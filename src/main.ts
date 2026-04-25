@@ -1,9 +1,10 @@
-import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce, Command, TextComponent } from 'obsidian';
+import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce, Command, TextComponent, setIcon } from 'obsidian';
 import { DEFAULT_SETTINGS, PersonalInternetSettings, PersonalInternetSettingTab } from "./settings";
 
 export default class PersonalInternetPlugin extends Plugin {
 	settings: PersonalInternetSettings;
 	private isMaterializing = false;
+	private tocComponent: TableOfContentsUI | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -90,10 +91,38 @@ export default class PersonalInternetPlugin extends Plugin {
 			})
 		);
 
+		// ToC Events
+		this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.refreshToC()));
+		this.registerEvent(this.app.metadataCache.on('changed', () => this.refreshToC()));
+
 		this.registerShortcuts();
 		this.registerCaptures();
 
 		this.addSettingTab(new PersonalInternetSettingTab(this.app, this));
+		
+		// Initial ToC load
+		this.refreshToC();
+	}
+
+	onunload() {
+		if (this.tocComponent) {
+			this.tocComponent.unload();
+		}
+	}
+
+	refreshToC() {
+		if (this.tocComponent) {
+			this.tocComponent.unload();
+			this.tocComponent = null;
+		}
+
+		if (!this.settings.showToC) return;
+
+		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (activeView) {
+			this.tocComponent = new TableOfContentsUI(this.app, activeView, this.settings.tocPosition);
+			this.tocComponent.load();
+		}
 	}
 
 	registerShortcuts() {
@@ -632,5 +661,71 @@ class TextInputModal extends Modal {
 	onClose() {
 		const { contentEl } = this;
 		contentEl.empty();
+	}
+}
+
+class TableOfContentsUI {
+	app: App;
+	view: MarkdownView;
+	position: ToCPosition;
+	containerEl: HTMLElement | null = null;
+	isCollapsed: boolean = true;
+
+	constructor(app: App, view: MarkdownView, position: ToCPosition) {
+		this.app = app;
+		this.view = view;
+		this.position = position;
+	}
+
+	load() {
+		const leafEl = this.view.containerEl;
+		this.containerEl = leafEl.createDiv({ cls: `personal-internet-toc-container pos-${this.position} is-collapsed` });
+		this.render();
+	}
+
+	unload() {
+		if (this.containerEl) {
+			this.containerEl.remove();
+			this.containerEl = null;
+		}
+	}
+
+	render() {
+		if (!this.containerEl) return;
+		this.containerEl.empty();
+
+		const contentEl = this.containerEl.createDiv({ cls: 'personal-internet-toc-content' });
+		
+		// Get Headings
+		const file = this.view.file;
+		if (file) {
+			const cache = this.app.metadataCache.getFileCache(file);
+			const headings = cache?.headings || [];
+
+			headings.forEach(heading => {
+				const item = contentEl.createDiv({ 
+					cls: `personal-internet-toc-item level-${heading.level}`,
+					text: heading.heading 
+				});
+				item.onclick = () => {
+					this.view.setEphemeralState({ line: heading.position.start.line });
+				};
+			});
+		}
+
+		// Footer (Collapsible control)
+		const footer = this.containerEl.createDiv({ cls: 'personal-internet-toc-footer' });
+		const title = footer.createDiv({ cls: 'personal-internet-toc-footer-title' });
+		setIcon(title, 'menu');
+		title.createSpan({ text: 'Table of Contents' });
+
+		const chevron = footer.createDiv({ cls: 'personal-internet-toc-chevron' });
+		setIcon(chevron, this.isCollapsed ? 'chevron-down' : 'chevron-up');
+
+		footer.onclick = () => {
+			this.isCollapsed = !this.isCollapsed;
+			this.containerEl?.toggleClass('is-collapsed', this.isCollapsed);
+			this.render();
+		};
 	}
 }

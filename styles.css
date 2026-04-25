@@ -23,7 +23,7 @@ If your plugin does not need CSS, delete this file.
 
 /* Prominent Settings Headers */
 .personal-internet-setting-header {
-    margin-left: 0 !important; /* Re-aligned with the cards */
+    margin-left: 0 !important;
     font-size: 1.3em !important;
     color: var(--text-normal);
     margin-top: 1.5em;
@@ -92,32 +92,29 @@ hr {
     margin-bottom: 20px !important;
 }
 
-/* Grouped Card Look (Screenshot-accurate) */
+/* Grouped Card Look */
 .personal-internet-settings-group {
-    background-color: var(--background-secondary); /* Often darker than alt in many themes */
+    background-color: var(--background-secondary);
     border-radius: 8px;
-    border: none !important; /* Removed the border as requested */
+    border: none !important;
     margin-bottom: 20px;
     overflow: hidden;
     padding: 4px 0;
 }
 
-/* Individual setting rows inside a group */
 .personal-internet-settings-group .setting-item {
     border: none !important;
     background: transparent !important;
-    padding: 14px 16px !important; /* Slightly increased for core feel */
+    padding: 14px 16px !important;
 }
 
-/* Internal Dividers (Inset from edges) */
 .personal-internet-row-divider {
-    margin: 0 16px !important; /* Pushes dividers away from the edges */
+    margin: 0 16px !important;
     border: 0;
     border-top: 1px solid var(--background-modifier-border);
     opacity: 0.4;
 }
 
-/* Multi-input row controls */
 .personal-internet-settings-group .setting-item-control {
     gap: 8px;
 }
@@ -128,7 +125,106 @@ hr {
     margin: 0;
 }
 
-/* Lint Settings */
+/* Table of Contents Floating UI */
+.personal-internet-toc-container {
+    position: absolute;
+    z-index: 100;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    width: 300px; /* Standardized width */
+    max-height: 50vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: height 0.2s ease;
+}
+
+/* Positioning */
+.personal-internet-toc-container.pos-bottom-right { bottom: 20px; right: 20px; }
+.personal-internet-toc-container.pos-bottom-left  { bottom: 20px; left: 20px; }
+.personal-internet-toc-container.pos-top-left     { top: 20px; left: 20px; }
+.personal-internet-toc-container.pos-top-right    { top: 20px; right: 20px; }
+
+/* Collapsed State */
+.personal-internet-toc-container.is-collapsed {
+    height: 42px;
+    width: 300px; /* Same width as expanded */
+}
+
+.personal-internet-toc-content {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 8px 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.is-collapsed .personal-internet-toc-content {
+    display: none;
+}
+
+.personal-internet-toc-footer {
+    height: 42px;
+    min-height: 42px;
+    flex-shrink: 0; /* Ensure footer never squishes */
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    background-color: var(--background-secondary-alt);
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.is-collapsed .personal-internet-toc-footer {
+    border-top: none;
+}
+
+.personal-internet-toc-footer:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.personal-internet-toc-footer-title {
+    display: flex;
+    align-items: center;
+    font-size: 0.9em;
+    color: var(--text-muted);
+    white-space: nowrap; /* Prevent "Table of contents" from wrapping */
+}
+
+.personal-internet-toc-footer-title svg {
+    margin-right: 8px;
+    width: 16px;
+    height: 16px;
+}
+
+/* Header Items */
+.personal-internet-toc-item {
+    padding: 8px 16px; /* More vertical space */
+    font-size: 0.9em;
+    color: var(--text-muted); /* Muted color to match label */
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+
+.personal-internet-toc-item:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-accent);
+}
+
+/* Indentation based on Header Level */
+.personal-internet-toc-item.level-1 { font-weight: bold; }
+.personal-internet-toc-item.level-2 { padding-left: 28px; }
+.personal-internet-toc-item.level-3 { padding-left: 40px; }
+.personal-internet-toc-item.level-4 { padding-left: 52px; }
+
+/* Variables and General settings */
 .personal-internet-setting-textarea {
     width: 400px;
     min-height: 4.5em;
@@ -138,7 +234,6 @@ hr {
     font-size: 0.9em;
 }
 
-/* Variables Grid */
 .personal-internet-variables-grid {
     background-color: var(--background-secondary);
     border-radius: 8px;
