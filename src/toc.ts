@@ -1,22 +1,37 @@
 import { App, MarkdownView, setIcon } from 'obsidian';
-import { ToCPosition } from './types';
+import { ToCPosition, ToCCollapseBehavior } from './types';
 
 export class TableOfContentsUI {
 	app: App;
 	view: MarkdownView;
 	position: ToCPosition;
+	collapseBehavior: ToCCollapseBehavior;
 	containerEl: HTMLElement | null = null;
 	isCollapsed: boolean = true;
 
-	constructor(app: App, view: MarkdownView, position: ToCPosition) {
+	constructor(app: App, view: MarkdownView, position: ToCPosition, collapseBehavior: ToCCollapseBehavior) {
 		this.app = app;
 		this.view = view;
 		this.position = position;
+		this.collapseBehavior = collapseBehavior;
 	}
 
 	load() {
 		const leafEl = this.view.containerEl;
 		this.containerEl = leafEl.createDiv({ cls: `personal-internet-toc-container pos-${this.position} is-collapsed` });
+		this.containerEl.setAttribute('tabindex', '-1');
+		
+		if (this.collapseBehavior === 'blur') {
+			this.containerEl.addEventListener('focusout', (e) => {
+				const relatedTarget = e.relatedTarget as Node;
+				if (this.containerEl && !this.containerEl.contains(relatedTarget)) {
+					this.isCollapsed = true;
+					this.containerEl.addClass('is-collapsed');
+					this.render();
+				}
+			});
+		}
+
 		this.render();
 	}
 
@@ -45,6 +60,11 @@ export class TableOfContentsUI {
 				});
 				item.onclick = () => {
 					this.view.setEphemeralState({ line: heading.position.start.line });
+					if (this.collapseBehavior === 'click') {
+						this.isCollapsed = true;
+						this.containerEl?.addClass('is-collapsed');
+						this.render();
+					}
 				};
 			});
 		}
@@ -57,10 +77,14 @@ export class TableOfContentsUI {
 		const chevron = footer.createDiv({ cls: 'personal-internet-toc-chevron' });
 		setIcon(chevron, this.isCollapsed ? 'chevron-down' : 'chevron-up');
 
-		footer.onclick = () => {
+		footer.onclick = (e) => {
+			e.stopPropagation();
 			this.isCollapsed = !this.isCollapsed;
 			this.containerEl?.toggleClass('is-collapsed', this.isCollapsed);
 			this.render();
+			if (!this.isCollapsed && this.collapseBehavior === 'blur') {
+				this.containerEl?.focus();
+			}
 		};
 	}
 }
