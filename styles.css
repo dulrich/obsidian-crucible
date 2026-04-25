@@ -11,7 +11,6 @@ If your plugin does not need CSS, delete this file.
     width: 300px;
 }
 
-/* Ensure the search input takes up the full width of the container */
 .personal-internet-search-container input {
     width: 100%;
 }
@@ -24,9 +23,9 @@ If your plugin does not need CSS, delete this file.
 
 /* Prominent Settings Headers */
 .personal-internet-setting-header {
-    margin-left: -20px !important;
+    margin-left: 0 !important; /* Re-aligned with the cards */
     font-size: 1.3em !important;
-    color: var(--text-accent);
+    color: var(--text-normal);
     margin-top: 1.5em;
     margin-bottom: 0.5em;
     font-weight: bold;
@@ -93,56 +92,46 @@ hr {
     margin-bottom: 20px !important;
 }
 
-/* Folder Templates UI - Grouped Look */
-.personal-internet-folder-templates-container {
-    background-color: var(--background-secondary-alt);
+/* Grouped Card Look (Screenshot-accurate) */
+.personal-internet-settings-group {
+    background-color: var(--background-secondary); /* Often darker than alt in many themes */
     border-radius: 8px;
-    border: 1px solid var(--background-modifier-border);
-    padding: 4px 0;
-    margin-bottom: 16px;
+    border: none !important; /* Removed the border as requested */
+    margin-bottom: 20px;
     overflow: hidden;
+    padding: 4px 0;
 }
 
-.personal-internet-folder-template-row .setting-item,
-.personal-internet-folder-template-button-row .setting-item {
+/* Individual setting rows inside a group */
+.personal-internet-settings-group .setting-item {
     border: none !important;
     background: transparent !important;
-    box-shadow: none !important;
-    margin: 0 !important;
-    padding: 8px 16px !important;
+    padding: 14px 16px !important; /* Slightly increased for core feel */
 }
 
-.personal-internet-folder-template-button-row .setting-item-control {
-    justify-content: flex-end;
-    width: 100%;
-}
-
-.personal-internet-mini-hr {
-    margin: 0 !important;
+/* Internal Dividers (Inset from edges) */
+.personal-internet-row-divider {
+    margin: 0 16px !important; /* Pushes dividers away from the edges */
     border: 0;
     border-top: 1px solid var(--background-modifier-border);
-    opacity: 0.5;
+    opacity: 0.4;
 }
 
-/* Ensure the two search boxes split the width evenly */
-.personal-internet-folder-template-row .setting-item-control {
-    width: 100%;
-    justify-content: flex-end;
+/* Multi-input row controls */
+.personal-internet-settings-group .setting-item-control {
+    gap: 8px;
 }
 
-.personal-internet-folder-template-row .personal-internet-search-container {
+.personal-internet-settings-group input[type="text"],
+.personal-internet-settings-group .personal-internet-search-container {
     width: 300px;
-    margin-right: 8px;
-}
-
-.personal-internet-folder-template-row .personal-internet-search-container:last-of-type {
-    margin-right: 0;
+    margin: 0;
 }
 
 /* Lint Settings */
 .personal-internet-setting-textarea {
     width: 400px;
-    min-height: 4.5em; /* Approximately 3 lines */
+    min-height: 4.5em;
     resize: none;
     overflow-y: hidden;
     font-family: var(--font-monospace);
@@ -151,8 +140,7 @@ hr {
 
 /* Variables Grid */
 .personal-internet-variables-grid {
-    background-color: var(--background-secondary-alt);
-    border: 1px solid var(--background-modifier-border);
+    background-color: var(--background-secondary);
     border-radius: 8px;
     padding: 8px;
     display: flex;

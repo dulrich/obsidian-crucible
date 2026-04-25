@@ -105,8 +105,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 
 	private renderSettings(containerEl: HTMLElement) {
 		containerEl.createEl('h2', { text: 'Folders', cls: 'personal-internet-setting-header' });
+		const foldersGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
-		new Setting(containerEl)
+		new Setting(foldersGroup)
 			.setName('Daily folder')
 			.setDesc('Folder for daily notes and day-specific assets.')
 			.addSearch(cb => {
@@ -120,7 +121,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				new FolderSuggest(this.app, cb.inputEl);
 			});
 
-		new Setting(containerEl)
+		foldersGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+		new Setting(foldersGroup)
 			.setName('Weekly folder')
 			.setDesc('Folder for weekly notes.')
 			.addSearch(cb => {
@@ -134,7 +137,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				new FolderSuggest(this.app, cb.inputEl);
 			});
 
-		new Setting(containerEl)
+		foldersGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+		new Setting(foldersGroup)
 			.setName('Monthly folder')
 			.setDesc('Folder for monthly notes.')
 			.addSearch(cb => {
@@ -149,8 +154,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			});
 
 		containerEl.createEl('h2', { text: 'Core Templates', cls: 'personal-internet-setting-header' });
+		const templatesGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
-		new Setting(containerEl)
+		new Setting(templatesGroup)
 			.setName('Daily template')
 			.setDesc('Path to the daily note template file.')
 			.addSearch(cb => {
@@ -164,7 +170,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
-		new Setting(containerEl)
+		templatesGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+		new Setting(templatesGroup)
 			.setName('Weekly template')
 			.setDesc('Path to the weekly note template file.')
 			.addSearch(cb => {
@@ -178,7 +186,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
-		new Setting(containerEl)
+		templatesGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+		new Setting(templatesGroup)
 			.setName('Monthly template')
 			.setDesc('Path to the monthly note template file.')
 			.addSearch(cb => {
@@ -196,15 +206,13 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Folder Templates', cls: 'personal-internet-setting-header' });
 		containerEl.createEl('p', { text: 'Map arbitrary folders to templates. These will be applied automatically when a new file is created in the folder.' });
 
-		const folderTemplatesContainer = containerEl.createDiv({ cls: 'personal-internet-folder-templates-container' });
+		const folderTemplatesGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
 		this.plugin.settings.folderTemplates.forEach((ft, index) => {
 			if (index > 0) {
-				folderTemplatesContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+				folderTemplatesGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 			}
-			const row = folderTemplatesContainer.createDiv({ cls: 'personal-internet-folder-template-row' });
-			
-			const s = new Setting(row)
+			const s = new Setting(folderTemplatesGroup)
 				.addSearch(cb => {
 					cb.setPlaceholder('Folder')
 						.setValue(ft.folder)
@@ -237,11 +245,10 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			s.infoEl.remove();
 		});
 
-		const buttonRow = folderTemplatesContainer.createDiv({ cls: 'personal-internet-folder-template-button-row' });
 		if (this.plugin.settings.folderTemplates.length > 0) {
-			folderTemplatesContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+			folderTemplatesGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 		}
-		new Setting(buttonRow)
+		new Setting(folderTemplatesGroup)
 			.addButton(bt => {
 				bt.setButtonText('Add Folder Template')
 					.setCta()
@@ -255,8 +262,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 
 	private renderLintSettings(containerEl: HTMLElement) {
 		containerEl.createEl('h2', { text: 'Automatic Linting', cls: 'personal-internet-setting-header' });
+		const autoLintGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
-		new Setting(containerEl)
+		new Setting(autoLintGroup)
 			.setName('Lint on save')
 			.setDesc('Automatically run the lint command when a file is modified.')
 			.addToggle(toggle => toggle
@@ -267,8 +275,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				}));
 
 		containerEl.createEl('h2', { text: 'Date Tracking', cls: 'personal-internet-setting-header' });
+		const dateGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
-		new Setting(containerEl)
+		new Setting(dateGroup)
 			.setName('Created Date Key')
 			.setDesc('Property key for the creation date.')
 			.addText(text => text
@@ -279,7 +288,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		new Setting(containerEl)
+		dateGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+		new Setting(dateGroup)
 			.setName('Modified Date Key')
 			.setDesc('Property key for the last modified date.')
 			.addText(text => text
@@ -291,8 +302,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				}));
 
 		containerEl.createEl('h2', { text: 'Formatting', cls: 'personal-internet-setting-header' });
+		const formattingGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
-		new Setting(containerEl)
+		new Setting(formattingGroup)
 			.setName('Blank line after YAML')
 			.setDesc('Ensure there is at least one blank line after the frontmatter.')
 			.addToggle(toggle => toggle
@@ -302,12 +314,14 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
+		formattingGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
 		const autoSize = (el: HTMLTextAreaElement) => {
 			el.style.height = 'auto';
 			el.style.height = (el.scrollHeight) + 'px';
 		};
 
-		new Setting(containerEl)
+		new Setting(formattingGroup)
 			.setName('YAML Key Priority')
 			.setDesc('Keys to move to the top of frontmatter (one per line).')
 			.addTextArea(text => {
@@ -322,7 +336,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				requestAnimationFrame(() => autoSize(text.inputEl));
 			});
 
-		new Setting(containerEl)
+		formattingGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+		new Setting(formattingGroup)
 			.setName('Frontmatter Insert')
 			.setDesc('Text to ensure exists in the frontmatter. (Supports template variables)')
 			.addTextArea(text => {
@@ -341,15 +357,13 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Excluded Folders', cls: 'personal-internet-setting-header' });
 		containerEl.createEl('p', { text: 'Notes in these folders will be ignored by all Lint commands.' });
 
-		const ignoredFoldersContainer = containerEl.createDiv({ cls: 'personal-internet-folder-templates-container' });
+		const ignoredFoldersGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
 		this.plugin.settings.lintIgnoredFolders.forEach((folder, index) => {
 			if (index > 0) {
-				ignoredFoldersContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+				ignoredFoldersGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 			}
-			const row = ignoredFoldersContainer.createDiv({ cls: 'personal-internet-folder-template-row' });
-			
-			const s = new Setting(row)
+			const s = new Setting(ignoredFoldersGroup)
 				.addSearch(cb => {
 					cb.setPlaceholder('Folder to ignore')
 						.setValue(folder)
@@ -373,11 +387,10 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			s.infoEl.remove();
 		});
 
-		const ignoreButtonRow = ignoredFoldersContainer.createDiv({ cls: 'personal-internet-folder-template-button-row' });
 		if (this.plugin.settings.lintIgnoredFolders.length > 0) {
-			ignoredFoldersContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+			ignoredFoldersGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 		}
-		new Setting(ignoreButtonRow)
+		new Setting(ignoredFoldersGroup)
 			.addButton(bt => {
 				bt.setButtonText('Add Ignored Folder')
 					.setCta()
@@ -393,24 +406,21 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Command Shortcuts', cls: 'personal-internet-setting-header' });
 		containerEl.createEl('p', { text: 'Create custom commands to open specific files directly from the Command Palette.' });
 
-		const shortcutsContainer = containerEl.createDiv({ cls: 'personal-internet-folder-templates-container' });
+		const shortcutsGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
 		this.plugin.settings.shortcuts.forEach((shortcut, index) => {
 			if (index > 0) {
-				shortcutsContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+				shortcutsGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 			}
-			const row = shortcutsContainer.createDiv({ cls: 'personal-internet-folder-template-row' });
-			
-			const s = new Setting(row)
-				.addText(text => {
-					text.setPlaceholder('Command Name')
+			const s = new Setting(shortcutsGroup)
+				.addText(cb => {
+					cb.setPlaceholder('Shortcut Name')
 						.setValue(shortcut.name)
 						.onChange(async (value) => {
 							this.plugin.settings.shortcuts[index].name = value;
 							await this.plugin.saveSettings();
 							this.plugin.registerShortcuts();
 						});
-					text.inputEl.addClass('personal-internet-shortcut-name-input');
 				})
 				.addSearch(cb => {
 					cb.setPlaceholder('File to open')
@@ -436,11 +446,10 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			s.infoEl.remove();
 		});
 
-		const buttonRow = shortcutsContainer.createDiv({ cls: 'personal-internet-folder-template-button-row' });
 		if (this.plugin.settings.shortcuts.length > 0) {
-			shortcutsContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+			shortcutsGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 		}
-		new Setting(buttonRow)
+		new Setting(shortcutsGroup)
 			.addButton(bt => {
 				bt.setButtonText('Add Shortcut')
 					.setCta()
