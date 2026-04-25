@@ -1,6 +1,11 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, ButtonComponent } from "obsidian";
 import PersonalInternetPlugin from "./main";
 import { FileSuggest, FolderSuggest } from "./suggesters";
+
+export interface FolderTemplate {
+	folder: string;
+	template: string;
+}
 
 export interface PersonalInternetSettings {
 	dailyFolder: string;
@@ -9,6 +14,7 @@ export interface PersonalInternetSettings {
 	dailyTemplate: string;
 	weeklyTemplate: string;
 	monthlyTemplate: string;
+	folderTemplates: FolderTemplate[];
 }
 
 export const DEFAULT_SETTINGS: PersonalInternetSettings = {
@@ -18,6 +24,7 @@ export const DEFAULT_SETTINGS: PersonalInternetSettings = {
 	dailyTemplate: '',
 	weeklyTemplate: '',
 	monthlyTemplate: '',
+	folderTemplates: [],
 }
 
 export class PersonalInternetSettingTab extends PluginSettingTab {
@@ -38,7 +45,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		focusTrap.tabIndex = -1;
 		focusTrap.focus();
 
-		containerEl.createEl('h2', { text: 'Folders' });
+		containerEl.createEl('h2', { text: 'Core Folders' });
 
 		new Setting(containerEl)
 			.setName('Daily folder')
@@ -82,7 +89,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				new FolderSuggest(this.app, cb.inputEl);
 			});
 
-		containerEl.createEl('h2', { text: 'Templates' });
+		containerEl.createEl('h2', { text: 'Core Templates' });
 
 		new Setting(containerEl)
 			.setName('Daily template')
@@ -124,6 +131,52 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 					});
 				cb.containerEl.addClass('personal-internet-search-container');
 				new FileSuggest(this.app, cb.inputEl);
+			});
+
+		containerEl.createEl('h2', { text: 'Folder Templates' });
+		containerEl.createEl('p', { text: 'Map arbitrary folders to templates. These will be applied automatically when a new file is created in the folder.' });
+
+		this.plugin.settings.folderTemplates.forEach((ft, index) => {
+			const s = new Setting(containerEl)
+				.addSearch(cb => {
+					cb.setPlaceholder('Folder')
+						.setValue(ft.folder)
+						.onChange(async (value) => {
+							this.plugin.settings.folderTemplates[index].folder = value;
+							await this.plugin.saveSettings();
+						});
+					new FolderSuggest(this.app, cb.inputEl);
+				})
+				.addSearch(cb => {
+					cb.setPlaceholder('Template')
+						.setValue(ft.template)
+						.onChange(async (value) => {
+							this.plugin.settings.folderTemplates[index].template = value;
+							await this.plugin.saveSettings();
+						});
+					new FileSuggest(this.app, cb.inputEl);
+				})
+				.addExtraButton(cb => {
+					cb.setIcon('trash')
+						.setTooltip('Delete')
+						.onClick(async () => {
+							this.plugin.settings.folderTemplates.splice(index, 1);
+							await this.plugin.saveSettings();
+							this.display();
+						});
+				});
+			s.infoEl.remove(); // Remove name/desc area for compact look
+		});
+
+		new Setting(containerEl)
+			.addButton(bt => {
+				bt.setButtonText('Add Folder Template')
+					.setCta()
+					.onClick(async () => {
+						this.plugin.settings.folderTemplates.push({ folder: '', template: '' });
+						await this.plugin.saveSettings();
+						this.display();
+					});
 			});
 	}
 }
