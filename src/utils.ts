@@ -20,7 +20,7 @@ export async function applyTemplateString(template: string, date: moment.Moment,
 
 	const replaceTokens = (text: string) => {
 		let result = text;
-		result = result.replace(/{{datetime:(.*?)}}/g, (match, format) => date.format(format));
+		result = result.replace(/{{datetime:(.*?)}}/g, (_match, format: string) => date.format(format));
 		result = result.replace(/{{date}}/g, date.format('YYYY-MM-DD'));
 		result = result.replace(/{{time}}/g, date.format('HH:mm'));
 		result = result.replace(/{{today}}/g, now.format('YYYY-MM-DD'));

@@ -5,7 +5,14 @@ import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { CaptureManager, TextInputModal } from "./captures";
 import { TableOfContentsUI } from "./toc";
-import { applyTemplateString, ensureFolder } from './utils';
+import { applyTemplateString } from './utils';
+
+interface AppWithPlugins extends App {
+	plugins: {
+		disablePlugin(id: string): Promise<void>;
+		enablePlugin(id: string): Promise<void>;
+	};
+}
 
 export default class PersonalInternetPlugin extends Plugin {
 	settings: PersonalInternetSettings;
@@ -18,35 +25,36 @@ export default class PersonalInternetPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => this.isMaterializing = state);
-		this.linter = new Linter(this.app, this.settings, (state: boolean) => this.isMaterializing = state);
+		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
+		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.captureManager = new CaptureManager(this.app, this.settings);
 
 		// --- Commands ---
-		this.addCommand({ id: 'materialize-day-today', name: 'Materialize Day: Today', callback: () => this.materializer.materializeDay(window.moment()) });
-		this.addCommand({ id: 'materialize-day-picker', name: 'Materialize Day: Pick Date', callback: () => this.openDayPicker() });
-		this.addCommand({ id: 'materialize-week-today', name: 'Materialize Week: Current', callback: () => this.materializer.materializeWeek(window.moment()) });
-		this.addCommand({ id: 'materialize-week-picker', name: 'Materialize Week: Pick Week', callback: () => this.openWeekPicker() });
-		this.addCommand({ id: 'materialize-month-today', name: 'Materialize Month: Current', callback: () => this.materializer.materializeMonth(window.moment()) });
-		this.addCommand({ id: 'materialize-month-picker', name: 'Materialize Month: Pick Month', callback: () => this.openMonthPicker() });
+		this.addCommand({ id: 'materialize-day-today', name: 'Materialize day: today', callback: () => { void this.materializer.materializeDay(window.moment()); } });
+		this.addCommand({ id: 'materialize-day-picker', name: 'Materialize day: pick date', callback: () => { this.openDayPicker(); } });
+		this.addCommand({ id: 'materialize-week-today', name: 'Materialize week: current', callback: () => { void this.materializer.materializeWeek(window.moment()); } });
+		this.addCommand({ id: 'materialize-week-picker', name: 'Materialize week: pick week', callback: () => { this.openWeekPicker(); } });
+		this.addCommand({ id: 'materialize-month-today', name: 'Materialize month: current', callback: () => { void this.materializer.materializeMonth(window.moment()); } });
+		this.addCommand({ id: 'materialize-month-picker', name: 'Materialize month: pick month', callback: () => { this.openMonthPicker(); } });
 
-		this.addCommand({ id: 'word-count', name: 'Word Count: Update Frontmatter', callback: () => this.linter.lintNote() });
-		this.addCommand({ id: 'lint-note', name: 'Lint: Format Frontmatter and Properties', callback: () => this.linter.lintNote() });
+		this.addCommand({ id: 'word-count', name: 'Word count: update frontmatter', callback: () => { void this.linter.lintNote(); } });
+		this.addCommand({ id: 'lint-note', name: 'Lint: format frontmatter and properties', callback: () => { void this.linter.lintNote(); } });
 
 		this.addCommand({
 			id: 'reload-plugin',
-			name: 'Reload Plugin',
+			name: 'Reload plugin',
 			callback: async () => {
-				// @ts-ignore
-				await this.app.plugins.disablePlugin(this.manifest.id);
-				// @ts-ignore
-				await this.app.plugins.enablePlugin(this.manifest.id);
-				new Notice('Plugin reloaded');
+				const plugins = (this.app as AppWithPlugins).plugins;
+				if (plugins) {
+					await plugins.disablePlugin(this.manifest.id);
+					await plugins.enablePlugin(this.manifest.id);
+					new Notice('Plugin reloaded');
+				}
 			},
 		});
 
 		// --- Events ---
-		this.registerEvent(this.app.vault.on('create', (file) => this.handleFileCreate(file)));
+		this.registerEvent(this.app.vault.on('create', (file) => { void this.handleFileCreate(file); }));
 
 		const debouncedLint = debounce(async (file: TFile) => {
 			if (this.settings.lintOnSave && !this.isMaterializing) {
@@ -76,7 +84,7 @@ export default class PersonalInternetPlugin extends Plugin {
 	}
 
 	async loadSettings() { 
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); 
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PersonalInternetSettings>); 
 	}
 	
 	async saveSettings() { 
@@ -116,10 +124,10 @@ export default class PersonalInternetPlugin extends Plugin {
 				callback: async () => {
 					if (capture.content.includes('{{value}}')) {
 						new TextInputModal(this.app, `Capture: ${capture.name}`, (value) => {
-							this.captureManager.executeCapture(capture, value);
+							void this.captureManager.executeCapture(capture, value);
 						}).open();
 					} else {
-						this.captureManager.executeCapture(capture);
+						void this.captureManager.executeCapture(capture);
 					}
 				}
 			});
@@ -128,19 +136,19 @@ export default class PersonalInternetPlugin extends Plugin {
 
 	openDayPicker() {
 		new PickerModal(this.app, 'Pick a date', 'date', window.moment().format('YYYY-MM-DD'), (dateStr) => {
-			this.materializer.materializeDay(window.moment(dateStr, 'YYYY-MM-DD'));
+			void this.materializer.materializeDay(window.moment(dateStr, 'YYYY-MM-DD'));
 		}).open();
 	}
 
 	openWeekPicker() {
 		new PickerModal(this.app, 'Pick a week', 'week', window.moment().format('GGGG-[W]WW'), (weekStr) => {
-			this.materializer.materializeWeek(window.moment(weekStr, 'GGGG-[W]WW'));
+			void this.materializer.materializeWeek(window.moment(weekStr, 'GGGG-[W]WW'));
 		}).open();
 	}
 
 	openMonthPicker() {
 		new PickerModal(this.app, 'Pick a month', 'month', window.moment().format('YYYY-MM'), (monthStr) => {
-			this.materializeMonth(window.moment(monthStr, 'YYYY-MM'));
+			void this.materializer.materializeMonth(window.moment(monthStr, 'YYYY-MM'));
 		}).open();
 	}
 
@@ -153,9 +161,9 @@ export default class PersonalInternetPlugin extends Plugin {
 		if (parentPath === this.settings.dailyFolder) {
 			const dateMatch = fileName.match(/^(\d{4}-\d{2}-\d{2})$/);
 			if (dateMatch) {
-				if (file.stat.size === 0) await this.materializer.materializeDay(window.moment(dateMatch[1], 'YYYY-MM-DD'));
+				if (file.stat.size === 0) void this.materializer.materializeDay(window.moment(dateMatch[1], 'YYYY-MM-DD'));
 			} else {
-				await this.app.vault.trash(file, true);
+				await this.app.fileManager.trashFile(file);
 				this.openDayPicker();
 			}
 			return;
@@ -164,9 +172,9 @@ export default class PersonalInternetPlugin extends Plugin {
 		if (parentPath === this.settings.weeklyFolder) {
 			const weekMatch = fileName.match(/^(\d{4}-W\d{2})$/);
 			if (weekMatch) {
-				if (file.stat.size === 0) this.materializer.materializeWeek(window.moment(weekMatch[1], 'GGGG-[W]WW'));
+				if (file.stat.size === 0) void this.materializer.materializeWeek(window.moment(weekMatch[1], 'GGGG-[W]WW'));
 			} else {
-				await this.app.vault.trash(file, true);
+				await this.app.fileManager.trashFile(file);
 				this.openWeekPicker();
 			}
 			return;
@@ -175,9 +183,9 @@ export default class PersonalInternetPlugin extends Plugin {
 		if (parentPath === this.settings.monthlyFolder) {
 			const monthMatch = fileName.match(/^(\d{4}-\d{2})$/);
 			if (monthMatch) {
-				if (file.stat.size === 0) this.materializeMonth(window.moment(monthMatch[1], 'YYYY-MM'));
+				if (file.stat.size === 0) void this.materializer.materializeMonth(window.moment(monthMatch[1], 'YYYY-MM'));
 			} else {
-				await this.app.vault.trash(file, true);
+				await this.app.fileManager.trashFile(file);
 				this.openMonthPicker();
 			}
 			return;
@@ -220,8 +228,7 @@ class PickerModal extends Modal {
 		const { contentEl } = this;
 		contentEl.createEl('h2', { text: this.title });
 		const input = contentEl.createEl('input', { type: this.type });
-		input.style.width = '100%';
-		input.style.marginBottom = '10px';
+		input.classList.add('personal-internet-picker-input');
 		input.value = this.initialValue;
 		const submit = contentEl.createEl('button', { text: 'Submit' });
 		const triggerSubmit = () => { if (input.value) { this.onSubmit(input.value); this.close(); } };

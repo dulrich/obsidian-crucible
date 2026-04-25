@@ -39,7 +39,7 @@ export class Materializer {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
 		} catch (e) {
-			new Notice(`Error materializing day: ${e.message}`);
+			new Notice(`Error materializing day: ${(e as Error).message}`);
 			console.error(e);
 		} finally {
 			this.setMaterializing(false);
@@ -71,7 +71,7 @@ export class Materializer {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
 		} catch (e) {
-			new Notice(`Error materializing week: ${e.message}`);
+			new Notice(`Error materializing week: ${(e as Error).message}`);
 		} finally {
 			this.setMaterializing(false);
 		}
@@ -102,7 +102,7 @@ export class Materializer {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
 		} catch (e) {
-			new Notice(`Error materializing month: ${e.message}`);
+			new Notice(`Error materializing month: ${(e as Error).message}`);
 		} finally {
 			this.setMaterializing(false);
 		}
