@@ -73,7 +73,12 @@ export class FolderSuggest extends FileSystemSuggest {
     }
 
     getItems(): TAbstractFile[] {
-        return this.app.vault.getAllLoadedFiles().filter(f => f instanceof TFolder);
+        const files = this.app.vault.getAllLoadedFiles();
+        return files.filter(f => {
+            if (!(f instanceof TFolder)) return false;
+            // @ts-ignore - Accessing internal API
+            return !this.app.metadataCache.isUserIgnored(f.path);
+        });
     }
 }
 
@@ -83,6 +88,11 @@ export class FileSuggest extends FileSystemSuggest {
     }
 
     getItems(): TAbstractFile[] {
-        return this.app.vault.getAllLoadedFiles().filter(f => f instanceof TFile && f.extension === 'md');
+        const files = this.app.vault.getAllLoadedFiles();
+        return files.filter(f => {
+            if (!(f instanceof TFile) || f.extension !== 'md') return false;
+            // @ts-ignore - Accessing internal API
+            return !this.app.metadataCache.isUserIgnored(f.path);
+        });
     }
 }
