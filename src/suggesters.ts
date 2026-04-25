@@ -1,5 +1,9 @@
 import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults } from "obsidian";
 
+interface MetadataCacheWithIgnore {
+    isUserIgnored(path: string): boolean;
+}
+
 export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFile> {
     public inputEl: HTMLInputElement;
 
@@ -14,7 +18,6 @@ export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFi
         const items = this.getItems();
         
         if (!inputStr) {
-            // Sort by length/depth even for empty input
             return items
                 .sort((a, b) => (a.path.length - b.path.length) || (a.path.split('/').length - b.path.split('/').length))
                 .slice(0, 100);
@@ -25,17 +28,12 @@ export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFi
             .map(item => ({ item, result: fuzzySearch(item.path) }))
             .filter(res => res.result !== null)
             .sort((a, b) => {
-                // Primary: Fuzzy score (lower is usually better in Obsidian's prepareFuzzySearch)
                 if (a.result!.score !== b.result!.score) {
                     return a.result!.score - b.result!.score;
                 }
-                
-                // Secondary: Path length (shorter is better)
                 if (a.item.path.length !== b.item.path.length) {
                     return a.item.path.length - b.item.path.length;
                 }
-                
-                // Tertiary: Path depth (fewer segments is better)
                 const aDepth = a.item.path.split('/').length;
                 const bDepth = b.item.path.split('/').length;
                 return aDepth - bDepth;
@@ -74,10 +72,10 @@ export class FolderSuggest extends FileSystemSuggest {
 
     getItems(): TAbstractFile[] {
         const files = this.app.vault.getAllLoadedFiles();
+        const metadataCache = this.app.metadataCache as unknown as MetadataCacheWithIgnore;
         return files.filter(f => {
             if (!(f instanceof TFolder)) return false;
-            // @ts-ignore - Accessing internal API
-            return !this.app.metadataCache.isUserIgnored(f.path);
+            return !metadataCache.isUserIgnored(f.path);
         });
     }
 }
@@ -89,10 +87,10 @@ export class FileSuggest extends FileSystemSuggest {
 
     getItems(): TAbstractFile[] {
         const files = this.app.vault.getAllLoadedFiles();
+        const metadataCache = this.app.metadataCache as unknown as MetadataCacheWithIgnore;
         return files.filter(f => {
             if (!(f instanceof TFile) || f.extension !== 'md') return false;
-            // @ts-ignore - Accessing internal API
-            return !this.app.metadataCache.isUserIgnored(f.path);
+            return !metadataCache.isUserIgnored(f.path);
         });
     }
 }

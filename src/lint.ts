@@ -1,6 +1,23 @@
-import { App, MarkdownView, Notice, TFile, moment } from 'obsidian';
+import { App, MarkdownView, Notice, moment } from 'obsidian';
 import { PersonalInternetSettings } from './types';
 import { applyTemplateString } from './utils';
+
+interface Segmenter {
+	segment(text: string): Iterable<{ isWordLike: boolean }>;
+}
+
+interface IntlWithSegmenter {
+	Segmenter: new (locale?: string, options?: { granularity: string }) => Segmenter;
+}
+
+interface AppWithPlugins extends App {
+	plugins: {
+		enabledPlugins: Set<string>;
+	};
+	commands: {
+		executeCommandById(id: string): void;
+	};
+}
 
 export class Linter {
 	app: App;
@@ -24,10 +41,9 @@ export class Linter {
 		const content = view.getViewData();
 		const body = content.replace(/^---\s*\n([\s\S]*?)\n---/, '');
 		
-		// @ts-ignore - Segmenter is available in Obsidian's environment
-		if (typeof Intl.Segmenter === 'function') {
-			// @ts-ignore
-			const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+		const intl = Intl as unknown as IntlWithSegmenter;
+		if (typeof intl.Segmenter === 'function') {
+			const segmenter = new intl.Segmenter(undefined, { granularity: 'word' });
 			const segments = segmenter.segment(body);
 			let count = 0;
 			for (const segment of segments) {
@@ -67,7 +83,7 @@ export class Linter {
 
 		this.setMaterializing(true);
 		try {
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
+			await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 				for (const [key, value] of Object.entries(insertYaml)) {
 					if (!fm[key]) fm[key] = value;
 				}
@@ -78,7 +94,7 @@ export class Linter {
 				fm['word-count'] = wordCount;
 
 				const priority = this.settings.lintYamlKeyPriority;
-				const sortedFm: any = {};
+				const sortedFm: Record<string, unknown> = {};
 				for (const key of priority) {
 					if (key in fm) {
 						sortedFm[key] = fm[key];
@@ -111,10 +127,12 @@ export class Linter {
 			this.setMaterializing(false);
 		}
 
-		// @ts-ignore
-		if (this.app.plugins.enabledPlugins.has('dataview')) {
-			// @ts-ignore
-			this.app.commands.executeCommandById('dataview:dataview-rebuild-current-view');
+		const plugins = (this.app as AppWithPlugins).plugins;
+		if (plugins && plugins.enabledPlugins.has('dataview')) {
+			const commands = (this.app as AppWithPlugins).commands;
+			if (commands) {
+				commands.executeCommandById('dataview:dataview-rebuild-current-view');
+			}
 		}
 
 		new Notice('Note linted');
