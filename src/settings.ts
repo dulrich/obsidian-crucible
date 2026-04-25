@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import PersonalInternetPlugin from "./main";
+import { FileSuggest, FolderSuggest } from "./suggesters";
 
 export interface PersonalInternetSettings {
 	dailyFolder: string;
@@ -32,74 +33,97 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
+		// Prevent auto-focus on the first setting
+		const focusTrap = containerEl.createDiv();
+		focusTrap.tabIndex = -1;
+		focusTrap.focus();
+
 		containerEl.createEl('h2', { text: 'Folders' });
 
 		new Setting(containerEl)
 			.setName('Daily folder')
 			.setDesc('Folder for daily notes and day-specific assets.')
-			.addText(text => text
-				.setPlaceholder('daily/day')
-				.setValue(this.plugin.settings.dailyFolder)
-				.onChange(async (value) => {
-					this.plugin.settings.dailyFolder = value;
-					await this.plugin.saveSettings();
-				}));
+			.addSearch(cb => {
+				cb.setPlaceholder('daily/day')
+					.setValue(this.plugin.settings.dailyFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.dailyFolder = value;
+						await this.plugin.saveSettings();
+					});
+				cb.containerEl.addClass('personal-internet-search-container');
+				new FolderSuggest(this.app, cb.inputEl);
+			});
 
 		new Setting(containerEl)
 			.setName('Weekly folder')
 			.setDesc('Folder for weekly notes.')
-			.addText(text => text
-				.setPlaceholder('daily/week')
-				.setValue(this.plugin.settings.weeklyFolder)
-				.onChange(async (value) => {
-					this.plugin.settings.weeklyFolder = value;
-					await this.plugin.saveSettings();
-				}));
+			.addSearch(cb => {
+				cb.setPlaceholder('daily/week')
+					.setValue(this.plugin.settings.weeklyFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.weeklyFolder = value;
+						await this.plugin.saveSettings();
+					});
+				cb.containerEl.addClass('personal-internet-search-container');
+				new FolderSuggest(this.app, cb.inputEl);
+			});
 
 		new Setting(containerEl)
 			.setName('Monthly folder')
 			.setDesc('Folder for monthly notes.')
-			.addText(text => text
-				.setPlaceholder('daily/month')
-				.setValue(this.plugin.settings.monthlyFolder)
-				.onChange(async (value) => {
-					this.plugin.settings.monthlyFolder = value;
-					await this.plugin.saveSettings();
-				}));
+			.addSearch(cb => {
+				cb.setPlaceholder('daily/month')
+					.setValue(this.plugin.settings.monthlyFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.monthlyFolder = value;
+						await this.plugin.saveSettings();
+					});
+				cb.containerEl.addClass('personal-internet-search-container');
+				new FolderSuggest(this.app, cb.inputEl);
+			});
 
 		containerEl.createEl('h2', { text: 'Templates' });
 
 		new Setting(containerEl)
 			.setName('Daily template')
 			.setDesc('Path to the daily note template file.')
-			.addText(text => text
-				.setPlaceholder('templates/daily.md')
-				.setValue(this.plugin.settings.dailyTemplate)
-				.onChange(async (value) => {
-					this.plugin.settings.dailyTemplate = value;
-					await this.plugin.saveSettings();
-				}));
+			.addSearch(cb => {
+				cb.setPlaceholder('templates/daily.md')
+					.setValue(this.plugin.settings.dailyTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.dailyTemplate = value;
+						await this.plugin.saveSettings();
+					});
+				cb.containerEl.addClass('personal-internet-search-container');
+				new FileSuggest(this.app, cb.inputEl);
+			});
 
 		new Setting(containerEl)
 			.setName('Weekly template')
 			.setDesc('Path to the weekly note template file.')
-			.addText(text => text
-				.setPlaceholder('templates/weekly.md')
-				.setValue(this.plugin.settings.weeklyTemplate)
-				.onChange(async (value) => {
-					this.plugin.settings.weeklyTemplate = value;
-					await this.plugin.saveSettings();
-				}));
+			.addSearch(cb => {
+				cb.setPlaceholder('templates/weekly.md')
+					.setValue(this.plugin.settings.weeklyTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.weeklyTemplate = value;
+						await this.plugin.saveSettings();
+					});
+				cb.containerEl.addClass('personal-internet-search-container');
+				new FileSuggest(this.app, cb.inputEl);
+			});
 
 		new Setting(containerEl)
 			.setName('Monthly template')
 			.setDesc('Path to the monthly note template file.')
-			.addText(text => text
-				.setPlaceholder('templates/monthly.md')
-				.setValue(this.plugin.settings.monthlyTemplate)
-				.onChange(async (value) => {
-					this.plugin.settings.monthlyTemplate = value;
-					await this.plugin.saveSettings();
-				}));
+			.addSearch(cb => {
+				cb.setPlaceholder('templates/monthly.md')
+					.setValue(this.plugin.settings.monthlyTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.monthlyTemplate = value;
+						await this.plugin.saveSettings();
+					});
+				cb.containerEl.addClass('personal-internet-search-container');
+				new FileSuggest(this.app, cb.inputEl);
+			});
 	}
 }
