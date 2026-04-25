@@ -53,7 +53,7 @@ export class CaptureManager {
 					let endIndex = lines.length;
 					for (let i = headerIndex + 1; i < lines.length; i++) {
 						const line = lines[i];
-						if (line && line.trim().startsWith('#')) {
+						if (line !== undefined && line.trim().startsWith('#')) {
 							endIndex = i;
 							break;
 						}
@@ -99,8 +99,7 @@ export class TextInputModal extends Modal {
 		contentEl.createEl('h2', { text: this.title });
 
 		const input = new TextComponent(contentEl);
-		input.inputEl.style.width = '100%';
-		input.inputEl.style.marginBottom = '10px';
+		input.inputEl.classList.add('personal-internet-modal-input');
 		input.inputEl.focus();
 
 		const submit = contentEl.createEl('button', { text: 'Submit', cls: 'mod-cta' });
