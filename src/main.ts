@@ -123,7 +123,6 @@ export default class PersonalInternetPlugin extends Plugin {
 				id: `capture-${index}`,
 				name: `Capture: ${capture.name}`,
 				callback: async () => {
-					// 1. Prompt for input if {{value}} exists in template
 					if (capture.content.includes('{{value}}')) {
 						new TextInputModal(this.app, `Capture: ${capture.name}`, (value) => {
 							this.executeCapture(capture, value);
@@ -165,17 +164,42 @@ export default class PersonalInternetPlugin extends Plugin {
 		const existingContent = await this.app.vault.read(file);
 		
 		let newContent = '';
-		if (capture.prepend) {
-			const yamlMatch = existingContent.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
-			if (yamlMatch) {
-				const yamlBlock = yamlMatch[0];
-				const body = existingContent.slice(yamlBlock.length);
-				newContent = `${yamlBlock}${content}\n${body}`;
+		
+		if (capture.targetSection) {
+			const sectionHeader = capture.targetSection.trim();
+			const lines = existingContent.split('\n');
+			const headerIndex = lines.findIndex(line => line.trim() === sectionHeader);
+
+			if (headerIndex !== -1) {
+				if (capture.prepend) {
+					lines.splice(headerIndex + 1, 0, content);
+				} else {
+					let endIndex = lines.length;
+					for (let i = headerIndex + 1; i < lines.length; i++) {
+						if (lines[i].trim().startsWith('#')) {
+							endIndex = i;
+							break;
+						}
+					}
+					lines.splice(endIndex, 0, content);
+				}
+				newContent = lines.join('\n');
 			} else {
-				newContent = `${content}\n${existingContent}`;
+				newContent = `${existingContent}\n\n${sectionHeader}\n${content}`;
 			}
 		} else {
-			newContent = `${existingContent}\n${content}`;
+			if (capture.prepend) {
+				const yamlMatch = existingContent.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
+				if (yamlMatch) {
+					const yamlBlock = yamlMatch[0];
+					const body = existingContent.slice(yamlBlock.length);
+					newContent = `${yamlBlock}${content}\n${body}`;
+				} else {
+					newContent = `${content}\n${existingContent}`;
+				}
+			} else {
+				newContent = `${existingContent}\n${content}`;
+			}
 		}
 
 		await this.app.vault.modify(file, newContent);
