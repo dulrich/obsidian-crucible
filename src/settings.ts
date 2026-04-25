@@ -23,6 +23,8 @@ export interface Capture {
 	prepend: boolean;
 }
 
+export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-right';
+
 export interface PersonalInternetSettings {
 	dailyFolder: string;
 	weeklyFolder: string;
@@ -43,6 +45,9 @@ export interface PersonalInternetSettings {
 	shortcuts: Shortcut[];
 	// Captures
 	captures: Capture[];
+	// ToC
+	showToC: boolean;
+	tocPosition: ToCPosition;
 }
 
 export const DEFAULT_SETTINGS: PersonalInternetSettings = {
@@ -62,6 +67,8 @@ export const DEFAULT_SETTINGS: PersonalInternetSettings = {
 	lintOnSave: false,
 	shortcuts: [],
 	captures: [],
+	showToC: true,
+	tocPosition: 'bottom-right',
 }
 
 export class PersonalInternetSettingTab extends PluginSettingTab {
@@ -121,6 +128,39 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 	}
 
 	private renderSettings(containerEl: HTMLElement) {
+		containerEl.createEl('h2', { text: 'Table of Contents', cls: 'personal-internet-setting-header' });
+		const tocGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
+
+		new Setting(tocGroup)
+			.setName('Show Table of Contents')
+			.setDesc('Add a floating, collapsible Table of Contents to markdown views.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.showToC)
+				.onChange(async (value) => {
+					this.plugin.settings.showToC = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshToC();
+					this.display();
+				}));
+
+		if (this.plugin.settings.showToC) {
+			tocGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+			new Setting(tocGroup)
+				.setName('Position')
+				.addDropdown(dd => {
+					dd.addOption('bottom-right', 'Bottom Right')
+					  .addOption('bottom-left', 'Bottom Left')
+					  .addOption('top-left', 'Top Left')
+					  .addOption('top-right', 'Top Right')
+					  .setValue(this.plugin.settings.tocPosition)
+					  .onChange(async (value: ToCPosition) => {
+						  this.plugin.settings.tocPosition = value;
+						  await this.plugin.saveSettings();
+						  this.plugin.refreshToC();
+					  });
+				});
+		}
+
 		containerEl.createEl('h2', { text: 'Folders', cls: 'personal-internet-setting-header' });
 		const foldersGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
 
