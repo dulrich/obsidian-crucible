@@ -1,10 +1,9 @@
-import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce, Command } from 'obsidian';
+import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce, Command, TextComponent } from 'obsidian';
 import { DEFAULT_SETTINGS, PersonalInternetSettings, PersonalInternetSettingTab } from "./settings";
 
 export default class PersonalInternetPlugin extends Plugin {
 	settings: PersonalInternetSettings;
 	private isMaterializing = false;
-	private registeredShortcutIds: string[] = [];
 
 	async onload() {
 		await this.loadSettings();
@@ -92,6 +91,7 @@ export default class PersonalInternetPlugin extends Plugin {
 		);
 
 		this.registerShortcuts();
+		this.registerCaptures();
 
 		this.addSettingTab(new PersonalInternetSettingTab(this.app, this));
 	}
@@ -113,6 +113,73 @@ export default class PersonalInternetPlugin extends Plugin {
 				}
 			});
 		});
+	}
+
+	registerCaptures() {
+		this.settings.captures.forEach((capture, index) => {
+			if (!capture.name) return;
+
+			this.addCommand({
+				id: `capture-${index}`,
+				name: `Capture: ${capture.name}`,
+				callback: async () => {
+					// 1. Prompt for input if {{value}} exists in template
+					if (capture.content.includes('{{value}}')) {
+						new TextInputModal(this.app, `Capture: ${capture.name}`, (value) => {
+							this.executeCapture(capture, value);
+						}).open();
+					} else {
+						this.executeCapture(capture);
+					}
+				}
+			});
+		});
+	}
+
+	async executeCapture(capture: any, value: string = '') {
+		let targetPath = '';
+		const now = window.moment();
+
+		switch (capture.targetType) {
+			case 'daily':
+				targetPath = `${this.settings.dailyFolder}/${now.format('YYYY-MM-DD')}.md`;
+				break;
+			case 'weekly':
+				targetPath = `${this.settings.weeklyFolder}/${now.format('GGGG-[W]WW')}.md`;
+				break;
+			case 'monthly':
+				targetPath = `${this.settings.monthlyFolder}/${now.format('YYYY-MM')}.md`;
+				break;
+			case 'selected':
+				targetPath = capture.file;
+				break;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(targetPath);
+		if (!(file instanceof TFile)) {
+			new Notice(`Capture target file not found: ${targetPath}`);
+			return;
+		}
+
+		const content = await this.applyTemplateString(capture.content, now, file.basename, value);
+		const existingContent = await this.app.vault.read(file);
+		
+		let newContent = '';
+		if (capture.prepend) {
+			const yamlMatch = existingContent.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
+			if (yamlMatch) {
+				const yamlBlock = yamlMatch[0];
+				const body = existingContent.slice(yamlBlock.length);
+				newContent = `${yamlBlock}${content}\n${body}`;
+			} else {
+				newContent = `${content}\n${existingContent}`;
+			}
+		} else {
+			newContent = `${existingContent}\n${content}`;
+		}
+
+		await this.app.vault.modify(file, newContent);
+		new Notice(`Captured to ${capture.name}`);
 	}
 
 	isPathIgnored(path: string): boolean {
@@ -159,7 +226,6 @@ export default class PersonalInternetPlugin extends Plugin {
 		const file = targetView.file;
 		if (this.isPathIgnored(file.path)) return;
 
-		// 1. Prepare data outside of the sync callback
 		const wordCount = await this.calculateWordCount(targetView);
 		const insertYaml: Record<string, string> = {};
 		if (this.settings.lintFrontmatterInsert) {
@@ -178,33 +244,18 @@ export default class PersonalInternetPlugin extends Plugin {
 		const todayStr = window.moment().format('YYYY-MM-DD');
 		const createdStr = window.moment(file.stat.ctime).format('YYYY-MM-DD');
 
-		// 2. Perform all YAML operations synchronously
 		this.isMaterializing = true;
 		try {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				// A. Insert Properties (Only if missing or empty)
 				for (const [key, value] of Object.entries(insertYaml)) {
-					if (!fm[key]) {
-						fm[key] = value;
-					}
+					if (!fm[key]) fm[key] = value;
 				}
-
-				// B. Date Created
-				if (this.settings.lintCreatedKey) {
-					if (!fm[this.settings.lintCreatedKey]) {
-						fm[this.settings.lintCreatedKey] = createdStr;
-					}
+				if (this.settings.lintCreatedKey && !fm[this.settings.lintCreatedKey]) {
+					fm[this.settings.lintCreatedKey] = createdStr;
 				}
-
-				// C. Date Modified
-				if (this.settings.lintModifiedKey) {
-					fm[this.settings.lintModifiedKey] = todayStr;
-				}
-
-				// D. Word Count
+				if (this.settings.lintModifiedKey) fm[this.settings.lintModifiedKey] = todayStr;
 				fm['word-count'] = wordCount;
 
-				// E. YAML Key Sorting
 				const priority = this.settings.lintYamlKeyPriority;
 				const sortedFm: any = {};
 				for (const key of priority) {
@@ -222,7 +273,6 @@ export default class PersonalInternetPlugin extends Plugin {
 				}
 			});
 
-			// 3. Structural Formatting
 			if (this.settings.lintBlankLineAfterYaml) {
 				const content = await this.app.vault.read(file);
 				const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
@@ -238,7 +288,6 @@ export default class PersonalInternetPlugin extends Plugin {
 			this.isMaterializing = false;
 		}
 
-		// 4. Trigger Dataview Refresh
 		// @ts-ignore
 		if (this.app.plugins.enabledPlugins.has('dataview')) {
 			// @ts-ignore
@@ -248,7 +297,7 @@ export default class PersonalInternetPlugin extends Plugin {
 		new Notice('Note linted');
 	}
 
-	async applyTemplateString(template: string, date: moment.Moment, fileName: string): Promise<string> {
+	async applyTemplateString(template: string, date: moment.Moment, fileName: string, value: string = ''): Promise<string> {
 		const now = window.moment();
 		let content = template;
 
@@ -259,6 +308,7 @@ export default class PersonalInternetPlugin extends Plugin {
 			result = result.replace(/{{time}}/g, date.format('HH:mm'));
 			result = result.replace(/{{today}}/g, now.format('YYYY-MM-DD'));
 			result = result.replace(/{{now}}/g, now.format('YYYY-MM-DDTHH:mm:ss'));
+			result = result.replace(/{{value}}/g, value);
 			return result;
 		};
 
@@ -291,7 +341,6 @@ export default class PersonalInternetPlugin extends Plugin {
 		const parentPath = file.parent?.path || '';
 		const fileName = file.basename;
 
-		// 1. Core Folders (Materialize logic)
 		if (parentPath === this.settings.dailyFolder) {
 			const dateMatch = fileName.match(/^(\d{4}-\d{2}-\d{2})$/);
 			if (dateMatch) {
@@ -331,7 +380,6 @@ export default class PersonalInternetPlugin extends Plugin {
 			return;
 		}
 
-		// 2. Arbitrary Folder Templates
 		const mapping = this.settings.folderTemplates.find(ft => ft.folder === parentPath);
 		if (mapping && mapping.template) {
 			this.isMaterializing = true;
@@ -514,6 +562,45 @@ class PickerModal extends Modal {
 					this.onSubmit(input.value);
 					this.close();
 				}
+			}
+		});
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
+class TextInputModal extends Modal {
+	title: string;
+	onSubmit: (result: string) => void;
+
+	constructor(app: App, title: string, onSubmit: (result: string) => void) {
+		super(app);
+		this.title = title;
+		this.onSubmit = onSubmit;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h2', { text: this.title });
+
+		const input = new TextComponent(contentEl);
+		input.inputEl.style.width = '100%';
+		input.inputEl.style.marginBottom = '10px';
+		input.inputEl.focus();
+
+		const submit = contentEl.createEl('button', { text: 'Submit', cls: 'mod-cta' });
+		submit.addEventListener('click', () => {
+			this.onSubmit(input.getValue());
+			this.close();
+		});
+		
+		input.inputEl.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') {
+				this.onSubmit(input.getValue());
+				this.close();
 			}
 		});
 	}
