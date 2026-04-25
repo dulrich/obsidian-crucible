@@ -21,3 +21,165 @@ If your plugin does not need CSS, delete this file.
     font-weight: bold;
     color: var(--text-accent);
 }
+
+/* Prominent Settings Headers */
+.personal-internet-setting-header {
+    margin-left: -20px !important;
+    font-size: 1.3em !important;
+    color: var(--text-accent);
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+    font-weight: bold;
+    display: block;
+}
+
+/* Hide the focus trap button */
+.personal-internet-focus-trap {
+    opacity: 0;
+    position: absolute;
+    width: 0;
+    height: 0;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    pointer-events: none;
+}
+
+hr {
+    margin-top: 2em;
+    margin-bottom: 2em;
+    border: 0;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Tab Navigation */
+.personal-internet-tab-nav {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 0;
+}
+
+.personal-internet-tab-btn {
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 4px 4px 0 0;
+    display: flex;
+    align-items: center;
+    font-size: 0.9em;
+    color: var(--text-muted);
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s ease;
+}
+
+.personal-internet-tab-btn:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+
+.personal-internet-tab-btn.is-active {
+    color: var(--text-accent);
+    border-bottom: 2px solid var(--interactive-accent);
+    background-color: var(--background-modifier-hover);
+}
+
+.personal-internet-tab-btn svg {
+    width: 16px;
+    height: 16px;
+    margin-right: 6px;
+}
+
+.personal-internet-tab-hr {
+    margin-top: 0 !important;
+    margin-bottom: 20px !important;
+}
+
+/* Folder Templates UI - Grouped Look */
+.personal-internet-folder-templates-container {
+    background-color: var(--background-secondary-alt);
+    border-radius: 8px;
+    border: 1px solid var(--background-modifier-border);
+    padding: 4px 0;
+    margin-bottom: 16px;
+    overflow: hidden;
+}
+
+.personal-internet-folder-template-row .setting-item,
+.personal-internet-folder-template-button-row .setting-item {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+    padding: 8px 16px !important;
+}
+
+.personal-internet-folder-template-button-row .setting-item-control {
+    justify-content: flex-end;
+    width: 100%;
+}
+
+.personal-internet-mini-hr {
+    margin: 0 !important;
+    border: 0;
+    border-top: 1px solid var(--background-modifier-border);
+    opacity: 0.5;
+}
+
+/* Ensure the two search boxes split the width evenly */
+.personal-internet-folder-template-row .setting-item-control {
+    width: 100%;
+    justify-content: flex-end;
+}
+
+.personal-internet-folder-template-row .personal-internet-search-container {
+    width: 300px;
+    margin-right: 8px;
+}
+
+.personal-internet-folder-template-row .personal-internet-search-container:last-of-type {
+    margin-right: 0;
+}
+
+/* Variables Grid */
+.personal-internet-variables-grid {
+    background-color: var(--background-secondary-alt);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+}
+
+.personal-internet-variable-row {
+    display: grid;
+    grid-template-columns: 150px 1fr 150px;
+    gap: 16px;
+    padding: 8px 12px;
+    align-items: center;
+}
+
+.personal-internet-variable-row:not(:last-child) {
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.personal-internet-variable-token {
+    font-family: var(--font-monospace);
+    color: var(--text-accent);
+    font-size: 0.9em;
+}
+
+.personal-internet-variable-description {
+    font-size: 0.9em;
+    color: var(--text-normal);
+}
+
+.personal-internet-variable-example {
+    font-size: 0.85em;
+    color: var(--text-muted);
+    text-align: right;
+}
+
+.personal-internet-variables-desc {
+    margin-bottom: 20px;
+    font-style: italic;
+    color: var(--text-muted);
+}
