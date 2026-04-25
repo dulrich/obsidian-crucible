@@ -97,12 +97,6 @@ export default class PersonalInternetPlugin extends Plugin {
 	}
 
 	registerShortcuts() {
-		// 1. Remove previously registered shortcut commands
-		// Note: Obsidian doesn't have a public "removeCommand" by ID easily, 
-		// but we can re-initialize them or use this internal hack if needed.
-		// Actually, the standard way is to refresh the plugin or just add them.
-		// To avoid duplicates during a single session, we'll use a dynamic ID pattern.
-		
 		this.settings.shortcuts.forEach((shortcut, index) => {
 			if (!shortcut.name || !shortcut.file) return;
 
@@ -128,24 +122,25 @@ export default class PersonalInternetPlugin extends Plugin {
 		});
 	}
 
-	async updateWordCount(view?: MarkdownView) {
-		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!targetView || !targetView.file) return;
-
-		if (this.isPathIgnored(targetView.file.path)) {
-			return;
-		}
-
-		const content = targetView.getViewData();
-		// Remove frontmatter for count
+	async calculateWordCount(view: MarkdownView): Promise<number> {
+		const content = view.getViewData();
 		const body = content.replace(/^---\s*\n([\s\S]*?)\n---/, '');
-		
 		const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
 		const segments = segmenter.segment(body);
 		let count = 0;
 		for (const segment of segments) {
 			if (segment.isWordLike) count++;
 		}
+		return count;
+	}
+
+	async updateWordCount(view?: MarkdownView) {
+		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!targetView || !targetView.file) return;
+
+		if (this.isPathIgnored(targetView.file.path)) return;
+
+		const count = await this.calculateWordCount(targetView);
 
 		this.isMaterializing = true;
 		try {
@@ -162,53 +157,72 @@ export default class PersonalInternetPlugin extends Plugin {
 		if (!targetView || !targetView.file) return;
 
 		const file = targetView.file;
+		if (this.isPathIgnored(file.path)) return;
 
-		if (this.isPathIgnored(file.path)) {
-			return;
+		// 1. Prepare data outside of the sync callback
+		const wordCount = await this.calculateWordCount(targetView);
+		const insertYaml: Record<string, string> = {};
+		if (this.settings.lintFrontmatterInsert) {
+			const processedInsert = await this.applyTemplateString(this.settings.lintFrontmatterInsert, window.moment(), file.basename);
+			const lines = processedInsert.split('\n');
+			for (const line of lines) {
+				const parts = line.split(':');
+				if (parts.length >= 2) {
+					const key = parts[0].trim();
+					const value = parts.slice(1).join(':').trim();
+					if (key) insertYaml[key] = value;
+				}
+			}
 		}
 
-		// 1. Update Word Count
-		await this.updateWordCount(targetView);
+		const todayStr = window.moment().format('YYYY-MM-DD');
+		const createdStr = window.moment(file.stat.ctime).format('YYYY-MM-DD');
 
-		// 2. Format and Sort Frontmatter
+		// 2. Perform all YAML operations synchronously
 		this.isMaterializing = true;
 		try {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				// Handle Date Created
-				if (this.settings.lintCreatedKey) {
-					const createdValue = fm[this.settings.lintCreatedKey];
-					if (!createdValue) {
-						fm[this.settings.lintCreatedKey] = window.moment(file.stat.ctime).format('YYYY-MM-DD');
+				// A. Insert Properties (Only if missing or empty)
+				for (const [key, value] of Object.entries(insertYaml)) {
+					if (!fm[key]) {
+						fm[key] = value;
 					}
 				}
 
-				// Handle Date Modified (Always update on lint)
-				if (this.settings.lintModifiedKey) {
-					fm[this.settings.lintModifiedKey] = window.moment().format('YYYY-MM-DD');
+				// B. Date Created
+				if (this.settings.lintCreatedKey) {
+					if (!fm[this.settings.lintCreatedKey]) {
+						fm[this.settings.lintCreatedKey] = createdStr;
+					}
 				}
 
-				// Sort keys based on priority
+				// C. Date Modified
+				if (this.settings.lintModifiedKey) {
+					fm[this.settings.lintModifiedKey] = todayStr;
+				}
+
+				// D. Word Count
+				fm['word-count'] = wordCount;
+
+				// E. YAML Key Sorting
 				const priority = this.settings.lintYamlKeyPriority;
 				const sortedFm: any = {};
-				
 				for (const key of priority) {
 					if (key in fm) {
 						sortedFm[key] = fm[key];
 						delete fm[key];
 					}
 				}
-				
 				for (const key of Object.keys(fm)) {
 					sortedFm[key] = fm[key];
 					delete fm[key];
 				}
-				
 				for (const key of Object.keys(sortedFm)) {
 					fm[key] = sortedFm[key];
 				}
 			});
 
-			// 3. Handle Blank Line After YAML
+			// 3. Structural Formatting
 			if (this.settings.lintBlankLineAfterYaml) {
 				const content = await this.app.vault.read(file);
 				const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
@@ -224,12 +238,33 @@ export default class PersonalInternetPlugin extends Plugin {
 			this.isMaterializing = false;
 		}
 
-		// 4. Trigger Dataview Rebuild (if plugin exists)
+		// 4. Trigger Dataview Refresh
 		// @ts-ignore
 		if (this.app.plugins.enabledPlugins.has('dataview')) {
 			// @ts-ignore
 			this.app.commands.executeCommandById('dataview:dataview-rebuild-current-view');
 		}
+
+		new Notice('Note linted');
+	}
+
+	async applyTemplateString(template: string, date: moment.Moment, fileName: string): Promise<string> {
+		const now = window.moment();
+		let content = template;
+
+		const replaceTokens = (text: string) => {
+			let result = text;
+			result = result.replace(/{{datetime:(.*?)}}/g, (match, format) => date.format(format));
+			result = result.replace(/{{date}}/g, date.format('YYYY-MM-DD'));
+			result = result.replace(/{{time}}/g, date.format('HH:mm'));
+			result = result.replace(/{{today}}/g, now.format('YYYY-MM-DD'));
+			result = result.replace(/{{now}}/g, now.format('YYYY-MM-DDTHH:mm:ss'));
+			return result;
+		};
+
+		content = replaceTokens(content);
+		content = content.replace(/{{title}}/g, fileName);
+		return content;
 	}
 
 	openDayPicker() {
@@ -343,37 +378,7 @@ export default class PersonalInternetPlugin extends Plugin {
 		}
 
 		let content = await this.app.vault.read(file);
-		const now = window.moment();
-
-		const replaceTokens = (text: string) => {
-			let result = text;
-			result = result.replace(/{{datetime:(.*?)}}/g, (match, format) => date.format(format));
-			result = result.replace(/{{date}}/g, date.format('YYYY-MM-DD'));
-			result = result.replace(/{{time}}/g, date.format('HH:mm'));
-			result = result.replace(/{{today}}/g, now.format('YYYY-MM-DD'));
-			result = result.replace(/{{now}}/g, now.format('YYYY-MM-DDTHH:mm:ss'));
-			return result;
-		};
-
-		// 1. Resolve basic tokens (including in YAML)
-		content = replaceTokens(content);
-
-		// 2. Handle {{title}} logic
-		let title = fileName;
-		const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
-		if (yamlMatch) {
-			const yamlLines = yamlMatch[1].split('\n');
-			const titleLine = yamlLines.find(line => line.trim().startsWith('title:'));
-			if (titleLine) {
-				const titleValue = titleLine.split(':')[1].trim();
-				// Remove potential quotes
-				title = titleValue.replace(/^["'](.*)["']$/, '$1');
-			}
-		}
-
-		content = content.replace(/{{title}}/g, title);
-
-		return content;
+		return await this.applyTemplateString(content, date, fileName);
 	}
 
 	async materializeDay(date: moment.Moment) {
