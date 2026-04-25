@@ -1,35 +1,104 @@
-import {App, PluginSettingTab, Setting} from "obsidian";
-import MyPlugin from "./main";
+import { App, PluginSettingTab, Setting } from "obsidian";
+import PersonalInternetPlugin from "./main";
 
-export interface MyPluginSettings {
-	mySetting: string;
+export interface PersonalInternetSettings {
+	dailyFolder: string;
+	weeklyFolder: string;
+	monthlyFolder: string;
+	dailyTemplate: string;
+	weeklyTemplate: string;
+	monthlyTemplate: string;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+export const DEFAULT_SETTINGS: PersonalInternetSettings = {
+	dailyFolder: 'daily/day',
+	weeklyFolder: 'daily/week',
+	monthlyFolder: 'daily/month',
+	dailyTemplate: '',
+	weeklyTemplate: '',
+	monthlyTemplate: '',
 }
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export class PersonalInternetSettingTab extends PluginSettingTab {
+	plugin: PersonalInternetPlugin;
 
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: PersonalInternetPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
+		containerEl.createEl('h2', { text: 'Folders' });
+
 		new Setting(containerEl)
-			.setName('Settings #1')
-			.setDesc('It\'s a secret')
+			.setName('Daily folder')
+			.setDesc('Folder for daily notes and day-specific assets.')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('daily/day')
+				.setValue(this.plugin.settings.dailyFolder)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.dailyFolder = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Weekly folder')
+			.setDesc('Folder for weekly notes.')
+			.addText(text => text
+				.setPlaceholder('daily/week')
+				.setValue(this.plugin.settings.weeklyFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.weeklyFolder = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Monthly folder')
+			.setDesc('Folder for monthly notes.')
+			.addText(text => text
+				.setPlaceholder('daily/month')
+				.setValue(this.plugin.settings.monthlyFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.monthlyFolder = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h2', { text: 'Templates' });
+
+		new Setting(containerEl)
+			.setName('Daily template')
+			.setDesc('Path to the daily note template file.')
+			.addText(text => text
+				.setPlaceholder('templates/daily.md')
+				.setValue(this.plugin.settings.dailyTemplate)
+				.onChange(async (value) => {
+					this.plugin.settings.dailyTemplate = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Weekly template')
+			.setDesc('Path to the weekly note template file.')
+			.addText(text => text
+				.setPlaceholder('templates/weekly.md')
+				.setValue(this.plugin.settings.weeklyTemplate)
+				.onChange(async (value) => {
+					this.plugin.settings.weeklyTemplate = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Monthly template')
+			.setDesc('Path to the monthly note template file.')
+			.addText(text => text
+				.setPlaceholder('templates/monthly.md')
+				.setValue(this.plugin.settings.monthlyTemplate)
+				.onChange(async (value) => {
+					this.plugin.settings.monthlyTemplate = value;
 					await this.plugin.saveSettings();
 				}));
 	}
