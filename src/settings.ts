@@ -7,6 +7,11 @@ export interface FolderTemplate {
 	template: string;
 }
 
+export interface Shortcut {
+	name: string;
+	file: string;
+}
+
 export interface PersonalInternetSettings {
 	dailyFolder: string;
 	weeklyFolder: string;
@@ -23,6 +28,8 @@ export interface PersonalInternetSettings {
 	lintModifiedKey: string;
 	lintBlankLineAfterYaml: boolean;
 	lintOnSave: boolean;
+	// Shortcuts
+	shortcuts: Shortcut[];
 }
 
 export const DEFAULT_SETTINGS: PersonalInternetSettings = {
@@ -40,11 +47,12 @@ export const DEFAULT_SETTINGS: PersonalInternetSettings = {
 	lintModifiedKey: 'updated',
 	lintBlankLineAfterYaml: true,
 	lintOnSave: false,
+	shortcuts: [],
 }
 
 export class PersonalInternetSettingTab extends PluginSettingTab {
 	plugin: PersonalInternetPlugin;
-	private activeTab: 'settings' | 'variables' | 'lint' = 'settings';
+	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' = 'settings';
 
 	constructor(app: App, plugin: PersonalInternetPlugin) {
 		super(app, plugin);
@@ -65,35 +73,22 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		// Tab Navigation
 		const navBar = containerEl.createDiv({ cls: 'personal-internet-tab-nav' });
 		
-		const settingsTabBtn = navBar.createDiv({ 
-			cls: `personal-internet-tab-btn ${this.activeTab === 'settings' ? 'is-active' : ''}` 
-		});
-		setIcon(settingsTabBtn, 'settings');
-		settingsTabBtn.createSpan({ text: ' Settings' });
-		settingsTabBtn.onclick = () => {
-			this.activeTab = 'settings';
-			this.display();
+		const createTab = (id: typeof this.activeTab, icon: string, label: string) => {
+			const btn = navBar.createDiv({ 
+				cls: `personal-internet-tab-btn ${this.activeTab === id ? 'is-active' : ''}` 
+			});
+			setIcon(btn, icon);
+			btn.createSpan({ text: ` ${label}` });
+			btn.onclick = () => {
+				this.activeTab = id;
+				this.display();
+			};
 		};
 
-		const lintTabBtn = navBar.createDiv({ 
-			cls: `personal-internet-tab-btn ${this.activeTab === 'lint' ? 'is-active' : ''}` 
-		});
-		setIcon(lintTabBtn, 'check-circle');
-		lintTabBtn.createSpan({ text: ' Lint' });
-		lintTabBtn.onclick = () => {
-			this.activeTab = 'lint';
-			this.display();
-		};
-
-		const variablesTabBtn = navBar.createDiv({ 
-			cls: `personal-internet-tab-btn ${this.activeTab === 'variables' ? 'is-active' : ''}` 
-		});
-		setIcon(variablesTabBtn, 'info');
-		variablesTabBtn.createSpan({ text: ' Variables' });
-		variablesTabBtn.onclick = () => {
-			this.activeTab = 'variables';
-			this.display();
-		};
+		createTab('settings', 'settings', 'Settings');
+		createTab('shortcuts', 'link', 'Shortcuts');
+		createTab('lint', 'check-circle', 'Lint');
+		createTab('variables', 'info', 'Variables');
 
 		containerEl.createEl('hr', { cls: 'personal-internet-tab-hr' });
 
@@ -101,6 +96,8 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			this.renderSettings(containerEl);
 		} else if (this.activeTab === 'lint') {
 			this.renderLintSettings(containerEl);
+		} else if (this.activeTab === 'shortcuts') {
+			this.renderShortcutSettings(containerEl);
 		} else {
 			this.renderVariables(containerEl);
 		}
@@ -386,6 +383,69 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 					.setCta()
 					.onClick(async () => {
 						this.plugin.settings.lintIgnoredFolders.push('');
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+	}
+
+	private renderShortcutSettings(containerEl: HTMLElement) {
+		containerEl.createEl('h2', { text: 'Command Shortcuts', cls: 'personal-internet-setting-header' });
+		containerEl.createEl('p', { text: 'Create custom commands to open specific files directly from the Command Palette.' });
+
+		const shortcutsContainer = containerEl.createDiv({ cls: 'personal-internet-folder-templates-container' });
+
+		this.plugin.settings.shortcuts.forEach((shortcut, index) => {
+			if (index > 0) {
+				shortcutsContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+			}
+			const row = shortcutsContainer.createDiv({ cls: 'personal-internet-folder-template-row' });
+			
+			const s = new Setting(row)
+				.addText(text => {
+					text.setPlaceholder('Command Name')
+						.setValue(shortcut.name)
+						.onChange(async (value) => {
+							this.plugin.settings.shortcuts[index].name = value;
+							await this.plugin.saveSettings();
+							this.plugin.registerShortcuts();
+						});
+					text.inputEl.addClass('personal-internet-shortcut-name-input');
+				})
+				.addSearch(cb => {
+					cb.setPlaceholder('File to open')
+						.setValue(shortcut.file)
+						.onChange(async (value) => {
+							this.plugin.settings.shortcuts[index].file = value;
+							await this.plugin.saveSettings();
+							this.plugin.registerShortcuts();
+						});
+					cb.containerEl.addClass('personal-internet-search-container');
+					new FileSuggest(this.app, cb.inputEl);
+				})
+				.addExtraButton(cb => {
+					cb.setIcon('trash')
+						.setTooltip('Delete')
+						.onClick(async () => {
+							this.plugin.settings.shortcuts.splice(index, 1);
+							await this.plugin.saveSettings();
+							this.plugin.registerShortcuts();
+							this.display();
+						});
+				});
+			s.infoEl.remove();
+		});
+
+		const buttonRow = shortcutsContainer.createDiv({ cls: 'personal-internet-folder-template-button-row' });
+		if (this.plugin.settings.shortcuts.length > 0) {
+			shortcutsContainer.createEl('hr', { cls: 'personal-internet-mini-hr' });
+		}
+		new Setting(buttonRow)
+			.addButton(bt => {
+				bt.setButtonText('Add Shortcut')
+					.setCta()
+					.onClick(async () => {
+						this.plugin.settings.shortcuts.push({ name: '', file: '' });
 						await this.plugin.saveSettings();
 						this.display();
 					});

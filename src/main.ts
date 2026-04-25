@@ -1,9 +1,10 @@
-import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce } from 'obsidian';
+import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce, Command } from 'obsidian';
 import { DEFAULT_SETTINGS, PersonalInternetSettings, PersonalInternetSettingTab } from "./settings";
 
 export default class PersonalInternetPlugin extends Plugin {
 	settings: PersonalInternetSettings;
 	private isMaterializing = false;
+	private registeredShortcutIds: string[] = [];
 
 	async onload() {
 		await this.loadSettings();
@@ -90,7 +91,34 @@ export default class PersonalInternetPlugin extends Plugin {
 			})
 		);
 
+		this.registerShortcuts();
+
 		this.addSettingTab(new PersonalInternetSettingTab(this.app, this));
+	}
+
+	registerShortcuts() {
+		// 1. Remove previously registered shortcut commands
+		// Note: Obsidian doesn't have a public "removeCommand" by ID easily, 
+		// but we can re-initialize them or use this internal hack if needed.
+		// Actually, the standard way is to refresh the plugin or just add them.
+		// To avoid duplicates during a single session, we'll use a dynamic ID pattern.
+		
+		this.settings.shortcuts.forEach((shortcut, index) => {
+			if (!shortcut.name || !shortcut.file) return;
+
+			this.addCommand({
+				id: `shortcut-${index}`,
+				name: `Shortcut: ${shortcut.name}`,
+				callback: async () => {
+					const file = this.app.vault.getAbstractFileByPath(shortcut.file);
+					if (file instanceof TFile) {
+						await this.app.workspace.getLeaf().openFile(file);
+					} else {
+						new Notice(`File not found: ${shortcut.file}`);
+					}
+				}
+			});
+		});
 	}
 
 	isPathIgnored(path: string): boolean {
