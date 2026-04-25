@@ -2,7 +2,7 @@
 import { App, PluginSettingTab, Setting, setIcon } from "obsidian";
 import PersonalInternetPlugin from "./main";
 import { FileSuggest, FolderSuggest } from "./suggesters";
-import { CaptureTarget, ToCPosition } from "./types";
+import { CaptureTarget, ToCPosition, ToCCollapseBehavior } from "./types";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
@@ -87,6 +87,22 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 					  .setValue(this.plugin.settings.tocPosition)
 					  .onChange(async (value: ToCPosition) => {
 						  this.plugin.settings.tocPosition = value;
+						  await this.plugin.saveSettings();
+						  this.plugin.refreshToC();
+					  });
+				});
+
+			tocGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+			new Setting(tocGroup)
+				.setName('Collapse behavior')
+				.setDesc('How the table of contents should automatically collapse.')
+				.addDropdown(dd => {
+					dd.addOption('manual', 'Manual')
+					  .addOption('click', 'Collapse on click')
+					  .addOption('blur', 'Collapse on blur')
+					  .setValue(this.plugin.settings.tocCollapseBehavior)
+					  .onChange(async (value: ToCCollapseBehavior) => {
+						  this.plugin.settings.tocCollapseBehavior = value;
 						  await this.plugin.saveSettings();
 						  this.plugin.refreshToC();
 					  });

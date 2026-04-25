@@ -96,7 +96,7 @@ export default class PersonalInternetPlugin extends Plugin {
 		if (!this.settings.showToC) return;
 		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (activeView) {
-			this.tocComponent = new TableOfContentsUI(this.app, activeView, this.settings.tocPosition);
+			this.tocComponent = new TableOfContentsUI(this.app, activeView, this.settings.tocPosition, this.settings.tocCollapseBehavior);
 			this.tocComponent.load();
 		}
 	}

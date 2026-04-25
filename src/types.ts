@@ -20,6 +20,7 @@ export interface Capture {
 }
 
 export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-right';
+export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
 export interface PersonalInternetSettings {
 	dailyFolder: string;
@@ -44,6 +45,7 @@ export interface PersonalInternetSettings {
 	// ToC
 	showToC: boolean;
 	tocPosition: ToCPosition;
+	tocCollapseBehavior: ToCCollapseBehavior;
 }
 
 export const DEFAULT_SETTINGS: PersonalInternetSettings = {
@@ -65,4 +67,5 @@ export const DEFAULT_SETTINGS: PersonalInternetSettings = {
 	captures: [],
 	showToC: true,
 	tocPosition: 'bottom-right',
+	tocCollapseBehavior: 'manual',
 }
