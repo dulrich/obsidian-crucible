@@ -6,3 +6,18 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+
+.personal-internet-search-container {
+    width: 300px;
+}
+
+/* Ensure the search input takes up the full width of the container */
+.personal-internet-search-container input {
+    width: 100%;
+}
+
+/* Style for highlighted fuzzy matches */
+.suggestion-item .suggestion-highlight {
+    font-weight: bold;
+    color: var(--text-accent);
+}
