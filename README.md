@@ -1,90 +1,55 @@
-# Obsidian Sample Plugin
+# Personal Internet Plugin for Obsidian
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+This plugin bundles a variety of custom commands and interfaces for a personal workflow, replacing the need for several separate community plugins like Daily Notes, Templater, Shell Commands, Linter, and QuickAdd.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+This project is based on the [Obsidian Sample Plugin](https://github.com/obsidianmd/obsidian-sample-plugin).
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+## Core Features
 
-## First time developing plugins?
+### 1. Materialize System
+Automate the creation of organizational structures with custom commands and date-pickers:
+- **Materialize Day/Week/Month:** Ensures the existence of date-based notes and folders (e.g., `daily/day/2026-04-24.md` and a matching folder).
+- **Template Support:** Automatically applies templates with token replacement (`{{date}}`, `{{now}}`, `{{title}}`, etc.).
+- **Smart Materialization:** Automatically materializes notes when clicking broken links to non-existent date files.
 
-Quick starting guide for new plugin devs:
+### 2. Linting Engine
+A streamlined replacement for the Linter plugin, focused on essential metadata management:
+- **Word Count:** Updates a `word-count` frontmatter property using accurate `Intl.Segmenter` logic.
+- **Date Management:** Automatically manages `created` and `updated` properties based on file system metadata.
+- **YAML Sorting:** Reorganizes frontmatter keys according to a user-defined priority list.
+- **Lint on Save:** Optional automatic execution of linting rules whenever a file is modified.
+- **Excluded Folders:** Define specific directories to skip during linting operations.
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+### 3. Shortcuts & Captures
+Native-feeling interfaces to replace QuickAdd functionality:
+- **Command Shortcuts:** Register custom commands to open specific files directly from the Command Palette.
+- **Capture Workflows:** Define workflows to append or prepend text (with prompts) to daily notes or specific files.
+- **Section Targeting:** Target specific markdown headers for captures (e.g., appending a thought under a `# Captures` header).
 
-## Releasing new releases
+### 4. Floating Table of Contents
+A clever, collapsible UI element for quick document navigation:
+- **Collapsible Control:** A sleek, minimized charcoal box that expands to show document headers.
+- **Configurable Position:** Anchor the ToC to any of the four corners of the editor.
+- **hierarchical Indentation:** Visualizes your document's structure for easy scanning.
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+## Development
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
-
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+### Install
+```bash
+npm install
 ```
 
-If you have multiple URLs, you can also do:
-
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
+### Dev
+```bash
+npm run dev
 ```
 
-## API Documentation
+### Production Build
+```bash
+npm run build
+```
 
-See https://docs.obsidian.md
+## Manual Installation
+1. Copy `main.js`, `manifest.json`, and `styles.css` to your vault's plugin folder: `<Vault>/.obsidian/plugins/personal-internet/`
+2. Reload Obsidian.
+3. Enable **Personal Internet** in **Settings > Community plugins**.
