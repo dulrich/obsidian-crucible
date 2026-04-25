@@ -18,6 +18,7 @@ export interface Capture {
 	name: string;
 	targetType: CaptureTarget;
 	file: string;
+	targetSection: string;
 	content: string;
 	prepend: boolean;
 }
@@ -535,8 +536,21 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 
 			new Setting(captureGroup)
+				.setName('Target Section')
+				.setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.')
+				.addText(text => text
+					.setPlaceholder('# Header')
+					.setValue(capture.targetSection)
+					.onChange(async (value) => {
+						this.plugin.settings.captures[index].targetSection = value;
+						await this.plugin.saveSettings();
+					}));
+
+			captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+			new Setting(captureGroup)
 				.setName('Prepend content')
-				.setDesc('Add to the top of the file instead of the bottom.')
+				.setDesc('Add to the top of the section/file instead of the bottom.')
 				.addToggle(toggle => toggle
 					.setValue(capture.prepend)
 					.onChange(async (value) => {
@@ -585,7 +599,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				.setButtonText('Add Capture')
 				.setCta()
 				.onClick(async () => {
-					this.plugin.settings.captures.push({ name: '', targetType: 'daily', file: '', content: '', prepend: false });
+					this.plugin.settings.captures.push({ name: '', targetType: 'daily', file: '', targetSection: '', content: '', prepend: false });
 					await this.plugin.saveSettings();
 					this.display();
 				}));
