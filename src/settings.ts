@@ -12,6 +12,16 @@ export interface Shortcut {
 	file: string;
 }
 
+export type CaptureTarget = 'daily' | 'weekly' | 'monthly' | 'selected';
+
+export interface Capture {
+	name: string;
+	targetType: CaptureTarget;
+	file: string;
+	content: string;
+	prepend: boolean;
+}
+
 export interface PersonalInternetSettings {
 	dailyFolder: string;
 	weeklyFolder: string;
@@ -30,6 +40,8 @@ export interface PersonalInternetSettings {
 	lintOnSave: boolean;
 	// Shortcuts
 	shortcuts: Shortcut[];
+	// Captures
+	captures: Capture[];
 }
 
 export const DEFAULT_SETTINGS: PersonalInternetSettings = {
@@ -48,11 +60,12 @@ export const DEFAULT_SETTINGS: PersonalInternetSettings = {
 	lintBlankLineAfterYaml: true,
 	lintOnSave: false,
 	shortcuts: [],
+	captures: [],
 }
 
 export class PersonalInternetSettingTab extends PluginSettingTab {
 	plugin: PersonalInternetPlugin;
-	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' = 'settings';
+	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' | 'captures' = 'settings';
 
 	constructor(app: App, plugin: PersonalInternetPlugin) {
 		super(app, plugin);
@@ -87,6 +100,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 
 		createTab('settings', 'settings', 'Settings');
 		createTab('shortcuts', 'link', 'Shortcuts');
+		createTab('captures', 'edit-3', 'Captures');
 		createTab('lint', 'check-circle', 'Lint');
 		createTab('variables', 'info', 'Variables');
 
@@ -98,6 +112,8 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			this.renderLintSettings(containerEl);
 		} else if (this.activeTab === 'shortcuts') {
 			this.renderShortcutSettings(containerEl);
+		} else if (this.activeTab === 'captures') {
+			this.renderCaptureSettings(containerEl);
 		} else {
 			this.renderVariables(containerEl);
 		}
@@ -210,9 +226,11 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 
 		this.plugin.settings.folderTemplates.forEach((ft, index) => {
 			if (index > 0) {
-				folderTemplatesGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+				folderTemplatesGroup.createEl('hr', { cls: 'personal-internet-mini-hr' });
 			}
-			const s = new Setting(folderTemplatesGroup)
+			const row = folderTemplatesGroup.createDiv({ cls: 'personal-internet-folder-template-row' });
+			
+			const s = new Setting(row)
 				.addSearch(cb => {
 					cb.setPlaceholder('Folder')
 						.setValue(ft.folder)
@@ -363,7 +381,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			if (index > 0) {
 				ignoredFoldersGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 			}
-			const s = new Setting(ignoredFoldersGroup)
+			const row = ignoredFoldersGroup.createDiv({ cls: 'personal-internet-folder-template-row' });
+			
+			const s = new Setting(row)
 				.addSearch(cb => {
 					cb.setPlaceholder('Folder to ignore')
 						.setValue(folder)
@@ -461,6 +481,116 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			});
 	}
 
+	private renderCaptureSettings(containerEl: HTMLElement) {
+		containerEl.createEl('h2', { text: 'Capture Workflows', cls: 'personal-internet-setting-header' });
+		containerEl.createEl('p', { text: 'Define workflows to quickly append or prepend text to specific notes.' });
+
+		this.plugin.settings.captures.forEach((capture, index) => {
+			const captureGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
+
+			new Setting(captureGroup)
+				.setName('Capture Name')
+				.addText(text => text
+					.setPlaceholder('e.g. Quick Note')
+					.setValue(capture.name)
+					.onChange(async (value) => {
+						this.plugin.settings.captures[index].name = value;
+						await this.plugin.saveSettings();
+						this.plugin.registerCaptures();
+					}));
+
+			captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+			new Setting(captureGroup)
+				.setName('Target Note')
+				.addDropdown(dd => {
+					dd.addOption('daily', 'Daily Note')
+					  .addOption('weekly', 'Weekly Note')
+					  .addOption('monthly', 'Monthly Note')
+					  .addOption('selected', 'Selected Note')
+					  .setValue(capture.targetType)
+					  .onChange(async (value: CaptureTarget) => {
+						  this.plugin.settings.captures[index].targetType = value;
+						  await this.plugin.saveSettings();
+						  this.display();
+					  });
+				});
+
+			if (capture.targetType === 'selected') {
+				captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+				new Setting(captureGroup)
+					.setName('Select Note')
+					.addSearch(cb => {
+						cb.setPlaceholder('e.g. Inbox.md')
+							.setValue(capture.file)
+							.onChange(async (value) => {
+								this.plugin.settings.captures[index].file = value;
+								await this.plugin.saveSettings();
+							});
+						cb.containerEl.addClass('personal-internet-search-container');
+						new FileSuggest(this.app, cb.inputEl);
+					});
+			}
+
+			captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+			new Setting(captureGroup)
+				.setName('Prepend content')
+				.setDesc('Add to the top of the file instead of the bottom.')
+				.addToggle(toggle => toggle
+					.setValue(capture.prepend)
+					.onChange(async (value) => {
+						this.plugin.settings.captures[index].prepend = value;
+						await this.plugin.saveSettings();
+					}));
+
+			captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+			const autoSize = (el: HTMLTextAreaElement) => {
+				el.style.height = 'auto';
+				el.style.height = (el.scrollHeight) + 'px';
+			};
+
+			new Setting(captureGroup)
+				.setName('Content Template')
+				.setDesc('Text to capture. (Supports variables like {{now}}, {{value}})')
+				.addTextArea(text => {
+					text.setPlaceholder('- {{now}}: {{value}}')
+						.setValue(capture.content)
+						.onChange(async (value) => {
+							this.plugin.settings.captures[index].content = value;
+							await this.plugin.saveSettings();
+							autoSize(text.inputEl);
+						});
+					text.inputEl.addClass('personal-internet-setting-textarea');
+					requestAnimationFrame(() => autoSize(text.inputEl));
+				});
+
+			captureGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
+
+			new Setting(captureGroup)
+				.addButton(bt => bt
+					.setButtonText('Delete Capture')
+					.setWarning()
+					.onClick(async () => {
+						this.plugin.settings.captures.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.plugin.registerCaptures();
+						this.display();
+					}));
+		});
+
+		new Setting(containerEl)
+			.addButton(bt => bt
+				.setButtonText('Add Capture')
+				.setCta()
+				.onClick(async () => {
+					this.plugin.settings.captures.push({ name: '', targetType: 'daily', file: '', content: '', prepend: false });
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+	}
+
 	private renderVariables(containerEl: HTMLElement) {
 		containerEl.createEl('h2', { text: 'Template Variables', cls: 'personal-internet-setting-header' });
 		
@@ -481,6 +611,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		addVariable('today', 'The current date at invocation', '2026-04-24');
 		addVariable('now', 'The current ISO datetime', '2026-04-24T14:30:00');
 		addVariable('title', 'The note title (from YAML or filename)', 'April 2026');
+		addVariable('value', 'Input entered by user during Capture', 'My quick thought');
 		addVariable('datetime:FORMAT', 'Custom format (Moment.js tokens)', '{{datetime:MMMM YYYY}}');
 
 		containerEl.createEl('hr');
