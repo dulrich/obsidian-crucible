@@ -139,6 +139,16 @@ hr {
     margin-right: 0;
 }
 
+/* Lint Settings */
+.personal-internet-setting-textarea {
+    width: 400px;
+    min-height: 4.5em; /* Approximately 3 lines */
+    resize: none;
+    overflow-y: hidden;
+    font-family: var(--font-monospace);
+    font-size: 0.9em;
+}
+
 /* Variables Grid */
 .personal-internet-variables-grid {
     background-color: var(--background-secondary-alt);

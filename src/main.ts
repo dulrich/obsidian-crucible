@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile } from 'obsidian';
+import { App, Modal, Notice, Plugin, TFile, TFolder, TAbstractFile, MarkdownView, parseFrontMatterEntry, debounce } from 'obsidian';
 import { DEFAULT_SETTINGS, PersonalInternetSettings, PersonalInternetSettingTab } from "./settings";
 
 export default class PersonalInternetPlugin extends Plugin {
@@ -45,6 +45,18 @@ export default class PersonalInternetPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'word-count',
+			name: 'Word Count: Update Frontmatter',
+			callback: () => this.updateWordCount(),
+		});
+
+		this.addCommand({
+			id: 'lint-note',
+			name: 'Lint: Format Frontmatter and Properties',
+			callback: () => this.lintNote(),
+		});
+
+		this.addCommand({
 			id: 'reload-plugin',
 			name: 'Reload Plugin',
 			callback: async () => {
@@ -61,7 +73,135 @@ export default class PersonalInternetPlugin extends Plugin {
 			this.app.vault.on('create', (file) => this.handleFileCreate(file))
 		);
 
+		const debouncedLint = debounce(async (file: TFile) => {
+			if (this.settings.lintOnSave && !this.isMaterializing) {
+				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (activeView && activeView.file?.path === file.path) {
+					await this.lintNote(activeView);
+				}
+			}
+		}, 2000, true);
+
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					debouncedLint(file);
+				}
+			})
+		);
+
 		this.addSettingTab(new PersonalInternetSettingTab(this.app, this));
+	}
+
+	isPathIgnored(path: string): boolean {
+		return this.settings.lintIgnoredFolders.some(ignored => {
+			if (!ignored) return false;
+			return path.startsWith(ignored);
+		});
+	}
+
+	async updateWordCount(view?: MarkdownView) {
+		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!targetView || !targetView.file) return;
+
+		if (this.isPathIgnored(targetView.file.path)) {
+			return;
+		}
+
+		const content = targetView.getViewData();
+		// Remove frontmatter for count
+		const body = content.replace(/^---\s*\n([\s\S]*?)\n---/, '');
+		
+		const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+		const segments = segmenter.segment(body);
+		let count = 0;
+		for (const segment of segments) {
+			if (segment.isWordLike) count++;
+		}
+
+		this.isMaterializing = true;
+		try {
+			await this.app.fileManager.processFrontMatter(targetView.file, (fm) => {
+				fm['word-count'] = count;
+			});
+		} finally {
+			this.isMaterializing = false;
+		}
+	}
+
+	async lintNote(view?: MarkdownView) {
+		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!targetView || !targetView.file) return;
+
+		const file = targetView.file;
+
+		if (this.isPathIgnored(file.path)) {
+			return;
+		}
+
+		// 1. Update Word Count
+		await this.updateWordCount(targetView);
+
+		// 2. Format and Sort Frontmatter
+		this.isMaterializing = true;
+		try {
+			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				// Handle Date Created
+				if (this.settings.lintCreatedKey) {
+					const createdValue = fm[this.settings.lintCreatedKey];
+					if (!createdValue) {
+						fm[this.settings.lintCreatedKey] = window.moment(file.stat.ctime).format('YYYY-MM-DD');
+					}
+				}
+
+				// Handle Date Modified (Always update on lint)
+				if (this.settings.lintModifiedKey) {
+					fm[this.settings.lintModifiedKey] = window.moment().format('YYYY-MM-DD');
+				}
+
+				// Sort keys based on priority
+				const priority = this.settings.lintYamlKeyPriority;
+				const sortedFm: any = {};
+				
+				for (const key of priority) {
+					if (key in fm) {
+						sortedFm[key] = fm[key];
+						delete fm[key];
+					}
+				}
+				
+				for (const key of Object.keys(fm)) {
+					sortedFm[key] = fm[key];
+					delete fm[key];
+				}
+				
+				for (const key of Object.keys(sortedFm)) {
+					fm[key] = sortedFm[key];
+				}
+			});
+
+			// 3. Handle Blank Line After YAML
+			if (this.settings.lintBlankLineAfterYaml) {
+				const content = await this.app.vault.read(file);
+				const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
+				if (yamlMatch) {
+					const currentNewlines = yamlMatch[2];
+					if (currentNewlines.length < 2) {
+						const updatedContent = content.replace(/^---\s*\n([\s\S]*?)\n---(\n*)/, `---\n$1\n---\n\n`);
+						await this.app.vault.modify(file, updatedContent);
+					}
+				}
+			}
+		} finally {
+			this.isMaterializing = false;
+		}
+
+		// 4. Trigger Dataview Rebuild (if plugin exists)
+		// @ts-ignore
+		if (this.app.plugins.enabledPlugins.has('dataview')) {
+			// @ts-ignore
+			this.app.commands.executeCommandById('dataview:dataview-rebuild-current-view');
+		}
 	}
 
 	openDayPicker() {
@@ -135,7 +275,6 @@ export default class PersonalInternetPlugin extends Plugin {
 			try {
 				const content = await this.applyTemplate(mapping.template, window.moment(), fileName);
 				await this.app.vault.modify(file, content);
-				new Notice(`Applied template: ${mapping.template}`);
 			} catch (e) {
 				new Notice(`Error applying folder template: ${e.message}`);
 			} finally {
