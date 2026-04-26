@@ -22,7 +22,7 @@ export interface Capture {
 export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-right';
 export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
-export interface PersonalInternetSettings {
+export interface CrucibleSettings {
 	dailyFolder: string;
 	weeklyFolder: string;
 	monthlyFolder: string;
@@ -48,7 +48,7 @@ export interface PersonalInternetSettings {
 	tocCollapseBehavior: ToCCollapseBehavior;
 }
 
-export const DEFAULT_SETTINGS: PersonalInternetSettings = {
+export const DEFAULT_SETTINGS: CrucibleSettings = {
 	dailyFolder: 'daily/day',
 	weeklyFolder: 'daily/week',
 	monthlyFolder: 'daily/month',

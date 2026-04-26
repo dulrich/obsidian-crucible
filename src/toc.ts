@@ -18,7 +18,7 @@ export class TableOfContentsUI {
 
 	load() {
 		const leafEl = this.view.containerEl;
-		this.containerEl = leafEl.createDiv({ cls: `personal-internet-toc-container pos-${this.position} is-collapsed pi-width-normal` });
+		this.containerEl = leafEl.createDiv({ cls: `crucible-toc-container pos-${this.position} is-collapsed pi-width-normal` });
 		this.containerEl.setAttribute('tabindex', '-1');
 		
 		if (this.collapseBehavior === 'blur') {
@@ -46,7 +46,7 @@ export class TableOfContentsUI {
 		if (!this.containerEl) return;
 		this.containerEl.empty();
 
-		const contentEl = this.containerEl.createDiv({ cls: 'personal-internet-toc-content' });
+		const contentEl = this.containerEl.createDiv({ cls: 'crucible-toc-content' });
 		
 		const file = this.view.file;
 		if (file) {
@@ -55,7 +55,7 @@ export class TableOfContentsUI {
 
 			headings.forEach(heading => {
 				const item = contentEl.createDiv({ 
-					cls: `personal-internet-toc-item level-${heading.level}`,
+					cls: `crucible-toc-item level-${heading.level}`,
 					text: heading.heading 
 				});
 				item.onclick = () => {
@@ -69,12 +69,12 @@ export class TableOfContentsUI {
 			});
 		}
 
-		const footer = this.containerEl.createDiv({ cls: 'personal-internet-toc-footer' });
-		const title = footer.createDiv({ cls: 'personal-internet-toc-footer-title' });
+		const footer = this.containerEl.createDiv({ cls: 'crucible-toc-footer' });
+		const title = footer.createDiv({ cls: 'crucible-toc-footer-title' });
 		setIcon(title, 'menu');
 		title.createSpan({ text: 'Table of Contents' });
 
-		const chevron = footer.createDiv({ cls: 'personal-internet-toc-chevron' });
+		const chevron = footer.createDiv({ cls: 'crucible-toc-chevron' });
 		setIcon(chevron, this.isCollapsed ? 'chevron-down' : 'chevron-up');
 
 		footer.onclick = (e) => {

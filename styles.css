@@ -7,7 +7,7 @@ If your plugin does not need CSS, delete this file.
 
 */
 
-.personal-internet-search-container input {
+.crucible-search-container input {
   width: 100%;
 }
 
@@ -18,7 +18,7 @@ If your plugin does not need CSS, delete this file.
 }
 
 /* Hide the focus trap button */
-.personal-internet-focus-trap {
+.crucible-focus-trap {
   opacity: 0;
   position: absolute;
   width: 0;
@@ -30,7 +30,7 @@ If your plugin does not need CSS, delete this file.
 }
 
 /* Modal Styles */
-.personal-internet-modal-input {
+.crucible-modal-input {
   width: 100%;
   margin-bottom: 10px;
 }
@@ -43,13 +43,13 @@ hr {
 }
 
 /* Tab Navigation */
-.personal-internet-tab-nav {
+.crucible-tab-nav {
   display: flex;
   gap: 8px;
   margin-bottom: 0;
 }
 
-.personal-internet-tab-btn {
+.crucible-tab-btn {
   padding: 6px 12px;
   cursor: pointer;
   border-radius: 4px 4px 0 0;
@@ -61,30 +61,30 @@ hr {
   transition: all 0.2s ease;
 }
 
-.personal-internet-tab-btn:hover {
+.crucible-tab-btn:hover {
   background-color: var(--background-modifier-hover);
   color: var(--text-normal);
 }
 
-.personal-internet-tab-btn.is-active {
+.crucible-tab-btn.is-active {
   color: var(--text-accent);
   border-bottom: 2px solid var(--interactive-accent);
   background-color: var(--background-modifier-hover);
 }
 
-.personal-internet-tab-btn svg {
+.crucible-tab-btn svg {
   width: 16px;
   height: 16px;
   margin-right: 6px;
 }
 
-.personal-internet-tab-hr {
+.crucible-tab-hr {
   margin-top: 0 !important;
   margin-bottom: 20px !important;
 }
 
 /* Grouped Card Look */
-.personal-internet-settings-group {
+.crucible-settings-group {
   background-color: var(--background-secondary);
   border-radius: 8px;
   border: none !important;
@@ -93,21 +93,21 @@ hr {
   padding: 0;
 }
 
-.personal-internet-settings-group .setting-item {
+.crucible-settings-group .setting-item {
   border: none !important;
   background: transparent !important;
   padding: 10px 16px !important;
 }
 
-.personal-internet-row-divider,
-.personal-internet-mini-hr {
+.crucible-row-divider,
+.crucible-mini-hr {
   margin: 0 16px !important;
   border: 0;
   border-top: 1px solid var(--background-modifier-border);
   opacity: 0.4;
 }
 
-.personal-internet-folder-template-row .setting-item {
+.crucible-folder-template-row .setting-item {
   padding-top: 8px !important;
   padding-bottom: 8px !important;
 }
@@ -117,19 +117,19 @@ hr {
 .pi-width-half { width: 150px !important; }
 .pi-width-wide { width: 450px !important; }
 
-.personal-internet-settings-group .setting-item-control {
+.crucible-settings-group .setting-item-control {
   gap: 8px;
 }
 
-.personal-internet-settings-group input[type="text"],
-.personal-internet-settings-group .personal-internet-search-container,
-.personal-internet-settings-group .setting-item-control select,
-.personal-internet-setting-textarea {
+.crucible-settings-group input[type="text"],
+.crucible-settings-group .crucible-search-container,
+.crucible-settings-group .setting-item-control select,
+.crucible-setting-textarea {
   margin: 0;
 }
 
 /* Table of Contents Floating UI */
-.personal-internet-toc-container {
+.crucible-toc-container {
   position: absolute;
   z-index: 100;
   background-color: var(--background-secondary);
@@ -144,32 +144,32 @@ hr {
 }
 
 /* Positioning */
-.personal-internet-toc-container.pos-bottom-right {
+.crucible-toc-container.pos-bottom-right {
   bottom: 20px;
   right: 20px;
 }
 
-.personal-internet-toc-container.pos-bottom-left {
+.crucible-toc-container.pos-bottom-left {
   bottom: 20px;
   left: 20px;
 }
 
-.personal-internet-toc-container.pos-top-left {
+.crucible-toc-container.pos-top-left {
   top: 20px;
   left: 20px;
 }
 
-.personal-internet-toc-container.pos-top-right {
+.crucible-toc-container.pos-top-right {
   top: 20px;
   right: 20px;
 }
 
 /* Collapsed State */
-.personal-internet-toc-container.is-collapsed {
+.crucible-toc-container.is-collapsed {
   height: 42px;
 }
 
-.personal-internet-toc-content {
+.crucible-toc-content {
   flex: 1 1 auto;
   overflow-y: auto;
   padding: 8px 0;
@@ -177,11 +177,11 @@ hr {
   flex-direction: column;
 }
 
-.is-collapsed .personal-internet-toc-content {
+.is-collapsed .crucible-toc-content {
   display: none;
 }
 
-.personal-internet-toc-footer {
+.crucible-toc-footer {
   height: 42px;
   min-height: 42px;
   flex-shrink: 0; /* Ensure footer never squishes */
@@ -194,15 +194,15 @@ hr {
   border-top: 1px solid var(--background-modifier-border);
 }
 
-.is-collapsed .personal-internet-toc-footer {
+.is-collapsed .crucible-toc-footer {
   border-top: none;
 }
 
-.personal-internet-toc-footer:hover {
+.crucible-toc-footer:hover {
   background-color: var(--background-modifier-hover);
 }
 
-.personal-internet-toc-footer-title {
+.crucible-toc-footer-title {
   display: flex;
   align-items: center;
   font-size: 0.9em;
@@ -210,14 +210,14 @@ hr {
   white-space: nowrap; /* Prevent "Table of contents" from wrapping */
 }
 
-.personal-internet-toc-footer-title svg {
+.crucible-toc-footer-title svg {
   margin-right: 8px;
   width: 16px;
   height: 16px;
 }
 
 /* Header Items */
-.personal-internet-toc-item {
+.crucible-toc-item {
   padding: 8px 16px; /* More vertical space */
   font-size: 0.9em;
   color: var(--text-muted); /* Muted color to match label */
@@ -229,19 +229,19 @@ hr {
   line-height: 1.4;
 }
 
-.personal-internet-toc-item:hover {
+.crucible-toc-item:hover {
   background-color: var(--background-modifier-hover);
   color: var(--text-accent);
 }
 
 /* Indentation based on Header Level */
-.personal-internet-toc-item.level-1 { font-weight: bold; }
-.personal-internet-toc-item.level-2 { padding-left: 28px; }
-.personal-internet-toc-item.level-3 { padding-left: 40px; }
-.personal-internet-toc-item.level-4 { padding-left: 52px; }
+.crucible-toc-item.level-1 { font-weight: bold; }
+.crucible-toc-item.level-2 { padding-left: 28px; }
+.crucible-toc-item.level-3 { padding-left: 40px; }
+.crucible-toc-item.level-4 { padding-left: 52px; }
 
 /* Variables and General settings */
-.personal-internet-setting-textarea {
+.crucible-setting-textarea {
   min-height: 4.5em;
   resize: none;
   overflow-y: hidden;
@@ -249,7 +249,7 @@ hr {
   font-size: 0.9em;
 }
 
-.personal-internet-variables-grid {
+.crucible-variables-grid {
   background-color: var(--background-secondary);
   border-radius: 8px;
   padding: 8px;
@@ -257,7 +257,7 @@ hr {
   flex-direction: column;
 }
 
-.personal-internet-variable-row {
+.crucible-variable-row {
   display: grid;
   grid-template-columns: 150px 1fr 150px;
   gap: 16px;
@@ -265,28 +265,28 @@ hr {
   align-items: center;
 }
 
-.personal-internet-variable-row:not(:last-child) {
+.crucible-variable-row:not(:last-child) {
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.personal-internet-variable-token {
+.crucible-variable-token {
   font-family: var(--font-monospace);
   color: var(--text-accent);
   font-size: 0.9em;
 }
 
-.personal-internet-variable-description {
+.crucible-variable-description {
   font-size: 0.9em;
   color: var(--text-normal);
 }
 
-.personal-internet-variable-example {
+.crucible-variable-example {
   font-size: 0.85em;
   color: var(--text-muted);
   text-align: right;
 }
 
-.personal-internet-variables-desc {
+.crucible-variables-desc {
   margin-bottom: 20px;
   font-style: italic;
   color: var(--text-muted);

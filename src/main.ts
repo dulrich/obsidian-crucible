@@ -1,6 +1,6 @@
 import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal } from 'obsidian';
-import { PersonalInternetSettingTab } from "./settings";
-import { PersonalInternetSettings, DEFAULT_SETTINGS } from "./types";
+import { CrucibleSettingTab } from "./settings";
+import { CrucibleSettings, DEFAULT_SETTINGS } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { CaptureManager, TextInputModal } from "./captures";
@@ -14,8 +14,8 @@ interface AppWithPlugins extends App {
 	};
 }
 
-export default class PersonalInternetPlugin extends Plugin {
-	settings: PersonalInternetSettings;
+export default class CruciblePlugin extends Plugin {
+	settings: CrucibleSettings;
 	private isMaterializing = false;
 	private materializer: Materializer;
 	private linter: Linter;
@@ -74,7 +74,7 @@ export default class PersonalInternetPlugin extends Plugin {
 
 		this.registerShortcuts();
 		this.registerCaptures();
-		this.addSettingTab(new PersonalInternetSettingTab(this.app, this));
+		this.addSettingTab(new CrucibleSettingTab(this.app, this));
 		
 		this.refreshToC();
 	}
@@ -84,7 +84,7 @@ export default class PersonalInternetPlugin extends Plugin {
 	}
 
 	async loadSettings() { 
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PersonalInternetSettings>); 
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CrucibleSettings>); 
 	}
 	
 	async saveSettings() { 
@@ -228,7 +228,7 @@ class PickerModal extends Modal {
 		const { contentEl } = this;
 		contentEl.createEl('h2', { text: this.title });
 		const input = contentEl.createEl('input', { type: this.type });
-		input.classList.add('personal-internet-picker-input');
+		input.classList.add('crucible-picker-input');
 		input.value = this.initialValue;
 		const submit = contentEl.createEl('button', { text: 'Submit' });
 		const triggerSubmit = () => { if (input.value) { this.onSubmit(input.value); this.close(); } };
