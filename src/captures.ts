@@ -1,12 +1,12 @@
 import { App, Modal, Notice, TFile, TextComponent, moment } from 'obsidian';
-import { PersonalInternetSettings, Capture } from './types';
+import { CrucibleSettings, Capture } from './types';
 import { applyTemplateString } from './utils';
 
 export class CaptureManager {
 	app: App;
-	settings: PersonalInternetSettings;
+	settings: CrucibleSettings;
 
-	constructor(app: App, settings: PersonalInternetSettings) {
+	constructor(app: App, settings: CrucibleSettings) {
 		this.app = app;
 		this.settings = settings;
 	}
@@ -99,7 +99,7 @@ export class TextInputModal extends Modal {
 		contentEl.createEl('h2', { text: this.title });
 
 		const input = new TextComponent(contentEl);
-		input.inputEl.classList.add('personal-internet-modal-input');
+		input.inputEl.classList.add('crucible-modal-input');
 		input.inputEl.focus();
 
 		const submit = contentEl.createEl('button', { text: 'Submit', cls: 'mod-cta' });
