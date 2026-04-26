@@ -46,6 +46,8 @@ export interface CrucibleSettings {
 	showToC: boolean;
 	tocPosition: ToCPosition;
 	tocCollapseBehavior: ToCCollapseBehavior;
+	// Commands
+	hiddenCommands: string[];
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -68,4 +70,5 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	showToC: true,
 	tocPosition: 'bottom-right',
 	tocCollapseBehavior: 'manual',
+	hiddenCommands: [],
 }
