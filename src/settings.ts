@@ -10,7 +10,7 @@ interface SearchWithContainer {
 
 export class CrucibleSettingTab extends PluginSettingTab {
 	plugin: CruciblePlugin;
-	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' | 'captures' = 'settings';
+	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' | 'captures' | 'commands' = 'settings';
 
 	constructor(app: App, plugin: CruciblePlugin) {
 		super(app, plugin);
@@ -41,6 +41,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		createTab('settings', 'settings', 'Settings');
 		createTab('shortcuts', 'link', 'Shortcuts');
 		createTab('captures', 'edit-3', 'Captures');
+		createTab('commands', 'terminal', 'Commands');
 		createTab('lint', 'check-circle', 'Lint');
 		createTab('variables', 'info', 'Variables');
 
@@ -54,8 +55,100 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			this.renderShortcutSettings(containerEl);
 		} else if (this.activeTab === 'captures') {
 			this.renderCaptureSettings(containerEl);
+		} else if (this.activeTab === 'commands') {
+			this.renderCommandSettings(containerEl);
 		} else {
 			this.renderVariables(containerEl);
+		}
+	}
+
+	private renderCommandSettings(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('Command visibility').setHeading();
+		containerEl.createEl('p', { text: 'Control which commands are visible in the Obsidian Command Palette. Disabling a command here will hide it from the palette but will not delete its configuration.' });
+
+		new Setting(containerEl).setName('Built-in commands').setHeading();
+		const builtInGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		
+		const builtInCommands = [
+			{ id: 'materialize-day-today', name: 'Materialize day: today' },
+			{ id: 'materialize-day-picker', name: 'Materialize day: pick date' },
+			{ id: 'materialize-week-today', name: 'Materialize week: current' },
+			{ id: 'materialize-week-picker', name: 'Materialize week: pick week' },
+			{ id: 'materialize-month-today', name: 'Materialize month: current' },
+			{ id: 'materialize-month-picker', name: 'Materialize month: pick month' },
+			{ id: 'word-count', name: 'Lint: word count' },
+			{ id: 'lint-note', name: 'Lint: all' },
+			{ id: 'reload-plugin', name: 'Reload plugin' }
+		];
+
+		builtInCommands.forEach((cmd, index) => {
+			if (index > 0) builtInGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(builtInGroup)
+				.setName(cmd.name)
+				.addToggle(toggle => toggle
+					.setValue(!this.plugin.settings.hiddenCommands.includes(cmd.id))
+					.onChange(async (value) => {
+						if (value) {
+							this.plugin.settings.hiddenCommands = this.plugin.settings.hiddenCommands.filter(id => id !== cmd.id);
+						} else {
+							if (!this.plugin.settings.hiddenCommands.includes(cmd.id)) {
+								this.plugin.settings.hiddenCommands.push(cmd.id);
+							}
+						}
+						await this.plugin.saveSettings();
+					}));
+		});
+
+		new Setting(containerEl).setName('Shortcuts').setHeading();
+		const shortcutsGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		
+		if (this.plugin.settings.shortcuts.length === 0) {
+			shortcutsGroup.createDiv({ text: 'No shortcuts defined.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.shortcuts.forEach((shortcut, index) => {
+				if (index > 0) shortcutsGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				const id = `shortcut-${index}`;
+				new Setting(shortcutsGroup)
+					.setName(`Shortcut: ${shortcut.name || '(unnamed)'}`)
+					.addToggle(toggle => toggle
+						.setValue(!this.plugin.settings.hiddenCommands.includes(id))
+						.onChange(async (value) => {
+							if (value) {
+								this.plugin.settings.hiddenCommands = this.plugin.settings.hiddenCommands.filter(h => h !== id);
+							} else {
+								if (!this.plugin.settings.hiddenCommands.includes(id)) {
+									this.plugin.settings.hiddenCommands.push(id);
+								}
+							}
+							await this.plugin.saveSettings();
+						}));
+			});
+		}
+
+		new Setting(containerEl).setName('Captures').setHeading();
+		const capturesGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		if (this.plugin.settings.captures.length === 0) {
+			capturesGroup.createDiv({ text: 'No captures defined.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.captures.forEach((capture, index) => {
+				if (index > 0) capturesGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				const id = `capture-${index}`;
+				new Setting(capturesGroup)
+					.setName(`Capture: ${capture.name || '(unnamed)'}`)
+					.addToggle(toggle => toggle
+						.setValue(!this.plugin.settings.hiddenCommands.includes(id))
+						.onChange(async (value) => {
+							if (value) {
+								this.plugin.settings.hiddenCommands = this.plugin.settings.hiddenCommands.filter(h => h !== id);
+							} else {
+								if (!this.plugin.settings.hiddenCommands.includes(id)) {
+									this.plugin.settings.hiddenCommands.push(id);
+								}
+							}
+							await this.plugin.saveSettings();
+						}));
+			});
 		}
 	}
 
