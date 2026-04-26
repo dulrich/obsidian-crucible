@@ -23,3 +23,6 @@ data.json
 
 # Local Configs
 .stylelintrc.json
+
+# Swap files
+*.swp
