@@ -1,6 +1,6 @@
 import { App, Modal, Notice, TFile, TextComponent, moment } from 'obsidian';
 import { CrucibleSettings, Capture } from './types';
-import { applyTemplateString } from './utils';
+import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 
 export class CaptureManager {
 	app: App;
@@ -36,62 +36,77 @@ export class CaptureManager {
 			return;
 		}
 
-		const content = await applyTemplateString(capture.content, now, file.basename, value);
+		const rawContent = await applyTemplateString(capture.content, now, file.basename, value);
+		const content = rawContent.trim();
+		if (!content) return;
+
 		const existingContent = await this.app.vault.read(file);
-		
 		let newContent = '';
 		
-		if (capture.targetSection) {
-			const sectionHeader = capture.targetSection.trim();
-			const lines = existingContent.split('\n');
-			const headerIndex = lines.findIndex(line => line.trim() === sectionHeader);
+		try {
+			if (capture.targetSection) {
+				const sectionHeader = capture.targetSection.trim();
+				const lines = existingContent.split('\n');
+				const headerIndex = lines.findIndex(line => line.trim() === sectionHeader);
 
-			if (headerIndex !== -1) {
-				if (capture.prepend) {
-					lines.splice(headerIndex + 1, 0, content);
-				} else {
-					let endIndex = lines.length;
-					for (let i = headerIndex + 1; i < lines.length; i++) {
-						const line = lines[i];
-						if (line !== undefined && line.trim().startsWith('#')) {
-							endIndex = i;
-							break;
+				if (headerIndex !== -1) {
+					if (capture.prepend) {
+						lines.splice(headerIndex + 1, 0, content);
+					} else {
+						let endIndex = lines.length;
+						for (let i = headerIndex + 1; i < lines.length; i++) {
+							const line = lines[i];
+							if (line !== undefined && line.trim().startsWith('#')) {
+								endIndex = i;
+								break;
+							}
 						}
+						lines.splice(endIndex, 0, content);
 					}
-					lines.splice(endIndex, 0, content);
-				}
-				newContent = lines.join('\n');
-			} else {
-				newContent = `${existingContent}\n\n${sectionHeader}\n${content}`;
-			}
-		} else {
-			if (capture.prepend) {
-				const yamlMatch = existingContent.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
-				if (yamlMatch) {
-					const yamlBlock = yamlMatch[0];
-					const body = existingContent.slice(yamlBlock.length);
-					newContent = `${yamlBlock}${content}\n${body}`;
+					newContent = lines.join('\n');
 				} else {
-					newContent = `${content}\n${existingContent}`;
+					const separator = existingContent.trim() ? "\n\n" : "";
+					const header = sectionHeader ? `${sectionHeader}\n` : "";
+					newContent = `${existingContent.trimEnd()}${separator}${header}${content}`;
 				}
 			} else {
-				newContent = `${existingContent}\n${content}`;
+				if (capture.prepend) {
+					const yamlMatch = existingContent.match(FRONTMATTER_REGEX);
+					if (yamlMatch) {
+						const yamlBlockWithNewlines = yamlMatch[0];
+						const currentNewlines = yamlMatch[2] || "";
+						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
+						const body = existingContent.slice(yamlBlockWithNewlines.length).trimStart();
+						
+						newContent = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + content + (body ? "\n\n" + body : "");
+					} else {
+						const body = existingContent.trimStart();
+						newContent = content + (body ? "\n\n" + body : "");
+					}
+				} else {
+					const head = existingContent.trimEnd();
+					newContent = (head ? head + "\n\n" : "") + content;
+				}
 			}
-		}
 
-		await this.app.vault.modify(file, newContent);
-		new Notice(`Captured to ${capture.name}`);
+			await this.app.vault.modify(file, newContent);
+			new Notice(`Captured to ${capture.name}`);
+		} catch (e) {
+			new Notice(`Error executing capture: ${(e as Error).message}`);
+		}
 	}
 }
 
 export class TextInputModal extends Modal {
 	title: string;
 	onSubmit: (result: string) => void;
+	onCloseCallback?: () => void;
 
-	constructor(app: App, title: string, onSubmit: (result: string) => void) {
+	constructor(app: App, title: string, onSubmit: (result: string) => void, onClose?: () => void) {
 		super(app);
 		this.title = title;
 		this.onSubmit = onSubmit;
+		this.onCloseCallback = onClose;
 	}
 
 	onOpen() {
@@ -110,6 +125,8 @@ export class TextInputModal extends Modal {
 		
 		input.inputEl.addEventListener('keydown', (e) => {
 			if (e.key === 'Enter') {
+				e.preventDefault();
+				e.stopPropagation();
 				this.onSubmit(input.getValue());
 				this.close();
 			}
@@ -119,5 +136,6 @@ export class TextInputModal extends Modal {
 	onClose() {
 		const { contentEl } = this;
 		contentEl.empty();
+		if (this.onCloseCallback) this.onCloseCallback();
 	}
 }
