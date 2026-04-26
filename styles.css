@@ -8,7 +8,6 @@ If your plugin does not need CSS, delete this file.
 */
 
 .personal-internet-search-container {
-    width: 300px;
 }
 
 .personal-internet-search-container input {
@@ -127,13 +126,19 @@ hr {
     padding-bottom: 8px !important;
 }
 
+/* Standard control widths */
+.pi-width-normal { width: 300px !important; }
+.pi-width-half   { width: 150px !important; }
+.pi-width-wide   { width: 450px !important; }
+
 .personal-internet-settings-group .setting-item-control {
     gap: 8px;
 }
 
 .personal-internet-settings-group input[type="text"],
-.personal-internet-settings-group .personal-internet-search-container {
-    width: 300px;
+.personal-internet-settings-group .personal-internet-search-container,
+.personal-internet-settings-group .setting-item-control select,
+.personal-internet-setting-textarea {
     margin: 0;
 }
 
@@ -145,7 +150,6 @@ hr {
     border: 1px solid var(--background-modifier-border);
     border-radius: 12px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    width: 300px; /* Standardized width */
     max-height: 50vh;
     display: flex;
     flex-direction: column;
@@ -162,7 +166,6 @@ hr {
 /* Collapsed State */
 .personal-internet-toc-container.is-collapsed {
     height: 42px;
-    width: 300px; /* Same width as expanded */
 }
 
 .personal-internet-toc-content {
@@ -238,7 +241,6 @@ hr {
 
 /* Variables and General settings */
 .personal-internet-setting-textarea {
-    width: 400px;
     min-height: 4.5em;
     resize: none;
     overflow-y: hidden;

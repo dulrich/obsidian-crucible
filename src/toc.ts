@@ -18,7 +18,7 @@ export class TableOfContentsUI {
 
 	load() {
 		const leafEl = this.view.containerEl;
-		this.containerEl = leafEl.createDiv({ cls: `personal-internet-toc-container pos-${this.position} is-collapsed` });
+		this.containerEl = leafEl.createDiv({ cls: `personal-internet-toc-container pos-${this.position} is-collapsed pi-width-normal` });
 		this.containerEl.setAttribute('tabindex', '-1');
 		
 		if (this.collapseBehavior === 'blur') {

@@ -90,6 +90,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						  await this.plugin.saveSettings();
 						  this.plugin.refreshToC();
 					  });
+					dd.selectEl.addClass('pi-width-half');
 				});
 
 			tocGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
@@ -106,6 +107,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						  await this.plugin.saveSettings();
 						  this.plugin.refreshToC();
 					  });
+					dd.selectEl.addClass('pi-width-half');
 				});
 		}
 
@@ -123,7 +125,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				new FolderSuggest(this.app, cb.inputEl);
 			});
 
@@ -140,7 +142,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				new FolderSuggest(this.app, cb.inputEl);
 			});
 
@@ -157,7 +159,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				new FolderSuggest(this.app, cb.inputEl);
 			});
 
@@ -175,7 +177,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
@@ -192,7 +194,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
@@ -209,7 +211,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
@@ -226,13 +228,13 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				.addSearch(cb => {
 					cb.setPlaceholder('Folder').setValue(ft.folder).onChange(async (v) => { ft.folder = v; await this.plugin.saveSettings(); });
 					const el = (cb as unknown as SearchWithContainer).containerEl;
-					if (el) el.addClass('personal-internet-search-container');
+					if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 					new FolderSuggest(this.app, cb.inputEl);
 				})
 				.addSearch(cb => {
 					cb.setPlaceholder('Template').setValue(ft.template).onChange(async (v) => { ft.template = v; await this.plugin.saveSettings(); });
 					const el = (cb as unknown as SearchWithContainer).containerEl;
-					if (el) el.addClass('personal-internet-search-container');
+					if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 					new FileSuggest(this.app, cb.inputEl);
 				})
 				.addExtraButton(cb => {
@@ -251,9 +253,9 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).setName('Date tracking').setHeading();
 		const dateGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
-		new Setting(dateGroup).setName('Created date key').setDesc('Property key for the creation date.').addText(t => t.setPlaceholder('created').setValue(this.plugin.settings.lintCreatedKey).onChange(async (v) => { this.plugin.settings.lintCreatedKey = v; await this.plugin.saveSettings(); }));
+		new Setting(dateGroup).setName('Created date key').setDesc('Property key for the creation date.').addText(t => t.setPlaceholder('created').setValue(this.plugin.settings.lintCreatedKey).onChange(async (v) => { this.plugin.settings.lintCreatedKey = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
 		dateGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
-		new Setting(dateGroup).setName('Modified date key').setDesc('Property key for the last modified date.').addText(t => t.setPlaceholder('updated').setValue(this.plugin.settings.lintModifiedKey).onChange(async (v) => { this.plugin.settings.lintModifiedKey = v; await this.plugin.saveSettings(); }));
+		new Setting(dateGroup).setName('Modified date key').setDesc('Property key for the last modified date.').addText(t => t.setPlaceholder('updated').setValue(this.plugin.settings.lintModifiedKey).onChange(async (v) => { this.plugin.settings.lintModifiedKey = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
 
 		new Setting(containerEl).setName('Formatting').setHeading();
 		const formattingGroup = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
@@ -267,13 +269,13 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		formattingGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 		new Setting(formattingGroup).setName('Yaml key priority').setDesc('Keys to move to the top of frontmatter (one per line).').addTextArea(t => {
 			t.setPlaceholder('title\ncreated\nupdated').setValue(this.plugin.settings.lintYamlKeyPriority.join('\n')).onChange(async (v) => { this.plugin.settings.lintYamlKeyPriority = v.split('\n').map(s => s.trim()).filter(s => s); await this.plugin.saveSettings(); autoSize(t.inputEl); });
-			t.inputEl.addClass('personal-internet-setting-textarea'); requestAnimationFrame(() => autoSize(t.inputEl));
+			t.inputEl.addClass('personal-internet-setting-textarea', 'pi-width-normal'); requestAnimationFrame(() => autoSize(t.inputEl));
 		});
 
 		formattingGroup.createEl('hr', { cls: 'personal-internet-row-divider' });
 		new Setting(formattingGroup).setName('Frontmatter insert').setDesc('Text to ensure exists in the frontmatter (supports template variables).').addTextArea(t => {
 			t.setPlaceholder('tags: \nstatus: ').setValue(this.plugin.settings.lintFrontmatterInsert).onChange(async (v) => { this.plugin.settings.lintFrontmatterInsert = v; await this.plugin.saveSettings(); autoSize(t.inputEl); });
-			t.inputEl.addClass('personal-internet-setting-textarea'); requestAnimationFrame(() => autoSize(t.inputEl));
+			t.inputEl.addClass('personal-internet-setting-textarea', 'pi-width-normal'); requestAnimationFrame(() => autoSize(t.inputEl));
 		});
 
 		containerEl.createEl('hr');
@@ -287,7 +289,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 			const s = new Setting(row).addSearch(cb => {
 				cb.setPlaceholder('Folder to ignore').setValue(folder).onChange(async (v) => { this.plugin.settings.lintIgnoredFolders[index] = v; await this.plugin.saveSettings(); });
 				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('personal-internet-search-container');
+				if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 				cb.inputEl.classList.add('personal-internet-full-width-search');
 				new FolderSuggest(this.app, cb.inputEl);
 			}).addExtraButton(cb => { cb.setIcon('trash').onClick(async () => { this.plugin.settings.lintIgnoredFolders.splice(index, 1); await this.plugin.saveSettings(); this.display(); }); });
@@ -303,11 +305,11 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		this.plugin.settings.shortcuts.forEach((shortcut, index) => {
 			if (index > 0) group.createEl('hr', { cls: 'personal-internet-mini-hr' });
 			const row = group.createDiv({ cls: 'personal-internet-folder-template-row' });
-			const s = new Setting(row).addText(t => t.setPlaceholder('Shortcut name').setValue(shortcut.name).onChange(async (v) => { shortcut.name = v; await this.plugin.saveSettings(); this.plugin.registerShortcuts(); }))
+			const s = new Setting(row).addText(t => t.setPlaceholder('Shortcut name').setValue(shortcut.name).onChange(async (v) => { shortcut.name = v; await this.plugin.saveSettings(); this.plugin.registerShortcuts(); }).inputEl.addClass('pi-width-normal'))
 				.addSearch(cb => {
 					cb.setPlaceholder('File to open').setValue(shortcut.file).onChange(async (v) => { shortcut.file = v; await this.plugin.saveSettings(); this.plugin.registerShortcuts(); });
 					const el = (cb as unknown as SearchWithContainer).containerEl;
-					if (el) el.addClass('personal-internet-search-container');
+					if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 					new FileSuggest(this.app, cb.inputEl);
 				})
 				.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => { this.plugin.settings.shortcuts.splice(index, 1); await this.plugin.saveSettings(); this.plugin.registerShortcuts(); this.display(); }); });
@@ -321,20 +323,20 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 		containerEl.createEl('p', { text: 'Define workflows to quickly append or prepend text to specific notes.' });
 		this.plugin.settings.captures.forEach((capture, index) => {
 			const group = containerEl.createDiv({ cls: 'personal-internet-settings-group' });
-			new Setting(group).setName('Capture name').addText(t => t.setPlaceholder('e.g. quick note').setValue(capture.name).onChange(async (v) => { capture.name = v; await this.plugin.saveSettings(); this.plugin.registerCaptures(); }));
+			new Setting(group).setName('Capture name').addText(t => t.setPlaceholder('e.g. quick note').setValue(capture.name).onChange(async (v) => { capture.name = v; await this.plugin.saveSettings(); this.plugin.registerCaptures(); }).inputEl.addClass('pi-width-normal'));
 			group.createEl('hr', { cls: 'personal-internet-row-divider' });
-			new Setting(group).setName('Target note').addDropdown(dd => dd.addOptions({ daily: 'Daily note', weekly: 'Weekly note', monthly: 'Monthly note', selected: 'Selected note' }).setValue(capture.targetType).onChange(async (v: CaptureTarget) => { capture.targetType = v; await this.plugin.saveSettings(); this.display(); }));
+			new Setting(group).setName('Target note').addDropdown(dd => { dd.addOptions({ daily: 'Daily note', weekly: 'Weekly note', monthly: 'Monthly note', selected: 'Selected note' }).setValue(capture.targetType).onChange(async (v: CaptureTarget) => { capture.targetType = v; await this.plugin.saveSettings(); this.display(); }); dd.selectEl.addClass('pi-width-half'); });
 			if (capture.targetType === 'selected') {
 				group.createEl('hr', { cls: 'personal-internet-row-divider' });
 				new Setting(group).setName('Select note').addSearch(cb => { 
 					cb.setPlaceholder('e.g. inbox.md').setValue(capture.file).onChange(async (v) => { capture.file = v; await this.plugin.saveSettings(); }); 
 					const el = (cb as unknown as SearchWithContainer).containerEl;
-					if (el) el.addClass('personal-internet-search-container');
+					if (el) el.addClass('personal-internet-search-container', 'pi-width-normal');
 					new FileSuggest(this.app, cb.inputEl); 
 				});
 			}
 			group.createEl('hr', { cls: 'personal-internet-row-divider' });
-			new Setting(group).setName('Target section').setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.').addText(t => t.setPlaceholder('# header').setValue(capture.targetSection).onChange(async (v) => { capture.targetSection = v; await this.plugin.saveSettings(); }));
+			new Setting(group).setName('Target section').setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.').addText(t => t.setPlaceholder('# header').setValue(capture.targetSection).onChange(async (v) => { capture.targetSection = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
 			group.createEl('hr', { cls: 'personal-internet-row-divider' });
 			new Setting(group).setName('Prepend content').setDesc('Add to the top of the section/file instead of the bottom.').addToggle(t => t.setValue(capture.prepend).onChange(async (v) => { capture.prepend = v; await this.plugin.saveSettings(); }));
 			group.createEl('hr', { cls: 'personal-internet-row-divider' });
@@ -342,7 +344,7 @@ export class PersonalInternetSettingTab extends PluginSettingTab {
 				el.setCssProps({ height: 'auto' });
 				el.setCssProps({ height: `${el.scrollHeight}px` });
 			};
-			new Setting(group).setName('Content template').setDesc('Text to capture (supports variables like {{now}}, {{value}}).').addTextArea(t => { t.setPlaceholder('- {{now}}: {{value}}').setValue(capture.content).onChange(async (v) => { capture.content = v; await this.plugin.saveSettings(); autoSize(t.inputEl); }); t.inputEl.addClass('personal-internet-setting-textarea'); requestAnimationFrame(() => autoSize(t.inputEl)); });
+			new Setting(group).setName('Content template').setDesc('Text to capture (supports variables like {{now}}, {{value}}).').addTextArea(t => { t.setPlaceholder('- {{now}}: {{value}}').setValue(capture.content).onChange(async (v) => { capture.content = v; await this.plugin.saveSettings(); autoSize(t.inputEl); }); t.inputEl.addClass('personal-internet-setting-textarea', 'pi-width-wide'); requestAnimationFrame(() => autoSize(t.inputEl)); });
 			group.createEl('hr', { cls: 'personal-internet-row-divider' });
 			new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => { this.plugin.settings.captures.splice(index, 1); await this.plugin.saveSettings(); this.plugin.registerCaptures(); this.display(); }));
 		});
