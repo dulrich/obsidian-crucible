@@ -40,26 +40,96 @@ export default class CruciblePlugin extends Plugin {
 		});
 
 		// --- Commands ---
-		this.addCommand({ id: 'materialize-day-today', name: 'Materialize day: today', callback: () => { void this.materializer.materializeDay(window.moment()); } });
-		this.addCommand({ id: 'materialize-day-picker', name: 'Materialize day: pick date', callback: () => { this.openDayPicker(); } });
-		this.addCommand({ id: 'materialize-week-today', name: 'Materialize week: current', callback: () => { void this.materializer.materializeWeek(window.moment()); } });
-		this.addCommand({ id: 'materialize-week-picker', name: 'Materialize week: pick week', callback: () => { this.openWeekPicker(); } });
-		this.addCommand({ id: 'materialize-month-today', name: 'Materialize month: current', callback: () => { void this.materializer.materializeMonth(window.moment()); } });
-		this.addCommand({ id: 'materialize-month-picker', name: 'Materialize month: pick month', callback: () => { this.openMonthPicker(); } });
+		this.addCommand({ 
+			id: 'materialize-day-today', 
+			name: 'Materialize day: today', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('materialize-day-today')) return false;
+				if (!checking) { void this.materializer.materializeDay(window.moment()); }
+				return true;
+			}
+		});
+		this.addCommand({ 
+			id: 'materialize-day-picker', 
+			name: 'Materialize day: pick date', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('materialize-day-picker')) return false;
+				if (!checking) { this.openDayPicker(); }
+				return true;
+			}
+		});
+		this.addCommand({ 
+			id: 'materialize-week-today', 
+			name: 'Materialize week: current', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('materialize-week-today')) return false;
+				if (!checking) { void this.materializer.materializeWeek(window.moment()); }
+				return true;
+			}
+		});
+		this.addCommand({ 
+			id: 'materialize-week-picker', 
+			name: 'Materialize week: pick week', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('materialize-week-picker')) return false;
+				if (!checking) { this.openWeekPicker(); }
+				return true;
+			}
+		});
+		this.addCommand({ 
+			id: 'materialize-month-today', 
+			name: 'Materialize month: current', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('materialize-month-today')) return false;
+				if (!checking) { void this.materializer.materializeMonth(window.moment()); }
+				return true;
+			}
+		});
+		this.addCommand({ 
+			id: 'materialize-month-picker', 
+			name: 'Materialize month: pick month', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('materialize-month-picker')) return false;
+				if (!checking) { this.openMonthPicker(); }
+				return true;
+			}
+		});
 
-		this.addCommand({ id: 'word-count', name: 'Word count: update frontmatter', callback: () => { void this.linter.lintNote(); } });
-		this.addCommand({ id: 'lint-note', name: 'Lint: format frontmatter and properties', callback: () => { void this.linter.lintNote(); } });
+		this.addCommand({ 
+			id: 'word-count', 
+			name: 'Lint: word count', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('word-count')) return false;
+				if (!checking) { void this.linter.lintNote(); }
+				return true;
+			}
+		});
+		this.addCommand({ 
+			id: 'lint-note', 
+			name: 'Lint: all', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('lint-note')) return false;
+				if (!checking) { void this.linter.lintNote(); }
+				return true;
+			}
+		});
 
 		this.addCommand({
 			id: 'reload-plugin',
 			name: 'Reload plugin',
-			callback: async () => {
-				const plugins = (this.app as AppWithPlugins).plugins;
-				if (plugins) {
-					await plugins.disablePlugin(this.manifest.id);
-					await plugins.enablePlugin(this.manifest.id);
-					new Notice('Plugin reloaded');
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('reload-plugin')) return false;
+				if (!checking) {
+					void (async () => {
+						const plugins = (this.app as AppWithPlugins).plugins;
+						if (plugins) {
+							await plugins.disablePlugin(this.manifest.id);
+							await plugins.enablePlugin(this.manifest.id);
+							new Notice('Plugin reloaded');
+						}
+					})();
 				}
+				return true;
 			},
 		});
 
@@ -114,12 +184,19 @@ export default class CruciblePlugin extends Plugin {
 	registerShortcuts() {
 		this.settings.shortcuts.forEach((shortcut, index) => {
 			if (!shortcut.name || !shortcut.file) return;
+			const id = `shortcut-${index}`;
 			this.addCommand({
-				id: `shortcut-${index}`,
+				id,
 				name: `Shortcut: ${shortcut.name}`,
-				callback: async () => {
-					const file = this.app.vault.getAbstractFileByPath(shortcut.file);
-					if (file instanceof TFile) await this.app.workspace.getLeaf().openFile(file);
+				checkCallback: (checking: boolean) => {
+					if (this.settings.hiddenCommands.includes(id)) return false;
+					if (!checking) {
+						void (async () => {
+							const file = this.app.vault.getAbstractFileByPath(shortcut.file);
+							if (file instanceof TFile) await this.app.workspace.getLeaf().openFile(file);
+						})();
+					}
+					return true;
 				}
 			});
 		});
@@ -128,34 +205,43 @@ export default class CruciblePlugin extends Plugin {
 	registerCaptures() {
 		this.settings.captures.forEach((capture, index) => {
 			if (!capture.name) return;
+			const id = `capture-${index}`;
 			this.addCommand({
-				id: `capture-${index}`,
+				id,
 				name: `Capture: ${capture.name}`,
-				callback: async () => {
-					if (capture.content.includes('{{value}}')) {
-						new TextInputModal(
-							this.app, 
-							`Capture: ${capture.name}`, 
-							async (value) => {
+				checkCallback: (checking: boolean) => {
+					if (this.settings.hiddenCommands.includes(id)) return false;
+					if (!checking) {
+						if (capture.content.includes('{{value}}')) {
+							new TextInputModal(
+								this.app, 
+								`Capture: ${capture.name}`, 
+								(value) => {
+									void (async () => {
+										this.isMaterializing = true;
+										try {
+											await this.captureManager.executeCapture(capture, value);
+										} finally {
+											this.isMaterializing = false;
+										}
+									})();
+								},
+								() => { 
+									this.refreshToC(); 
+								}
+							).open();
+						} else {
+							void (async () => {
 								this.isMaterializing = true;
 								try {
-									await this.captureManager.executeCapture(capture, value);
+									await this.captureManager.executeCapture(capture);
 								} finally {
 									this.isMaterializing = false;
 								}
-							},
-							() => { 
-								this.refreshToC(); 
-							}
-						).open();
-					} else {
-						this.isMaterializing = true;
-						try {
-							await this.captureManager.executeCapture(capture);
-						} finally {
-							this.isMaterializing = false;
+							})();
 						}
 					}
+					return true;
 				}
 			});
 		});
