@@ -19,15 +19,26 @@
 npm install     # Install dependencies
 npm run dev     # Watch for changes and hot-recompile
 npm run build   # Production build with minification
+npm run lint    # Run ESLint and Stylelint
 ```
 
-## Core Loop
+## Full Cleanup Loop (MANDATORY)
 
-Agents must follow this cycle for every task:
-1.  **Implement** the requested code changes.
-2.  **Test** by running `npm run build` and `npm run lint`.
-3.  **Fix** any TypeScript, bundling, or linting errors discovered.
-4.  **Verify** both the build and linting succeed before reporting that the task is complete.
+Before signaling task completion or reporting success, you MUST execute and pass this sequence:
+
+1.  **Linting:** Run `npm run lint`. This executes both ESLint (for TypeScript) and Stylelint (for CSS). All errors MUST be resolved.
+2.  **Type Checking:** Run `npx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
+3.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
+4.  **Verification:** Confirm all processes exited with code 0 and no background processes are hanging.
+
+## UI & UX Standards
+
+- **Grouped Cards:** All settings must be organized within `.personal-internet-settings-group` containers to match the native Obsidian "Options" look.
+- **Inset Dividers:** Use `hr` with `.personal-internet-row-divider` for separators that don't touch the edges.
+- **Widths:** Use the standardized CSS classes: `.pi-width-half` (150px), `.pi-width-normal` (300px), or `.pi-width-wide` (450px). NEVER use hardcoded pixel widths for controls in CSS.
+- **Centering:** Vertical centering in settings rows is currently handled by the default Obsidian layout; do not attempt complex flex overrides without careful testing.
+- **Tabs:** The settings page is divided into "Settings", "Shortcuts", "Captures", "Lint", and "Variables".
+- **Fuzzy Search:** Use the custom `FileSuggest` and `FolderSuggest` classes for any file-path inputs.
 
 ## File & folder conventions
 
@@ -45,13 +56,6 @@ Agents must follow this cycle for every task:
     suggesters.ts     # Fuzzy-search autocomplete classes for files/folders
     utils.ts          # Shared helpers (template replacement, folder checks)
   ```
-
-## UI & UX Standards
-
-- **Grouped Cards:** All settings must be organized within `.personal-internet-settings-group` containers to match the native Obsidian "Options" look.
-- **Inset Dividers:** Use `hr` with `.personal-internet-row-divider` for separators that don't touch the edges.
-- **Tabs:** The settings page is divided into "Settings", "Shortcuts", "Captures", "Lint", and "Variables".
-- **Fuzzy Search:** Use the custom `FileSuggest` and `FolderSuggest` classes for any file-path inputs.
 
 ## Template Engine
 
