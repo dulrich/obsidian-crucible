@@ -1,6 +1,6 @@
 import { App, MarkdownView, Notice, moment } from 'obsidian';
 import { CrucibleSettings } from './types';
-import { applyTemplateString } from './utils';
+import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 
 interface Segmenter {
 	segment(text: string): Iterable<{ isWordLike: boolean }>;
@@ -39,7 +39,7 @@ export class Linter {
 
 	async calculateWordCount(view: MarkdownView): Promise<number> {
 		const content = view.getViewData();
-		const body = content.replace(/^---\s*\n([\s\S]*?)\n---/, '');
+		const body = content.replace(FRONTMATTER_REGEX, '');
 		
 		const intl = Intl as unknown as IntlWithSegmenter;
 		if (typeof intl.Segmenter === 'function') {
@@ -112,12 +112,21 @@ export class Linter {
 
 			if (this.settings.lintBlankLineAfterYaml) {
 				const content = await this.app.vault.read(file);
-				const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---(\n*)/);
+				const yamlMatch = content.match(FRONTMATTER_REGEX);
 				if (yamlMatch) {
+					const yamlBlockWithNewlines = yamlMatch[0];
 					const currentNewlines = yamlMatch[2] || "";
-					if (currentNewlines.length < 2) {
-						const updatedContent = content.replace(/^---\s*\n([\s\S]*?)\n---(\n*)/, `---\n$1\n---\n\n`);
-						await this.app.vault.modify(file, updatedContent);
+					
+					// Only modify if it doesn't already have at least one blank line (2 newlines)
+					// or if it has MORE than 2 newlines and we want to normalize it.
+					if (currentNewlines.length !== 2 || currentNewlines !== "\n\n") {
+						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
+						const body = content.slice(yamlBlockWithNewlines.length);
+						const updatedContent = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
+						
+						if (updatedContent !== content) {
+							await this.app.vault.modify(file, updatedContent);
+						}
 					}
 				}
 			}
