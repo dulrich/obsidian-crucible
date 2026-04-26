@@ -7,230 +7,231 @@ If your plugin does not need CSS, delete this file.
 
 */
 
-.personal-internet-search-container {
-}
-
 .personal-internet-search-container input {
-    width: 100%;
+  width: 100%;
 }
 
 /* Style for highlighted fuzzy matches */
 .suggestion-item .suggestion-highlight {
-    font-weight: bold;
-    color: var(--text-accent);
-}
-
-/* Prominent Settings Headers */
-.personal-internet-setting-header {
-    margin-left: 0 !important;
-    font-size: 1.3em !important;
-    color: var(--text-normal);
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
-    font-weight: bold;
-    display: block;
+  font-weight: bold;
+  color: var(--text-accent);
 }
 
 /* Hide the focus trap button */
 .personal-internet-focus-trap {
-    opacity: 0;
-    position: absolute;
-    width: 0;
-    height: 0;
-    padding: 0;
-    margin: 0;
-    border: 0;
-    pointer-events: none;
+  opacity: 0;
+  position: absolute;
+  width: 0;
+  height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  pointer-events: none;
 }
 
 /* Modal Styles */
 .personal-internet-modal-input {
-    width: 100%;
-    margin-bottom: 10px;
+  width: 100%;
+  margin-bottom: 10px;
 }
 
 hr {
-    margin-top: 2em;
-    margin-bottom: 2em;
-    border: 0;
-    border-top: 1px solid var(--background-modifier-border);
+  margin-top: 2em;
+  margin-bottom: 2em;
+  border: 0;
+  border-top: 1px solid var(--background-modifier-border);
 }
 
 /* Tab Navigation */
 .personal-internet-tab-nav {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 0;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 0;
 }
 
 .personal-internet-tab-btn {
-    padding: 6px 12px;
-    cursor: pointer;
-    border-radius: 4px 4px 0 0;
-    display: flex;
-    align-items: center;
-    font-size: 0.9em;
-    color: var(--text-muted);
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s ease;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-radius: 4px 4px 0 0;
+  display: flex;
+  align-items: center;
+  font-size: 0.9em;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
 }
 
 .personal-internet-tab-btn:hover {
-    background-color: var(--background-modifier-hover);
-    color: var(--text-normal);
+  background-color: var(--background-modifier-hover);
+  color: var(--text-normal);
 }
 
 .personal-internet-tab-btn.is-active {
-    color: var(--text-accent);
-    border-bottom: 2px solid var(--interactive-accent);
-    background-color: var(--background-modifier-hover);
+  color: var(--text-accent);
+  border-bottom: 2px solid var(--interactive-accent);
+  background-color: var(--background-modifier-hover);
 }
 
 .personal-internet-tab-btn svg {
-    width: 16px;
-    height: 16px;
-    margin-right: 6px;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
 }
 
 .personal-internet-tab-hr {
-    margin-top: 0 !important;
-    margin-bottom: 20px !important;
+  margin-top: 0 !important;
+  margin-bottom: 20px !important;
 }
 
 /* Grouped Card Look */
 .personal-internet-settings-group {
-    background-color: var(--background-secondary);
-    border-radius: 8px;
-    border: none !important;
-    margin-bottom: 20px;
-    overflow: hidden;
-    padding: 0;
+  background-color: var(--background-secondary);
+  border-radius: 8px;
+  border: none !important;
+  margin-bottom: 20px;
+  overflow: hidden;
+  padding: 0;
 }
 
 .personal-internet-settings-group .setting-item {
-    border: none !important;
-    background: transparent !important;
-    padding: 10px 16px !important;
+  border: none !important;
+  background: transparent !important;
+  padding: 10px 16px !important;
 }
 
 .personal-internet-row-divider,
 .personal-internet-mini-hr {
-    margin: 0 16px !important;
-    border: 0;
-    border-top: 1px solid var(--background-modifier-border);
-    opacity: 0.4;
+  margin: 0 16px !important;
+  border: 0;
+  border-top: 1px solid var(--background-modifier-border);
+  opacity: 0.4;
 }
 
 .personal-internet-folder-template-row .setting-item {
-    padding-top: 8px !important;
-    padding-bottom: 8px !important;
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
 }
 
 /* Standard control widths */
 .pi-width-normal { width: 300px !important; }
-.pi-width-half   { width: 150px !important; }
-.pi-width-wide   { width: 450px !important; }
+.pi-width-half { width: 150px !important; }
+.pi-width-wide { width: 450px !important; }
 
 .personal-internet-settings-group .setting-item-control {
-    gap: 8px;
+  gap: 8px;
 }
 
 .personal-internet-settings-group input[type="text"],
 .personal-internet-settings-group .personal-internet-search-container,
 .personal-internet-settings-group .setting-item-control select,
 .personal-internet-setting-textarea {
-    margin: 0;
+  margin: 0;
 }
 
 /* Table of Contents Floating UI */
 .personal-internet-toc-container {
-    position: absolute;
-    z-index: 100;
-    background-color: var(--background-secondary);
-    border: 1px solid var(--background-modifier-border);
-    border-radius: 12px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    max-height: 50vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    transition: height 0.2s ease;
+  position: absolute;
+  z-index: 100;
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 20%);
+  max-height: 50vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: height 0.2s ease;
 }
 
 /* Positioning */
-.personal-internet-toc-container.pos-bottom-right { bottom: 20px; right: 20px; }
-.personal-internet-toc-container.pos-bottom-left  { bottom: 20px; left: 20px; }
-.personal-internet-toc-container.pos-top-left     { top: 20px; left: 20px; }
-.personal-internet-toc-container.pos-top-right    { top: 20px; right: 20px; }
+.personal-internet-toc-container.pos-bottom-right {
+  bottom: 20px;
+  right: 20px;
+}
+
+.personal-internet-toc-container.pos-bottom-left {
+  bottom: 20px;
+  left: 20px;
+}
+
+.personal-internet-toc-container.pos-top-left {
+  top: 20px;
+  left: 20px;
+}
+
+.personal-internet-toc-container.pos-top-right {
+  top: 20px;
+  right: 20px;
+}
 
 /* Collapsed State */
 .personal-internet-toc-container.is-collapsed {
-    height: 42px;
+  height: 42px;
 }
 
 .personal-internet-toc-content {
-    flex: 1 1 auto;
-    overflow-y: auto;
-    padding: 8px 0;
-    display: flex;
-    flex-direction: column;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .is-collapsed .personal-internet-toc-content {
-    display: none;
+  display: none;
 }
 
 .personal-internet-toc-footer {
-    height: 42px;
-    min-height: 42px;
-    flex-shrink: 0; /* Ensure footer never squishes */
-    padding: 0 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    cursor: pointer;
-    background-color: var(--background-secondary-alt);
-    border-top: 1px solid var(--background-modifier-border);
+  height: 42px;
+  min-height: 42px;
+  flex-shrink: 0; /* Ensure footer never squishes */
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  background-color: var(--background-secondary-alt);
+  border-top: 1px solid var(--background-modifier-border);
 }
 
 .is-collapsed .personal-internet-toc-footer {
-    border-top: none;
+  border-top: none;
 }
 
 .personal-internet-toc-footer:hover {
-    background-color: var(--background-modifier-hover);
+  background-color: var(--background-modifier-hover);
 }
 
 .personal-internet-toc-footer-title {
-    display: flex;
-    align-items: center;
-    font-size: 0.9em;
-    color: var(--text-muted);
-    white-space: nowrap; /* Prevent "Table of contents" from wrapping */
+  display: flex;
+  align-items: center;
+  font-size: 0.9em;
+  color: var(--text-muted);
+  white-space: nowrap; /* Prevent "Table of contents" from wrapping */
 }
 
 .personal-internet-toc-footer-title svg {
-    margin-right: 8px;
-    width: 16px;
-    height: 16px;
+  margin-right: 8px;
+  width: 16px;
+  height: 16px;
 }
 
 /* Header Items */
 .personal-internet-toc-item {
-    padding: 8px 16px; /* More vertical space */
-    font-size: 0.9em;
-    color: var(--text-muted); /* Muted color to match label */
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex-shrink: 0;
-    line-height: 1.4;
+  padding: 8px 16px; /* More vertical space */
+  font-size: 0.9em;
+  color: var(--text-muted); /* Muted color to match label */
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  line-height: 1.4;
 }
 
 .personal-internet-toc-item:hover {
-    background-color: var(--background-modifier-hover);
-    color: var(--text-accent);
+  background-color: var(--background-modifier-hover);
+  color: var(--text-accent);
 }
 
 /* Indentation based on Header Level */
@@ -241,52 +242,52 @@ hr {
 
 /* Variables and General settings */
 .personal-internet-setting-textarea {
-    min-height: 4.5em;
-    resize: none;
-    overflow-y: hidden;
-    font-family: var(--font-monospace);
-    font-size: 0.9em;
+  min-height: 4.5em;
+  resize: none;
+  overflow-y: hidden;
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
 }
 
 .personal-internet-variables-grid {
-    background-color: var(--background-secondary);
-    border-radius: 8px;
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
+  background-color: var(--background-secondary);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
 }
 
 .personal-internet-variable-row {
-    display: grid;
-    grid-template-columns: 150px 1fr 150px;
-    gap: 16px;
-    padding: 8px 12px;
-    align-items: center;
+  display: grid;
+  grid-template-columns: 150px 1fr 150px;
+  gap: 16px;
+  padding: 8px 12px;
+  align-items: center;
 }
 
 .personal-internet-variable-row:not(:last-child) {
-    border-bottom: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
 }
 
 .personal-internet-variable-token {
-    font-family: var(--font-monospace);
-    color: var(--text-accent);
-    font-size: 0.9em;
+  font-family: var(--font-monospace);
+  color: var(--text-accent);
+  font-size: 0.9em;
 }
 
 .personal-internet-variable-description {
-    font-size: 0.9em;
-    color: var(--text-normal);
+  font-size: 0.9em;
+  color: var(--text-normal);
 }
 
 .personal-internet-variable-example {
-    font-size: 0.85em;
-    color: var(--text-muted);
-    text-align: right;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  text-align: right;
 }
 
 .personal-internet-variables-desc {
-    margin-bottom: 20px;
-    font-style: italic;
-    color: var(--text-muted);
+  margin-bottom: 20px;
+  font-style: italic;
+  color: var(--text-muted);
 }
