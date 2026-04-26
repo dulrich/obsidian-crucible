@@ -133,11 +133,28 @@ export default class CruciblePlugin extends Plugin {
 				name: `Capture: ${capture.name}`,
 				callback: async () => {
 					if (capture.content.includes('{{value}}')) {
-						new TextInputModal(this.app, `Capture: ${capture.name}`, (value) => {
-							void this.captureManager.executeCapture(capture, value);
-						}).open();
+						new TextInputModal(
+							this.app, 
+							`Capture: ${capture.name}`, 
+							async (value) => {
+								this.isMaterializing = true;
+								try {
+									await this.captureManager.executeCapture(capture, value);
+								} finally {
+									this.isMaterializing = false;
+								}
+							},
+							() => { 
+								this.refreshToC(); 
+							}
+						).open();
 					} else {
-						void this.captureManager.executeCapture(capture);
+						this.isMaterializing = true;
+						try {
+							await this.captureManager.executeCapture(capture);
+						} finally {
+							this.isMaterializing = false;
+						}
 					}
 				}
 			});
@@ -164,6 +181,9 @@ export default class CruciblePlugin extends Plugin {
 
 	async handleFileCreate(file: TAbstractFile) {
 		if (this.isMaterializing || !(file instanceof TFile) || file.extension !== 'md') return;
+		
+		// CRITICAL: Only proceed if the file is truly empty to avoid overwriting existing notes on startup
+		if (file.stat.size > 0) return;
 
 		const parentPath = file.parent?.path || '';
 		const fileName = file.basename;

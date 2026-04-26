@@ -1,5 +1,7 @@
 import { App, TFolder, moment } from 'obsidian';
 
+export const FRONTMATTER_REGEX = /^[\uFEFF]?---\s*[^\S\r\n]*[\r\n]+([\s\S]*?)[\r\n]+---[^\S\r\n]*([\r\n]*)/;
+
 export async function ensureFolder(app: App, path: string): Promise<void> {
 	const normalizedPath = path.replace(/\\/g, '/').replace(/\/+$/, '');
 	const parts = normalizedPath.split('/');

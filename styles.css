@@ -35,13 +35,6 @@ If your plugin does not need CSS, delete this file.
   margin-bottom: 10px;
 }
 
-hr {
-  margin-top: 2em;
-  margin-bottom: 2em;
-  border: 0;
-  border-top: 1px solid var(--background-modifier-border);
-}
-
 /* Tab Navigation */
 .crucible-tab-nav {
   display: flex;
