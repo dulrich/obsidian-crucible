@@ -1,4 +1,4 @@
-# Personal Internet Plugin (Development Guide)
+# Crucible Plugin (Development Guide)
 
 ## Project overview
 
@@ -78,6 +78,5 @@ Supported tokens in any template or property injection:
 
 - Link the root directory to your vault:
   ```bash
-  ln -s /path/to/plugin <Vault>/.obsidian/plugins/personal-internet
-  ```
+  ln -s /path/to/plugin <Vault>/.obsidian/plugins/obsidian-crucible  ```
 - Use the **Reload Plugin** command from the palette after a re-build.
