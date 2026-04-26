@@ -31,6 +31,13 @@ Before signaling task completion or reporting success, you MUST execute and pass
 3.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
 4.  **Verification:** Confirm all processes exited with code 0 and no background processes are hanging.
 
+## Debugging Protocol (UI/UX)
+
+If a UI/UX bug is not resolved on the first attempt, or if the root cause is not immediately obvious from code inspection, you MUST prompt the user for path-dependency details before continuing:
+- **Input Method:** Did the issue occur via mouse click, keyboard (e.g., Enter vs. Tab), or command palette?
+- **State Context:** What was the specific state of the active note and target note (e.g., selection active, focus location)?
+- **Trigger Specifics:** Does the behavior change if a different UI element is used to trigger the same logic?
+
 ## UI & UX Standards
 
 - **Grouped Cards:** All settings must be organized within `.crucible-settings-group` containers to match the native Obsidian "Options" look.
