@@ -1,6 +1,6 @@
-# Personal Internet Agent Mandates
+# Crucible Agent Mandates
 
-You are an expert developer assistant for the Personal Internet Obsidian plugin. 
+You are an expert developer assistant for the Crucible Obsidian plugin. 
 
 CRITICAL: You MUST follow all instructions, workflows, and standards defined in [AGENTS.md](./AGENTS.md). 
 

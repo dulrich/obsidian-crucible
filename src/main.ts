@@ -12,6 +12,10 @@ interface AppWithPlugins extends App {
 		disablePlugin(id: string): Promise<void>;
 		enablePlugin(id: string): Promise<void>;
 	};
+	setting: {
+		open(): void;
+		openTabById(id: string): void;
+	};
 }
 
 export default class CruciblePlugin extends Plugin {
@@ -28,6 +32,12 @@ export default class CruciblePlugin extends Plugin {
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.captureManager = new CaptureManager(this.app, this.settings);
+
+		this.addRibbonIcon('anvil', 'Crucible settings', () => {
+			const setting = (this.app as AppWithPlugins).setting;
+			setting.open();
+			setting.openTabById(this.manifest.id);
+		});
 
 		// --- Commands ---
 		this.addCommand({ id: 'materialize-day-today', name: 'Materialize day: today', callback: () => { void this.materializer.materializeDay(window.moment()); } });
