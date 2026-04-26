@@ -1,0 +1,20 @@
+- Annotate Clipping
+    - this will be the prototype for the "Folder Watching" agent pattern
+    - watch the configured folder for Obsidian Web Clipper (default: Clippings) and read a prompt setting
+    - when a new file is created, used the configured prompt file `_custom/prompts/clippings.md` to analyze the newly clipped note
+    - the prompt will compare the metadata and content to examples in the prompt and:
+        - apply tags like `fanfic`, `transcript`, `blog`, `goldmine`, `3-2-1`, `prompt-kit` based on the note
+    - run Crucible: Lint
+    - take tag based actions:
+        - transcript -> run the Crucible: Refine Transcript agentic command on the note
+        - prompt-kit -> move the note to configured folder (`prompt_kits`)
+- Refine Transcript
+    - this will be the prototype for the "Triggered Skill" agent pattern
+    - with the specified note, perform a macro-like series of operations:
+        - copy the note to configured raw transcript folder (`_raw_transcript`)
+        - apply the frontmatter property raw-transcript linking to the copied note
+        - use the configured prompt file `_custom/prompts/refine-transcript.md` to refine the transcript (note body)
+        - when the call returns, replace the note body with the response
+        - run Crucible: Lint
+        - add the tag #refined to the tags property
+        - set the frontmatter property `model=<model used>` for bookkeeping
