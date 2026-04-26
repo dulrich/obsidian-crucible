@@ -1,9 +1,9 @@
 {
-	"id": "personal-internet",
-	"name": "Personal Internet",
+	"id": "obsidian-crucible",
+	"name": "Crucible",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Custom commands and interfaces for my personal workflow.",
+	"description": "An agentic second brain for Obsidian. Orchestrate your workflows, capture your reading, and synthesize insights.",
 	"author": "dulrich",
 	"authorUrl": "https://github.com/dulrich",
 	"isDesktopOnly": false

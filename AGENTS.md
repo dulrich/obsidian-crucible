@@ -33,8 +33,8 @@ Before signaling task completion or reporting success, you MUST execute and pass
 
 ## UI & UX Standards
 
-- **Grouped Cards:** All settings must be organized within `.personal-internet-settings-group` containers to match the native Obsidian "Options" look.
-- **Inset Dividers:** Use `hr` with `.personal-internet-row-divider` for separators that don't touch the edges.
+- **Grouped Cards:** All settings must be organized within `.crucible-settings-group` containers to match the native Obsidian "Options" look.
+- **Inset Dividers:** Use `hr` with `.crucible-row-divider` for separators that don't touch the edges.
 - **Widths:** Use the standardized CSS classes: `.pi-width-half` (150px), `.pi-width-normal` (300px), or `.pi-width-wide` (450px). NEVER use hardcoded pixel widths for controls in CSS.
 - **Centering:** Vertical centering in settings rows is currently handled by the default Obsidian layout; do not attempt complex flex overrides without careful testing.
 - **Tabs:** The settings page is divided into "Settings", "Shortcuts", "Captures", "Lint", and "Variables".

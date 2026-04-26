@@ -1,13 +1,13 @@
 import { App, TFile, Notice, moment } from 'obsidian';
-import { PersonalInternetSettings } from './types';
+import { CrucibleSettings } from './types';
 import { ensureFolder, applyTemplateString } from './utils';
 
 export class Materializer {
 	app: App;
-	settings: PersonalInternetSettings;
+	settings: CrucibleSettings;
 	setMaterializing: (state: boolean) => void;
 
-	constructor(app: App, settings: PersonalInternetSettings, setMaterializing: (state: boolean) => void) {
+	constructor(app: App, settings: CrucibleSettings, setMaterializing: (state: boolean) => void) {
 		this.app = app;
 		this.settings = settings;
 		this.setMaterializing = setMaterializing;
