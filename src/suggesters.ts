@@ -1,7 +1,13 @@
-import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults } from "obsidian";
+import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults, Command } from "obsidian";
 
 interface MetadataCacheWithIgnore {
     isUserIgnored(path: string): boolean;
+}
+
+interface AppWithCommands extends App {
+	commands: {
+		listCommands(): Command[];
+	};
 }
 
 export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFile> {
@@ -93,4 +99,50 @@ export class FileSuggest extends FileSystemSuggest {
             return !metadataCache.isUserIgnored(f.path);
         });
     }
+}
+
+export class CommandSuggest extends AbstractInputSuggest<Command> {
+	public inputEl: HTMLInputElement;
+
+	constructor(app: App, inputEl: HTMLInputElement) {
+		super(app, inputEl);
+		this.inputEl = inputEl;
+	}
+
+	getItems(): Command[] {
+		const commands = (this.app as AppWithCommands).commands.listCommands();
+		
+		// Add internal virtual commands for easier selection in Chains
+		const internal: Command[] = [
+			{ id: 'crucible:lint-note', name: 'Crucible: Lint note' },
+			{ id: 'crucible:capture', name: 'Crucible: Quick Capture (Name|Value)' },
+			{ id: 'crucible:materialize-day-today', name: 'Crucible: Materialize today' },
+			{ id: 'crucible:forward-task', name: 'Crucible: Forward task' },
+		];
+
+		return [...internal, ...commands];
+	}
+
+	getSuggestions(inputStr: string): Command[] {
+		const items = this.getItems();
+		if (!inputStr) return items.slice(0, 100);
+
+		const fuzzySearch = prepareFuzzySearch(inputStr);
+		return items
+			.map(item => ({ item, result: fuzzySearch(item.name) }))
+			.filter(res => res.result !== null)
+			.sort((a, b) => b.result!.score - a.result!.score)
+			.map(res => res.item)
+			.slice(0, 100);
+	}
+
+	renderSuggestion(command: Command, el: HTMLElement): void {
+		el.setText(command.name);
+	}
+
+	selectSuggestion(command: Command): void {
+		this.inputEl.value = command.id;
+		this.inputEl.dispatchEvent(new Event("input"));
+		this.close();
+	}
 }

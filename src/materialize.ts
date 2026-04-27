@@ -13,7 +13,7 @@ export class Materializer {
 		this.setMaterializing = setMaterializing;
 	}
 
-	async materializeDay(date: moment.Moment) {
+	async materializeDay(date: moment.Moment): Promise<boolean> {
 		this.setMaterializing(true);
 		const dateStr = date.format('YYYY-MM-DD');
 		const dailyFolderBase = this.settings.dailyFolder;
@@ -38,15 +38,17 @@ export class Materializer {
 			if (file instanceof TFile) {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
+			return true;
 		} catch (e) {
 			new Notice(`Error materializing day: ${(e as Error).message}`);
 			console.error(e);
+			return false;
 		} finally {
 			this.setMaterializing(false);
 		}
 	}
 
-	async materializeWeek(date: moment.Moment) {
+	async materializeWeek(date: moment.Moment): Promise<boolean> {
 		this.setMaterializing(true);
 		const weekStr = date.format('GGGG-[W]WW');
 		const folderPath = this.settings.weeklyFolder;
@@ -70,14 +72,16 @@ export class Materializer {
 			if (file instanceof TFile) {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
+			return true;
 		} catch (e) {
 			new Notice(`Error materializing week: ${(e as Error).message}`);
+			return false;
 		} finally {
 			this.setMaterializing(false);
 		}
 	}
 
-	async materializeMonth(date: moment.Moment) {
+	async materializeMonth(date: moment.Moment): Promise<boolean> {
 		this.setMaterializing(true);
 		const monthStr = date.format('YYYY-MM');
 		const folderPath = this.settings.monthlyFolder;
@@ -101,8 +105,10 @@ export class Materializer {
 			if (file instanceof TFile) {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
+			return true;
 		} catch (e) {
 			new Notice(`Error materializing month: ${(e as Error).message}`);
+			return false;
 		} finally {
 			this.setMaterializing(false);
 		}
