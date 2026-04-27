@@ -78,6 +78,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			{ id: 'materialize-month-picker', name: 'Materialize month: pick month' },
 			{ id: 'word-count', name: 'Lint: word count' },
 			{ id: 'lint-note', name: 'Lint: all' },
+			{ id: 'lint-vault', name: 'Lint: vault' },
 			{ id: 'reload-plugin', name: 'Reload plugin' }
 		];
 
@@ -344,7 +345,21 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const autoLintGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		new Setting(autoLintGroup).setName('Lint on save').setDesc('Automatically run the lint command when a file is modified.').addToggle(t => t.setValue(this.plugin.settings.lintOnSave).onChange(async (v) => { this.plugin.settings.lintOnSave = v; await this.plugin.saveSettings(); }));
 
-		new Setting(containerEl).setName('Date tracking').setHeading();
+		new Setting(containerEl).setName('Manual linting').setHeading();
+		const manualLintGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(manualLintGroup)
+			.setName('Lint vault')
+			.setDesc('Run the lint command on every Markdown file in your vault. Warning: This can be slow for large vaults.')
+			.addButton(bt => bt
+				.setButtonText('Lint Vault')
+				.setWarning()
+				.onClick(async () => {
+					await this.plugin.linter.lintVault();
+				})
+			);
+
+		new Setting(containerEl).setName('Date keys').setHeading();
+
 		const dateGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		new Setting(dateGroup).setName('Created date key').setDesc('Property key for the creation date.').addText(t => t.setPlaceholder('created').setValue(this.plugin.settings.lintCreatedKey).onChange(async (v) => { this.plugin.settings.lintCreatedKey = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
 		dateGroup.createEl('hr', { cls: 'crucible-row-divider' });
