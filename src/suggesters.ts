@@ -113,11 +113,9 @@ export class CommandSuggest extends AbstractInputSuggest<Command> {
 		const commands = (this.app as AppWithCommands).commands.listCommands();
 		
 		// Add internal virtual commands for easier selection in Chains
+		// Only add ones that aren't already registered as standard commands or need special handling
 		const internal: Command[] = [
-			{ id: 'crucible:lint-note', name: 'Crucible: Lint note' },
 			{ id: 'crucible:capture', name: 'Crucible: Quick Capture (Name|Value)' },
-			{ id: 'crucible:materialize-day-today', name: 'Crucible: Materialize today' },
-			{ id: 'crucible:forward-task', name: 'Crucible: Forward task' },
 		];
 
 		return [...internal, ...commands];

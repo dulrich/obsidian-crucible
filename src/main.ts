@@ -46,12 +46,14 @@ export default class CruciblePlugin extends Plugin {
 		});
 
 		// --- Commands ---
+		const prefix = this.manifest.id;
+
 		this.addCommand({ 
 			id: 'materialize-day-today', 
 			name: 'Materialize day: today', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('materialize-day-today')) return false;
-				if (!checking) { void this.materializer.materializeDay(window.moment()); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-day-today`); }
 				return true;
 			}
 		});
@@ -69,7 +71,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Materialize week: current', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('materialize-week-today')) return false;
-				if (!checking) { void this.materializer.materializeWeek(window.moment()); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-week-today`); }
 				return true;
 			}
 		});
@@ -87,7 +89,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Materialize month: current', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('materialize-month-today')) return false;
-				if (!checking) { void this.materializer.materializeMonth(window.moment()); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-month-today`); }
 				return true;
 			}
 		});
@@ -106,7 +108,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: word count', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('word-count')) return false;
-				if (!checking) { void this.linter.lintNote(); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:word-count`); }
 				return true;
 			}
 		});
@@ -115,7 +117,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: all', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('lint-note')) return false;
-				if (!checking) { void this.linter.lintNote(); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-note`); }
 				return true;
 			}
 		});
@@ -124,24 +126,17 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: vault', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('lint-vault')) return false;
-				if (!checking) { void this.linter.lintVault(); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-vault`); }
 				return true;
 			}
 		});
 
 		this.addCommand({
-			id: 'forward-task',
-			name: 'Forward task',
+			id: 'mark-as-forwarded',
+			name: 'Mark as forwarded',
 			editorCallback: (editor) => {
-				const cursor = editor.getCursor();
-				const lineNum = cursor.line;
-				const line = editor.getLine(lineNum);
-				const checkboxRegex = /^(\s*[-*+]\s+\[) (\]\s+.*)$/;
-				if (checkboxRegex.test(line)) {
-					const newLine = line.replace(checkboxRegex, '$1>$2');
-					editor.setLine(lineNum, newLine);
-					editor.setCursor(cursor);
-				}
+				if (this.settings.hiddenCommands.includes('mark-as-forwarded')) return;
+				void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, '', null, editor);
 			}
 		});
 
@@ -355,12 +350,13 @@ export default class CruciblePlugin extends Plugin {
 		};
 
 		register('lint-note', async () => await this.linter.lintNote());
+		register('lint-vault', async () => await this.linter.lintVault());
 		register('word-count', async () => await this.linter.lintNote());
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
 		
-		this.chainManager.registerInternalCommand('crucible:forward-task', async (args, prev, editor) => {
+		register('mark-as-forwarded', async (args, prev, editor) => {
 			if (!editor) return false;
 			const cursor = editor.getCursor();
 			const lineNum = cursor.line;
@@ -375,7 +371,7 @@ export default class CruciblePlugin extends Plugin {
 			return false;
 		});
 
-		this.chainManager.registerInternalCommand('crucible:capture', async (args, prev, editor) => {
+		register('capture', async (args, prev, editor) => {
 			// args format: "Capture Name|optional value"
 			const [name, manualValue] = args.split('|');
 			const capture = this.settings.captures.find(c => c.name === name);
