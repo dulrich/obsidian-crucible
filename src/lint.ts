@@ -1,4 +1,4 @@
-import { App, MarkdownView, Notice, moment } from 'obsidian';
+import { App, MarkdownView, Notice, moment, TFile, TFolder } from 'obsidian';
 import { CrucibleSettings } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 
@@ -37,8 +37,7 @@ export class Linter {
 		});
 	}
 
-	async calculateWordCount(view: MarkdownView): Promise<number> {
-		const content = view.getViewData();
+	calculateWordCount(content: string): number {
 		const body = content.replace(FRONTMATTER_REGEX, '');
 		
 		const intl = Intl as unknown as IntlWithSegmenter;
@@ -59,10 +58,55 @@ export class Linter {
 		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!targetView || !targetView.file) return;
 
-		const file = targetView.file;
+		await this.lintFile(targetView.file);
+	}
+
+	async lintVault() {
+		await this.lintFolder(this.app.vault.getRoot());
+	}
+
+	async lintFolder(folder: TFolder) {
+		const files: TFile[] = [];
+		const recursiveGetFiles = (currentFolder: TFolder) => {
+			if (this.isPathIgnored(currentFolder.path)) return;
+			for (const child of currentFolder.children) {
+				if (child instanceof TFile && child.extension === 'md') {
+					if (!this.isPathIgnored(child.path)) {
+						files.push(child);
+					}
+				} else if (child instanceof TFolder) {
+					recursiveGetFiles(child);
+				}
+			}
+		};
+
+		recursiveGetFiles(folder);
+
+		if (files.length === 0) {
+			new Notice('No Markdown files found to lint in this folder');
+			return;
+		}
+
+		const notice = new Notice(`Linting ${files.length} notes...`, 0);
+		let count = 0;
+
+		for (const file of files) {
+			await this.lintFile(file, true);
+			count++;
+			if (count % 10 === 0) {
+				notice.setMessage(`Linting ${files.length} notes... (${count}/${files.length})`);
+			}
+		}
+
+		notice.hide();
+		new Notice(`Finished linting ${count} notes`);
+	}
+
+	async lintFile(file: TFile, silent: boolean = false) {
 		if (this.isPathIgnored(file.path)) return;
 
-		const wordCount = await this.calculateWordCount(targetView);
+		const content = await this.app.vault.read(file);
+		const wordCount = this.calculateWordCount(content);
 		const insertYaml: Record<string, string> = {};
 		
 		if (this.settings.lintFrontmatterInsert) {
@@ -90,6 +134,9 @@ export class Linter {
 				if (this.settings.lintCreatedKey && !fm[this.settings.lintCreatedKey]) {
 					fm[this.settings.lintCreatedKey] = createdStr;
 				}
+				if (!fm['title'] || fm['title'] === '') {
+					fm['title'] = file.basename;
+				}
 				if (this.settings.lintModifiedKey) fm[this.settings.lintModifiedKey] = todayStr;
 				fm['word-count'] = wordCount;
 
@@ -111,39 +158,39 @@ export class Linter {
 			});
 
 			if (this.settings.lintBlankLineAfterYaml) {
-				const content = await this.app.vault.read(file);
-				const yamlMatch = content.match(FRONTMATTER_REGEX);
+				const contentAfterFM = await this.app.vault.read(file);
+				const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
 				if (yamlMatch) {
 					const yamlBlockWithNewlines = yamlMatch[0];
 					const currentNewlines = yamlMatch[2] || "";
 					
-					// Only modify if it doesn't already have at least one blank line (2 newlines)
-					// or if it has MORE than 2 newlines and we want to normalize it.
 					if (currentNewlines.length !== 2 || currentNewlines !== "\n\n") {
 						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
-						const body = content.slice(yamlBlockWithNewlines.length);
+						const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
 						const updatedContent = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
 						
-						if (updatedContent !== content) {
+						if (updatedContent !== contentAfterFM) {
 							await this.app.vault.modify(file, updatedContent);
 						}
 					}
 				}
 			}
 		} catch (e) {
-			new Notice(`Error during lint: ${(e as Error).message}`);
+			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
+			console.error(`Error during lint (${file.path}):`, e);
 		} finally {
 			this.setMaterializing(false);
 		}
 
-		const plugins = (this.app as AppWithPlugins).plugins;
-		if (plugins && plugins.enabledPlugins.has('dataview')) {
-			const commands = (this.app as AppWithPlugins).commands;
-			if (commands) {
-				commands.executeCommandById('dataview:dataview-rebuild-current-view');
+		if (!silent) {
+			const plugins = (this.app as AppWithPlugins).plugins;
+			if (plugins && plugins.enabledPlugins.has('dataview')) {
+				const commands = (this.app as AppWithPlugins).commands;
+				if (commands) {
+					commands.executeCommandById('dataview:dataview-rebuild-current-view');
+				}
 			}
+			new Notice('Note linted');
 		}
-
-		new Notice('Note linted');
 	}
 }
