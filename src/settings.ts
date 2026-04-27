@@ -1,11 +1,17 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Platform, Hotkey } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest } from "./suggesters";
 import { CaptureTarget, CaptureSource, ToCPosition, ToCCollapseBehavior } from "./types";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
+}
+
+interface AppWithInternals extends App {
+	hotkeyManager: {
+		getHotkeys(id: string): Hotkey[];
+	};
 }
 
 export class CrucibleSettingTab extends PluginSettingTab {
@@ -90,7 +96,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 			commands.forEach((cmd, index) => {
 				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
-				new Setting(group)
+				const s = new Setting(group)
 					.setName(cmd.name)
 					.addToggle(toggle => toggle
 						.setValue(!this.plugin.settings.hiddenCommands.includes(cmd.id))
@@ -104,6 +110,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 							}
 							await this.plugin.saveSettings();
 						}));
+				
+				this.renderHotkey(s.controlEl, cmd.id);
 			});
 		};
 
@@ -148,6 +156,31 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		renderGroup('Shortcuts', shortcutCommands);
 		renderGroup('Chains', chainCommands);
 		renderGroup('Other', otherCommands);
+	}
+
+	private renderHotkey(el: HTMLElement, commandId: string) {
+		const prefix = this.plugin.manifest.id;
+		const fullId = `${prefix}:${commandId}`;
+		const hotkeys = (this.app as AppWithInternals).hotkeyManager.getHotkeys(fullId);
+		
+		if (!hotkeys || hotkeys.length === 0) return;
+
+		const hotkey = hotkeys[0];
+		const parts = hotkey.modifiers.map(mod => {
+			if (mod === 'Mod') return Platform.isMacOS ? 'Cmd' : 'Ctrl';
+			return mod;
+		});
+		
+		let key = hotkey.key;
+		if (key.length === 1) key = key.toUpperCase();
+		if (key === ' ') key = 'Space';
+		parts.push(key);
+
+		const hotkeyEl = document.createElement('div');
+		hotkeyEl.classList.add('crucible-hotkey-display');
+		hotkeyEl.createEl('kbd', { text: parts.join(' + ') });
+		
+		el.prepend(hotkeyEl);
 	}
 
 	private renderChainSettings(containerEl: HTMLElement) {
