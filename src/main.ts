@@ -1,4 +1,4 @@
-import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal } from 'obsidian';
+import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS } from "./types";
 import { Materializer } from "./materialize";
@@ -20,9 +20,9 @@ interface AppWithPlugins extends App {
 
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
+	linter: Linter;
 	private isMaterializing = false;
 	private materializer: Materializer;
-	private linter: Linter;
 	private captureManager: CaptureManager;
 	private tocComponent: TableOfContentsUI | null = null;
 
@@ -113,6 +113,15 @@ export default class CruciblePlugin extends Plugin {
 				return true;
 			}
 		});
+		this.addCommand({ 
+			id: 'lint-vault', 
+			name: 'Lint: vault', 
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('lint-vault')) return false;
+				if (!checking) { void this.linter.lintVault(); }
+				return true;
+			}
+		});
 
 		this.addCommand({
 			id: 'reload-plugin',
@@ -148,6 +157,21 @@ export default class CruciblePlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') debouncedLint(file);
 		}));
+
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (file instanceof TFolder) {
+					menu.addItem((item) => {
+						item
+							.setTitle('Lint notes in folder')
+							.setIcon('check-circle')
+							.onClick(async () => {
+								await this.linter.lintFolder(file);
+							});
+					});
+				}
+			})
+		);
 
 		this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.refreshToC()));
 		this.registerEvent(this.app.metadataCache.on('changed', () => this.refreshToC()));

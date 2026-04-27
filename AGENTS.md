@@ -24,12 +24,12 @@ npm run lint    # Run ESLint and Stylelint
 
 ## Full Cleanup Loop (MANDATORY)
 
-Before signaling task completion or reporting success, you MUST execute and pass this sequence:
+Before signaling task completion or reporting success, you MUST execute and pass this sequence. **Run these commands sequentially (do not background them) so that output is immediately visible:**
 
 1.  **Linting:** Run `npm run lint`. This executes both ESLint (for TypeScript) and Stylelint (for CSS). All errors MUST be resolved.
 2.  **Type Checking:** Run `npx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
 3.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
-4.  **Verification:** Confirm all processes exited with code 0 and no background processes are hanging.
+4.  **Verification:** Confirm all processes exited with code 0.
 
 ## Debugging Protocol (UI/UX)
 
@@ -83,7 +83,10 @@ Supported tokens in any template or property injection:
 
 ## Testing
 
+- **Dev Server:** Always run `npm run dev` at the start of a session to watch for changes and hot-recompile.
 - Link the root directory to your vault:
   ```bash
-  ln -s /path/to/plugin <Vault>/.obsidian/plugins/obsidian-crucible  ```
+  ln -s /path/to/plugin <Vault>/.obsidian/plugins/obsidian-crucible
+  ```
 - Use the **Reload Plugin** command from the palette after a re-build.
+
