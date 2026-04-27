@@ -16,7 +16,7 @@ interface AppWithInternals extends App {
 
 export class CrucibleSettingTab extends PluginSettingTab {
 	plugin: CruciblePlugin;
-	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' | 'captures' | 'commands' | 'chains' = 'settings';
+	private activeTab: 'settings' | 'lint' | 'shortcuts' | 'captures' | 'commands' | 'chains' = 'settings';
 	private editingChainIndex: number = -1;
 
 	constructor(app: App, plugin: CruciblePlugin) {
@@ -60,7 +60,6 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			createTab('chains', 'list', 'Chains');
 			createTab('commands', 'terminal', 'Commands');
 			createTab('lint', 'check-circle', 'Lint');
-			createTab('variables', 'info', 'Variables');
 		}
 
 		containerEl.createEl('hr', { cls: 'crucible-tab-hr' });
@@ -77,8 +76,6 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			this.renderChainSettings(containerEl);
 		} else if (this.activeTab === 'commands') {
 			this.renderCommandSettings(containerEl);
-		} else {
-			this.renderVariables(containerEl);
 		}
 	}
 
@@ -146,7 +143,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		}));
 
 		const otherCommands = [
-			{ id: 'forward-task', name: 'Forward task' },
+			{ id: 'mark-as-forwarded', name: 'Mark as forwarded' },
 			{ id: 'reload-plugin', name: 'Reload plugin' }
 		];
 
@@ -458,7 +455,6 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
-		containerEl.createEl('hr');
 		new Setting(containerEl).setName('Folder templates').setHeading();
 		containerEl.createEl('p', { text: 'Map arbitrary folders to templates. These will be applied automatically when a new file is created in the folder.' });
 
@@ -487,6 +483,24 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		});
 
 		new Setting(folderTemplatesGroup).addButton(bt => bt.setButtonText('Add folder template').setCta().onClick(async () => { this.plugin.settings.folderTemplates.push({ folder: '', template: '' }); await this.plugin.saveSettings(); this.display(); }));
+
+		new Setting(containerEl).setName('Template variables').setHeading();
+		const desc = containerEl.createDiv({ cls: 'crucible-variables-desc' });
+		desc.createEl('p', { text: 'Use these tokens in your template files. They will be replaced when a note is "materialized" or created in a mapped folder.' });
+		const grid = containerEl.createDiv({ cls: 'crucible-variables-grid' });
+		const addVar = (t: string, d: string, e: string) => { 
+			const row = grid.createDiv({ cls: 'crucible-variable-row' }); 
+			row.createDiv({ cls: 'crucible-variable-token', text: `{{${t}}}` }); 
+			row.createDiv({ cls: 'crucible-variable-description', text: d }); 
+			row.createDiv({ cls: 'crucible-variable-example', text: e }); 
+		};
+		addVar('date', 'Target date (YYYY-MM-DD)', '2026-04-24'); 
+		addVar('time', 'Target time (HH:mm)', '14:30'); 
+		addVar('today', 'Current date', '2026-04-24'); 
+		addVar('now', 'ISO datetime', '2026-04-24T14:30:00'); 
+		addVar('title', 'Note title', 'April 2026'); 
+		addVar('value', 'User input', 'My thought'); 
+		addVar('datetime:FORMAT', 'Custom format', '{{datetime:MMMM YYYY}}');
 	}
 
 	private renderLintSettings(containerEl: HTMLElement) {
@@ -622,17 +636,5 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => { this.plugin.settings.captures.splice(index, 1); await this.plugin.saveSettings(); this.plugin.registerCaptures(); this.display(); }));
 		});
 		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => { this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', prepend: false }); await this.plugin.saveSettings(); this.display(); }));
-	}
-
-	private renderVariables(containerEl: HTMLElement) {
-		new Setting(containerEl).setName('Template variables').setHeading();
-		const desc = containerEl.createDiv({ cls: 'crucible-variables-desc' });
-		desc.createEl('p', { text: 'Use these tokens in your template files. They will be replaced when a note is "materialized" or created in a mapped folder.' });
-		const grid = containerEl.createDiv({ cls: 'crucible-variables-grid' });
-		const addVar = (t: string, d: string, e: string) => { const row = grid.createDiv({ cls: 'crucible-variable-row' }); row.createDiv({ cls: 'crucible-variable-token', text: `{{${t}}}` }); row.createDiv({ cls: 'crucible-variable-description', text: d }); row.createDiv({ cls: 'crucible-variable-example', text: e }); };
-		addVar('date', 'Target date (YYYY-MM-DD)', '2026-04-24'); addVar('time', 'Target time (HH:mm)', '14:30'); addVar('today', 'Current date', '2026-04-24'); addVar('now', 'ISO datetime', '2026-04-24T14:30:00'); addVar('title', 'Note title', 'April 2026'); addVar('value', 'User input', 'My thought'); addVar('datetime:FORMAT', 'Custom format', '{{datetime:MMMM YYYY}}');
-		containerEl.createEl('hr'); 
-		new Setting(containerEl).setName('Common date formats').setHeading();
-		const f = containerEl.createEl('ul'); f.createEl('li', { text: 'MMMM YYYY → April 2026' }); f.createEl('li', { text: 'GGGG-[W]WW → 2026-W17' });
 	}
 }
