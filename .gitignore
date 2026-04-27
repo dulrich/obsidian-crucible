@@ -26,3 +26,6 @@ data.json
 
 # Swap files
 *.swp
+
+# Gemini Local Configs
+.gemini/*

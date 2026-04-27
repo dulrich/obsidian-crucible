@@ -56,12 +56,27 @@ export class CaptureManager {
 						let endIndex = lines.length;
 						for (let i = headerIndex + 1; i < lines.length; i++) {
 							const line = lines[i];
-							if (line !== undefined && line.trim().startsWith('#')) {
+							if (line !== undefined && (line.trim().startsWith('#') || line.trim() === '---')) {
 								endIndex = i;
 								break;
 							}
 						}
-						lines.splice(endIndex, 0, content);
+						
+						let insertIndex = endIndex;
+						for (let i = endIndex - 1; i > headerIndex; i--) {
+							const line = lines[i];
+							if (line !== undefined && line.trim() !== '') {
+								insertIndex = i + 1;
+								break;
+							}
+						}
+						if (insertIndex === endIndex && insertIndex > headerIndex + 1) {
+							// If we didn't find any non-empty lines, insert right after header
+							// or at the top of the blank space.
+							insertIndex = headerIndex + 1;
+						}
+
+						lines.splice(insertIndex, 0, content);
 					}
 					newContent = lines.join('\n');
 				} else {
