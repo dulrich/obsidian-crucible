@@ -9,10 +9,12 @@ export interface Shortcut {
 }
 
 export type CaptureTarget = 'daily' | 'weekly' | 'monthly' | 'selected';
+export type CaptureSource = 'dialog' | 'line' | 'line-fallback' | 'selection' | 'selection-fallback';
 
 export interface Capture {
 	name: string;
 	targetType: CaptureTarget;
+	source: CaptureSource;
 	file: string;
 	targetSection: string;
 	content: string;

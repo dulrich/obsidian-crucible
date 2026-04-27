@@ -2,7 +2,7 @@
 import { App, PluginSettingTab, Setting, setIcon } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest } from "./suggesters";
-import { CaptureTarget, ToCPosition, ToCCollapseBehavior } from "./types";
+import { CaptureTarget, CaptureSource, ToCPosition, ToCCollapseBehavior } from "./types";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
@@ -444,6 +444,22 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				});
 			}
 			group.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(group)
+				.setName('Capture source')
+				.addDropdown(dd => {
+					dd.addOption('dialog', 'Dialog')
+					  .addOption('line', 'Current line')
+					  .addOption('line-fallback', 'Current line -> Dialog')
+					  .addOption('selection', 'Selection')
+					  .addOption('selection-fallback', 'Selection -> Dialog')
+					  .setValue(capture.source || 'dialog')
+					  .onChange(async (value: CaptureSource) => {
+						  capture.source = value;
+						  await this.plugin.saveSettings();
+					  });
+					dd.selectEl.addClass('pi-width-half');
+				});
+			group.createEl('hr', { cls: 'crucible-row-divider' });
 			new Setting(group).setName('Target section').setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.').addText(t => t.setPlaceholder('# header').setValue(capture.targetSection).onChange(async (v) => { capture.targetSection = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
 			group.createEl('hr', { cls: 'crucible-row-divider' });
 			new Setting(group).setName('Prepend content').setDesc('Add to the top of the section/file instead of the bottom.').addToggle(t => t.setValue(capture.prepend).onChange(async (v) => { capture.prepend = v; await this.plugin.saveSettings(); }));
@@ -456,7 +472,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			group.createEl('hr', { cls: 'crucible-row-divider' });
 			new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => { this.plugin.settings.captures.splice(index, 1); await this.plugin.saveSettings(); this.plugin.registerCaptures(); this.display(); }));
 		});
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => { this.plugin.settings.captures.push({ name: '', targetType: 'daily', file: '', targetSection: '', content: '', prepend: false }); await this.plugin.saveSettings(); this.display(); }));
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => { this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', prepend: false }); await this.plugin.saveSettings(); this.display(); }));
 	}
 
 	private renderVariables(containerEl: HTMLElement) {

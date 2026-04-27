@@ -1,6 +1,6 @@
-import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder } from 'obsidian';
+import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
-import { CrucibleSettings, DEFAULT_SETTINGS } from "./types";
+import { CrucibleSettings, DEFAULT_SETTINGS, Capture } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { CaptureManager, TextInputModal } from "./captures";
@@ -124,6 +124,20 @@ export default class CruciblePlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'forward-task',
+			name: 'Forward task',
+			editorCallback: (editor) => {
+				const lineNum = editor.getCursor().line;
+				const line = editor.getLine(lineNum);
+				const checkboxRegex = /^(\s*[-*+]\s+\[) (\]\s+.*)$/;
+				if (checkboxRegex.test(line)) {
+					const newLine = line.replace(checkboxRegex, '$1>$2');
+					editor.setLine(lineNum, newLine);
+				}
+			}
+		});
+
+		this.addCommand({
 			id: 'reload-plugin',
 			name: 'Reload plugin',
 			checkCallback: (checking: boolean) => {
@@ -233,42 +247,65 @@ export default class CruciblePlugin extends Plugin {
 			this.addCommand({
 				id,
 				name: `Capture: ${capture.name}`,
-				checkCallback: (checking: boolean) => {
+				editorCheckCallback: (checking: boolean, editor: Editor) => {
 					if (this.settings.hiddenCommands.includes(id)) return false;
 					if (!checking) {
-						if (capture.content.includes('{{value}}')) {
-							new TextInputModal(
-								this.app, 
-								`Capture: ${capture.name}`, 
-								(value) => {
-									void (async () => {
-										this.isMaterializing = true;
-										try {
-											await this.captureManager.executeCapture(capture, value);
-										} finally {
-											this.isMaterializing = false;
-										}
-									})();
-								},
-								() => { 
-									this.refreshToC(); 
-								}
-							).open();
-						} else {
-							void (async () => {
+						const executeWithAutoValue = async (val: string, fallbackToDialog = false) => {
+							if (val.trim()) {
 								this.isMaterializing = true;
 								try {
-									await this.captureManager.executeCapture(capture);
+									await this.captureManager.executeCapture(capture, val);
 								} finally {
 									this.isMaterializing = false;
 								}
-							})();
+							} else if (fallbackToDialog) {
+								this.openCaptureDialog(capture);
+							}
+						};
+
+						const source = capture.source || 'dialog';
+						switch (source) {
+							case 'dialog':
+								this.openCaptureDialog(capture);
+								break;
+							case 'line':
+								void executeWithAutoValue(editor.getLine(editor.getCursor().line));
+								break;
+							case 'line-fallback':
+								void executeWithAutoValue(editor.getLine(editor.getCursor().line), true);
+								break;
+							case 'selection':
+								void executeWithAutoValue(editor.getSelection());
+								break;
+							case 'selection-fallback':
+								void executeWithAutoValue(editor.getSelection(), true);
+								break;
 						}
 					}
 					return true;
 				}
 			});
 		});
+	}
+
+	private openCaptureDialog(capture: Capture) {
+		new TextInputModal(
+			this.app, 
+			`Capture: ${capture.name}`, 
+			(value) => {
+				void (async () => {
+					this.isMaterializing = true;
+					try {
+						await this.captureManager.executeCapture(capture, value);
+					} finally {
+						this.isMaterializing = false;
+					}
+				})();
+			},
+			() => { 
+				this.refreshToC(); 
+			}
+		).open();
 	}
 
 	openDayPicker() {
