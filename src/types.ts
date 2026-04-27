@@ -24,6 +24,17 @@ export interface Capture {
 export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-right';
 export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
+export interface ChainStep {
+	commandId: string;
+	keepGoing: boolean;
+	args: string;
+}
+
+export interface Chain {
+	name: string;
+	steps: ChainStep[];
+}
+
 export interface CrucibleSettings {
 	dailyFolder: string;
 	weeklyFolder: string;
@@ -44,6 +55,8 @@ export interface CrucibleSettings {
 	shortcuts: Shortcut[];
 	// Captures
 	captures: Capture[];
+	// Chains
+	chains: Chain[];
 	// ToC
 	showToC: boolean;
 	tocPosition: ToCPosition;
@@ -69,6 +82,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	lintOnSave: false,
 	shortcuts: [],
 	captures: [],
+	chains: [],
 	showToC: true,
 	tocPosition: 'bottom-right',
 	tocCollapseBehavior: 'manual',

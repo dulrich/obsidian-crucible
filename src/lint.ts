@@ -54,18 +54,18 @@ export class Linter {
 		}
 	}
 
-	async lintNote(view?: MarkdownView) {
+	async lintNote(view?: MarkdownView): Promise<boolean> {
 		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!targetView || !targetView.file) return;
+		if (!targetView || !targetView.file) return false;
 
-		await this.lintFile(targetView.file);
+		return await this.lintFile(targetView.file);
 	}
 
-	async lintVault() {
-		await this.lintFolder(this.app.vault.getRoot());
+	async lintVault(): Promise<boolean> {
+		return await this.lintFolder(this.app.vault.getRoot());
 	}
 
-	async lintFolder(folder: TFolder) {
+	async lintFolder(folder: TFolder): Promise<boolean> {
 		const files: TFile[] = [];
 		const recursiveGetFiles = (currentFolder: TFolder) => {
 			if (this.isPathIgnored(currentFolder.path)) return;
@@ -84,14 +84,16 @@ export class Linter {
 
 		if (files.length === 0) {
 			new Notice('No Markdown files found to lint in this folder');
-			return;
+			return true;
 		}
 
 		const notice = new Notice(`Linting ${files.length} notes...`, 0);
 		let count = 0;
+		let allSuccess = true;
 
 		for (const file of files) {
-			await this.lintFile(file, true);
+			const success = await this.lintFile(file, true);
+			if (!success) allSuccess = false;
 			count++;
 			if (count % 10 === 0) {
 				notice.setMessage(`Linting ${files.length} notes... (${count}/${files.length})`);
@@ -100,10 +102,11 @@ export class Linter {
 
 		notice.hide();
 		new Notice(`Finished linting ${count} notes`);
+		return allSuccess;
 	}
 
-	async lintFile(file: TFile, silent: boolean = false) {
-		if (this.isPathIgnored(file.path)) return;
+	async lintFile(file: TFile, silent: boolean = false): Promise<boolean> {
+		if (this.isPathIgnored(file.path)) return true;
 
 		const content = await this.app.vault.read(file);
 		const wordCount = this.calculateWordCount(content);
@@ -178,6 +181,7 @@ export class Linter {
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
 			console.error(`Error during lint (${file.path}):`, e);
+			return false;
 		} finally {
 			this.setMaterializing(false);
 		}
@@ -192,5 +196,6 @@ export class Linter {
 			}
 			new Notice('Note linted');
 		}
+		return true;
 	}
 }

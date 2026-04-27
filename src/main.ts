@@ -4,6 +4,7 @@ import { CrucibleSettings, DEFAULT_SETTINGS, Capture } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { CaptureManager, TextInputModal } from "./captures";
+import { ChainManager } from "./chains";
 import { TableOfContentsUI } from "./toc";
 import { applyTemplateString } from './utils';
 
@@ -24,6 +25,7 @@ export default class CruciblePlugin extends Plugin {
 	private isMaterializing = false;
 	private materializer: Materializer;
 	private captureManager: CaptureManager;
+	private chainManager: ChainManager;
 	private tocComponent: TableOfContentsUI | null = null;
 
 	async onload() {
@@ -32,6 +34,10 @@ export default class CruciblePlugin extends Plugin {
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.captureManager = new CaptureManager(this.app, this.settings);
+		this.chainManager = new ChainManager(this.app);
+
+		this.registerInternalCommands();
+		this.registerChains();
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
 			const setting = (this.app as AppWithPlugins).setting;
@@ -127,12 +133,14 @@ export default class CruciblePlugin extends Plugin {
 			id: 'forward-task',
 			name: 'Forward task',
 			editorCallback: (editor) => {
-				const lineNum = editor.getCursor().line;
+				const cursor = editor.getCursor();
+				const lineNum = cursor.line;
 				const line = editor.getLine(lineNum);
 				const checkboxRegex = /^(\s*[-*+]\s+\[) (\]\s+.*)$/;
 				if (checkboxRegex.test(line)) {
 					const newLine = line.replace(checkboxRegex, '$1>$2');
 					editor.setLine(lineNum, newLine);
+					editor.setCursor(cursor);
 				}
 			}
 		});
@@ -241,46 +249,36 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	registerCaptures() {
+		const prefix = this.manifest.id;
 		this.settings.captures.forEach((capture, index) => {
 			if (!capture.name) return;
 			const id = `capture-${index}`;
+			const fullId = `${prefix}:${id}`;
+
+			// Register in ChainManager so it can handle args/responses
+			this.chainManager.registerInternalCommand(fullId, async (args, prev, editor) => {
+				const resolvedValue = args || await this.resolveCaptureValue(capture, editor);
+				if (resolvedValue === null) return false;
+				return await this.captureManager.executeCapture(capture, resolvedValue);
+			});
+
 			this.addCommand({
 				id,
 				name: `Capture: ${capture.name}`,
 				editorCheckCallback: (checking: boolean, editor: Editor) => {
 					if (this.settings.hiddenCommands.includes(id)) return false;
 					if (!checking) {
-						const executeWithAutoValue = async (val: string, fallbackToDialog = false) => {
-							if (val.trim()) {
-								this.isMaterializing = true;
-								try {
-									await this.captureManager.executeCapture(capture, val);
-								} finally {
-									this.isMaterializing = false;
-								}
-							} else if (fallbackToDialog) {
-								this.openCaptureDialog(capture);
+						void (async () => {
+							const value = await this.resolveCaptureValue(capture, editor);
+							if (value === null) return; 
+							
+							this.isMaterializing = true;
+							try {
+								await this.captureManager.executeCapture(capture, value);
+							} finally {
+								this.isMaterializing = false;
 							}
-						};
-
-						const source = capture.source || 'dialog';
-						switch (source) {
-							case 'dialog':
-								this.openCaptureDialog(capture);
-								break;
-							case 'line':
-								void executeWithAutoValue(editor.getLine(editor.getCursor().line));
-								break;
-							case 'line-fallback':
-								void executeWithAutoValue(editor.getLine(editor.getCursor().line), true);
-								break;
-							case 'selection':
-								void executeWithAutoValue(editor.getSelection());
-								break;
-							case 'selection-fallback':
-								void executeWithAutoValue(editor.getSelection(), true);
-								break;
-						}
+						})();
 					}
 					return true;
 				}
@@ -288,24 +286,125 @@ export default class CruciblePlugin extends Plugin {
 		});
 	}
 
+	private async resolveCaptureValue(capture: Capture, editor?: Editor): Promise<string | null> {
+		const source = capture.source || 'dialog';
+		
+		switch (source) {
+			case 'line':
+				if (editor) return editor.getLine(editor.getCursor().line);
+				break;
+			case 'line-fallback':
+				if (editor) {
+					const line = editor.getLine(editor.getCursor().line);
+					if (line.trim()) return line;
+				}
+				return await this.promptForCaptureValue(capture);
+			case 'selection':
+				if (editor) return editor.getSelection();
+				break;
+			case 'selection-fallback':
+				if (editor) {
+					const selection = editor.getSelection();
+					if (selection.trim()) return selection;
+				}
+				return await this.promptForCaptureValue(capture);
+			case 'dialog':
+			default:
+				return await this.promptForCaptureValue(capture);
+		}
+		return '';
+	}
+
+	private async promptForCaptureValue(capture: Capture): Promise<string | null> {
+		return new Promise((resolve) => {
+			new TextInputModal(
+				this.app, 
+				`Capture: ${capture.name}`, 
+				(value) => {
+					resolve(value);
+				},
+				() => { 
+					this.refreshToC(); 
+					resolve(null);
+				}
+			).open();
+		});
+	}
+
 	private openCaptureDialog(capture: Capture) {
-		new TextInputModal(
-			this.app, 
-			`Capture: ${capture.name}`, 
-			(value) => {
-				void (async () => {
-					this.isMaterializing = true;
-					try {
-						await this.captureManager.executeCapture(capture, value);
-					} finally {
-						this.isMaterializing = false;
-					}
-				})();
-			},
-			() => { 
-				this.refreshToC(); 
+		void (async () => {
+			const value = await this.promptForCaptureValue(capture);
+			if (value !== null) {
+				this.isMaterializing = true;
+				try {
+					await this.captureManager.executeCapture(capture, value);
+				} finally {
+					this.isMaterializing = false;
+				}
 			}
-		).open();
+		})();
+	}
+
+	private registerInternalCommands() {
+		const prefix = this.manifest.id;
+
+		// Built-in commands
+		const register = (id: string, fn: (args: string, prev: unknown, editor?: Editor) => Promise<unknown>) => {
+			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn);
+			this.chainManager.registerInternalCommand(`crucible:${id}`, fn);
+		};
+
+		register('lint-note', async () => await this.linter.lintNote());
+		register('word-count', async () => await this.linter.lintNote());
+		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
+		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
+		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
+		
+		this.chainManager.registerInternalCommand('crucible:forward-task', async (args, prev, editor) => {
+			if (!editor) return false;
+			const cursor = editor.getCursor();
+			const lineNum = cursor.line;
+			const line = editor.getLine(lineNum);
+			const checkboxRegex = /^(\s*[-*+]\s+\[) (\]\s+.*)$/;
+			if (checkboxRegex.test(line)) {
+				const newLine = line.replace(checkboxRegex, '$1>$2');
+				editor.setLine(lineNum, newLine);
+				editor.setCursor(cursor);
+				return true;
+			}
+			return false;
+		});
+
+		this.chainManager.registerInternalCommand('crucible:capture', async (args, prev, editor) => {
+			// args format: "Capture Name|optional value"
+			const [name, manualValue] = args.split('|');
+			const capture = this.settings.captures.find(c => c.name === name);
+			if (capture) {
+				const resolvedValue = manualValue || await this.resolveCaptureValue(capture, editor);
+				if (resolvedValue === null) return false;
+				return await this.captureManager.executeCapture(capture, resolvedValue);
+			}
+			new Notice(`Capture not found: ${name}`);
+			return false;
+		});
+	}
+
+	registerChains() {
+		this.settings.chains.forEach((chain, index) => {
+			if (!chain.name) return;
+			const id = `chain-${index}`;
+			this.addCommand({
+				id,
+				name: `Chain: ${chain.name}`,
+				editorCheckCallback: (checking: boolean, editor: Editor) => {
+					if (this.settings.hiddenCommands.includes(id)) return false;
+					if (!checking) {
+						void this.chainManager.executeChain(chain, editor);
+					}
+					return true;
+				}
+			});
+		});
 	}
 
 	openDayPicker() {

@@ -11,7 +11,7 @@ export class CaptureManager {
 		this.settings = settings;
 	}
 
-	async executeCapture(capture: Capture, value: string = '') {
+	async executeCapture(capture: Capture, value: string = ''): Promise<boolean> {
 		let targetPath = '';
 		const now = moment();
 
@@ -33,12 +33,12 @@ export class CaptureManager {
 		const file = this.app.vault.getAbstractFileByPath(targetPath);
 		if (!(file instanceof TFile)) {
 			new Notice(`Capture target file not found: ${targetPath}`);
-			return;
+			return false;
 		}
 
 		const rawContent = await applyTemplateString(capture.content, now, file.basename, value);
 		const content = rawContent.trim();
-		if (!content) return;
+		if (!content) return true;
 
 		const existingContent = await this.app.vault.read(file);
 		let newContent = '';
@@ -106,8 +106,10 @@ export class CaptureManager {
 
 			await this.app.vault.modify(file, newContent);
 			new Notice(`Captured to ${capture.name}`);
+			return true;
 		} catch (e) {
 			new Notice(`Error executing capture: ${(e as Error).message}`);
+			return false;
 		}
 	}
 }

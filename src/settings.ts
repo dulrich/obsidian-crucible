@@ -1,7 +1,7 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { App, PluginSettingTab, Setting, setIcon } from "obsidian";
 import CruciblePlugin from "./main";
-import { FileSuggest, FolderSuggest } from "./suggesters";
+import { FileSuggest, FolderSuggest, CommandSuggest } from "./suggesters";
 import { CaptureTarget, CaptureSource, ToCPosition, ToCCollapseBehavior } from "./types";
 
 interface SearchWithContainer {
@@ -10,7 +10,8 @@ interface SearchWithContainer {
 
 export class CrucibleSettingTab extends PluginSettingTab {
 	plugin: CruciblePlugin;
-	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' | 'captures' | 'commands' = 'settings';
+	private activeTab: 'settings' | 'variables' | 'lint' | 'shortcuts' | 'captures' | 'commands' | 'chains' = 'settings';
+	private editingChainIndex: number = -1;
 
 	constructor(app: App, plugin: CruciblePlugin) {
 		super(app, plugin);
@@ -26,24 +27,35 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		const navBar = containerEl.createDiv({ cls: 'crucible-tab-nav' });
 		
-		const createTab = (id: typeof this.activeTab, icon: string, label: string) => {
-			const btn = navBar.createDiv({ 
-				cls: `crucible-tab-btn ${this.activeTab === id ? 'is-active' : ''}` 
-			});
-			setIcon(btn, icon);
-			btn.createSpan({ text: ` ${label}` });
-			btn.onclick = () => {
-				this.activeTab = id;
+		if (this.editingChainIndex !== -1) {
+			const backBtn = navBar.createDiv({ cls: 'crucible-tab-btn' });
+			setIcon(backBtn, 'arrow-left');
+			backBtn.createSpan({ text: ' Back' });
+			backBtn.onclick = () => {
+				this.editingChainIndex = -1;
 				this.display();
 			};
-		};
+		} else {
+			const createTab = (id: typeof this.activeTab, icon: string, label: string) => {
+				const btn = navBar.createDiv({ 
+					cls: `crucible-tab-btn ${this.activeTab === id ? 'is-active' : ''}` 
+				});
+				setIcon(btn, icon);
+				btn.createSpan({ text: ` ${label}` });
+				btn.onclick = () => {
+					this.activeTab = id;
+					this.display();
+				};
+			};
 
-		createTab('settings', 'settings', 'Settings');
-		createTab('shortcuts', 'link', 'Shortcuts');
-		createTab('captures', 'edit-3', 'Captures');
-		createTab('commands', 'terminal', 'Commands');
-		createTab('lint', 'check-circle', 'Lint');
-		createTab('variables', 'info', 'Variables');
+			createTab('settings', 'settings', 'Settings');
+			createTab('shortcuts', 'link', 'Shortcuts');
+			createTab('captures', 'edit-3', 'Captures');
+			createTab('chains', 'list', 'Chains');
+			createTab('commands', 'terminal', 'Commands');
+			createTab('lint', 'check-circle', 'Lint');
+			createTab('variables', 'info', 'Variables');
+		}
 
 		containerEl.createEl('hr', { cls: 'crucible-tab-hr' });
 
@@ -55,6 +67,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			this.renderShortcutSettings(containerEl);
 		} else if (this.activeTab === 'captures') {
 			this.renderCaptureSettings(containerEl);
+		} else if (this.activeTab === 'chains') {
+			this.renderChainSettings(containerEl);
 		} else if (this.activeTab === 'commands') {
 			this.renderCommandSettings(containerEl);
 		} else {
@@ -151,6 +165,151 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						}));
 			});
 		}
+
+		new Setting(containerEl).setName('Chains').setHeading();
+		const chainsGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		if (this.plugin.settings.chains.length === 0) {
+			chainsGroup.createDiv({ text: 'No chains defined.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.chains.forEach((chain, index) => {
+				if (index > 0) chainsGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				const id = `chain-${index}`;
+				new Setting(chainsGroup)
+					.setName(`Chain: ${chain.name || '(unnamed)'}`)
+					.addToggle(toggle => toggle
+						.setValue(!this.plugin.settings.hiddenCommands.includes(id))
+						.onChange(async (value) => {
+							if (value) {
+								this.plugin.settings.hiddenCommands = this.plugin.settings.hiddenCommands.filter(h => h !== id);
+							} else {
+								if (!this.plugin.settings.hiddenCommands.includes(id)) {
+									this.plugin.settings.hiddenCommands.push(id);
+								}
+							}
+							await this.plugin.saveSettings();
+						}));
+			});
+		}
+	}
+
+	private renderChainSettings(containerEl: HTMLElement) {
+		if (this.editingChainIndex !== -1) {
+			this.renderEditChain(containerEl);
+			return;
+		}
+
+		new Setting(containerEl).setName('Chains').setHeading();
+		containerEl.createEl('p', { text: 'Define a sequence of commands to run in order. Chains can pass arguments and responses between steps.' });
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		if (this.plugin.settings.chains.length === 0) {
+			group.createDiv({ text: 'No chains defined.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.chains.forEach((chain, index) => {
+				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(group)
+					.setName(chain.name || '(unnamed)')
+					.setDesc(`${chain.steps.length} steps`)
+					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit chain').onClick(() => {
+						this.editingChainIndex = index;
+						this.display();
+					}))
+					.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete chain').onClick(async () => {
+						this.plugin.settings.chains.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.plugin.registerChains();
+						this.display();
+					}));
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add Chain').setCta().onClick(async () => {
+			this.plugin.settings.chains.push({ name: '', steps: [] });
+			await this.plugin.saveSettings();
+			this.editingChainIndex = this.plugin.settings.chains.length - 1;
+			this.display();
+		}));
+	}
+
+	private renderEditChain(containerEl: HTMLElement) {
+		const chain = this.plugin.settings.chains[this.editingChainIndex];
+		if (!chain) return;
+
+		new Setting(containerEl).setName('Edit Chain').setHeading();
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(group)
+			.setName('Chain name')
+			.addText(t => t
+				.setPlaceholder('e.g. Refine Transcript')
+				.setValue(chain.name)
+				.onChange(async (v) => {
+					chain.name = v;
+					await this.plugin.saveSettings();
+					this.plugin.registerChains();
+				}).inputEl.addClass('pi-width-normal'));
+
+		new Setting(containerEl).setName('Steps').setHeading();
+
+		chain.steps.forEach((step, index) => {
+			const stepGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+			
+			new Setting(stepGroup)
+				.setName(`Step ${index + 1}`)
+				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove step').onClick(async () => {
+					chain.steps.splice(index, 1);
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+			new Setting(stepGroup)
+				.setName('Command')
+				.addSearch(cb => {
+					cb.setPlaceholder('Search for a command...')
+						.setValue(step.commandId)
+						.onChange(async (v) => {
+							step.commandId = v;
+							await this.plugin.saveSettings();
+						});
+					const el = (cb as unknown as SearchWithContainer).containerEl;
+					if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+					new CommandSuggest(this.app, cb.inputEl);
+				});
+
+			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+			new Setting(stepGroup)
+				.setName('Arguments')
+				.setDesc('Support variables like {{response}} from the previous step.')
+				.addText(t => t
+					.setPlaceholder('Args...')
+					.setValue(step.args)
+					.onChange(async (v) => {
+						step.args = v;
+						await this.plugin.saveSettings();
+					}).inputEl.addClass('pi-width-normal'));
+
+			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+			new Setting(stepGroup)
+				.setName('Keep going on failure')
+				.addToggle(t => t
+					.setValue(step.keepGoing)
+					.onChange(async (v) => {
+						step.keepGoing = v;
+						await this.plugin.saveSettings();
+					}));
+		});
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add step').setCta().onClick(async () => {
+			chain.steps.push({ commandId: '', keepGoing: false, args: '' });
+			await this.plugin.saveSettings();
+			this.display();
+		}));
 	}
 
 	private renderSettings(containerEl: HTMLElement) {
