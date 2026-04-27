@@ -22,6 +22,12 @@ export class ChainManager {
 		this.registry.set(id, fn);
 	}
 
+	async executeInternalCommand(id: string, args: string = '', prev: unknown = null, editor?: Editor): Promise<unknown> {
+		const fn = this.registry.get(id);
+		if (fn) return await fn(args, prev, editor);
+		return null;
+	}
+
 	async executeChain(chain: Chain, editor?: Editor) {
 		let previousResponse: unknown = null;
 		new Notice(`Starting chain: ${chain.name}`);
