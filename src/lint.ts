@@ -10,15 +10,6 @@ interface IntlWithSegmenter {
 	Segmenter: new (locale?: string, options?: { granularity: string }) => Segmenter;
 }
 
-interface AppWithPlugins extends App {
-	plugins: {
-		enabledPlugins: Set<string>;
-	};
-	commands: {
-		executeCommandById(id: string): void;
-	};
-}
-
 export class Linter {
 	app: App;
 	settings: CrucibleSettings;
@@ -187,9 +178,9 @@ export class Linter {
 		}
 
 		if (!silent) {
-			const plugins = (this.app as AppWithPlugins).plugins;
+			const plugins = this.app.plugins;
 			if (plugins && plugins.enabledPlugins.has('dataview')) {
-				const commands = (this.app as AppWithPlugins).commands;
+				const commands = this.app.commands;
 				if (commands) {
 					commands.executeCommandById('dataview:dataview-rebuild-current-view');
 				}

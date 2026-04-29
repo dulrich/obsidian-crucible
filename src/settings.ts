@@ -1,22 +1,17 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon, Platform, Hotkey } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Platform } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest } from "./suggesters";
-import { CaptureTarget, CaptureSource, ToCPosition, ToCCollapseBehavior } from "./types";
+import { CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType } from "./types";
+import { agentCommandId } from "./agents";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
 }
 
-interface AppWithInternals extends App {
-	hotkeyManager: {
-		getHotkeys(id: string): Hotkey[];
-	};
-}
-
 export class CrucibleSettingTab extends PluginSettingTab {
 	plugin: CruciblePlugin;
-	private activeTab: 'settings' | 'lint' | 'shortcuts' | 'captures' | 'commands' | 'chains' = 'settings';
+	private activeTab: 'settings' | 'lint' | 'shortcuts' | 'captures' | 'commands' | 'chains' | 'providers' | 'agents' = 'settings';
 	private editingChainIndex: number = -1;
 
 	constructor(app: App, plugin: CruciblePlugin) {
@@ -58,6 +53,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			createTab('shortcuts', 'link', 'Shortcuts');
 			createTab('captures', 'edit-3', 'Captures');
 			createTab('chains', 'list', 'Chains');
+			createTab('providers', 'plug', 'Providers');
+			createTab('agents', 'bot', 'Agents');
 			createTab('commands', 'terminal', 'Commands');
 			createTab('lint', 'check-circle', 'Lint');
 		}
@@ -74,6 +71,10 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			this.renderCaptureSettings(containerEl);
 		} else if (this.activeTab === 'chains') {
 			this.renderChainSettings(containerEl);
+		} else if (this.activeTab === 'providers') {
+			this.renderProviderSettings(containerEl);
+		} else if (this.activeTab === 'agents') {
+			this.renderAgentSettings(containerEl);
 		} else if (this.activeTab === 'commands') {
 			this.renderCommandSettings(containerEl);
 		}
@@ -142,6 +143,11 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			name: `Chain: ${c.name || '(unnamed)'}`
 		}));
 
+		const agentCommands = this.plugin.settings.agents.map(a => ({
+			id: agentCommandId(a.id),
+			name: `Agent: ${a.name || '(unnamed)'}`
+		}));
+
 		const otherCommands = [
 			{ id: 'mark-as-forwarded', name: 'Mark as forwarded' },
 			{ id: 'reload-plugin', name: 'Reload plugin' }
@@ -152,22 +158,24 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		renderGroup('Captures', captureCommands);
 		renderGroup('Shortcuts', shortcutCommands);
 		renderGroup('Chains', chainCommands);
+		renderGroup('Agents', agentCommands);
 		renderGroup('Other', otherCommands);
 	}
 
 	private renderHotkey(el: HTMLElement, commandId: string) {
 		const prefix = this.plugin.manifest.id;
 		const fullId = `${prefix}:${commandId}`;
-		const hotkeys = (this.app as AppWithInternals).hotkeyManager.getHotkeys(fullId);
+		const hotkeys = this.app.hotkeyManager.getHotkeys(fullId);
 		
 		if (!hotkeys || hotkeys.length === 0) return;
 
 		const hotkey = hotkeys[0];
-		const parts = hotkey.modifiers.map(mod => {
+		if (!hotkey) return;
+		const parts: string[] = hotkey.modifiers.map(mod => {
 			if (mod === 'Mod') return Platform.isMacOS ? 'Cmd' : 'Ctrl';
 			return mod;
 		});
-		
+
 		let key = hotkey.key;
 		if (key.length === 1) key = key.toUpperCase();
 		if (key === ' ') key = 'Space';
@@ -242,9 +250,31 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		chain.steps.forEach((step, index) => {
 			const stepGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-			
+
 			new Setting(stepGroup)
 				.setName(`Step ${index + 1}`)
+				.addExtraButton(cb => cb
+					.setIcon('arrow-up')
+					.setTooltip('Move step up')
+					.setDisabled(index === 0)
+					.onClick(async () => {
+						if (index === 0) return;
+						const [moved] = chain.steps.splice(index, 1);
+						if (moved) chain.steps.splice(index - 1, 0, moved);
+						await this.plugin.saveSettings();
+						this.display();
+					}))
+				.addExtraButton(cb => cb
+					.setIcon('arrow-down')
+					.setTooltip('Move step down')
+					.setDisabled(index === chain.steps.length - 1)
+					.onClick(async () => {
+						if (index === chain.steps.length - 1) return;
+						const [moved] = chain.steps.splice(index, 1);
+						if (moved) chain.steps.splice(index + 1, 0, moved);
+						await this.plugin.saveSettings();
+						this.display();
+					}))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove step').onClick(async () => {
 					chain.steps.splice(index, 1);
 					await this.plugin.saveSettings();
@@ -256,29 +286,102 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			new Setting(stepGroup)
 				.setName('Command')
 				.addSearch(cb => {
+					let prevSchema = this.plugin.chainManager.getCommandSchema(step.commandId);
 					cb.setPlaceholder('Search for a command...')
 						.setValue(step.commandId)
 						.onChange(async (v) => {
 							step.commandId = v;
-							await this.plugin.saveSettings();
+							const newSchema = this.plugin.chainManager.getCommandSchema(v);
+							if (newSchema !== prevSchema) {
+								// Schema changed - clear args and rebuild to show new schema inputs
+								step.args = {};
+								prevSchema = newSchema;
+								await this.plugin.saveSettings();
+								this.display();
+							} else {
+								await this.plugin.saveSettings();
+							}
 						});
 					const el = (cb as unknown as SearchWithContainer).containerEl;
 					if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-					new CommandSuggest(this.app, cb.inputEl);
+					const agentExtras = this.plugin.settings.agents.map(a => ({
+						id: agentCommandId(a.id),
+						name: `Crucible Agent: ${a.name || '(unnamed)'}`
+					}));
+					const sourceExtras = [
+						{ id: 'crucible:source:active-file', name: 'Crucible Source: Active file contents' },
+						{ id: 'crucible:source:selection', name: 'Crucible Source: Editor selection' },
+						{ id: 'crucible:source:input', name: 'Crucible Source: User input' }
+					];
+					new CommandSuggest(this.app, cb.inputEl, [...sourceExtras, ...agentExtras]);
 				});
 
-			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			const schema = this.plugin.chainManager.getCommandSchema(step.commandId);
+			
+			if (schema) {
+				schema.forEach(arg => {
+					stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+					const s = new Setting(stepGroup)
+						.setName(arg.name)
+						.setDesc(arg.description || '');
 
-			new Setting(stepGroup)
-				.setName('Arguments')
-				.setDesc('Support variables like {{response}} from the previous step.')
-				.addText(t => t
-					.setPlaceholder('Args...')
-					.setValue(step.args)
-					.onChange(async (v) => {
-						step.args = v;
-						await this.plugin.saveSettings();
-					}).inputEl.addClass('pi-width-normal'));
+					switch (arg.type) {
+						case 'text':
+							s.addText(t => t
+								.setValue(step.args[arg.id] || '')
+								.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); })
+								.inputEl.addClass('pi-width-normal'));
+							break;
+						case 'textarea':
+							s.addTextArea(t => t
+								.setValue(step.args[arg.id] || '')
+								.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); })
+								.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal'));
+							break;
+						case 'dropdown':
+							s.addDropdown(d => {
+								if (arg.options) d.addOptions(arg.options);
+								d.setValue(step.args[arg.id] || '')
+								 .onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
+								d.selectEl.addClass('pi-width-normal');
+							});
+							break;
+						case 'file':
+							s.addSearch(cb => {
+								cb.setPlaceholder('Select file...')
+									.setValue(step.args[arg.id] || '')
+									.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
+								const el = (cb as unknown as SearchWithContainer).containerEl;
+								if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+								new FileSuggest(this.app, cb.inputEl);
+							});
+							break;
+						case 'folder':
+							s.addSearch(cb => {
+								cb.setPlaceholder('Select folder...')
+									.setValue(step.args[arg.id] || '')
+									.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
+								const el = (cb as unknown as SearchWithContainer).containerEl;
+								if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+								new FolderSuggest(this.app, cb.inputEl);
+							});
+							break;
+					}
+				});
+			} else {
+				// Fallback for commands without schema (standard Obsidian commands)
+				stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(stepGroup)
+					.setName('Arguments')
+					.setDesc('Support variables like {{response}} from the previous step.')
+					.addText(t => t
+						.setPlaceholder('Args...')
+						.setValue(step.args._default || '')
+						.onChange(async (v) => {
+							step.args._default = v;
+							await this.plugin.saveSettings();
+						}).inputEl.addClass('pi-width-normal'));
+			}
 
 			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
 
@@ -293,10 +396,288 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		});
 
 		new Setting(containerEl).addButton(bt => bt.setButtonText('Add step').setCta().onClick(async () => {
-			chain.steps.push({ commandId: '', keepGoing: false, args: '' });
+			chain.steps.push({ commandId: '', keepGoing: false, args: {} });
 			await this.plugin.saveSettings();
 			this.display();
 		}));
+	}
+
+	private renderProviderSettings(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('LLM Providers').setHeading();
+		containerEl.createEl('p', { text: 'Configure connection details for each LLM you want to use. Agents reference a Provider to make calls. API keys are stored securely using Obsidian Secret Storage.' });
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		if (this.plugin.settings.providers.length === 0) {
+			group.createDiv({ text: 'No providers configured.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.providers.forEach((provider, index) => {
+				const providerGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+				this.renderEditProvider(providerGroup, provider, index);
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add Provider').setCta().onClick(async () => {
+			const id = Math.random().toString(36).substring(2, 9);
+			this.plugin.settings.providers.push({ id, name: '', type: 'openai', model: 'gpt-4o' });
+			await this.plugin.saveSettings();
+			this.display();
+		}));
+	}
+
+	private renderEditProvider(containerEl: HTMLElement, provider: Provider, index: number) {
+		new Setting(containerEl)
+			.setName(`Provider: ${provider.name || '(unnamed)'}`)
+			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete provider').onClick(async () => {
+				this.plugin.settings.providers.splice(index, 1);
+				await this.plugin.saveSettings();
+				await this.plugin.providerManager.deleteApiKey(provider.id);
+				this.plugin.registerAgents();
+				this.display();
+			}));
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Name')
+			.addText(t => t
+				.setPlaceholder('e.g. GPT-4o')
+				.setValue(provider.name)
+				.onChange(async (v) => { provider.name = v; await this.plugin.saveSettings(); }));
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Type')
+			.addDropdown(d => d
+				.addOption('openai', 'OpenAI')
+				.addOption('anthropic', 'Anthropic')
+				.addOption('google', 'Google (Gemini)')
+				.addOption('openrouter', 'OpenRouter')
+				.addOption('ollama', 'Ollama (Local)')
+				.setValue(provider.type)
+				.onChange(async (v: LlmProviderType) => { provider.type = v; await this.plugin.saveSettings(); this.display(); }));
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Model')
+			.addText(t => {
+				let placeholder = 'e.g. gpt-4o';
+				if (provider.type === 'ollama') placeholder = 'e.g. llama3';
+				if (provider.type === 'google') placeholder = 'e.g. gemini-1.5-pro';
+				if (provider.type === 'openrouter') placeholder = 'e.g. anthropic/claude-3.5-sonnet';
+
+				t.setPlaceholder(placeholder)
+				 .setValue(provider.model)
+				 .onChange(async (v) => { provider.model = v; await this.plugin.saveSettings(); });
+			});
+
+		if (provider.type !== 'ollama') {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(containerEl)
+				.setName('API Key')
+				.setDesc('Stored securely in Obsidian Secret Storage.')
+				.addText(t => {
+					t.inputEl.type = 'password';
+					t.setPlaceholder('Enter API key...')
+					 .onChange(async (v) => {
+						await this.plugin.providerManager.storeApiKey(provider.id, v);
+					 });
+					// We don't load the key back into the UI for security
+				});
+		} else {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(containerEl)
+				.setName('Ollama URL')
+				.setDesc('Default is http://localhost:11434')
+				.addText(t => t
+					.setPlaceholder('http://localhost:11434')
+					.setValue(provider.baseUrl || '')
+					.onChange(async (v) => { provider.baseUrl = v; await this.plugin.saveSettings(); }));
+		}
+	}
+
+	private renderAgentSettings(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('Agents').setHeading();
+		containerEl.createEl('p', { text: 'An Agent binds a Provider to a system prompt and a user-prompt template. Each Agent is registered as an internal command so it can be used as a step in a Chain.' });
+
+		if (this.plugin.settings.providers.length === 0) {
+			const empty = containerEl.createDiv({ cls: 'crucible-settings-group' });
+			empty.createDiv({ text: 'Configure at least one Provider before adding agents.', cls: 'crucible-empty-state' });
+		}
+
+		const listGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		if (this.plugin.settings.agents.length === 0) {
+			listGroup.createDiv({ text: 'No agents configured.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.agents.forEach((agent, index) => {
+				const agentGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+				this.renderEditAgent(agentGroup, agent, index);
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt
+			.setButtonText('Add Agent')
+			.setCta()
+			.setDisabled(this.plugin.settings.providers.length === 0)
+			.onClick(async () => {
+				const id = Math.random().toString(36).substring(2, 9);
+				const firstProvider = this.plugin.settings.providers[0];
+				this.plugin.settings.agents.push({
+					id,
+					name: '',
+					providerId: firstProvider ? firstProvider.id : '',
+					systemPromptSource: 'text',
+					systemPromptText: '',
+					systemPromptFile: '',
+					userPromptSource: 'text',
+					userPromptText: '{{input}}',
+					userPromptFile: ''
+				});
+				await this.plugin.saveSettings();
+				this.plugin.registerAgents();
+				this.display();
+			}));
+	}
+
+	private renderEditAgent(containerEl: HTMLElement, agent: Agent, index: number) {
+		const commandId = agentCommandId(agent.id);
+
+		new Setting(containerEl)
+			.setName(`Agent: ${agent.name || '(unnamed)'}`)
+			.setDesc(`Chain command: ${commandId}`)
+			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete agent').onClick(async () => {
+				this.plugin.settings.agents.splice(index, 1);
+				await this.plugin.saveSettings();
+				this.plugin.registerAgents();
+				this.display();
+			}));
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Name')
+			.addText(t => t
+				.setPlaceholder('e.g. Summarize')
+				.setValue(agent.name)
+				.onChange(async (v) => {
+					agent.name = v;
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Provider')
+			.setDesc('LLM connection used to run this agent.')
+			.addDropdown(d => {
+				if (this.plugin.settings.providers.length === 0) {
+					d.addOption('', 'No providers configured');
+				} else {
+					if (!agent.providerId || !this.plugin.settings.providers.find(p => p.id === agent.providerId)) {
+						d.addOption('', 'Select a provider...');
+					}
+					this.plugin.settings.providers.forEach(p => {
+						d.addOption(p.id, p.name || `(unnamed ${p.type})`);
+					});
+				}
+				d.setValue(agent.providerId)
+				 .onChange(async (v) => {
+					agent.providerId = v;
+					await this.plugin.saveSettings();
+				 });
+				d.selectEl.addClass('pi-width-normal');
+			});
+
+		const autoSize = (el: HTMLTextAreaElement) => {
+			el.setCssProps({ height: 'auto' });
+			el.setCssProps({ height: `${el.scrollHeight}px` });
+		};
+
+		const renderPromptEditor = (
+			label: string,
+			description: string,
+			placeholder: string,
+			getSource: () => AgentPromptSource,
+			setSource: (v: AgentPromptSource) => Promise<void>,
+			getText: () => string,
+			setText: (v: string) => Promise<void>,
+			getFile: () => string,
+			setFile: (v: string) => Promise<void>,
+		) => {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+			new Setting(containerEl)
+				.setName(label)
+				.setDesc(description)
+				.addDropdown(d => {
+					d.addOption('text', 'Text')
+					 .addOption('file', 'Vault file')
+					 .setValue(getSource())
+					 .onChange(async (v: AgentPromptSource) => {
+						 await setSource(v);
+						 this.display();
+					 });
+					d.selectEl.addClass('pi-width-half');
+				});
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+			if (getSource() === 'file') {
+				new Setting(containerEl)
+					.setName(`${label} file`)
+					.setDesc('Markdown file in your vault. Its contents are loaded each time the agent runs.')
+					.addSearch(cb => {
+						cb.setPlaceholder('prompts/summarize.md')
+						  .setValue(getFile())
+						  .onChange(async (v) => { await setFile(v); });
+						const el = (cb as unknown as SearchWithContainer).containerEl;
+						if (el) el.addClass('crucible-search-container', 'pi-width-wide');
+						new FileSuggest(this.app, cb.inputEl);
+					});
+			} else {
+				new Setting(containerEl)
+					.setName(`${label} text`)
+					.setDesc('Inline prompt template.')
+					.addTextArea(t => {
+						t.setPlaceholder(placeholder)
+						 .setValue(getText())
+						 .onChange(async (v) => {
+							await setText(v);
+							autoSize(t.inputEl);
+						 });
+						t.inputEl.addClass('crucible-setting-textarea', 'pi-width-wide');
+						requestAnimationFrame(() => autoSize(t.inputEl));
+					});
+			}
+		};
+
+		renderPromptEditor(
+			'System prompt',
+			'Persistent instructions for the agent. Supports template tokens like {{today}}, {{datetime:FORMAT}}.',
+			'You are a helpful assistant...',
+			() => agent.systemPromptSource || 'text',
+			async (v) => { agent.systemPromptSource = v; await this.plugin.saveSettings(); },
+			() => agent.systemPromptText || '',
+			async (v) => { agent.systemPromptText = v; await this.plugin.saveSettings(); },
+			() => agent.systemPromptFile || '',
+			async (v) => { agent.systemPromptFile = v; await this.plugin.saveSettings(); },
+		);
+
+		renderPromptEditor(
+			'User prompt template',
+			'Template for the user message. {{input}} (or {{value}}) is replaced by the runtime input passed to the agent.',
+			'Summarize the following:\n\n{{input}}',
+			() => agent.userPromptSource || 'text',
+			async (v) => { agent.userPromptSource = v; await this.plugin.saveSettings(); },
+			() => agent.userPromptText || '',
+			async (v) => { agent.userPromptText = v; await this.plugin.saveSettings(); },
+			() => agent.userPromptFile || '',
+			async (v) => { agent.userPromptFile = v; await this.plugin.saveSettings(); },
+		);
 	}
 
 	private renderSettings(containerEl: HTMLElement) {
@@ -596,7 +977,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
 			new Setting(group).setName('Capture name').addText(t => t.setPlaceholder('e.g. quick note').setValue(capture.name).onChange(async (v) => { capture.name = v; await this.plugin.saveSettings(); this.plugin.registerCaptures(); }).inputEl.addClass('pi-width-normal'));
 			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group).setName('Target note').addDropdown(dd => { dd.addOptions({ daily: 'Daily note', weekly: 'Weekly note', monthly: 'Monthly note', selected: 'Selected note' }).setValue(capture.targetType).onChange(async (v: CaptureTarget) => { capture.targetType = v; await this.plugin.saveSettings(); this.display(); }); dd.selectEl.addClass('pi-width-half'); });
+			new Setting(group).setName('Target note').addDropdown(dd => { dd.addOptions({ daily: 'Daily note', weekly: 'Weekly note', monthly: 'Monthly note', active: 'Active note', selected: 'Specify note' }).setValue(capture.targetType).onChange(async (v: CaptureTarget) => { capture.targetType = v; await this.plugin.saveSettings(); this.display(); }); dd.selectEl.addClass('pi-width-half'); });
 			if (capture.targetType === 'selected') {
 				group.createEl('hr', { cls: 'crucible-row-divider' });
 				new Setting(group).setName('Select note').addSearch(cb => { 
@@ -625,7 +1006,20 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			group.createEl('hr', { cls: 'crucible-row-divider' });
 			new Setting(group).setName('Target section').setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.').addText(t => t.setPlaceholder('# header').setValue(capture.targetSection).onChange(async (v) => { capture.targetSection = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
 			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group).setName('Prepend content').setDesc('Add to the top of the section/file instead of the bottom.').addToggle(t => t.setValue(capture.prepend).onChange(async (v) => { capture.prepend = v; await this.plugin.saveSettings(); }));
+			new Setting(group)
+				.setName('Write mode')
+				.setDesc('How captured content is added to the target section or file.')
+				.addDropdown(dd => {
+					dd.addOption('append', 'Append')
+					  .addOption('prepend', 'Prepend')
+					  .addOption('replace', 'Replace')
+					  .setValue(capture.writeMode || 'append')
+					  .onChange(async (v: CaptureWriteMode) => {
+						  capture.writeMode = v;
+						  await this.plugin.saveSettings();
+					  });
+					dd.selectEl.addClass('pi-width-half');
+				});
 			group.createEl('hr', { cls: 'crucible-row-divider' });
 			const autoSize = (el: HTMLTextAreaElement) => { 
 				el.setCssProps({ height: 'auto' });
@@ -635,6 +1029,6 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			group.createEl('hr', { cls: 'crucible-row-divider' });
 			new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => { this.plugin.settings.captures.splice(index, 1); await this.plugin.saveSettings(); this.plugin.registerCaptures(); this.display(); }));
 		});
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => { this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', prepend: false }); await this.plugin.saveSettings(); this.display(); }));
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => { this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', writeMode: 'append' }); await this.plugin.saveSettings(); this.display(); }));
 	}
 }
