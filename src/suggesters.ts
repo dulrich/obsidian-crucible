@@ -1,15 +1,5 @@
 import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults, Command } from "obsidian";
 
-interface MetadataCacheWithIgnore {
-    isUserIgnored(path: string): boolean;
-}
-
-interface AppWithCommands extends App {
-	commands: {
-		listCommands(): Command[];
-	};
-}
-
 export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFile> {
     public inputEl: HTMLInputElement;
 
@@ -78,10 +68,9 @@ export class FolderSuggest extends FileSystemSuggest {
 
     getItems(): TAbstractFile[] {
         const files = this.app.vault.getAllLoadedFiles();
-        const metadataCache = this.app.metadataCache as unknown as MetadataCacheWithIgnore;
         return files.filter(f => {
             if (!(f instanceof TFolder)) return false;
-            return !metadataCache.isUserIgnored(f.path);
+            return !this.app.metadataCache.isUserIgnored(f.path);
         });
     }
 }
@@ -93,29 +82,31 @@ export class FileSuggest extends FileSystemSuggest {
 
     getItems(): TAbstractFile[] {
         const files = this.app.vault.getAllLoadedFiles();
-        const metadataCache = this.app.metadataCache as unknown as MetadataCacheWithIgnore;
         return files.filter(f => {
             if (!(f instanceof TFile) || f.extension !== 'md') return false;
-            return !metadataCache.isUserIgnored(f.path);
+            return !this.app.metadataCache.isUserIgnored(f.path);
         });
     }
 }
 
 export class CommandSuggest extends AbstractInputSuggest<Command> {
 	public inputEl: HTMLInputElement;
+	private extraCommands: Command[];
 
-	constructor(app: App, inputEl: HTMLInputElement) {
+	constructor(app: App, inputEl: HTMLInputElement, extraCommands: Command[] = []) {
 		super(app, inputEl);
 		this.inputEl = inputEl;
+		this.extraCommands = extraCommands;
 	}
 
 	getItems(): Command[] {
-		const commands = (this.app as AppWithCommands).commands.listCommands();
-		
+		const commands = this.app.commands.listCommands();
+
 		// Add internal virtual commands for easier selection in Chains
 		// Only add ones that aren't already registered as standard commands or need special handling
 		const internal: Command[] = [
 			{ id: 'crucible:capture', name: 'Crucible: Quick Capture (Name|Value)' },
+			...this.extraCommands
 		];
 
 		return [...internal, ...commands];
