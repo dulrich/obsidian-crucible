@@ -1,6 +1,7 @@
 import { App, MarkdownView, Notice, moment, TFile, TFolder } from 'obsidian';
 import { CrucibleSettings } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
+import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing } from './frontmatter';
 
 interface Segmenter {
 	segment(text: string): Iterable<{ isWordLike: boolean }>;
@@ -119,62 +120,42 @@ export class Linter {
 		const todayStr = moment().format('YYYY-MM-DD');
 		const createdStr = moment(file.stat.ctime).format('YYYY-MM-DD');
 
-		this.setMaterializing(true);
 		try {
-			await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				for (const [key, value] of Object.entries(insertYaml)) {
-					if (!fm[key]) fm[key] = value;
-				}
-				if (this.settings.lintCreatedKey && !fm[this.settings.lintCreatedKey]) {
-					fm[this.settings.lintCreatedKey] = createdStr;
-				}
-				if (!fm['title'] || fm['title'] === '') {
-					fm['title'] = file.basename;
-				}
-				if (this.settings.lintModifiedKey) fm[this.settings.lintModifiedKey] = todayStr;
-				fm['word-count'] = wordCount;
-
-				const priority = this.settings.lintYamlKeyPriority;
-				const sortedFm: Record<string, unknown> = {};
-				for (const key of priority) {
-					if (key in fm) {
-						sortedFm[key] = fm[key];
-						delete fm[key];
+			await withMaterializing(this.setMaterializing, async () => {
+				await updateFrontmatter(this.app, file, (fm) => {
+					for (const [key, value] of Object.entries(insertYaml)) {
+						upsertFrontmatterPropertyIfEmpty(fm, key, value);
 					}
-				}
-				for (const key of Object.keys(fm)) {
-					sortedFm[key] = fm[key];
-					delete fm[key];
-				}
-				for (const key of Object.keys(sortedFm)) {
-					fm[key] = sortedFm[key];
-				}
-			});
+					upsertFrontmatterPropertyIfEmpty(fm, this.settings.lintCreatedKey, createdStr);
+					upsertFrontmatterPropertyIfEmpty(fm, 'title', file.basename);
+					if (this.settings.lintModifiedKey) upsertFrontmatterProperty(fm, this.settings.lintModifiedKey, todayStr);
+					upsertFrontmatterProperty(fm, 'word-count', wordCount);
+					sortFrontmatterProperties(fm, this.settings.lintYamlKeyPriority);
+				});
 
-			if (this.settings.lintBlankLineAfterYaml) {
-				const contentAfterFM = await this.app.vault.read(file);
-				const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
-				if (yamlMatch) {
-					const yamlBlockWithNewlines = yamlMatch[0];
-					const currentNewlines = yamlMatch[2] || "";
-					
-					if (currentNewlines.length !== 2 || currentNewlines !== "\n\n") {
-						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
-						const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
-						const updatedContent = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
+				if (this.settings.lintBlankLineAfterYaml) {
+					const contentAfterFM = await this.app.vault.read(file);
+					const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
+					if (yamlMatch) {
+						const yamlBlockWithNewlines = yamlMatch[0];
+						const currentNewlines = yamlMatch[2] || "";
 						
-						if (updatedContent !== contentAfterFM) {
-							await this.app.vault.modify(file, updatedContent);
+						if (currentNewlines.length !== 2 || currentNewlines !== "\n\n") {
+							const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
+							const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
+							const updatedContent = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
+							
+							if (updatedContent !== contentAfterFM) {
+								await this.app.vault.modify(file, updatedContent);
+							}
 						}
 					}
 				}
-			}
+			});
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
 			console.error(`Error during lint (${file.path}):`, e);
 			return false;
-		} finally {
-			this.setMaterializing(false);
 		}
 
 		if (!silent) {

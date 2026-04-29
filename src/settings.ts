@@ -1,22 +1,55 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon, Platform } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Platform, Command } from "obsidian";
 import CruciblePlugin from "./main";
-import { FileSuggest, FolderSuggest, CommandSuggest } from "./suggesters";
-import { CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType } from "./types";
+import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
+import { Capture, CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType } from "./types";
 import { agentCommandId } from "./agents";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
 }
 
+type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'lint' | 'commands';
+
 export class CrucibleSettingTab extends PluginSettingTab {
 	plugin: CruciblePlugin;
-	private activeTab: 'settings' | 'lint' | 'shortcuts' | 'captures' | 'commands' | 'chains' | 'providers' | 'agents' = 'settings';
+	private activeTab: CrucibleSettingsTab = 'configure';
+	private editingCaptureIndex: number = -1;
 	private editingChainIndex: number = -1;
+	private editingProviderIndex: number = -1;
+	private editingAgentIndex: number = -1;
 
 	constructor(app: App, plugin: CruciblePlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	private isEditingDetail(): boolean {
+		return this.editingCaptureIndex !== -1 ||
+			this.editingChainIndex !== -1 ||
+			this.editingProviderIndex !== -1 ||
+			this.editingAgentIndex !== -1;
+	}
+
+	private resetEditingState(): void {
+		this.editingCaptureIndex = -1;
+		this.editingChainIndex = -1;
+		this.editingProviderIndex = -1;
+		this.editingAgentIndex = -1;
+	}
+
+	private getChainCommandExtras(): Command[] {
+		const sourceExtras: Command[] = [
+			{ id: 'crucible:source:active-file', name: 'Crucible Source: Active file contents' },
+			{ id: 'crucible:source:selection', name: 'Crucible Source: Editor selection' },
+			{ id: 'crucible:source:input', name: 'Crucible Source: User input' }
+		];
+		const agentExtras: Command[] = this.plugin.settings.agents.map(a => ({
+			id: agentCommandId(a.id),
+			name: `Crucible Agent: ${a.name || '(unnamed)'}`
+		}));
+
+		return [...sourceExtras, ...agentExtras];
 	}
 
 	display(): void {
@@ -28,16 +61,16 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		const navBar = containerEl.createDiv({ cls: 'crucible-tab-nav' });
 		
-		if (this.editingChainIndex !== -1) {
+		if (this.isEditingDetail()) {
 			const backBtn = navBar.createDiv({ cls: 'crucible-tab-btn' });
 			setIcon(backBtn, 'arrow-left');
 			backBtn.createSpan({ text: ' Back' });
 			backBtn.onclick = () => {
-				this.editingChainIndex = -1;
+				this.resetEditingState();
 				this.display();
 			};
 		} else {
-			const createTab = (id: typeof this.activeTab, icon: string, label: string) => {
+			const createTab = (id: CrucibleSettingsTab, icon: string, label: string) => {
 				const btn = navBar.createDiv({ 
 					cls: `crucible-tab-btn ${this.activeTab === id ? 'is-active' : ''}` 
 				});
@@ -45,36 +78,28 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				btn.createSpan({ text: ` ${label}` });
 				btn.onclick = () => {
 					this.activeTab = id;
+					this.resetEditingState();
 					this.display();
 				};
 			};
 
-			createTab('settings', 'settings', 'Settings');
-			createTab('shortcuts', 'link', 'Shortcuts');
-			createTab('captures', 'edit-3', 'Captures');
-			createTab('chains', 'list', 'Chains');
-			createTab('providers', 'plug', 'Providers');
-			createTab('agents', 'bot', 'Agents');
-			createTab('commands', 'terminal', 'Commands');
+			createTab('configure', 'settings', 'Configure');
+			createTab('automate', 'workflow', 'Automate');
+			createTab('ai', 'bot', 'AI');
 			createTab('lint', 'check-circle', 'Lint');
+			createTab('commands', 'terminal', 'Commands');
 		}
 
 		containerEl.createEl('hr', { cls: 'crucible-tab-hr' });
 
-		if (this.activeTab === 'settings') {
+		if (this.activeTab === 'configure') {
 			this.renderSettings(containerEl);
 		} else if (this.activeTab === 'lint') {
 			this.renderLintSettings(containerEl);
-		} else if (this.activeTab === 'shortcuts') {
-			this.renderShortcutSettings(containerEl);
-		} else if (this.activeTab === 'captures') {
-			this.renderCaptureSettings(containerEl);
-		} else if (this.activeTab === 'chains') {
-			this.renderChainSettings(containerEl);
-		} else if (this.activeTab === 'providers') {
-			this.renderProviderSettings(containerEl);
-		} else if (this.activeTab === 'agents') {
-			this.renderAgentSettings(containerEl);
+		} else if (this.activeTab === 'automate') {
+			this.renderAutomateSettings(containerEl);
+		} else if (this.activeTab === 'ai') {
+			this.renderAiSettings(containerEl);
 		} else if (this.activeTab === 'commands') {
 			this.renderCommandSettings(containerEl);
 		}
@@ -188,12 +213,87 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		el.prepend(hotkeyEl);
 	}
 
-	private renderChainSettings(containerEl: HTMLElement) {
+	private renderAutomateSettings(containerEl: HTMLElement) {
+		if (this.editingCaptureIndex !== -1) {
+			this.renderEditCapture(containerEl);
+			return;
+		}
 		if (this.editingChainIndex !== -1) {
 			this.renderEditChain(containerEl);
 			return;
 		}
 
+		this.renderCaptureListSection(containerEl);
+		this.renderChainListSection(containerEl);
+		this.renderShortcutSettings(containerEl);
+	}
+
+	private renderCaptureListSection(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('Captures').setHeading();
+		containerEl.createEl('p', { text: 'Define workflows to quickly append, prepend, or replace text in notes.' });
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		if (this.plugin.settings.captures.length === 0) {
+			group.createDiv({ text: 'No captures configured.', cls: 'crucible-empty-state' });
+		} else {
+			this.plugin.settings.captures.forEach((capture, index) => {
+				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(group)
+					.setName(capture.name || '(unnamed)')
+					.setDesc(this.describeCapture(capture))
+					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit capture').onClick(() => {
+						this.editingCaptureIndex = index;
+						this.display();
+					}))
+					.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete capture').onClick(async () => {
+						this.plugin.settings.captures.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.plugin.registerCaptures();
+						this.display();
+					}));
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => {
+			this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', writeMode: 'append' });
+			await this.plugin.saveSettings();
+			this.plugin.registerCaptures();
+			this.editingCaptureIndex = this.plugin.settings.captures.length - 1;
+			this.display();
+		}));
+	}
+
+	private describeCapture(capture: Capture): string {
+		const target = this.captureTargetLabel(capture);
+		const source = this.captureSourceLabel(capture.source || 'dialog');
+		const writeMode = this.captureWriteModeLabel(capture.writeMode || 'append');
+		return `${target} - ${source} - ${writeMode}`;
+	}
+
+	private captureTargetLabel(capture: Capture): string {
+		if (capture.targetType === 'daily') return 'Daily note';
+		if (capture.targetType === 'weekly') return 'Weekly note';
+		if (capture.targetType === 'monthly') return 'Monthly note';
+		if (capture.targetType === 'active') return 'Active note';
+		return capture.file || 'Specified note';
+	}
+
+	private captureSourceLabel(source: CaptureSource): string {
+		if (source === 'line') return 'Current line';
+		if (source === 'line-fallback') return 'Current line or dialog';
+		if (source === 'selection') return 'Selection';
+		if (source === 'selection-fallback') return 'Selection or dialog';
+		return 'Dialog';
+	}
+
+	private captureWriteModeLabel(writeMode: CaptureWriteMode): string {
+		if (writeMode === 'prepend') return 'Prepend';
+		if (writeMode === 'replace') return 'Replace';
+		return 'Append';
+	}
+
+	private renderChainListSection(containerEl: HTMLElement) {
 		new Setting(containerEl).setName('Chains').setHeading();
 		containerEl.createEl('p', { text: 'Define a sequence of commands to run in order. Chains can pass arguments and responses between steps.' });
 
@@ -220,7 +320,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			});
 		}
 
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add Chain').setCta().onClick(async () => {
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add chain').setCta().onClick(async () => {
 			this.plugin.settings.chains.push({ name: '', steps: [] });
 			await this.plugin.saveSettings();
 			this.editingChainIndex = this.plugin.settings.chains.length - 1;
@@ -286,34 +386,32 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			new Setting(stepGroup)
 				.setName('Command')
 				.addSearch(cb => {
+					const commandExtras = this.getChainCommandExtras();
 					let prevSchema = this.plugin.chainManager.getCommandSchema(step.commandId);
+					const updateCommandId = async (commandId: string) => {
+						step.commandId = commandId;
+						const newSchema = this.plugin.chainManager.getCommandSchema(commandId);
+						if (newSchema !== prevSchema) {
+							// Schema changed - clear args and rebuild to show new schema inputs
+							step.args = {};
+							prevSchema = newSchema;
+							await this.plugin.saveSettings();
+							this.display();
+						} else {
+							await this.plugin.saveSettings();
+						}
+					};
 					cb.setPlaceholder('Search for a command...')
-						.setValue(step.commandId)
+						.setValue(getCommandSuggestDisplayName(this.app, step.commandId, commandExtras))
 						.onChange(async (v) => {
-							step.commandId = v;
-							const newSchema = this.plugin.chainManager.getCommandSchema(v);
-							if (newSchema !== prevSchema) {
-								// Schema changed - clear args and rebuild to show new schema inputs
-								step.args = {};
-								prevSchema = newSchema;
-								await this.plugin.saveSettings();
-								this.display();
-							} else {
-								await this.plugin.saveSettings();
-							}
+							const selectedCommand = findCommandSuggestItem(this.app, v, commandExtras);
+							await updateCommandId(selectedCommand?.id || v);
 						});
 					const el = (cb as unknown as SearchWithContainer).containerEl;
 					if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-					const agentExtras = this.plugin.settings.agents.map(a => ({
-						id: agentCommandId(a.id),
-						name: `Crucible Agent: ${a.name || '(unnamed)'}`
-					}));
-					const sourceExtras = [
-						{ id: 'crucible:source:active-file', name: 'Crucible Source: Active file contents' },
-						{ id: 'crucible:source:selection', name: 'Crucible Source: Editor selection' },
-						{ id: 'crucible:source:input', name: 'Crucible Source: User input' }
-					];
-					new CommandSuggest(this.app, cb.inputEl, [...sourceExtras, ...agentExtras]);
+					new CommandSuggest(this.app, cb.inputEl, commandExtras, command => {
+						void updateCommandId(command.id);
+					});
 				});
 
 			const schema = this.plugin.chainManager.getCommandSchema(step.commandId);
@@ -402,9 +500,36 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		}));
 	}
 
-	private renderProviderSettings(containerEl: HTMLElement) {
-		new Setting(containerEl).setName('LLM Providers').setHeading();
-		containerEl.createEl('p', { text: 'Configure connection details for each LLM you want to use. Agents reference a Provider to make calls. API keys are stored securely using Obsidian Secret Storage.' });
+	private renderAiSettings(containerEl: HTMLElement) {
+		if (this.editingProviderIndex !== -1) {
+			const provider = this.plugin.settings.providers[this.editingProviderIndex];
+			if (provider) {
+				new Setting(containerEl).setName('Edit Provider').setHeading();
+				const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+				this.renderEditProvider(group, provider, this.editingProviderIndex);
+				return;
+			}
+			this.editingProviderIndex = -1;
+		}
+
+		if (this.editingAgentIndex !== -1) {
+			const agent = this.plugin.settings.agents[this.editingAgentIndex];
+			if (agent) {
+				new Setting(containerEl).setName('Edit Agent').setHeading();
+				const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+				this.renderEditAgent(group, agent, this.editingAgentIndex);
+				return;
+			}
+			this.editingAgentIndex = -1;
+		}
+
+		this.renderProviderListSection(containerEl);
+		this.renderAgentListSection(containerEl);
+	}
+
+	private renderProviderListSection(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('Providers').setHeading();
+		containerEl.createEl('p', { text: 'Configure LLM connections and models. Agents reference providers when they run.' });
 
 		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
 
@@ -412,28 +537,57 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			group.createDiv({ text: 'No providers configured.', cls: 'crucible-empty-state' });
 		} else {
 			this.plugin.settings.providers.forEach((provider, index) => {
-				const providerGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-				this.renderEditProvider(providerGroup, provider, index);
+				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(group)
+					.setName(provider.name || '(unnamed)')
+					.setDesc(this.describeProvider(provider))
+					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit provider').onClick(() => {
+						this.editingProviderIndex = index;
+						this.display();
+					}))
+					.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete provider').onClick(async () => {
+						await this.deleteProvider(index);
+					}));
 			});
 		}
 
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add Provider').setCta().onClick(async () => {
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add provider').setCta().onClick(async () => {
 			const id = Math.random().toString(36).substring(2, 9);
 			this.plugin.settings.providers.push({ id, name: '', type: 'openai', model: 'gpt-4o' });
 			await this.plugin.saveSettings();
+			this.editingProviderIndex = this.plugin.settings.providers.length - 1;
 			this.display();
 		}));
+	}
+
+	private describeProvider(provider: Provider): string {
+		const typeLabels: Record<LlmProviderType, string> = {
+			openai: 'OpenAI',
+			anthropic: 'Anthropic',
+			google: 'Google',
+			openrouter: 'OpenRouter',
+			ollama: 'Ollama'
+		};
+		return `${typeLabels[provider.type]} - ${provider.model || '(no model)'}`;
+	}
+
+	private async deleteProvider(index: number) {
+		const provider = this.plugin.settings.providers[index];
+		if (!provider) return;
+
+		this.plugin.settings.providers.splice(index, 1);
+		this.editingProviderIndex = -1;
+		await this.plugin.saveSettings();
+		await this.plugin.providerManager.deleteApiKey(provider.id);
+		this.plugin.registerAgents();
+		this.display();
 	}
 
 	private renderEditProvider(containerEl: HTMLElement, provider: Provider, index: number) {
 		new Setting(containerEl)
 			.setName(`Provider: ${provider.name || '(unnamed)'}`)
 			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete provider').onClick(async () => {
-				this.plugin.settings.providers.splice(index, 1);
-				await this.plugin.saveSettings();
-				await this.plugin.providerManager.deleteApiKey(provider.id);
-				this.plugin.registerAgents();
-				this.display();
+				await this.deleteProvider(index);
 			}));
 
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
@@ -443,20 +597,23 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			.addText(t => t
 				.setPlaceholder('e.g. GPT-4o')
 				.setValue(provider.name)
-				.onChange(async (v) => { provider.name = v; await this.plugin.saveSettings(); }));
+				.onChange(async (v) => { provider.name = v; await this.plugin.saveSettings(); })
+				.inputEl.addClass('pi-width-normal'));
 
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 
 		new Setting(containerEl)
 			.setName('Type')
-			.addDropdown(d => d
-				.addOption('openai', 'OpenAI')
-				.addOption('anthropic', 'Anthropic')
-				.addOption('google', 'Google (Gemini)')
-				.addOption('openrouter', 'OpenRouter')
-				.addOption('ollama', 'Ollama (Local)')
-				.setValue(provider.type)
-				.onChange(async (v: LlmProviderType) => { provider.type = v; await this.plugin.saveSettings(); this.display(); }));
+			.addDropdown(d => {
+				d.addOption('openai', 'OpenAI')
+					.addOption('anthropic', 'Anthropic')
+					.addOption('google', 'Google (Gemini)')
+					.addOption('openrouter', 'OpenRouter')
+					.addOption('ollama', 'Ollama (Local)')
+					.setValue(provider.type)
+					.onChange(async (v: LlmProviderType) => { provider.type = v; await this.plugin.saveSettings(); this.display(); });
+				d.selectEl.addClass('pi-width-half');
+			});
 
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 
@@ -471,6 +628,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				t.setPlaceholder(placeholder)
 				 .setValue(provider.model)
 				 .onChange(async (v) => { provider.model = v; await this.plugin.saveSettings(); });
+				t.inputEl.addClass('pi-width-normal');
 			});
 
 		if (provider.type !== 'ollama') {
@@ -484,6 +642,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					 .onChange(async (v) => {
 						await this.plugin.providerManager.storeApiKey(provider.id, v);
 					 });
+					t.inputEl.addClass('pi-width-normal');
 					// We don't load the key back into the UI for security
 				});
 		} else {
@@ -494,11 +653,12 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				.addText(t => t
 					.setPlaceholder('http://localhost:11434')
 					.setValue(provider.baseUrl || '')
-					.onChange(async (v) => { provider.baseUrl = v; await this.plugin.saveSettings(); }));
+					.onChange(async (v) => { provider.baseUrl = v; await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-normal'));
 		}
 	}
 
-	private renderAgentSettings(containerEl: HTMLElement) {
+	private renderAgentListSection(containerEl: HTMLElement) {
 		new Setting(containerEl).setName('Agents').setHeading();
 		containerEl.createEl('p', { text: 'An Agent binds a Provider to a system prompt and a user-prompt template. Each Agent is registered as an internal command so it can be used as a step in a Chain.' });
 
@@ -513,13 +673,22 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			listGroup.createDiv({ text: 'No agents configured.', cls: 'crucible-empty-state' });
 		} else {
 			this.plugin.settings.agents.forEach((agent, index) => {
-				const agentGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-				this.renderEditAgent(agentGroup, agent, index);
+				if (index > 0) listGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(listGroup)
+					.setName(agent.name || '(unnamed)')
+					.setDesc(this.describeAgent(agent))
+					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit agent').onClick(() => {
+						this.editingAgentIndex = index;
+						this.display();
+					}))
+					.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete agent').onClick(async () => {
+						await this.deleteAgent(index);
+					}));
 			});
 		}
 
 		new Setting(containerEl).addButton(bt => bt
-			.setButtonText('Add Agent')
+			.setButtonText('Add agent')
 			.setCta()
 			.setDisabled(this.plugin.settings.providers.length === 0)
 			.onClick(async () => {
@@ -538,8 +707,25 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				});
 				await this.plugin.saveSettings();
 				this.plugin.registerAgents();
+				this.editingAgentIndex = this.plugin.settings.agents.length - 1;
 				this.display();
 			}));
+	}
+
+	private describeAgent(agent: Agent): string {
+		const provider = this.plugin.settings.providers.find(p => p.id === agent.providerId);
+		const providerName = provider ? provider.name || `(unnamed ${provider.type})` : 'No provider selected';
+		return `${providerName} - ${agentCommandId(agent.id)}`;
+	}
+
+	private async deleteAgent(index: number) {
+		if (!this.plugin.settings.agents[index]) return;
+
+		this.plugin.settings.agents.splice(index, 1);
+		this.editingAgentIndex = -1;
+		await this.plugin.saveSettings();
+		this.plugin.registerAgents();
+		this.display();
 	}
 
 	private renderEditAgent(containerEl: HTMLElement, agent: Agent, index: number) {
@@ -549,10 +735,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			.setName(`Agent: ${agent.name || '(unnamed)'}`)
 			.setDesc(`Chain command: ${commandId}`)
 			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete agent').onClick(async () => {
-				this.plugin.settings.agents.splice(index, 1);
-				await this.plugin.saveSettings();
-				this.plugin.registerAgents();
-				this.display();
+				await this.deleteAgent(index);
 			}));
 
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
@@ -951,7 +1134,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	}
 
 	private renderShortcutSettings(containerEl: HTMLElement) {
-		new Setting(containerEl).setName('Command shortcuts').setHeading();
+		new Setting(containerEl).setName('Shortcuts').setHeading();
 		containerEl.createEl('p', { text: 'Create custom commands to open specific files directly from the Command Palette.' });
 		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		this.plugin.settings.shortcuts.forEach((shortcut, index) => {
@@ -970,65 +1153,133 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		new Setting(group).addButton(bt => bt.setButtonText('Add shortcut').setCta().onClick(async () => { this.plugin.settings.shortcuts.push({ name: '', file: '' }); await this.plugin.saveSettings(); this.display(); }));
 	}
 
-	private renderCaptureSettings(containerEl: HTMLElement) {
-		new Setting(containerEl).setName('Capture workflows').setHeading();
-		containerEl.createEl('p', { text: 'Define workflows to quickly append or prepend text to specific notes.' });
-		this.plugin.settings.captures.forEach((capture, index) => {
-			const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
-			new Setting(group).setName('Capture name').addText(t => t.setPlaceholder('e.g. quick note').setValue(capture.name).onChange(async (v) => { capture.name = v; await this.plugin.saveSettings(); this.plugin.registerCaptures(); }).inputEl.addClass('pi-width-normal'));
+	private renderEditCapture(containerEl: HTMLElement) {
+		const capture = this.plugin.settings.captures[this.editingCaptureIndex];
+		if (!capture) {
+			this.editingCaptureIndex = -1;
+			this.renderAutomateSettings(containerEl);
+			return;
+		}
+
+		new Setting(containerEl).setName('Edit Capture').setHeading();
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(group)
+			.setName('Capture name')
+			.addText(t => t
+				.setPlaceholder('e.g. quick note')
+				.setValue(capture.name)
+				.onChange(async (v) => {
+					capture.name = v;
+					await this.plugin.saveSettings();
+					this.plugin.registerCaptures();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Target note')
+			.addDropdown(dd => {
+				dd.addOptions({
+					daily: 'Daily note',
+					weekly: 'Weekly note',
+					monthly: 'Monthly note',
+					active: 'Active note',
+					selected: 'Specify note'
+				})
+					.setValue(capture.targetType)
+					.onChange(async (v: CaptureTarget) => {
+						capture.targetType = v;
+						await this.plugin.saveSettings();
+						this.display();
+					});
+				dd.selectEl.addClass('pi-width-half');
+			});
+
+		if (capture.targetType === 'selected') {
 			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group).setName('Target note').addDropdown(dd => { dd.addOptions({ daily: 'Daily note', weekly: 'Weekly note', monthly: 'Monthly note', active: 'Active note', selected: 'Specify note' }).setValue(capture.targetType).onChange(async (v: CaptureTarget) => { capture.targetType = v; await this.plugin.saveSettings(); this.display(); }); dd.selectEl.addClass('pi-width-half'); });
-			if (capture.targetType === 'selected') {
-				group.createEl('hr', { cls: 'crucible-row-divider' });
-				new Setting(group).setName('Select note').addSearch(cb => { 
-					cb.setPlaceholder('e.g. inbox.md').setValue(capture.file).onChange(async (v) => { capture.file = v; await this.plugin.saveSettings(); }); 
+			new Setting(group)
+				.setName('Select note')
+				.addSearch(cb => { 
+					cb.setPlaceholder('e.g. inbox.md')
+						.setValue(capture.file)
+						.onChange(async (v) => { capture.file = v; await this.plugin.saveSettings(); }); 
 					const el = (cb as unknown as SearchWithContainer).containerEl;
 					if (el) el.addClass('crucible-search-container', 'pi-width-normal');
 					new FileSuggest(this.app, cb.inputEl); 
 				});
-			}
-			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group)
-				.setName('Capture source')
-				.addDropdown(dd => {
-					dd.addOption('dialog', 'Dialog')
-					  .addOption('line', 'Current line')
-					  .addOption('line-fallback', 'Current line -> Dialog')
-					  .addOption('selection', 'Selection')
-					  .addOption('selection-fallback', 'Selection -> Dialog')
-					  .setValue(capture.source || 'dialog')
-					  .onChange(async (value: CaptureSource) => {
-						  capture.source = value;
-						  await this.plugin.saveSettings();
-					  });
-					dd.selectEl.addClass('pi-width-half');
-				});
-			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group).setName('Target section').setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.').addText(t => t.setPlaceholder('# header').setValue(capture.targetSection).onChange(async (v) => { capture.targetSection = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-normal'));
-			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group)
-				.setName('Write mode')
-				.setDesc('How captured content is added to the target section or file.')
-				.addDropdown(dd => {
-					dd.addOption('append', 'Append')
-					  .addOption('prepend', 'Prepend')
-					  .addOption('replace', 'Replace')
-					  .setValue(capture.writeMode || 'append')
-					  .onChange(async (v: CaptureWriteMode) => {
-						  capture.writeMode = v;
-						  await this.plugin.saveSettings();
-					  });
-					dd.selectEl.addClass('pi-width-half');
-				});
-			group.createEl('hr', { cls: 'crucible-row-divider' });
-			const autoSize = (el: HTMLTextAreaElement) => { 
-				el.setCssProps({ height: 'auto' });
-				el.setCssProps({ height: `${el.scrollHeight}px` });
-			};
-			new Setting(group).setName('Content template').setDesc('Text to capture (supports variables like {{now}}, {{value}}).').addTextArea(t => { t.setPlaceholder('- {{now}}: {{value}}').setValue(capture.content).onChange(async (v) => { capture.content = v; await this.plugin.saveSettings(); autoSize(t.inputEl); }); t.inputEl.addClass('crucible-setting-textarea', 'pi-width-wide'); requestAnimationFrame(() => autoSize(t.inputEl)); });
-			group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => { this.plugin.settings.captures.splice(index, 1); await this.plugin.saveSettings(); this.plugin.registerCaptures(); this.display(); }));
-		});
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => { this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', writeMode: 'append' }); await this.plugin.saveSettings(); this.display(); }));
+		}
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Capture source')
+			.addDropdown(dd => {
+				dd.addOption('dialog', 'Dialog')
+				  .addOption('line', 'Current line')
+				  .addOption('line-fallback', 'Current line -> Dialog')
+				  .addOption('selection', 'Selection')
+				  .addOption('selection-fallback', 'Selection -> Dialog')
+				  .setValue(capture.source || 'dialog')
+				  .onChange(async (value: CaptureSource) => {
+					  capture.source = value;
+					  await this.plugin.saveSettings();
+				  });
+				dd.selectEl.addClass('pi-width-half');
+			});
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Target section')
+			.setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.')
+			.addText(t => t
+				.setPlaceholder('# header')
+				.setValue(capture.targetSection)
+				.onChange(async (v) => { capture.targetSection = v; await this.plugin.saveSettings(); })
+				.inputEl.addClass('pi-width-normal'));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Write mode')
+			.setDesc('How captured content is added to the target section or file.')
+			.addDropdown(dd => {
+				dd.addOption('append', 'Append')
+				  .addOption('prepend', 'Prepend')
+				  .addOption('replace', 'Replace')
+				  .setValue(capture.writeMode || 'append')
+				  .onChange(async (v: CaptureWriteMode) => {
+					  capture.writeMode = v;
+					  await this.plugin.saveSettings();
+				  });
+				dd.selectEl.addClass('pi-width-half');
+			});
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		const autoSize = (el: HTMLTextAreaElement) => { 
+			el.setCssProps({ height: 'auto' });
+			el.setCssProps({ height: `${el.scrollHeight}px` });
+		};
+		new Setting(group)
+			.setName('Content template')
+			.setDesc('Text to capture (supports variables like {{now}}, {{value}}).')
+			.addTextArea(t => {
+				t.setPlaceholder('- {{now}}: {{value}}')
+					.setValue(capture.content)
+					.onChange(async (v) => {
+						capture.content = v;
+						await this.plugin.saveSettings();
+						autoSize(t.inputEl);
+					});
+				t.inputEl.addClass('crucible-setting-textarea', 'pi-width-wide');
+				requestAnimationFrame(() => autoSize(t.inputEl));
+			});
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => {
+			this.plugin.settings.captures.splice(this.editingCaptureIndex, 1);
+			this.editingCaptureIndex = -1;
+			await this.plugin.saveSettings();
+			this.plugin.registerCaptures();
+			this.display();
+		}));
 	}
 }

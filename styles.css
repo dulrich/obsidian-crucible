@@ -38,20 +38,24 @@ If your plugin does not need CSS, delete this file.
 /* Tab Navigation */
 .crucible-tab-nav {
   display: flex;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px;
   margin-bottom: 0;
+  max-width: 100%;
 }
 
 .crucible-tab-btn {
-  padding: 6px 12px;
+  padding: 6px 8px;
   cursor: pointer;
   border-radius: 4px 4px 0 0;
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   font-size: 0.9em;
   color: var(--text-muted);
   border-bottom: 2px solid transparent;
   transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
 .crucible-tab-btn:hover {

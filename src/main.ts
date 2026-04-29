@@ -9,6 +9,7 @@ import { ProviderManager } from "./providers";
 import { AgentManager } from "./agents";
 import { TableOfContentsUI } from "./toc";
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
+import { normalizeFrontmatterPropertyName, parseTagList, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterTags, withMaterializing } from './frontmatter';
 
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
@@ -393,6 +394,19 @@ export default class CruciblePlugin extends Plugin {
 			return false;
 		});
 
+		register('upsert-tags', async (args) => {
+			return await this.upsertActiveFileTags(args.tags || '');
+		}, [
+			{ id: 'tags', name: 'Tags', type: 'textarea', description: 'Tags to add to the active note frontmatter. Use commas, spaces, or one per line. Leading # is optional.' }
+		]);
+
+		register('upsert-property', async (args) => {
+			return await this.upsertActiveFileProperty(args.property || '', args.value || '');
+		}, [
+			{ id: 'property', name: 'Property', type: 'text', description: 'Frontmatter property name to create or update on the active note.' },
+			{ id: 'value', name: 'Value', type: 'textarea', description: 'Value to write to the property. Supports {{response}} from the previous chain step.' }
+		]);
+
 		register('capture', async (args, prev, editor) => {
 			// args: { name: string, value: string }
 			const name = args.name;
@@ -410,6 +424,38 @@ export default class CruciblePlugin extends Plugin {
 			{ id: 'name', name: 'Capture name', type: 'text', description: 'Name of the capture workflow to trigger.' },
 			{ id: 'value', name: 'Content', type: 'textarea', description: 'Optional content. If omitted, will prompt or use source.' }
 		]);
+	}
+
+	private async upsertActiveFileTags(tagsInput: string): Promise<boolean> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
+
+		const newTags = parseTagList(tagsInput);
+		if (newTags.length === 0) throw new Error('No tags provided');
+
+		await withMaterializing(state => { this.isMaterializing = state; }, async () => {
+			await updateFrontmatter(this.app, file, (fm) => {
+				upsertFrontmatterTags(fm, tagsInput);
+			});
+		});
+
+		return true;
+	}
+
+	private async upsertActiveFileProperty(property: string, value: string): Promise<boolean> {
+		const file = this.app.workspace.getActiveFile();
+		if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
+
+		const propertyName = normalizeFrontmatterPropertyName(property);
+		if (!propertyName) throw new Error('Property name is required');
+
+		await withMaterializing(state => { this.isMaterializing = state; }, async () => {
+			await updateFrontmatter(this.app, file, (fm) => {
+				upsertFrontmatterProperty(fm, propertyName, value);
+			});
+		});
+
+		return true;
 	}
 
 	registerChains() {
