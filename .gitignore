@@ -27,5 +27,21 @@ data.json
 # Swap files
 *.swp
 
-# Gemini Local Configs
-.gemini/*
+# Agent Local Configs
+.codex
+.claude/
+.gemini/
+.cursor/
+.continue/
+.windsurf/
+.cline/
+.roo/
+.roocode/
+.aider*
+.augment/
+.qwen/
+.kiro/
+.opencode/
+.crush/
+CLAUDE.local.md
+GEMINI.local.md

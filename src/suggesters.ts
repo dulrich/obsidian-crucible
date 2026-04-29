@@ -92,24 +92,17 @@ export class FileSuggest extends FileSystemSuggest {
 export class CommandSuggest extends AbstractInputSuggest<Command> {
 	public inputEl: HTMLInputElement;
 	private extraCommands: Command[];
+	private onChoose?: (command: Command) => void;
 
-	constructor(app: App, inputEl: HTMLInputElement, extraCommands: Command[] = []) {
+	constructor(app: App, inputEl: HTMLInputElement, extraCommands: Command[] = [], onChoose?: (command: Command) => void) {
 		super(app, inputEl);
 		this.inputEl = inputEl;
 		this.extraCommands = extraCommands;
+		this.onChoose = onChoose;
 	}
 
 	getItems(): Command[] {
-		const commands = this.app.commands.listCommands();
-
-		// Add internal virtual commands for easier selection in Chains
-		// Only add ones that aren't already registered as standard commands or need special handling
-		const internal: Command[] = [
-			{ id: 'crucible:capture', name: 'Crucible: Quick Capture (Name|Value)' },
-			...this.extraCommands
-		];
-
-		return [...internal, ...commands];
+		return getCommandSuggestItems(this.app, this.extraCommands);
 	}
 
 	getSuggestions(inputStr: string): Command[] {
@@ -130,8 +123,38 @@ export class CommandSuggest extends AbstractInputSuggest<Command> {
 	}
 
 	selectSuggestion(command: Command): void {
-		this.inputEl.value = command.id;
-		this.inputEl.dispatchEvent(new Event("input"));
+		if (this.onChoose) {
+			this.inputEl.value = command.name;
+			this.onChoose(command);
+		} else {
+			this.inputEl.value = command.id;
+			this.inputEl.dispatchEvent(new Event("input"));
+		}
 		this.close();
 	}
+}
+
+export function getCommandSuggestItems(app: App, extraCommands: Command[] = []): Command[] {
+	const commands = app.commands.listCommands();
+
+	// Add internal virtual commands for easier selection in Chains.
+	const internal: Command[] = [
+		{ id: 'crucible:capture', name: 'Crucible: Quick Capture (Name|Value)' },
+		{ id: 'crucible:upsert-property', name: 'Crucible: Add/update file property' },
+		{ id: 'crucible:upsert-tags', name: 'Crucible: Upsert frontmatter tags' },
+		...extraCommands
+	];
+
+	return [...internal, ...commands];
+}
+
+export function findCommandSuggestItem(app: App, value: string, extraCommands: Command[] = []): Command | undefined {
+	const normalizedValue = value.trim();
+	return getCommandSuggestItems(app, extraCommands)
+		.find(command => command.id === normalizedValue || command.name === normalizedValue);
+}
+
+export function getCommandSuggestDisplayName(app: App, commandId: string, extraCommands: Command[] = []): string {
+	return getCommandSuggestItems(app, extraCommands)
+		.find(command => command.id === commandId)?.name || commandId;
 }
