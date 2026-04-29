@@ -83,10 +83,9 @@ Supported tokens in any template or property injection:
 
 ## Testing
 
-- **Dev Server:** Always run `npm run dev` at the start of a session to watch for changes and hot-recompile.
+- **Hot reload watcher:** At the start of implementation or debugging work, remind the user to run `npm run dev` in a separate terminal. This watcher is for the user's Obsidian hot-reload workflow; without it, changes may compile only during the final build and can appear not to have taken effect in Obsidian. Do not run `npm run dev` automatically unless the user explicitly asks or the task specifically requires watching live build output. If you do run it, stop it before the full cleanup loop.
 - Link the root directory to your vault:
   ```bash
   ln -s /path/to/plugin <Vault>/.obsidian/plugins/obsidian-crucible
   ```
 - Use the **Reload Plugin** command from the palette after a re-build.
-
