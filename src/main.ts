@@ -1,23 +1,14 @@
 import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
-import { CrucibleSettings, DEFAULT_SETTINGS, Capture } from "./types";
+import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { CaptureManager, TextInputModal } from "./captures";
 import { ChainManager } from "./chains";
+import { ProviderManager } from "./providers";
+import { AgentManager } from "./agents";
 import { TableOfContentsUI } from "./toc";
-import { applyTemplateString } from './utils';
-
-interface AppWithPlugins extends App {
-	plugins: {
-		disablePlugin(id: string): Promise<void>;
-		enablePlugin(id: string): Promise<void>;
-	};
-	setting: {
-		open(): void;
-		openTabById(id: string): void;
-	};
-}
+import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
@@ -25,7 +16,9 @@ export default class CruciblePlugin extends Plugin {
 	private isMaterializing = false;
 	private materializer: Materializer;
 	private captureManager: CaptureManager;
-	private chainManager: ChainManager;
+	chainManager: ChainManager;
+	providerManager: ProviderManager;
+	agentManager: AgentManager;
 	private tocComponent: TableOfContentsUI | null = null;
 
 	async onload() {
@@ -33,16 +26,18 @@ export default class CruciblePlugin extends Plugin {
 
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
-		this.captureManager = new CaptureManager(this.app, this.settings);
+		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.chainManager = new ChainManager(this.app);
+		this.providerManager = new ProviderManager(this.app);
+		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 
 		this.registerInternalCommands();
+		this.agentManager.registerAgents();
 		this.registerChains();
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
-			const setting = (this.app as AppWithPlugins).setting;
-			setting.open();
-			setting.openTabById(this.manifest.id);
+			this.app.setting.open();
+			this.app.setting.openTabById(this.manifest.id);
 		});
 
 		// --- Commands ---
@@ -53,7 +48,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Materialize day: today', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('materialize-day-today')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-day-today`); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-day-today`, {}); }
 				return true;
 			}
 		});
@@ -71,7 +66,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Materialize week: current', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('materialize-week-today')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-week-today`); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-week-today`, {}); }
 				return true;
 			}
 		});
@@ -89,7 +84,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Materialize month: current', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('materialize-month-today')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-month-today`); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-month-today`, {}); }
 				return true;
 			}
 		});
@@ -108,7 +103,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: word count', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('word-count')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:word-count`); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:word-count`, {}); }
 				return true;
 			}
 		});
@@ -117,7 +112,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: all', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('lint-note')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-note`); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-note`, {}); }
 				return true;
 			}
 		});
@@ -126,7 +121,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: vault', 
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('lint-vault')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-vault`); }
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-vault`, {}); }
 				return true;
 			}
 		});
@@ -136,7 +131,7 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Mark as forwarded',
 			editorCallback: (editor) => {
 				if (this.settings.hiddenCommands.includes('mark-as-forwarded')) return;
-				void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, '', null, editor);
+				void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
 			}
 		});
 
@@ -147,10 +142,9 @@ export default class CruciblePlugin extends Plugin {
 				if (this.settings.hiddenCommands.includes('reload-plugin')) return false;
 				if (!checking) {
 					void (async () => {
-						const plugins = (this.app as AppWithPlugins).plugins;
-						if (plugins) {
-							await plugins.disablePlugin(this.manifest.id);
-							await plugins.enablePlugin(this.manifest.id);
+						if (this.app.plugins) {
+							await this.app.plugins.disablePlugin(this.manifest.id);
+							await this.app.plugins.enablePlugin(this.manifest.id);
 							new Notice('Plugin reloaded');
 						}
 					})();
@@ -206,8 +200,18 @@ export default class CruciblePlugin extends Plugin {
 
 	async loadSettings() { 
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CrucibleSettings>); 
+		await this.migrateSettings();
 	}
 	
+	private async migrateSettings() {
+		// Pre-1.0 migrations only. Add real migrations here once the data model ships.
+		return Promise.resolve();
+	}
+
+	registerAgents() {
+		this.agentManager.registerAgents();
+	}
+
 	async saveSettings() { 
 		await this.saveData(this.settings); 
 	}
@@ -252,7 +256,7 @@ export default class CruciblePlugin extends Plugin {
 
 			// Register in ChainManager so it can handle args/responses
 			this.chainManager.registerInternalCommand(fullId, async (args, prev, editor) => {
-				const resolvedValue = args || await this.resolveCaptureValue(capture, editor);
+				const resolvedValue = args._default || await this.resolveCaptureValue(capture, editor);
 				if (resolvedValue === null) return false;
 				return await this.captureManager.executeCapture(capture, resolvedValue);
 			});
@@ -267,12 +271,7 @@ export default class CruciblePlugin extends Plugin {
 							const value = await this.resolveCaptureValue(capture, editor);
 							if (value === null) return; 
 							
-							this.isMaterializing = true;
-							try {
-								await this.captureManager.executeCapture(capture, value);
-							} finally {
-								this.isMaterializing = false;
-							}
+							await this.captureManager.executeCapture(capture, value);
 						})();
 					}
 					return true;
@@ -330,12 +329,7 @@ export default class CruciblePlugin extends Plugin {
 		void (async () => {
 			const value = await this.promptForCaptureValue(capture);
 			if (value !== null) {
-				this.isMaterializing = true;
-				try {
-					await this.captureManager.executeCapture(capture, value);
-				} finally {
-					this.isMaterializing = false;
-				}
+				await this.captureManager.executeCapture(capture, value);
 			}
 		})();
 	}
@@ -344,9 +338,9 @@ export default class CruciblePlugin extends Plugin {
 		const prefix = this.manifest.id;
 
 		// Built-in commands
-		const register = (id: string, fn: (args: string, prev: unknown, editor?: Editor) => Promise<unknown>) => {
-			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn);
-			this.chainManager.registerInternalCommand(`crucible:${id}`, fn);
+		const register = (id: string, fn: (args: Record<string, string>, prev: unknown, editor?: Editor) => Promise<unknown>, schema?: CommandArgSchema[]) => {
+			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn, schema);
+			this.chainManager.registerInternalCommand(`crucible:${id}`, fn, schema);
 		};
 
 		register('lint-note', async () => await this.linter.lintNote());
@@ -355,6 +349,34 @@ export default class CruciblePlugin extends Plugin {
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
+
+		// --- Sources: produce content for chain steps via {{response}} ---
+		register('source:active-file', async () => {
+			const file = this.app.workspace.getActiveFile();
+			if (!file) throw new Error('No active file');
+			const content = await this.app.vault.read(file);
+			return content.replace(FRONTMATTER_REGEX, '').trim();
+		});
+
+		register('source:selection', async (args, prev, editor) => {
+			if (!editor) throw new Error('No editor available');
+			return editor.getSelection();
+		});
+
+		register('source:input', async (args) => {
+			const title = args.title || 'Input';
+			return await new Promise<string | false>((resolve) => {
+				let submitted = false;
+				new TextInputModal(
+					this.app,
+					title,
+					(value) => { submitted = true; resolve(value); },
+					() => { if (!submitted) resolve(false); }
+				).open();
+			});
+		}, [
+			{ id: 'title', name: 'Title', type: 'text', description: 'Heading shown above the input box.' }
+		]);
 		
 		register('mark-as-forwarded', async (args, prev, editor) => {
 			if (!editor) return false;
@@ -372,8 +394,10 @@ export default class CruciblePlugin extends Plugin {
 		});
 
 		register('capture', async (args, prev, editor) => {
-			// args format: "Capture Name|optional value"
-			const [name, manualValue] = args.split('|');
+			// args: { name: string, value: string }
+			const name = args.name;
+			const manualValue = args.value;
+			
 			const capture = this.settings.captures.find(c => c.name === name);
 			if (capture) {
 				const resolvedValue = manualValue || await this.resolveCaptureValue(capture, editor);
@@ -382,7 +406,10 @@ export default class CruciblePlugin extends Plugin {
 			}
 			new Notice(`Capture not found: ${name}`);
 			return false;
-		});
+		}, [
+			{ id: 'name', name: 'Capture name', type: 'text', description: 'Name of the capture workflow to trigger.' },
+			{ id: 'value', name: 'Content', type: 'textarea', description: 'Optional content. If omitted, will prompt or use source.' }
+		]);
 	}
 
 	registerChains() {

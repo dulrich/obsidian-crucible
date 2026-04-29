@@ -8,8 +8,9 @@ export interface Shortcut {
 	file: string;
 }
 
-export type CaptureTarget = 'daily' | 'weekly' | 'monthly' | 'selected';
+export type CaptureTarget = 'daily' | 'weekly' | 'monthly' | 'selected' | 'active';
 export type CaptureSource = 'dialog' | 'line' | 'line-fallback' | 'selection' | 'selection-fallback';
+export type CaptureWriteMode = 'append' | 'prepend' | 'replace';
 
 export interface Capture {
 	name: string;
@@ -18,21 +19,87 @@ export interface Capture {
 	file: string;
 	targetSection: string;
 	content: string;
-	prepend: boolean;
+	writeMode: CaptureWriteMode;
 }
 
 export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-right';
 export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
+import { Hotkey, Command } from 'obsidian';
+
+declare module 'obsidian' {
+	interface App {
+		secretStorage: SecretStorage;
+		plugins: {
+			enabledPlugins: Set<string>;
+			disablePlugin(id: string): Promise<void>;
+			enablePlugin(id: string): Promise<void>;
+		};
+		setting: {
+			open(): void;
+			openTabById(id: string): void;
+		};
+		commands: {
+			listCommands(): Command[];
+			executeCommandById(id: string): void;
+			commands: Record<string, Command>;
+		};
+		hotkeyManager: {
+			getHotkeys(id: string): Hotkey[];
+		};
+	}
+	interface MetadataCache {
+		isUserIgnored(path: string): boolean;
+	}
+}
+
+export interface SecretStorage {
+	setSecret(key: string, value: string): void;
+	getSecret(key: string): string | null;
+	listSecrets(): string[];
+}
+
+export interface CommandArgSchema {
+	id: string;
+	name: string;
+	type: 'text' | 'textarea' | 'dropdown' | 'file' | 'folder';
+	description?: string;
+	options?: Record<string, string>;
+}
+
 export interface ChainStep {
 	commandId: string;
 	keepGoing: boolean;
-	args: string;
+	args: Record<string, string>;
 }
 
 export interface Chain {
 	name: string;
 	steps: ChainStep[];
+}
+
+export type LlmProviderType = 'openai' | 'anthropic' | 'google' | 'openrouter' | 'ollama';
+
+export interface Provider {
+	id: string;
+	name: string;
+	type: LlmProviderType;
+	model: string;
+	baseUrl?: string;
+}
+
+export type AgentPromptSource = 'text' | 'file';
+
+export interface Agent {
+	id: string;
+	name: string;
+	providerId: string;
+	systemPromptSource: AgentPromptSource;
+	systemPromptText: string;
+	systemPromptFile: string;
+	userPromptSource: AgentPromptSource;
+	userPromptText: string;
+	userPromptFile: string;
 }
 
 export interface CrucibleSettings {
@@ -57,6 +124,10 @@ export interface CrucibleSettings {
 	captures: Capture[];
 	// Chains
 	chains: Chain[];
+	// LLM providers (connection + model)
+	providers: Provider[];
+	// Agents (provider + prompts, callable from chains)
+	agents: Agent[];
 	// ToC
 	showToC: boolean;
 	tocPosition: ToCPosition;
@@ -83,6 +154,8 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	shortcuts: [],
 	captures: [],
 	chains: [],
+	providers: [],
+	agents: [],
 	showToC: true,
 	tocPosition: 'bottom-right',
 	tocCollapseBehavior: 'manual',

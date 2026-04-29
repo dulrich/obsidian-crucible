@@ -1,28 +1,36 @@
 import { App, Notice, Editor } from 'obsidian';
-import { Chain, ChainStep } from './types';
+import { Chain, ChainStep, CommandArgSchema } from './types';
 
-export type ChainCommandFn = (args: string, previousResponse: unknown, editor?: Editor) => Promise<unknown>;
-
-interface AppWithCommands extends App {
-	commands: {
-		listCommands(): { id: string, name: string }[];
-		executeCommandById(id: string): void;
-	};
-}
+export type ChainCommandFn = (args: Record<string, string>, previousResponse: unknown, editor?: Editor) => Promise<unknown>;
 
 export class ChainManager {
 	app: App;
 	private registry: Map<string, ChainCommandFn> = new Map();
+	private schemas: Map<string, CommandArgSchema[]> = new Map();
 
 	constructor(app: App) {
 		this.app = app;
 	}
 
-	registerInternalCommand(id: string, fn: ChainCommandFn) {
+	registerInternalCommand(id: string, fn: ChainCommandFn, schema?: CommandArgSchema[]) {
 		this.registry.set(id, fn);
+		if (schema) this.schemas.set(id, schema);
 	}
 
-	async executeInternalCommand(id: string, args: string = '', prev: unknown = null, editor?: Editor): Promise<unknown> {
+	unregisterInternalCommand(id: string) {
+		this.registry.delete(id);
+		this.schemas.delete(id);
+	}
+
+	listInternalCommandIds(): string[] {
+		return Array.from(this.registry.keys());
+	}
+
+	getCommandSchema(id: string): CommandArgSchema[] | undefined {
+		return this.schemas.get(id);
+	}
+
+	async executeInternalCommand(id: string, args: Record<string, string> = {}, prev: unknown = null, editor?: Editor): Promise<unknown> {
 		const fn = this.registry.get(id);
 		if (fn) return await fn(args, prev, editor);
 		return null;
@@ -53,21 +61,27 @@ export class ChainManager {
 	private async executeStep(step: ChainStep, previousResponse: unknown, editor?: Editor): Promise<unknown> {
 		const internalFn = this.registry.get(step.commandId);
 		
-		// Process args template
-		let processedArgs = step.args || '';
+		// Handle legacy string args or missing args
+		const rawArgs = typeof step.args === 'string' ? { _default: step.args } : (step.args || {});
+		const processedArgs: Record<string, string> = {};
+
+		// Process args template for all values in the record
 		if (previousResponse !== null && previousResponse !== undefined) {
 			const respStr = typeof previousResponse === 'string' ? previousResponse : JSON.stringify(previousResponse);
-			processedArgs = processedArgs.replace(/{{response}}/g, respStr);
+			for (const [key, value] of Object.entries(rawArgs)) {
+				processedArgs[key] = value.replace(/{{response}}/g, respStr);
+			}
+		} else {
+			Object.assign(processedArgs, rawArgs);
 		}
 
 		if (internalFn) {
 			return await internalFn(processedArgs, previousResponse, editor);
 		} else {
 			// External Obsidian command
-			const appWithCommands = this.app as AppWithCommands;
-			if (appWithCommands.commands && appWithCommands.commands.listCommands().find(c => c.id === step.commandId)) {
-				appWithCommands.commands.executeCommandById(step.commandId);
-				return true; // We assume success for external commands as we can't track them
+			if (this.app.commands && this.app.commands.listCommands().find(c => c.id === step.commandId)) {
+				this.app.commands.executeCommandById(step.commandId);
+				return true;
 			} else {
 				throw new Error(`Command not found: ${step.commandId}`);
 			}
