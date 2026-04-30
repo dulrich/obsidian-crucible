@@ -39,17 +39,44 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	}
 
 	private getChainCommandExtras(): Command[] {
-		const sourceExtras: Command[] = [
+		const chainOnlyCommands: Command[] = [
 			{ id: 'crucible:source:active-file', name: 'Crucible Source: Active file contents' },
 			{ id: 'crucible:source:selection', name: 'Crucible Source: Editor selection' },
-			{ id: 'crucible:source:input', name: 'Crucible Source: User input' }
+			{ id: 'crucible:source:input', name: 'Crucible Source: User input' },
+			{ id: 'crucible:copy-active-file', name: 'Crucible: Copy note to clipboard' },
+			{ id: 'crucible:copy-note-to-folder', name: 'Crucible: Copy note to folder' },
+			{ id: 'crucible:replace-note-body', name: 'Crucible: Replace note body' },
+			{ id: 'crucible:capture', name: 'Crucible: Quick Capture' },
+			{ id: 'crucible:upsert-property', name: 'Crucible: Add/update property' },
+			{ id: 'crucible:upsert-tags', name: 'Crucible: Upsert tags' },
 		];
 		const agentExtras: Command[] = this.plugin.settings.agents.map(a => ({
 			id: agentCommandId(a.id),
 			name: `Crucible Agent: ${a.name || '(unnamed)'}`
 		}));
 
-		return [...sourceExtras, ...agentExtras];
+		return [...chainOnlyCommands, ...agentExtras];
+	}
+
+	private getChainOnlyCommandList(): { id: string, name: string }[] {
+		return [
+			{ id: 'crucible:source:active-file', name: 'Source: Active file contents' },
+			{ id: 'crucible:source:selection', name: 'Source: Editor selection' },
+			{ id: 'crucible:source:input', name: 'Source: User input' },
+			{ id: 'crucible:copy-active-file', name: 'Copy note to clipboard' },
+			{ id: 'crucible:copy-note-to-folder', name: 'Copy note to folder' },
+			{ id: 'crucible:replace-note-body', name: 'Replace note body' },
+			{ id: 'crucible:capture', name: 'Quick Capture' },
+			{ id: 'crucible:upsert-property', name: 'Add/update property' },
+			{ id: 'crucible:upsert-tags', name: 'Upsert tags' },
+		];
+	}
+
+	private refreshDisplay() {
+		const scrollEl = this.containerEl.closest('.vertical-tab-content') as HTMLElement | null;
+		const scrollTop = scrollEl?.scrollTop ?? 0;
+		this.display();
+		requestAnimationFrame(() => { if (scrollEl) scrollEl.scrollTop = scrollTop; });
 	}
 
 	display(): void {
@@ -107,14 +134,24 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 	private renderCommandSettings(containerEl: HTMLElement) {
 		new Setting(containerEl).setName('Command visibility').setHeading();
-		containerEl.createEl('p', { text: 'Control which commands are visible in the Obsidian Command Palette. Disabling a command here will hide it from the palette but will not delete its configuration.' });
+		containerEl.createEl('p', { text: 'Control where commands appear. "Palette" shows the command in the Obsidian Command Palette. "Chains" shows it in the chain step search.' });
 
+		const toggleList = (list: string[], id: string, enabled: boolean): string[] => {
+			if (enabled) return list.filter(x => x !== id);
+			return list.includes(id) ? list : [...list, id];
+		};
+
+		// Palette + Chain Search toggles — for commands registered with this.addCommand()
 		const renderGroup = (title: string, commands: { id: string, name: string }[]) => {
 			if (commands.length === 0) return;
-			
+
 			new Setting(containerEl).setName(title).setHeading();
 			const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
-			
+
+			const header = new Setting(group).setName('').setDesc('');
+			header.controlEl.createSpan({ text: 'Palette', cls: 'crucible-toggle-header' });
+			header.controlEl.createSpan({ text: 'Chains', cls: 'crucible-toggle-header' });
+
 			commands.sort((a, b) => a.name.localeCompare(b.name));
 
 			commands.forEach((cmd, index) => {
@@ -122,19 +159,47 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				const s = new Setting(group)
 					.setName(cmd.name)
 					.addToggle(toggle => toggle
+						.setTooltip('Show in Command Palette')
 						.setValue(!this.plugin.settings.hiddenCommands.includes(cmd.id))
 						.onChange(async (value) => {
-							if (value) {
-								this.plugin.settings.hiddenCommands = this.plugin.settings.hiddenCommands.filter(id => id !== cmd.id);
-							} else {
-								if (!this.plugin.settings.hiddenCommands.includes(cmd.id)) {
-									this.plugin.settings.hiddenCommands.push(cmd.id);
-								}
-							}
+							this.plugin.settings.hiddenCommands = toggleList(this.plugin.settings.hiddenCommands, cmd.id, value);
+							await this.plugin.saveSettings();
+						}))
+					.addToggle(toggle => toggle
+						.setTooltip('Show in Chain Search')
+						.setValue(!this.plugin.settings.hiddenFromChainSearch.includes(cmd.id))
+						.onChange(async (value) => {
+							this.plugin.settings.hiddenFromChainSearch = toggleList(this.plugin.settings.hiddenFromChainSearch, cmd.id, value);
 							await this.plugin.saveSettings();
 						}));
-				
+
 				this.renderHotkey(s.controlEl, cmd.id);
+			});
+		};
+
+		// Chain Search toggle only — for chain-only internal commands (never in the palette)
+		const renderChainOnlyGroup = (title: string, commands: { id: string, name: string }[]) => {
+			if (commands.length === 0) return;
+
+			new Setting(containerEl).setName(title).setHeading();
+			const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+			const header = new Setting(group).setName('').setDesc('');
+			header.controlEl.createSpan({ text: 'Chains', cls: 'crucible-toggle-header' });
+
+			commands.sort((a, b) => a.name.localeCompare(b.name));
+
+			commands.forEach((cmd, index) => {
+				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(group)
+					.setName(cmd.name)
+					.addToggle(toggle => toggle
+						.setTooltip('Show in Chain Search')
+						.setValue(!this.plugin.settings.hiddenFromChainSearch.includes(cmd.id))
+						.onChange(async (value) => {
+							this.plugin.settings.hiddenFromChainSearch = toggleList(this.plugin.settings.hiddenFromChainSearch, cmd.id, value);
+							await this.plugin.saveSettings();
+						}));
 			});
 		};
 
@@ -185,6 +250,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		renderGroup('Chains', chainCommands);
 		renderGroup('Agents', agentCommands);
 		renderGroup('Other', otherCommands);
+		renderChainOnlyGroup('Chain Commands', this.getChainOnlyCommandList());
 	}
 
 	private renderHotkey(el: HTMLElement, commandId: string) {
@@ -307,6 +373,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				new Setting(group)
 					.setName(chain.name || '(unnamed)')
 					.setDesc(`${chain.steps.length} steps`)
+					.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate chain').onClick(async () => {
+						const copy = JSON.parse(JSON.stringify(chain));
+						copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
+						this.plugin.settings.chains.push(copy);
+						await this.plugin.saveSettings();
+						this.plugin.registerChains();
+						this.display();
+					}))
 					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit chain').onClick(() => {
 						this.editingChainIndex = index;
 						this.display();
@@ -346,10 +420,59 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					this.plugin.registerChains();
 				}).inputEl.addClass('pi-width-normal'));
 
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Debug mode')
+			.setDesc('Log each step\'s input and output to a debug note in _crucible/debug.md.')
+			.addToggle(t => t
+				.setValue(chain.debugMode ?? false)
+				.onChange(async (v) => { chain.debugMode = v; await this.plugin.saveSettings(); }));
+
+		new Setting(containerEl).setName('Variables').setHeading();
+		containerEl.createEl('p', { text: 'Define values accessible as {{varName}} in step arguments. The variable {{agent_model}} is set automatically after an agent step.' });
+
+		const varGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const variables = chain.variables ?? {};
+
+		Object.entries(variables).forEach(([key, val], index) => {
+			if (index > 0) varGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			const row = new Setting(varGroup);
+			row.addText(t => t
+				.setPlaceholder('name')
+				.setValue(key)
+				.onChange(async (newKey) => {
+					delete variables[key];
+					variables[newKey] = val;
+					chain.variables = variables;
+					await this.plugin.saveSettings();
+				}).inputEl.addClass('pi-width-small'));
+			row.addText(t => t
+				.setPlaceholder('value')
+				.setValue(val)
+				.onChange(async (newVal) => {
+					variables[key] = newVal;
+					chain.variables = variables;
+					await this.plugin.saveSettings();
+				}).inputEl.addClass('pi-width-normal'));
+			row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove variable').onClick(async () => {
+				delete variables[key];
+				chain.variables = variables;
+				await this.plugin.saveSettings();
+				this.display();
+			}));
+		});
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add variable').onClick(async () => {
+			chain.variables = { ...variables, '': '' };
+			await this.plugin.saveSettings();
+			this.display();
+		}));
+
 		new Setting(containerEl).setName('Steps').setHeading();
 
 		chain.steps.forEach((step, index) => {
 			const stepGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+			stepGroup.dataset.stepIndex = String(index);
 
 			new Setting(stepGroup)
 				.setName(`Step ${index + 1}`)
@@ -362,7 +485,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						const [moved] = chain.steps.splice(index, 1);
 						if (moved) chain.steps.splice(index - 1, 0, moved);
 						await this.plugin.saveSettings();
-						this.display();
+						this.refreshDisplay();
 					}))
 				.addExtraButton(cb => cb
 					.setIcon('arrow-down')
@@ -373,112 +496,188 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						const [moved] = chain.steps.splice(index, 1);
 						if (moved) chain.steps.splice(index + 1, 0, moved);
 						await this.plugin.saveSettings();
-						this.display();
+						this.refreshDisplay();
 					}))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove step').onClick(async () => {
 					chain.steps.splice(index, 1);
 					await this.plugin.saveSettings();
-					this.display();
+					this.refreshDisplay();
 				}));
 
 			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
 
 			new Setting(stepGroup)
-				.setName('Command')
-				.addSearch(cb => {
-					const commandExtras = this.getChainCommandExtras();
-					let prevSchema = this.plugin.chainManager.getCommandSchema(step.commandId);
-					const updateCommandId = async (commandId: string) => {
-						step.commandId = commandId;
-						const newSchema = this.plugin.chainManager.getCommandSchema(commandId);
-						if (newSchema !== prevSchema) {
-							// Schema changed - clear args and rebuild to show new schema inputs
-							step.args = {};
-							prevSchema = newSchema;
-							await this.plugin.saveSettings();
-							this.display();
-						} else {
-							await this.plugin.saveSettings();
-						}
-					};
-					cb.setPlaceholder('Search for a command...')
-						.setValue(getCommandSuggestDisplayName(this.app, step.commandId, commandExtras))
-						.onChange(async (v) => {
-							const selectedCommand = findCommandSuggestItem(this.app, v, commandExtras);
-							await updateCommandId(selectedCommand?.id || v);
-						});
-					const el = (cb as unknown as SearchWithContainer).containerEl;
-					if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-					new CommandSuggest(this.app, cb.inputEl, commandExtras, command => {
-						void updateCommandId(command.id);
-					});
-				});
+				.setName('Step type')
+				.addDropdown(d => d
+					.addOption('command', 'Command')
+					.addOption('guard', 'Guard')
+					.setValue(step.stepType ?? 'command')
+					.onChange(async (v) => {
+						step.stepType = v as 'command' | 'guard';
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+					}));
 
-			const schema = this.plugin.chainManager.getCommandSchema(step.commandId);
-			
-			if (schema) {
-				schema.forEach(arg => {
-					stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
-					const s = new Setting(stepGroup)
-						.setName(arg.name)
-						.setDesc(arg.description || '');
+			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
 
-					switch (arg.type) {
-						case 'text':
-							s.addText(t => t
-								.setValue(step.args[arg.id] || '')
-								.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); })
-								.inputEl.addClass('pi-width-normal'));
-							break;
-						case 'textarea':
-							s.addTextArea(t => t
-								.setValue(step.args[arg.id] || '')
-								.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); })
-								.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal'));
-							break;
-						case 'dropdown':
-							s.addDropdown(d => {
-								if (arg.options) d.addOptions(arg.options);
-								d.setValue(step.args[arg.id] || '')
-								 .onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
-								d.selectEl.addClass('pi-width-normal');
-							});
-							break;
-						case 'file':
-							s.addSearch(cb => {
-								cb.setPlaceholder('Select file...')
-									.setValue(step.args[arg.id] || '')
-									.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
-								const el = (cb as unknown as SearchWithContainer).containerEl;
-								if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-								new FileSuggest(this.app, cb.inputEl);
-							});
-							break;
-						case 'folder':
-							s.addSearch(cb => {
-								cb.setPlaceholder('Select folder...')
-									.setValue(step.args[arg.id] || '')
-									.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
-								const el = (cb as unknown as SearchWithContainer).containerEl;
-								if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-								new FolderSuggest(this.app, cb.inputEl);
-							});
-							break;
-					}
-				});
-			} else {
-				// Fallback for commands without schema (standard Obsidian commands)
-				stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			if ((step.stepType ?? 'command') === 'guard') {
+				const gc = step.guardCondition ?? { type: 'has-tag' as const };
+				if (!step.guardCondition) { step.guardCondition = gc; }
+
 				new Setting(stepGroup)
-					.setName('Arguments')
-					.setDesc('Support variables like {{response}} from the previous step.')
-					.addText(t => t
-						.setPlaceholder('Args...')
-						.setValue(step.args._default || '')
+					.setName('Condition type')
+					.addDropdown(d => d
+						.addOption('has-tag', 'Note has tag')
+						.addOption('not-has-tag', 'Note does not have tag')
+						.addOption('has-property', 'Note has property')
+						.addOption('not-has-property', 'Note does not have property')
+						.addOption('property-equals', 'Property equals value')
+						.setValue(gc.type)
 						.onChange(async (v) => {
-							step.args._default = v;
+							gc.type = v as typeof gc.type;
+							step.guardCondition = gc;
 							await this.plugin.saveSettings();
-						}).inputEl.addClass('pi-width-normal'));
+							this.refreshDisplay();
+						}));
+
+				stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+				if (gc.type === 'has-tag' || gc.type === 'not-has-tag') {
+					const positive = gc.type === 'has-tag';
+					new Setting(stepGroup)
+						.setName('Tag')
+						.setDesc(positive ? 'Guard passes if the active note has this tag.' : 'Guard passes if the active note does not have this tag.')
+						.addText(t => t
+							.setPlaceholder('#refined')
+							.setValue(gc.tag ?? '')
+							.onChange(async (v) => { gc.tag = v; step.guardCondition = gc; await this.plugin.saveSettings(); })
+							.inputEl.addClass('pi-width-normal'));
+				} else if (gc.type === 'has-property' || gc.type === 'not-has-property') {
+					const positive = gc.type === 'has-property';
+					new Setting(stepGroup)
+						.setName('Property')
+						.setDesc(positive ? 'Guard passes if the active note has this frontmatter property.' : 'Guard passes if the active note does not have this frontmatter property.')
+						.addText(t => t
+							.setPlaceholder('model')
+							.setValue(gc.property ?? '')
+							.onChange(async (v) => { gc.property = v; step.guardCondition = gc; await this.plugin.saveSettings(); })
+							.inputEl.addClass('pi-width-normal'));
+				} else if (gc.type === 'property-equals') {
+					new Setting(stepGroup)
+						.setName('Property')
+						.addText(t => t
+							.setPlaceholder('status')
+							.setValue(gc.property ?? '')
+							.onChange(async (v) => { gc.property = v; step.guardCondition = gc; await this.plugin.saveSettings(); })
+							.inputEl.addClass('pi-width-normal'));
+					stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+					new Setting(stepGroup)
+						.setName('Value')
+						.setDesc('Guard passes if the property equals this value.')
+						.addText(t => t
+							.setPlaceholder('done')
+							.setValue(gc.value ?? '')
+							.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await this.plugin.saveSettings(); })
+							.inputEl.addClass('pi-width-normal'));
+				}
+			} else {
+				new Setting(stepGroup)
+					.setName('Command')
+					.addSearch(cb => {
+						const commandExtras = this.getChainCommandExtras();
+						let prevSchema = this.plugin.chainManager.getCommandSchema(step.commandId);
+						const updateCommandId = async (commandId: string) => {
+							step.commandId = commandId;
+							const newSchema = this.plugin.chainManager.getCommandSchema(commandId);
+							if (newSchema !== prevSchema) {
+								// Schema changed - clear args and rebuild to show new schema inputs
+								step.args = {};
+								prevSchema = newSchema;
+								await this.plugin.saveSettings();
+								this.refreshDisplay();
+							} else {
+								await this.plugin.saveSettings();
+							}
+						};
+						cb.setPlaceholder('Search for a command...')
+							.setValue(getCommandSuggestDisplayName(this.app, step.commandId, commandExtras))
+							.onChange(async (v) => {
+								const selectedCommand = findCommandSuggestItem(this.app, v, commandExtras);
+								await updateCommandId(selectedCommand?.id || v);
+							});
+						const el = (cb as unknown as SearchWithContainer).containerEl;
+						if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+						new CommandSuggest(this.app, cb.inputEl, commandExtras, command => {
+							void updateCommandId(command.id);
+						}, this.plugin.settings.hiddenFromChainSearch);
+					});
+
+				const schema = this.plugin.chainManager.getCommandSchema(step.commandId);
+
+				if (schema) {
+					schema.forEach(arg => {
+						stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+						const s = new Setting(stepGroup)
+							.setName(arg.name)
+							.setDesc(arg.description || '');
+
+						switch (arg.type) {
+							case 'text':
+								s.addText(t => t
+									.setValue(step.args[arg.id] || '')
+									.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); })
+									.inputEl.addClass('pi-width-normal'));
+								break;
+							case 'textarea':
+								s.addTextArea(t => t
+									.setValue(step.args[arg.id] || '')
+									.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); })
+									.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal'));
+								break;
+							case 'dropdown':
+								s.addDropdown(d => {
+									if (arg.options) d.addOptions(arg.options);
+									d.setValue(step.args[arg.id] || '')
+									 .onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
+									d.selectEl.addClass('pi-width-normal');
+								});
+								break;
+							case 'file':
+								s.addSearch(cb => {
+									cb.setPlaceholder('Select file...')
+										.setValue(step.args[arg.id] || '')
+										.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
+									const el = (cb as unknown as SearchWithContainer).containerEl;
+									if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+									new FileSuggest(this.app, cb.inputEl);
+								});
+								break;
+							case 'folder':
+								s.addSearch(cb => {
+									cb.setPlaceholder('Select folder...')
+										.setValue(step.args[arg.id] || '')
+										.onChange(async (v) => { step.args[arg.id] = v; await this.plugin.saveSettings(); });
+									const el = (cb as unknown as SearchWithContainer).containerEl;
+									if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+									new FolderSuggest(this.app, cb.inputEl);
+								});
+								break;
+						}
+					});
+				} else {
+					// Fallback for commands without schema (standard Obsidian commands)
+					stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+					new Setting(stepGroup)
+						.setName('Arguments')
+						.setDesc('Support variables like {{response}} from the previous step.')
+						.addText(t => t
+							.setPlaceholder('Args...')
+							.setValue(step.args._default || '')
+							.onChange(async (v) => {
+								step.args._default = v;
+								await this.plugin.saveSettings();
+							}).inputEl.addClass('pi-width-normal'));
+				}
 			}
 
 			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
@@ -491,12 +690,47 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						step.keepGoing = v;
 						await this.plugin.saveSettings();
 					}));
+
+			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+			new Setting(stepGroup)
+				.setName('Capture intermediate output')
+				.setDesc('Write this step\'s output to _crucible/step-<name>-output.md for debugging.')
+				.addToggle(t => t
+					.setValue(step.captureIntermediate ?? false)
+					.onChange(async (v) => {
+						step.captureIntermediate = v;
+						await this.plugin.saveSettings();
+					}));
 		});
 
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add step').setCta().onClick(async () => {
-			chain.steps.push({ commandId: '', keepGoing: false, args: {} });
+		let insertAt = chain.steps.length; // default: end of chain
+
+		const actionRow = new Setting(containerEl);
+		actionRow.addDropdown(d => {
+			d.addOption(String(chain.steps.length), 'At end');
+			chain.steps.forEach((_, i) => d.addOption(String(i), `Before step ${i + 1}`));
+			d.setValue(String(insertAt));
+			d.onChange(v => { insertAt = Number(v); });
+			d.selectEl.addClass('pi-width-small');
+		});
+		actionRow.addButton(bt => bt.setButtonText('Add step').setCta().onClick(async () => {
+			chain.steps.splice(insertAt, 0, { commandId: '', keepGoing: false, args: {} });
 			await this.plugin.saveSettings();
+			const targetIndex = insertAt;
 			this.display();
+			requestAnimationFrame(() => {
+				const scrollEl = this.containerEl.closest('.vertical-tab-content') as HTMLElement | null;
+				const newStep = this.containerEl.querySelector(`[data-step-index="${targetIndex}"]`) as HTMLElement | null;
+				if (newStep && scrollEl) {
+					const stepTop = newStep.offsetTop;
+					const stepCenter = stepTop + newStep.offsetHeight / 2;
+					scrollEl.scrollTop = stepCenter - scrollEl.clientHeight / 2;
+				}
+			});
+		}));
+		actionRow.addButton(bt => bt.setButtonText('Preview chain').onClick(() => {
+			this.plugin.chainManager.previewChain(chain);
 		}));
 	}
 

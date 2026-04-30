@@ -92,17 +92,22 @@ export class FileSuggest extends FileSystemSuggest {
 export class CommandSuggest extends AbstractInputSuggest<Command> {
 	public inputEl: HTMLInputElement;
 	private extraCommands: Command[];
+	private excludeIds: string[];
 	private onChoose?: (command: Command) => void;
 
-	constructor(app: App, inputEl: HTMLInputElement, extraCommands: Command[] = [], onChoose?: (command: Command) => void) {
+	constructor(app: App, inputEl: HTMLInputElement, extraCommands: Command[] = [], onChoose?: (command: Command) => void, excludeIds: string[] = []) {
 		super(app, inputEl);
 		this.inputEl = inputEl;
 		this.extraCommands = extraCommands;
+		this.excludeIds = excludeIds;
 		this.onChoose = onChoose;
 	}
 
 	getItems(): Command[] {
-		return getCommandSuggestItems(this.app, this.extraCommands);
+		const items = getCommandSuggestItems(this.app, this.extraCommands);
+		if (this.excludeIds.length === 0) return items;
+		const excluded = new Set(this.excludeIds);
+		return items.filter(cmd => !excluded.has(cmd.id));
 	}
 
 	getSuggestions(inputStr: string): Command[] {
@@ -136,16 +141,7 @@ export class CommandSuggest extends AbstractInputSuggest<Command> {
 
 export function getCommandSuggestItems(app: App, extraCommands: Command[] = []): Command[] {
 	const commands = app.commands.listCommands();
-
-	// Add internal virtual commands for easier selection in Chains.
-	const internal: Command[] = [
-		{ id: 'crucible:capture', name: 'Crucible: Quick Capture (Name|Value)' },
-		{ id: 'crucible:upsert-property', name: 'Crucible: Add/update file property' },
-		{ id: 'crucible:upsert-tags', name: 'Crucible: Upsert frontmatter tags' },
-		...extraCommands
-	];
-
-	return [...internal, ...commands];
+	return [...extraCommands, ...commands];
 }
 
 export function findCommandSuggestItem(app: App, value: string, extraCommands: Command[] = []): Command | undefined {

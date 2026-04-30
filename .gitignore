@@ -24,6 +24,8 @@ data.json
 # Local Configs
 .stylelintrc.json
 
+# local python/terminal history
+.cond.pyhistory
 # Swap files
 *.swp
 

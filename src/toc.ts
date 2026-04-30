@@ -74,6 +74,23 @@ export class TableOfContentsUI {
 		setIcon(title, 'menu');
 		title.createSpan({ text: 'Table of Contents' });
 
+		const navControls = footer.createDiv({ cls: 'crucible-toc-nav-controls' });
+
+		const topBtn = navControls.createDiv({ cls: 'crucible-toc-nav-btn', attr: { 'aria-label': 'Jump to top' } });
+		setIcon(topBtn, 'arrow-up-to-line');
+		topBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.view.setEphemeralState({ line: 0 });
+		};
+
+		const bottomBtn = navControls.createDiv({ cls: 'crucible-toc-nav-btn', attr: { 'aria-label': 'Jump to bottom' } });
+		setIcon(bottomBtn, 'arrow-down-to-line');
+		bottomBtn.onclick = (e) => {
+			e.stopPropagation();
+			const editor = this.view.editor;
+			if (editor) this.view.setEphemeralState({ line: editor.lastLine() });
+		};
+
 		const chevron = footer.createDiv({ cls: 'crucible-toc-chevron' });
 		setIcon(chevron, this.isCollapsed ? 'chevron-down' : 'chevron-up');
 
