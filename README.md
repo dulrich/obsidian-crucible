@@ -11,10 +11,9 @@ Crucible consolidates features traditionally spread across multiple plugins (Dai
 - **Smart Linting:** Keep your properties and frontmatter clean and consistent automatically.
 - **Table of Contents:** A floating, collapsible navigator for your long-form notes.
 - **Command Shortcuts:** Map specific files to commands for instant access.
-
-## Planned Features
-
-- **AI Assistant:** Active synthesis and analysis of captured content to identify themes, biases, and connections.
+- **AI Agents:** Define reusable AI assistants with custom system prompts, user prompt templates, and a configured provider. Agents are registered as commands and can be invoked from the command palette or chained together.
+- **Chains:** Compose multi-step workflows by linking captures, linting, and agent calls into a single command. Each step can pass its output to the next via `{{response}}`.
+- **AI Providers:** Connect to OpenAI, Anthropic, Google (Gemini), OpenRouter, or a local Ollama instance. API keys are stored securely using Obsidian's secret storage.
 
 ## Installation
 

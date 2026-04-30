@@ -1,0 +1,10 @@
+- Next plugin tasks:
+	- [x] agent running spinner UI
+	- [x] jump to top/end? control merged with ToC
+	- [ ] Debugging & Observability patterns (@debugging.md) — chain tracing (debug mode toggle + log), intermediate capture per step, and dry-run inspector are done; full chain dry-run with template preview is remaining
+	- [x] refine needs to target the note it spawned from (background work)
+	- [x] duplicate chain
+	- [x] chain variables or other solution to Agent selection -> model property lineup
+	- [x] copy current note internal command
+	- [x] Commands: need to still show internal search even when disabled in CP (two toggles?)
+	- [x] Chain: guard function checks for tags/model property and fails

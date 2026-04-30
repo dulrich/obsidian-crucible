@@ -339,24 +339,33 @@ export default class CruciblePlugin extends Plugin {
 		const prefix = this.manifest.id;
 
 		// Built-in commands
-		const register = (id: string, fn: (args: Record<string, string>, prev: unknown, editor?: Editor) => Promise<unknown>, schema?: CommandArgSchema[]) => {
+		const register = (id: string, fn: (args: Record<string, string>, prev: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>, schema?: CommandArgSchema[]) => {
 			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn, schema);
 			this.chainManager.registerInternalCommand(`crucible:${id}`, fn, schema);
 		};
 
-		register('lint-note', async () => await this.linter.lintNote());
+		register('lint-note', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
 		register('lint-vault', async () => await this.linter.lintVault());
-		register('word-count', async () => await this.linter.lintNote());
+		register('word-count', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
 
 		// --- Sources: produce content for chain steps via {{response}} ---
-		register('source:active-file', async () => {
-			const file = this.app.workspace.getActiveFile();
+		register('source:active-file', async (_a, _p, _e, tf) => {
+			const file = tf ?? this.app.workspace.getActiveFile();
 			if (!file) throw new Error('No active file');
 			const content = await this.app.vault.read(file);
 			return content.replace(FRONTMATTER_REGEX, '').trim();
+		});
+
+		register('copy-active-file', async (_a, _p, _e, tf) => {
+			const file = tf ?? this.app.workspace.getActiveFile();
+			if (!file) throw new Error('No active file');
+			const content = await this.app.vault.read(file);
+			await navigator.clipboard.writeText(content);
+			new Notice('Note copied to clipboard');
+			return true;
 		});
 
 		register('source:selection', async (args, prev, editor) => {
@@ -394,29 +403,61 @@ export default class CruciblePlugin extends Plugin {
 			return false;
 		});
 
-		register('upsert-tags', async (args) => {
-			return await this.upsertActiveFileTags(args.tags || '');
+		register('upsert-tags', async (args, _p, _e, tf) => {
+			return await this.upsertActiveFileTags(args.tags || '', tf);
 		}, [
 			{ id: 'tags', name: 'Tags', type: 'textarea', description: 'Tags to add to the active note frontmatter. Use commas, spaces, or one per line. Leading # is optional.' }
 		]);
 
-		register('upsert-property', async (args) => {
-			return await this.upsertActiveFileProperty(args.property || '', args.value || '');
+		register('upsert-property', async (args, _p, _e, tf) => {
+			return await this.upsertActiveFileProperty(args.property || '', args.value || '', tf);
 		}, [
 			{ id: 'property', name: 'Property', type: 'text', description: 'Frontmatter property name to create or update on the active note.' },
 			{ id: 'value', name: 'Value', type: 'textarea', description: 'Value to write to the property. Supports {{response}} from the previous chain step.' }
 		]);
 
-		register('capture', async (args, prev, editor) => {
-			// args: { name: string, value: string }
+		register('copy-note-to-folder', async (args, _p, _e, tf) => {
+			const file = tf ?? this.app.workspace.getActiveFile();
+			if (!file) throw new Error('No active file');
+			const folder = args.folder?.trim();
+			if (!folder) throw new Error('No destination folder specified');
+			if (!this.app.vault.getFolderByPath(folder)) await this.app.vault.createFolder(folder);
+			const destPath = `${folder}/${file.name}`;
+			const exists = this.app.vault.getFileByPath(destPath);
+			if (exists) { new Notice(`Copy already exists: ${destPath}`); return destPath; }
+			const content = await this.app.vault.read(file);
+			await this.app.vault.create(destPath, content);
+			new Notice(`Copied to ${destPath}`);
+			return destPath;
+		}, [
+			{ id: 'folder', name: 'Destination folder', type: 'folder', description: 'Vault folder to copy the current note into.' }
+		]);
+
+		register('replace-note-body', async (args, prev, _e, tf) => {
+			const file = tf ?? this.app.workspace.getActiveFile();
+			if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
+			const replacement = args.content || (typeof prev === 'string' ? prev : '');
+			if (!replacement) throw new Error('No replacement content provided');
+			const existing = await this.app.vault.read(file);
+			const fmMatch = existing.match(/^---\n[\s\S]*?\n---\n/);
+			const frontmatter = fmMatch ? fmMatch[0] : '';
+			await withMaterializing(state => { this.isMaterializing = state; }, async () => {
+				await this.app.vault.modify(file, frontmatter + replacement);
+			});
+			new Notice('Note body replaced');
+			return true;
+		}, [
+			{ id: 'content', name: 'Content', type: 'textarea', description: 'New body for the note. If empty, uses {{response}} from the previous step.' }
+		]);
+
+		register('capture', async (args, prev, editor, tf) => {
 			const name = args.name;
 			const manualValue = args.value;
-			
 			const capture = this.settings.captures.find(c => c.name === name);
 			if (capture) {
 				const resolvedValue = manualValue || await this.resolveCaptureValue(capture, editor);
 				if (resolvedValue === null) return false;
-				return await this.captureManager.executeCapture(capture, resolvedValue);
+				return await this.captureManager.executeCapture(capture, resolvedValue, tf);
 			}
 			new Notice(`Capture not found: ${name}`);
 			return false;
@@ -426,8 +467,8 @@ export default class CruciblePlugin extends Plugin {
 		]);
 	}
 
-	private async upsertActiveFileTags(tagsInput: string): Promise<boolean> {
-		const file = this.app.workspace.getActiveFile();
+	private async upsertActiveFileTags(tagsInput: string, targetFile?: TFile): Promise<boolean> {
+		const file = targetFile ?? this.app.workspace.getActiveFile();
 		if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
 
 		const newTags = parseTagList(tagsInput);
@@ -442,8 +483,8 @@ export default class CruciblePlugin extends Plugin {
 		return true;
 	}
 
-	private async upsertActiveFileProperty(property: string, value: string): Promise<boolean> {
-		const file = this.app.workspace.getActiveFile();
+	private async upsertActiveFileProperty(property: string, value: string, targetFile?: TFile): Promise<boolean> {
+		const file = targetFile ?? this.app.workspace.getActiveFile();
 		if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
 
 		const propertyName = normalizeFrontmatterPropertyName(property);
@@ -468,7 +509,10 @@ export default class CruciblePlugin extends Plugin {
 				editorCheckCallback: (checking: boolean, editor: Editor) => {
 					if (this.settings.hiddenCommands.includes(id)) return false;
 					if (!checking) {
-						void this.chainManager.executeChain(chain, editor);
+						// Capture the active file at invocation time so async steps never
+						// accidentally target a different note if the user navigates away.
+						const spawnFile = this.app.workspace.getActiveFile() ?? undefined;
+						void this.chainManager.executeChain(chain, editor, spawnFile);
 					}
 					return true;
 				}

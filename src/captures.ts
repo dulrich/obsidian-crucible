@@ -13,7 +13,7 @@ export class CaptureManager {
 		this.setMaterializing = setMaterializing;
 	}
 
-	async executeCapture(capture: Capture, value: string = ''): Promise<boolean> {
+	async executeCapture(capture: Capture, value: string = '', targetFile?: TFile): Promise<boolean> {
 		this.setMaterializing(true);
 		try {
 			let targetPath = '';
@@ -33,7 +33,7 @@ export class CaptureManager {
 					targetPath = capture.file;
 					break;
 				case 'active': {
-					const activeFile = this.app.workspace.getActiveFile();
+					const activeFile = targetFile ?? this.app.workspace.getActiveFile();
 					if (!activeFile) {
 						new Notice('Capture target requires an active note.');
 						return false;

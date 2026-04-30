@@ -110,6 +110,7 @@ If your plugin does not need CSS, delete this file.
 }
 
 /* Standard control widths */
+.pi-width-small { width: 120px !important; }
 .pi-width-normal { width: 300px !important; }
 .pi-width-half { width: 150px !important; }
 .pi-width-wide { width: 450px !important; }
@@ -250,11 +251,60 @@ If your plugin does not need CSS, delete this file.
   color: var(--text-accent);
 }
 
+.crucible-toc-nav-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.crucible-toc-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.crucible-toc-nav-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.crucible-toc-nav-btn:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+
 /* Indentation based on Header Level */
 .crucible-toc-item.level-1 { font-weight: bold; }
 .crucible-toc-item.level-2 { padding-left: 28px; }
 .crucible-toc-item.level-3 { padding-left: 40px; }
 .crucible-toc-item.level-4 { padding-left: 52px; }
+
+.crucible-inspector-pre {
+  background-color: var(--background-secondary);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.crucible-toggle-header {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  width: 38px;
+  text-align: center;
+  display: inline-block;
+}
 
 /* Variables and General settings */
 .crucible-setting-textarea {

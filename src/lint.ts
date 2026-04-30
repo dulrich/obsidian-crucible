@@ -46,8 +46,11 @@ export class Linter {
 		}
 	}
 
-	async lintNote(view?: MarkdownView): Promise<boolean> {
-		const targetView = view || this.app.workspace.getActiveViewOfType(MarkdownView);
+	async lintNote(viewOrFile?: MarkdownView | TFile): Promise<boolean> {
+		if (viewOrFile instanceof TFile) {
+			return await this.lintFile(viewOrFile);
+		}
+		const targetView = viewOrFile || this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (!targetView || !targetView.file) return false;
 
 		return await this.lintFile(targetView.file);
