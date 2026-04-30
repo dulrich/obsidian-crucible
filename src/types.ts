@@ -67,15 +67,35 @@ export interface CommandArgSchema {
 	options?: Record<string, string>;
 }
 
+export type GuardConditionType = 'has-tag' | 'not-has-tag' | 'has-property' | 'not-has-property' | 'property-equals';
+
+export interface GuardCondition {
+	type: GuardConditionType;
+	tag?: string;
+	property?: string;
+	value?: string;
+}
+
 export interface ChainStep {
 	commandId: string;
+	stepType?: 'command' | 'guard';
 	keepGoing: boolean;
 	args: Record<string, string>;
+	guardCondition?: GuardCondition;
+	captureIntermediate?: boolean;
 }
 
 export interface Chain {
 	name: string;
 	steps: ChainStep[];
+	variables?: Record<string, string>;
+	debugMode?: boolean;
+	debugLogPath?: string;
+}
+
+export interface AgentResult {
+	response: string;
+	model: string;
 }
 
 export type LlmProviderType = 'openai' | 'anthropic' | 'google' | 'openrouter' | 'ollama';
@@ -134,6 +154,7 @@ export interface CrucibleSettings {
 	tocCollapseBehavior: ToCCollapseBehavior;
 	// Commands
 	hiddenCommands: string[];
+	hiddenFromChainSearch: string[];
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -160,4 +181,5 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	tocPosition: 'bottom-right',
 	tocCollapseBehavior: 'manual',
 	hiddenCommands: [],
+	hiddenFromChainSearch: [],
 }

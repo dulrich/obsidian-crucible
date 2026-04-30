@@ -1,5 +1,5 @@
 import { App, Notice, TFile, moment } from 'obsidian';
-import { Agent, CrucibleSettings, Provider, CommandArgSchema } from './types';
+import { Agent, AgentResult, CrucibleSettings, Provider, CommandArgSchema } from './types';
 import { ChainManager } from './chains';
 import { ProviderManager } from './providers';
 import { applyTemplateString } from './utils';
@@ -39,8 +39,8 @@ export class AgentManager {
 		this.settings.agents.forEach(agent => {
 			if (!agent.id) return;
 			const id = agentCommandId(agent.id);
-			this.chainManager.registerInternalCommand(id, async (args) => {
-				return await this.executeAgent(agent, args);
+			this.chainManager.registerInternalCommand(id, async (args, _prev, _editor, targetFile) => {
+				return await this.executeAgent(agent, args, targetFile);
 			}, AGENT_INPUT_SCHEMA);
 			this.registeredIds.add(id);
 		});
@@ -50,7 +50,7 @@ export class AgentManager {
 		return this.settings.providers.find(p => p.id === providerId);
 	}
 
-	async executeAgent(agent: Agent, args: Record<string, string>): Promise<string> {
+	async executeAgent(agent: Agent, args: Record<string, string>, targetFile?: TFile): Promise<AgentResult> {
 		const provider = this.getProvider(agent.providerId);
 		if (!provider) {
 			const msg = `Agent "${agent.name || agent.id}" has no valid provider`;
@@ -60,7 +60,7 @@ export class AgentManager {
 
 		const input = args.input ?? '';
 		const now = moment();
-		const fileName = this.app.workspace.getActiveFile()?.basename || '';
+		const fileName = (targetFile ?? this.app.workspace.getActiveFile())?.basename || '';
 
 		const systemTemplate = await this.resolvePrompt(agent, 'system');
 		// {{value}} and {{input}} both resolve to the runtime input.
@@ -69,12 +69,16 @@ export class AgentManager {
 		const system = await applyTemplateString(systemTemplate, now, fileName, input);
 		const user = await applyTemplateString(userTemplate, now, fileName, input);
 
-		new Notice(`Agent "${agent.name || agent.id}" is thinking...`);
+		const label = agent.name || agent.id;
+		const spinner = new Notice(`Agent "${label}" is thinking...`, 0);
 
 		try {
-			return await this.providerManager.complete(provider, system, user);
+			const response = await this.providerManager.complete(provider, system, user);
+			spinner.hide();
+			return { response, model: provider.model };
 		} catch (e: unknown) {
 			const message = e instanceof Error ? e.message : String(e);
+			spinner.hide();
 			new Notice("Agent error: " + message);
 			throw e instanceof Error ? e : new Error(message);
 		}
