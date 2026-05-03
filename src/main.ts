@@ -10,6 +10,13 @@ import { AgentManager } from "./agents";
 import { TableOfContentsUI } from "./toc";
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { normalizeFrontmatterPropertyName, parseTagList, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterTags, withMaterializing } from './frontmatter';
+import { JobStore } from './orchestration/JobStore';
+import { Orchestrator } from './orchestration/Orchestrator';
+import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
+import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
+import { YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
+import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
+import { FilePickerModal } from './orchestration/FilePickerModal';
 
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
@@ -20,6 +27,8 @@ export default class CruciblePlugin extends Plugin {
 	chainManager: ChainManager;
 	providerManager: ProviderManager;
 	agentManager: AgentManager;
+	jobStore: JobStore;
+	orchestrator: Orchestrator;
 	private tocComponent: TableOfContentsUI | null = null;
 
 	async onload() {
@@ -31,6 +40,12 @@ export default class CruciblePlugin extends Plugin {
 		this.chainManager = new ChainManager(this.app);
 		this.providerManager = new ProviderManager(this.app);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
+		this.jobStore = new JobStore(this);
+		this.orchestrator = new Orchestrator(this, this.jobStore);
+		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
+		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow());
+		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow());
+		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 
 		this.registerInternalCommands();
 		this.agentManager.registerAgents();
@@ -152,6 +167,46 @@ export default class CruciblePlugin extends Plugin {
 				}
 				return true;
 			},
+		});
+
+		this.addCommand({
+			id: 'orchestrator-scan',
+			name: 'Orchestrator: scan',
+			callback: () => { void this.orchestrator.scan(); },
+		});
+
+		this.addCommand({
+			id: 'orchestrator-run-next',
+			name: 'Orchestrator: run next',
+			callback: () => { void this.orchestrator.runNext(); },
+		});
+
+		this.addCommand({
+			id: 'orchestrator-enqueue-daily-brief-lite',
+			name: 'Orchestrator: enqueue daily brief lite',
+			callback: () => { void this.orchestrator.enqueue('daily_brief_lite'); },
+		});
+
+		this.addCommand({
+			id: 'orchestrator-enqueue-transcript-refine',
+			name: 'Orchestrator: enqueue transcript refine',
+			callback: () => {
+				new FilePickerModal(this.app, 'Pick a transcript note', (file) => {
+					void this.orchestrator.enqueue('transcript_refine', { targetPath: file.path });
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'orchestrator-enqueue-youtube-tracker',
+			name: 'Orchestrator: enqueue YouTube tracker',
+			callback: () => { void this.orchestrator.enqueue('youtube_tracker'); },
+		});
+
+		this.addCommand({
+			id: 'orchestrator-enqueue-link-scan',
+			name: 'Orchestrator: enqueue link scan',
+			callback: () => { void this.orchestrator.enqueue('link_scan'); },
 		});
 
 		// --- Events ---

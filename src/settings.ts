@@ -4,12 +4,13 @@ import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
 import { Capture, CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType } from "./types";
 import { agentCommandId } from "./agents";
+import { isValidTimezone } from "./orchestration/utils/dates";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
 }
 
-type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'lint' | 'commands';
+type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'orchestrator' | 'lint' | 'commands';
 
 export class CrucibleSettingTab extends PluginSettingTab {
 	plugin: CruciblePlugin;
@@ -113,6 +114,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			createTab('configure', 'settings', 'Configure');
 			createTab('automate', 'workflow', 'Automate');
 			createTab('ai', 'bot', 'AI');
+			createTab('orchestrator', 'list-todo', 'Orchestrator');
 			createTab('lint', 'check-circle', 'Lint');
 			createTab('commands', 'terminal', 'Commands');
 		}
@@ -127,6 +129,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			this.renderAutomateSettings(containerEl);
 		} else if (this.activeTab === 'ai') {
 			this.renderAiSettings(containerEl);
+		} else if (this.activeTab === 'orchestrator') {
+			this.renderOrchestrationSettings(containerEl);
 		} else if (this.activeTab === 'commands') {
 			this.renderCommandSettings(containerEl);
 		}
@@ -1299,6 +1303,149 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		addVar('title', 'Note title', 'April 2026'); 
 		addVar('value', 'User input', 'My thought'); 
 		addVar('datetime:FORMAT', 'Custom format', '{{datetime:MMMM YYYY}}');
+	}
+
+	private renderOrchestrationSettings(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('Orchestrator').setHeading();
+		containerEl.createEl('p', { text: 'Vault-native deterministic job runner. Jobs are markdown files in queue folders that move through inbox → running → done | failed. Manual execution only — use the "Orchestrator: Scan" and "Orchestrator: Run next" commands.' });
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		new Setting(group)
+			.setName('Enabled')
+			.setDesc('When off, scan and run-next show a notice and do nothing.')
+			.addToggle(t => t.setValue(this.plugin.settings.orchestrationEnabled).onChange(async (v) => {
+				this.plugin.settings.orchestrationEnabled = v;
+				await this.plugin.saveSettings();
+			}));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Queue folder root')
+			.setDesc('Vault folder containing inbox/, running/, done/, failed/ subfolders.')
+			.addText(t => t
+				.setPlaceholder('_crucible/orchestration/queue')
+				.setValue(this.plugin.settings.orchestrationQueueRoot)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationQueueRoot = v.trim() || '_crucible/orchestration/queue';
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		let tzWarning: HTMLElement | null = null;
+		const setTzWarningVisibility = (valid: boolean) => {
+			if (!tzWarning) return;
+			if (valid) tzWarning.addClass('is-hidden');
+			else tzWarning.removeClass('is-hidden');
+		};
+		const tzSetting = new Setting(group)
+			.setName('Timezone')
+			.setDesc('IANA timezone name used to determine "today" for date-bound workflows.')
+			.addText(t => t
+				.setPlaceholder('America/Mexico_City')
+				.setValue(this.plugin.settings.orchestrationTimezone)
+				.onChange(async (v) => {
+					const next = v.trim() || 'America/Mexico_City';
+					this.plugin.settings.orchestrationTimezone = next;
+					await this.plugin.saveSettings();
+					setTzWarningVisibility(isValidTimezone(next));
+				})
+				.inputEl.addClass('pi-width-normal'));
+		tzWarning = tzSetting.descEl.createEl('div', {
+			cls: 'crucible-tz-warning',
+			text: 'Warning: this timezone is not recognized by Intl.DateTimeFormat.',
+		});
+		setTzWarningVisibility(isValidTimezone(this.plugin.settings.orchestrationTimezone));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('YouTube channels note')
+			.setDesc('Markdown note containing the channel registry table. Used by the YouTube tracker workflow.')
+			.addSearch(cb => {
+				cb.setPlaceholder('_system/youtube/Channels.md')
+					.setValue(this.plugin.settings.orchestrationYoutubeChannelsNote)
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationYoutubeChannelsNote = v.trim() || '_system/youtube/Channels.md';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(this.app, cb.inputEl);
+			});
+
+		new Setting(containerEl).setName('Link registry').setHeading();
+		const linkGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		new Setting(linkGroup)
+			.setName('Link registry root')
+			.setDesc('Vault folder where one note per canonical URL is stored.')
+			.addText(t => t
+				.setPlaceholder('_crucible/link_registry')
+				.setValue(this.plugin.settings.orchestrationLinkRegistryRoot)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationLinkRegistryRoot = v.trim() || '_crucible/link_registry';
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+		const autoSize = (el: HTMLTextAreaElement) => {
+			el.setCssProps({ height: 'auto' });
+			el.setCssProps({ height: `${el.scrollHeight}px` });
+		};
+
+		new Setting(linkGroup)
+			.setName('Scan exclusions')
+			.setDesc('Folders to skip during link scan (one path per line). The link registry root is always excluded.')
+			.addTextArea(t => {
+				t.setPlaceholder('_crucible')
+					.setValue(this.plugin.settings.orchestrationLinkScanExclusions.join('\n'))
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationLinkScanExclusions = v
+							.split('\n')
+							.map(s => s.trim())
+							.filter(s => s.length > 0);
+						await this.plugin.saveSettings();
+						autoSize(t.inputEl);
+					});
+				t.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal');
+				requestAnimationFrame(() => autoSize(t.inputEl));
+			});
+
+		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(linkGroup)
+			.setName('Tracked sources note')
+			.setDesc('Markdown note that will hold promoted tracked sources as a table (Base URL | Description | Date Added). Setting only — not yet read or written by v1.')
+			.addSearch(cb => {
+				cb.setPlaceholder('Sources/Tracked Sources.md')
+					.setValue(this.plugin.settings.orchestrationTrackedSourcesNote)
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationTrackedSourcesNote = v.trim() || 'Sources/Tracked Sources.md';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(this.app, cb.inputEl);
+			});
+
+		new Setting(containerEl).setName('Actions').setHeading();
+		const actions = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(actions)
+			.setName('Scan now')
+			.setDesc('Ensure queue folders exist, count jobs, and recover any job stuck in running for more than an hour.')
+			.addButton(bt => bt.setButtonText('Scan').onClick(async () => {
+				await this.plugin.orchestrator.scan();
+			}));
+		actions.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(actions)
+			.setName('Run next')
+			.setDesc('Pick the oldest job in inbox and execute it.')
+			.addButton(bt => bt.setButtonText('Run next').onClick(async () => {
+				await this.plugin.orchestrator.runNext();
+			}));
 	}
 
 	private renderLintSettings(containerEl: HTMLElement) {
