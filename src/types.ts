@@ -155,6 +155,14 @@ export interface CrucibleSettings {
 	// Commands
 	hiddenCommands: string[];
 	hiddenFromChainSearch: string[];
+	// Orchestrator
+	orchestrationEnabled: boolean;
+	orchestrationQueueRoot: string;
+	orchestrationTimezone: string;
+	orchestrationYoutubeChannelsNote: string;
+	orchestrationLinkRegistryRoot: string;
+	orchestrationLinkScanExclusions: string[];
+	orchestrationTrackedSourcesNote: string;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -182,4 +190,11 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	tocCollapseBehavior: 'manual',
 	hiddenCommands: [],
 	hiddenFromChainSearch: [],
+	orchestrationEnabled: true,
+	orchestrationQueueRoot: '_crucible/orchestration/queue',
+	orchestrationTimezone: 'America/Mexico_City',
+	orchestrationYoutubeChannelsNote: '_system/youtube/Channels.md',
+	orchestrationLinkRegistryRoot: '_crucible/link_registry',
+	orchestrationLinkScanExclusions: ['_crucible'],
+	orchestrationTrackedSourcesNote: 'Sources/Tracked Sources.md',
 }

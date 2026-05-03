@@ -1,0 +1,129 @@
+import { App, Notice } from 'obsidian';
+import { JobStore } from './JobStore';
+import { JobType, OrchestrationJob, ScanReport, WorkflowResult } from './types';
+import { Workflow } from './workflows/Workflow';
+import type CruciblePlugin from '../main';
+
+const STALE_RUNNING_MS = 60 * 60 * 1000;
+
+export class Orchestrator {
+	private app: App;
+	private workflows: Map<JobType, Workflow> = new Map();
+
+	constructor(private plugin: CruciblePlugin, private store: JobStore) {
+		this.app = plugin.app;
+	}
+
+	register(type: JobType, workflow: Workflow): void {
+		this.workflows.set(type, workflow);
+	}
+
+	async enqueue(type: JobType, params?: Record<string, unknown>): Promise<OrchestrationJob | null> {
+		if (!this.plugin.settings.orchestrationEnabled) {
+			new Notice('Orchestrator is disabled in settings.');
+			return null;
+		}
+		const job = await this.store.enqueue(type, { params });
+		new Notice(`Orchestrator: queued ${type} (${job.id})`);
+		return job;
+	}
+
+	async runNext(): Promise<OrchestrationJob | null> {
+		if (!this.plugin.settings.orchestrationEnabled) {
+			new Notice('Orchestrator is disabled in settings.');
+			return null;
+		}
+		await this.store.ensureFolders();
+
+		const queued = await this.store.listFolder('queued');
+		const next = queued[0];
+		if (!next) {
+			new Notice('Orchestrator: nothing to run.');
+			return null;
+		}
+
+		const moved = await this.store.move(next.file, next.job, 'running');
+		const workflow = this.workflows.get(moved.job.type);
+		if (!workflow) {
+			const error = `No workflow registered for type "${moved.job.type}"`;
+			await this.store.setError(moved.file, error);
+			const failed = await this.store.move(moved.file, moved.job, 'failed');
+			new Notice(`Orchestrator: ${moved.job.id} → failed (${error})`);
+			return failed.job;
+		}
+
+		try {
+			const result: WorkflowResult = await workflow.run(moved.job, { plugin: this.plugin });
+			if (result.outputPaths && result.outputPaths.length > 0) {
+				await this.store.setOutputPaths(moved.file, result.outputPaths);
+			}
+			if (result.notes) {
+				await this.store.appendNotes(moved.file, result.notes);
+				if (result.notes.startsWith('Partial:')) {
+					await this.store.setPartial(moved.file, true);
+				}
+			}
+			if (result.status === 'failed') {
+				await this.store.setError(moved.file, result.error ?? 'Workflow returned failed status');
+				const failed = await this.store.move(moved.file, moved.job, 'failed');
+				new Notice(`Orchestrator: ${moved.job.id} → failed`);
+				return failed.job;
+			}
+			const done = await this.store.move(moved.file, moved.job, 'done');
+			new Notice(`Orchestrator: ${moved.job.id} → done`);
+			return done.job;
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			await this.store.setError(moved.file, message);
+			const failed = await this.store.move(moved.file, moved.job, 'failed');
+			new Notice(`Orchestrator: ${moved.job.id} → failed (${message})`);
+			return failed.job;
+		}
+	}
+
+	async scan(): Promise<ScanReport> {
+		await this.store.ensureFolders();
+
+		const queued = await this.store.listFolder('queued');
+		const running = await this.store.listFolder('running');
+		const done = await this.store.listFolder('done');
+		const failed = await this.store.listFolder('failed');
+
+		let recovered = 0;
+		const cutoff = Date.now() - STALE_RUNNING_MS;
+		for (const entry of running) {
+			const updatedRaw = entry.job.updated ?? entry.job.created;
+			const updatedAt = Date.parse(updatedRaw);
+			if (Number.isFinite(updatedAt) && updatedAt < cutoff) {
+				await this.store.setError(entry.file, `Recovered: stale running job (last updated ${updatedRaw})`);
+				await this.store.move(entry.file, entry.job, 'queued');
+				recovered++;
+			}
+		}
+
+		await this.ensureQueueIgnored();
+
+		const report: ScanReport = {
+			inbox: queued.length,
+			running: running.length - recovered,
+			done: done.length,
+			failed: failed.length,
+			recovered,
+		};
+
+		const summary =
+			`Orchestrator: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
+			(recovered > 0 ? `, recovered ${recovered}` : '');
+		new Notice(summary);
+		return report;
+	}
+
+	private async ensureQueueIgnored(): Promise<void> {
+		const root = this.store.paths().root;
+		if (!this.plugin.settings.lintIgnoredFolders.includes(root)) {
+			this.plugin.settings.lintIgnoredFolders = [...this.plugin.settings.lintIgnoredFolders, root];
+			await this.plugin.saveSettings();
+		}
+	}
+}
+
