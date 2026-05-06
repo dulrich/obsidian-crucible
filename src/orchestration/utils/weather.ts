@@ -8,9 +8,9 @@ export interface Coords {
 
 export interface WeatherSnapshot {
 	location: string;
-	temperatureC: number;
+	highC: number;
+	lowC: number;
 	description: string;
-	windKmh: number;
 }
 
 export const LOCATIONS: Coords[] = [
@@ -44,20 +44,21 @@ const WEATHER_CODES: Record<number, string> = {
 };
 
 interface OpenMeteoResponse {
-	current?: {
-		temperature_2m?: number;
-		weather_code?: number;
-		wind_speed_10m?: number;
+	daily?: {
+		temperature_2m_max?: number[];
+		temperature_2m_min?: number[];
+		weather_code?: number[];
 	};
 }
 
-export async function fetchWeather(coords: Coords): Promise<WeatherSnapshot> {
+export async function fetchWeather(coords: Coords, timezone: string): Promise<WeatherSnapshot> {
 	const params = new URLSearchParams({
 		latitude: coords.lat.toString(),
 		longitude: coords.lon.toString(),
-		current: 'temperature_2m,weather_code,wind_speed_10m',
-		wind_speed_unit: 'kmh',
+		daily: 'temperature_2m_max,temperature_2m_min,weather_code',
 		temperature_unit: 'celsius',
+		timezone,
+		forecast_days: '1',
 	});
 	const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
 	const res = await requestUrl({ url, method: 'GET', throw: false });
@@ -65,16 +66,16 @@ export async function fetchWeather(coords: Coords): Promise<WeatherSnapshot> {
 		throw new Error(`Open-Meteo ${coords.label}: HTTP ${res.status}`);
 	}
 	const body = res.json as OpenMeteoResponse;
-	const current = body?.current;
-	if (!current) {
-		throw new Error(`Open-Meteo ${coords.label}: missing 'current' in response`);
+	const daily = body?.daily;
+	if (!daily) {
+		throw new Error(`Open-Meteo ${coords.label}: missing 'daily' in response`);
 	}
-	const temperatureC = current.temperature_2m;
-	const code = current.weather_code;
-	const windKmh = current.wind_speed_10m;
-	if (typeof temperatureC !== 'number' || typeof code !== 'number' || typeof windKmh !== 'number') {
-		throw new Error(`Open-Meteo ${coords.label}: incomplete current weather data`);
+	const highC = daily.temperature_2m_max?.[0];
+	const lowC = daily.temperature_2m_min?.[0];
+	const code = daily.weather_code?.[0];
+	if (typeof highC !== 'number' || typeof lowC !== 'number' || typeof code !== 'number') {
+		throw new Error(`Open-Meteo ${coords.label}: incomplete daily forecast data`);
 	}
 	const description = WEATHER_CODES[code] ?? `code ${code}`;
-	return { location: coords.label, temperatureC, description, windKmh };
+	return { location: coords.label, highC, lowC, description };
 }

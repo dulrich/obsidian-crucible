@@ -23,6 +23,10 @@ export class Orchestrator {
 			new Notice('Orchestrator is disabled in settings.');
 			return null;
 		}
+		if (!this.isWorkflowEnabled(type)) {
+			new Notice(`Orchestrator: workflow "${type}" is disabled in settings.`);
+			return null;
+		}
 		const job = await this.store.enqueue(type, { params });
 		new Notice(`Orchestrator: queued ${type} (${job.id})`);
 		return job;
@@ -43,6 +47,14 @@ export class Orchestrator {
 		}
 
 		const moved = await this.store.move(next.file, next.job, 'running');
+		if (!this.isWorkflowEnabled(moved.job.type)) {
+			const error = `Workflow "${moved.job.type}" is disabled in settings`;
+			await this.store.setError(moved.file, error);
+			const failed = await this.store.move(moved.file, moved.job, 'failed');
+			new Notice(`Orchestrator: ${moved.job.id} → failed (${error})`);
+			return failed.job;
+		}
+
 		const workflow = this.workflows.get(moved.job.type);
 		if (!workflow) {
 			const error = `No workflow registered for type "${moved.job.type}"`;
@@ -116,6 +128,17 @@ export class Orchestrator {
 			(recovered > 0 ? `, recovered ${recovered}` : '');
 		new Notice(summary);
 		return report;
+	}
+
+	private isWorkflowEnabled(type: JobType): boolean {
+		const s = this.plugin.settings;
+		switch (type) {
+			case 'daily_brief_lite': return s.orchestrationDailyBriefEnabled;
+			case 'youtube_tracker': return s.orchestrationYoutubeTrackerEnabled;
+			case 'link_scan': return s.orchestrationLinkScanEnabled;
+			case 'transcript_refine': return s.orchestrationTranscriptRefineEnabled;
+			default: return true;
+		}
 	}
 
 	private async ensureQueueIgnored(): Promise<void> {
