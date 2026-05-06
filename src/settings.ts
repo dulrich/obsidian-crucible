@@ -1309,9 +1309,9 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Orchestrator').setHeading();
 		containerEl.createEl('p', { text: 'Vault-native deterministic job runner. Jobs are markdown files in queue folders that move through inbox → running → done | failed. Manual execution only — use the "Orchestrator: Scan" and "Orchestrator: Run next" commands.' });
 
-		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const globalGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 
-		new Setting(group)
+		new Setting(globalGroup)
 			.setName('Enabled')
 			.setDesc('When off, scan and run-next show a notice and do nothing.')
 			.addToggle(t => t.setValue(this.plugin.settings.orchestrationEnabled).onChange(async (v) => {
@@ -1319,8 +1319,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				await this.plugin.saveSettings();
 			}));
 
-		group.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(group)
+		globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(globalGroup)
 			.setName('Queue folder root')
 			.setDesc('Vault folder containing inbox/, running/, done/, failed/ subfolders.')
 			.addText(t => t
@@ -1332,14 +1332,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				})
 				.inputEl.addClass('pi-width-normal'));
 
-		group.createEl('hr', { cls: 'crucible-row-divider' });
+		globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
 		let tzWarning: HTMLElement | null = null;
 		const setTzWarningVisibility = (valid: boolean) => {
 			if (!tzWarning) return;
 			if (valid) tzWarning.addClass('is-hidden');
 			else tzWarning.removeClass('is-hidden');
 		};
-		const tzSetting = new Setting(group)
+		const tzSetting = new Setting(globalGroup)
 			.setName('Timezone')
 			.setDesc('IANA timezone name used to determine "today" for date-bound workflows.')
 			.addText(t => t
@@ -1358,10 +1358,43 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		});
 		setTzWarningVisibility(isValidTimezone(this.plugin.settings.orchestrationTimezone));
 
-		group.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(group)
-			.setName('YouTube channels note')
-			.setDesc('Markdown note containing the channel registry table. Used by the YouTube tracker workflow.')
+		// --- Daily Brief Lite ---
+		new Setting(containerEl).setName('Daily Brief Lite').setHeading();
+		const dailyBriefGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(dailyBriefGroup)
+			.setName('Enabled')
+			.setDesc('Fetch FX rates and weather, then inject them into today\'s daily note.')
+			.addToggle(t => t.setValue(this.plugin.settings.orchestrationDailyBriefEnabled).onChange(async (v) => {
+				this.plugin.settings.orchestrationDailyBriefEnabled = v;
+				await this.plugin.saveSettings();
+			}));
+		dailyBriefGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(dailyBriefGroup)
+			.setName('Target section')
+			.setDesc('Header to inject the brief under (e.g. # Daily Brief). If empty, defaults to "Daily Brief: External Context".')
+			.addText(t => t
+				.setPlaceholder('# Daily Brief: External Context')
+				.setValue(this.plugin.settings.orchestrationDailyBriefTargetSection)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationDailyBriefTargetSection = v;
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		// --- YouTube Tracker ---
+		new Setting(containerEl).setName('YouTube Tracker').setHeading();
+		const ytGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(ytGroup)
+			.setName('Enabled')
+			.setDesc('Poll configured YouTube channels for new videos and create intake notes.')
+			.addToggle(t => t.setValue(this.plugin.settings.orchestrationYoutubeTrackerEnabled).onChange(async (v) => {
+				this.plugin.settings.orchestrationYoutubeTrackerEnabled = v;
+				await this.plugin.saveSettings();
+			}));
+		ytGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(ytGroup)
+			.setName('Channels note')
+			.setDesc('Markdown note containing the channel registry table.')
 			.addSearch(cb => {
 				cb.setPlaceholder('_system/youtube/Channels.md')
 					.setValue(this.plugin.settings.orchestrationYoutubeChannelsNote)
@@ -1374,11 +1407,19 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
-		new Setting(containerEl).setName('Link registry').setHeading();
+		// --- Link Scan ---
+		new Setting(containerEl).setName('Link Scan').setHeading();
 		const linkGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-
 		new Setting(linkGroup)
-			.setName('Link registry root')
+			.setName('Enabled')
+			.setDesc('Scan the vault for URLs and build a canonical link registry.')
+			.addToggle(t => t.setValue(this.plugin.settings.orchestrationLinkScanEnabled).onChange(async (v) => {
+				this.plugin.settings.orchestrationLinkScanEnabled = v;
+				await this.plugin.saveSettings();
+			}));
+		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(linkGroup)
+			.setName('Registry root')
 			.setDesc('Vault folder where one note per canonical URL is stored.')
 			.addText(t => t
 				.setPlaceholder('_crucible/link_registry')
@@ -1388,7 +1429,6 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				})
 				.inputEl.addClass('pi-width-normal'));
-
 		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
 
 		const autoSize = (el: HTMLTextAreaElement) => {
@@ -1413,12 +1453,10 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				t.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal');
 				requestAnimationFrame(() => autoSize(t.inputEl));
 			});
-
 		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
-
 		new Setting(linkGroup)
 			.setName('Tracked sources note')
-			.setDesc('Markdown note that will hold promoted tracked sources as a table (Base URL | Description | Date Added). Setting only — not yet read or written by v1.')
+			.setDesc('Markdown note that will hold promoted tracked sources as a table (Base URL | Description | Date Added).')
 			.addSearch(cb => {
 				cb.setPlaceholder('Sources/Tracked Sources.md')
 					.setValue(this.plugin.settings.orchestrationTrackedSourcesNote)
@@ -1431,6 +1469,30 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				new FileSuggest(this.app, cb.inputEl);
 			});
 
+		// --- Transcript Refine ---
+		new Setting(containerEl).setName('Transcript Refine').setHeading();
+		const refineGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(refineGroup)
+			.setName('Enabled')
+			.setDesc('Run an AI chain against a target transcript note.')
+			.addToggle(t => t.setValue(this.plugin.settings.orchestrationTranscriptRefineEnabled).onChange(async (v) => {
+				this.plugin.settings.orchestrationTranscriptRefineEnabled = v;
+				await this.plugin.saveSettings();
+			}));
+		refineGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(refineGroup)
+			.setName('Default chain')
+			.setDesc('Chain to run when no agentChainName is specified in the job params.')
+			.addText(t => t
+				.setPlaceholder('Refine Transcript')
+				.setValue(this.plugin.settings.orchestrationTranscriptRefineChainName)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationTranscriptRefineChainName = v.trim() || 'Refine Transcript';
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		// --- Actions ---
 		new Setting(containerEl).setName('Actions').setHeading();
 		const actions = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		new Setting(actions)

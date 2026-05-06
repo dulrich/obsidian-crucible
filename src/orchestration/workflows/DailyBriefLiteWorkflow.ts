@@ -4,10 +4,7 @@ import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
 import { fetchFxRate, FxRate } from '../utils/fx';
 import { fetchWeather, LOCATIONS, WeatherSnapshot } from '../utils/weather';
-import { replaceMarkedBlock } from '../utils/markdownBlocks';
 
-const BLOCK_KEY = 'daily-brief-lite';
-const HEADING = 'Daily Brief: External Context';
 const FX_PAIRS: Array<{ base: string; quote: string; label: string }> = [
 	{ base: 'USD', quote: 'MXN', label: 'USD → MXN' },
 	{ base: 'EUR', quote: 'MXN', label: 'EUR → MXN' },
@@ -27,8 +24,19 @@ export class DailyBriefLiteWorkflow implements Workflow {
 			return { status: 'failed', error: `Daily note could not be materialized at ${path}` };
 		}
 
+		const targetSection = (plugin.settings.orchestrationDailyBriefTargetSection ?? '').trim();
+		const content = await app.vault.read(file);
+
+		if (targetSection && !isSectionEmpty(content, targetSection)) {
+			return {
+				status: 'done',
+				outputPaths: [file.path],
+				notes: 'Section already has content, skipped.',
+			};
+		}
+
 		const fxResults = await Promise.allSettled(FX_PAIRS.map(p => fetchFxRate(p.base, p.quote)));
-		const weatherResults = await Promise.allSettled(LOCATIONS.map(loc => fetchWeather(loc)));
+		const weatherResults = await Promise.allSettled(LOCATIONS.map(loc => fetchWeather(loc, tz)));
 
 		const failures: string[] = [];
 		const fxLines: string[] = fxResults.map((r, i) => {
@@ -61,11 +69,8 @@ export class DailyBriefLiteWorkflow implements Workflow {
 			...weatherLines,
 		].join('\n');
 
-		const content = await app.vault.read(file);
-		const next = replaceMarkedBlock(content, BLOCK_KEY, body, HEADING);
-		if (next !== content) {
-			await app.vault.modify(file, next);
-		}
+		const next = appendToSection(content, targetSection, body);
+		await app.vault.modify(file, next);
 
 		const notes = failures.length === 0
 			? 'All sources OK'
@@ -94,14 +99,67 @@ export class DailyBriefLiteWorkflow implements Workflow {
 	}
 }
 
+function sectionBounds(lines: string[], headerIndex: number, headerLevel: number): number {
+	for (let i = headerIndex + 1; i < lines.length; i++) {
+		const line = lines[i] ?? '';
+		const headMatch = line.trim().match(/^(#+)\s/);
+		if (headMatch && headMatch[1]!.length <= headerLevel) return i;
+		if (line.trim() === '---') return i;
+	}
+	return lines.length;
+}
+
+function isSectionEmpty(content: string, header: string): boolean {
+	const lines = content.split('\n');
+	const headerTrimmed = header.trim();
+	const headerIndex = lines.findIndex(l => l.trim() === headerTrimmed);
+	if (headerIndex === -1) return true;
+
+	const levelMatch = headerTrimmed.match(/^(#+)/);
+	const level = levelMatch ? levelMatch[1]!.length : 0;
+	const endIndex = sectionBounds(lines, headerIndex, level);
+
+	for (let i = headerIndex + 1; i < endIndex; i++) {
+		if ((lines[i] ?? '').trim() !== '') return false;
+	}
+	return true;
+}
+
+function appendToSection(content: string, header: string, body: string): string {
+	const lines = content.split('\n');
+	const headerTrimmed = header.trim();
+	const headerIndex = lines.findIndex(l => l.trim() === headerTrimmed);
+
+	if (headerIndex === -1) {
+		const separator = content.trim() ? '\n\n' : '';
+		return `${content.trimEnd()}${separator}${headerTrimmed}\n\n${body.trim()}\n`;
+	}
+
+	const levelMatch = headerTrimmed.match(/^(#+)/);
+	const level = levelMatch ? levelMatch[1]!.length : 0;
+	const endIndex = sectionBounds(lines, headerIndex, level);
+
+	// Find last non-blank line in section to insert after it, or use headerIndex + 1
+	let insertIndex = headerIndex + 1;
+	for (let i = endIndex - 1; i > headerIndex; i--) {
+		if ((lines[i] ?? '').trim() !== '') {
+			insertIndex = i + 1;
+			break;
+		}
+	}
+
+	lines.splice(insertIndex, 0, '', body.trim(), '');
+	return lines.join('\n');
+}
+
 function formatFxLine(label: string, rate: FxRate): string {
-	return `- ${label}: ${rate.rate.toFixed(4)} _(as of ${rate.asOf})_`;
+	return `- ${label}: ${rate.rate.toFixed(2)} _(as of ${rate.asOf})_`;
 }
 
 function formatWeatherLine(snap: WeatherSnapshot): string {
-	const temp = Number.isInteger(snap.temperatureC) ? snap.temperatureC.toString() : snap.temperatureC.toFixed(1);
-	const wind = Number.isInteger(snap.windKmh) ? snap.windKmh.toString() : snap.windKmh.toFixed(1);
-	return `- ${snap.location}: ${temp}°C, ${snap.description}, wind ${wind} km/h`;
+	const high = Math.round(snap.highC);
+	const low = Math.round(snap.lowC);
+	return `- ${snap.location}: ↑${high}°C / ↓${low}°C, ${snap.description}`;
 }
 
 function formatStamp(tz: string): string {
