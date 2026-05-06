@@ -14,6 +14,7 @@ Crucible consolidates features traditionally spread across multiple plugins (Dai
 - **AI Agents:** Define reusable AI assistants with custom system prompts, user prompt templates, and a configured provider. Agents are registered as commands and can be invoked from the command palette or chained together.
 - **Chains:** Compose multi-step workflows by linking captures, linting, and agent calls into a single command. Each step can pass its output to the next via `{{response}}`.
 - **AI Providers:** Connect to OpenAI, Anthropic, Google (Gemini), OpenRouter, or a local Ollama instance. API keys are stored securely using Obsidian's secret storage.
+- **Settings in a tab:** Open the full settings UI in a workspace tab via the *Open settings in a tab* command, side-by-side with your notes instead of buried in the modal.
 
 ## Installation
 
