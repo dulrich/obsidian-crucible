@@ -3,7 +3,7 @@ import { CrucibleSettingTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
-import { CaptureManager, TextInputModal } from "./captures";
+import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
 import { ChainManager } from "./chains";
 import { ProviderManager } from "./providers";
 import { AgentManager } from "./agents";
@@ -184,25 +184,25 @@ export default class CruciblePlugin extends Plugin {
 
 		this.addCommand({
 			id: 'orchestrator-scan',
-			name: 'Orchestrator: scan',
+			name: 'Orchestrate: scan',
 			callback: () => { void this.orchestrator.scan(); },
 		});
 
 		this.addCommand({
 			id: 'orchestrator-run-next',
-			name: 'Orchestrator: run next',
+			name: 'Orchestrate: run next',
 			callback: () => { void this.orchestrator.runNext(); },
 		});
 
 		this.addCommand({
 			id: 'orchestrator-enqueue-daily-brief-lite',
-			name: 'Orchestrator: enqueue daily brief lite',
+			name: 'Orchestrate: enqueue daily brief lite',
 			callback: () => { void this.orchestrator.enqueue('daily_brief_lite'); },
 		});
 
 		this.addCommand({
 			id: 'orchestrator-enqueue-transcript-refine',
-			name: 'Orchestrator: enqueue transcript refine',
+			name: 'Orchestrate: enqueue transcript refine',
 			callback: () => {
 				new FilePickerModal(this.app, 'Pick a transcript note', (file) => {
 					void this.orchestrator.enqueue('transcript_refine', { targetPath: file.path });
@@ -212,13 +212,13 @@ export default class CruciblePlugin extends Plugin {
 
 		this.addCommand({
 			id: 'orchestrator-enqueue-youtube-tracker',
-			name: 'Orchestrator: enqueue YouTube tracker',
+			name: 'Orchestrate: enqueue YouTube tracker',
 			callback: () => { void this.orchestrator.enqueue('youtube_tracker'); },
 		});
 
 		this.addCommand({
 			id: 'orchestrator-enqueue-link-scan',
-			name: 'Orchestrator: enqueue link scan',
+			name: 'Orchestrate: enqueue link scan',
 			callback: () => { void this.orchestrator.enqueue('link_scan'); },
 		});
 
@@ -324,10 +324,15 @@ export default class CruciblePlugin extends Plugin {
 			const fullId = `${prefix}:${id}`;
 
 			// Register in ChainManager so it can handle args/responses
-			this.chainManager.registerInternalCommand(fullId, async (args, prev, editor) => {
+			this.chainManager.registerInternalCommand(fullId, async (args, prev, editor, targetFile) => {
 				const resolvedValue = args._default || await this.resolveCaptureValue(capture, editor);
 				if (resolvedValue === null) return false;
-				return await this.captureManager.executeCapture(capture, resolvedValue);
+				return await this.captureManager.executeCapture(
+					capture,
+					resolvedValue,
+					targetFile,
+					this.resolveCaptureContext(editor),
+				);
 			});
 
 			this.addCommand({
@@ -340,7 +345,12 @@ export default class CruciblePlugin extends Plugin {
 							const value = await this.resolveCaptureValue(capture, editor);
 							if (value === null) return; 
 							
-							await this.captureManager.executeCapture(capture, value);
+							await this.captureManager.executeCapture(
+								capture,
+								value,
+								undefined,
+								this.resolveCaptureContext(editor),
+							);
 						})();
 					}
 					return true;
@@ -376,6 +386,12 @@ export default class CruciblePlugin extends Plugin {
 				return await this.promptForCaptureValue(capture);
 		}
 		return '';
+	}
+
+	private resolveCaptureContext(editor?: Editor): CaptureExecutionContext {
+		return {
+			sourceSectionHeader: editor ? findCurrentSectionHeader(editor) : null,
+		};
 	}
 
 	private async promptForCaptureValue(capture: Capture): Promise<string | null> {
@@ -525,7 +541,12 @@ export default class CruciblePlugin extends Plugin {
 			if (capture) {
 				const resolvedValue = manualValue || await this.resolveCaptureValue(capture, editor);
 				if (resolvedValue === null) return false;
-				return await this.captureManager.executeCapture(capture, resolvedValue, tf);
+				return await this.captureManager.executeCapture(
+					capture,
+					resolvedValue,
+					tf,
+					this.resolveCaptureContext(editor),
+				);
 			}
 			new Notice(`Capture not found: ${name}`);
 			return false;
@@ -675,6 +696,14 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}
 	}
+}
+
+function findCurrentSectionHeader(editor: Editor): string | null {
+	for (let lineNum = editor.getCursor().line; lineNum >= 0; lineNum--) {
+		const line = editor.getLine(lineNum).trim();
+		if (/^#{1,6}\s+\S/.test(line)) return line;
+	}
+	return null;
 }
 
 class PickerModal extends Modal {
