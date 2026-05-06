@@ -299,7 +299,7 @@ If your plugin does not need CSS, delete this file.
   font-family: var(--font-monospace);
   font-size: 0.85em;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   max-height: 60vh;
   overflow-y: auto;
 }

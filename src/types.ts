@@ -108,6 +108,18 @@ export interface Provider {
 	baseUrl?: string;
 }
 
+export interface FxPair {
+	base: string;
+	quote: string;
+	label: string;
+}
+
+export interface WeatherLocation {
+	label: string;
+	lat: number;
+	lon: number;
+}
+
 export type AgentPromptSource = 'text' | 'file';
 
 export interface Agent {
@@ -162,6 +174,8 @@ export interface CrucibleSettings {
 	// Workflow: daily_brief_lite
 	orchestrationDailyBriefEnabled: boolean;
 	orchestrationDailyBriefTargetSection: string;
+	orchestrationDailyBriefFxPairs: FxPair[];
+	orchestrationDailyBriefWeatherLocations: WeatherLocation[];
 	// Workflow: youtube_tracker
 	orchestrationYoutubeTrackerEnabled: boolean;
 	orchestrationYoutubeChannelsNote: string;
@@ -205,6 +219,15 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationTimezone: 'America/Mexico_City',
 	orchestrationDailyBriefEnabled: true,
 	orchestrationDailyBriefTargetSection: 'Daily Brief: External Context',
+	orchestrationDailyBriefFxPairs: [
+		{ base: 'USD', quote: 'MXN', label: 'USD → MXN' },
+		{ base: 'EUR', quote: 'MXN', label: 'EUR → MXN' },
+	],
+	orchestrationDailyBriefWeatherLocations: [
+		{ label: 'Guadalajara, MX', lat: 20.6597, lon: -103.3496 },
+		{ label: 'Mt Vernon, WA', lat: 48.4201, lon: -122.3346 },
+		{ label: 'Bolzano, IT', lat: 46.4983, lon: 11.3548 },
+	],
 	orchestrationYoutubeTrackerEnabled: true,
 	orchestrationYoutubeChannelsNote: '_system/youtube/Channels.md',
 	orchestrationLinkScanEnabled: true,
