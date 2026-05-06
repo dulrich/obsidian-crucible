@@ -29,6 +29,12 @@ If your plugin does not need CSS, delete this file.
   pointer-events: none;
 }
 
+/* Settings rendered in a workspace tab (mirrors .vertical-tab-content) */
+.crucible-settings-host {
+  overflow-y: auto;
+  padding: 16px 24px;
+}
+
 /* Modal Styles */
 .crucible-modal-input {
   width: 100%;
