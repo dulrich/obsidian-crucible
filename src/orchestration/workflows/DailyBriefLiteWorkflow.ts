@@ -3,12 +3,8 @@ import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
 import { fetchFxRate, FxRate } from '../utils/fx';
-import { fetchWeather, LOCATIONS, WeatherSnapshot } from '../utils/weather';
-
-const FX_PAIRS: Array<{ base: string; quote: string; label: string }> = [
-	{ base: 'USD', quote: 'MXN', label: 'USD → MXN' },
-	{ base: 'EUR', quote: 'MXN', label: 'EUR → MXN' },
-];
+import { fetchWeather, WeatherSnapshot } from '../utils/weather';
+import { insertIntoSection, isSectionEmpty } from '../../sections';
 
 export class DailyBriefLiteWorkflow implements Workflow {
 	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
@@ -35,18 +31,29 @@ export class DailyBriefLiteWorkflow implements Workflow {
 			};
 		}
 
-		const fxResults = await Promise.allSettled(FX_PAIRS.map(p => fetchFxRate(p.base, p.quote)));
-		const weatherResults = await Promise.allSettled(LOCATIONS.map(loc => fetchWeather(loc, tz)));
+		const fxPairs = plugin.settings.orchestrationDailyBriefFxPairs;
+		const locations = plugin.settings.orchestrationDailyBriefWeatherLocations;
+
+		if (fxPairs.length === 0 && locations.length === 0) {
+			return {
+				status: 'done',
+				outputPaths: [file.path],
+				notes: 'No FX pairs or weather locations configured, skipped.',
+			};
+		}
+
+		const fxResults = await Promise.allSettled(fxPairs.map(p => fetchFxRate(p.base, p.quote)));
+		const weatherResults = await Promise.allSettled(locations.map(loc => fetchWeather(loc, tz)));
 
 		const failures: string[] = [];
 		const fxLines: string[] = fxResults.map((r, i) => {
-			const pair = FX_PAIRS[i]!;
+			const pair = fxPairs[i]!;
 			if (r.status === 'fulfilled') return formatFxLine(pair.label, r.value);
 			failures.push(pair.label);
 			return `- ${pair.label}: *lookup failed (${describeReason(r.reason)})*`;
 		});
 		const weatherLines: string[] = weatherResults.map((r, i) => {
-			const loc = LOCATIONS[i]!;
+			const loc = locations[i]!;
 			if (r.status === 'fulfilled') return formatWeatherLine(r.value);
 			failures.push(loc.label);
 			return `- ${loc.label}: *lookup failed (${describeReason(r.reason)})*`;
@@ -61,15 +68,15 @@ export class DailyBriefLiteWorkflow implements Workflow {
 		}
 
 		const stamp = formatStamp(tz);
-		const body = [
-			`**FX Rates** _(updated ${stamp})_`,
-			...fxLines,
-			'',
-			'**Weather**',
-			...weatherLines,
-		].join('\n');
+		const sections: string[] = [];
+		if (fxLines.length) sections.push([`**FX Rates** _(updated ${stamp})_`, ...fxLines].join('\n'));
+		if (weatherLines.length) sections.push(['**Weather**', ...weatherLines].join('\n'));
+		const body = sections.join('\n\n');
 
-		const next = appendToSection(content, targetSection, body);
+		// Pad with blank lines so the block is visually separated from any
+		// existing content above and the next section below.
+		const payload = `\n${body.trim()}\n`;
+		const next = insertIntoSection(content, targetSection, payload, 'append');
 		await app.vault.modify(file, next);
 
 		const notes = failures.length === 0
@@ -97,59 +104,6 @@ export class DailyBriefLiteWorkflow implements Workflow {
 		}
 		return null;
 	}
-}
-
-function sectionBounds(lines: string[], headerIndex: number, headerLevel: number): number {
-	for (let i = headerIndex + 1; i < lines.length; i++) {
-		const line = lines[i] ?? '';
-		const headMatch = line.trim().match(/^(#+)\s/);
-		if (headMatch && headMatch[1]!.length <= headerLevel) return i;
-		if (line.trim() === '---') return i;
-	}
-	return lines.length;
-}
-
-function isSectionEmpty(content: string, header: string): boolean {
-	const lines = content.split('\n');
-	const headerTrimmed = header.trim();
-	const headerIndex = lines.findIndex(l => l.trim() === headerTrimmed);
-	if (headerIndex === -1) return true;
-
-	const levelMatch = headerTrimmed.match(/^(#+)/);
-	const level = levelMatch ? levelMatch[1]!.length : 0;
-	const endIndex = sectionBounds(lines, headerIndex, level);
-
-	for (let i = headerIndex + 1; i < endIndex; i++) {
-		if ((lines[i] ?? '').trim() !== '') return false;
-	}
-	return true;
-}
-
-function appendToSection(content: string, header: string, body: string): string {
-	const lines = content.split('\n');
-	const headerTrimmed = header.trim();
-	const headerIndex = lines.findIndex(l => l.trim() === headerTrimmed);
-
-	if (headerIndex === -1) {
-		const separator = content.trim() ? '\n\n' : '';
-		return `${content.trimEnd()}${separator}${headerTrimmed}\n\n${body.trim()}\n`;
-	}
-
-	const levelMatch = headerTrimmed.match(/^(#+)/);
-	const level = levelMatch ? levelMatch[1]!.length : 0;
-	const endIndex = sectionBounds(lines, headerIndex, level);
-
-	// Find last non-blank line in section to insert after it, or use headerIndex + 1
-	let insertIndex = headerIndex + 1;
-	for (let i = endIndex - 1; i > headerIndex; i--) {
-		if ((lines[i] ?? '').trim() !== '') {
-			insertIndex = i + 1;
-			break;
-		}
-	}
-
-	lines.splice(insertIndex, 0, '', body.trim(), '');
-	return lines.join('\n');
 }
 
 function formatFxLine(label: string, rate: FxRate): string {

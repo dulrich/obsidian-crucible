@@ -2,7 +2,7 @@
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType } from "./types";
+import { Capture, CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType, Chain, CrucibleSettings } from "./types";
 import { agentCommandId } from "./agents";
 import { isValidTimezone } from "./orchestration/utils/dates";
 
@@ -19,6 +19,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	private editingChainIndex: number = -1;
 	private editingProviderIndex: number = -1;
 	private editingAgentIndex: number = -1;
+	private editingWorkflowId: string | null = null;
 
 	constructor(app: App, plugin: CruciblePlugin) {
 		super(app, plugin);
@@ -29,7 +30,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		return this.editingCaptureIndex !== -1 ||
 			this.editingChainIndex !== -1 ||
 			this.editingProviderIndex !== -1 ||
-			this.editingAgentIndex !== -1;
+			this.editingAgentIndex !== -1 ||
+			this.editingWorkflowId !== null;
 	}
 
 	private resetEditingState(): void {
@@ -37,6 +39,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		this.editingChainIndex = -1;
 		this.editingProviderIndex = -1;
 		this.editingAgentIndex = -1;
+		this.editingWorkflowId = null;
 	}
 
 	private getChainCommandExtras(): Command[] {
@@ -76,7 +79,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	private getScrollContainer(): HTMLElement | null {
 		// In the settings modal the scroller is .vertical-tab-content; in the
 		// workspace-tab view it's the contentEl flagged with .crucible-settings-host.
-		return this.containerEl.closest('.vertical-tab-content, .crucible-settings-host') as HTMLElement | null;
+		return this.containerEl.closest<HTMLElement>('.vertical-tab-content, .crucible-settings-host');
 	}
 
 	private refreshDisplay() {
@@ -384,7 +387,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					.setName(chain.name || '(unnamed)')
 					.setDesc(`${chain.steps.length} steps`)
 					.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate chain').onClick(async () => {
-						const copy = JSON.parse(JSON.stringify(chain));
+						const copy = JSON.parse(JSON.stringify(chain)) as Chain;
 						copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
 						this.plugin.settings.chains.push(copy);
 						await this.plugin.saveSettings();
@@ -719,25 +722,27 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const actionRow = new Setting(containerEl);
 		actionRow.addDropdown(d => {
 			d.addOption(String(chain.steps.length), 'At end');
-			chain.steps.forEach((_, i) => d.addOption(String(i), `Before step ${i + 1}`));
+			chain.steps.forEach((_, i) => { d.addOption(String(i), `Before step ${i + 1}`); });
 			d.setValue(String(insertAt));
 			d.onChange(v => { insertAt = Number(v); });
 			d.selectEl.addClass('pi-width-small');
 		});
-		actionRow.addButton(bt => bt.setButtonText('Add step').setCta().onClick(async () => {
-			chain.steps.splice(insertAt, 0, { commandId: '', keepGoing: false, args: {} });
-			await this.plugin.saveSettings();
-			const targetIndex = insertAt;
-			this.display();
-			requestAnimationFrame(() => {
-				const scrollEl = this.getScrollContainer();
-				const newStep = this.containerEl.querySelector(`[data-step-index="${targetIndex}"]`) as HTMLElement | null;
-				if (newStep && scrollEl) {
-					const stepTop = newStep.offsetTop;
-					const stepCenter = stepTop + newStep.offsetHeight / 2;
-					scrollEl.scrollTop = stepCenter - scrollEl.clientHeight / 2;
-				}
-			});
+		actionRow.addButton(bt => bt.setButtonText('Add step').setCta().onClick(() => {
+			void (async () => {
+				chain.steps.splice(insertAt, 0, { commandId: '', keepGoing: false, args: {} });
+				await this.plugin.saveSettings();
+				const targetIndex = insertAt;
+				this.display();
+				requestAnimationFrame(() => {
+					const scrollEl = this.getScrollContainer();
+					const newStep = this.containerEl.querySelector<HTMLElement>(`[data-step-index="${targetIndex}"]`);
+					if (newStep && scrollEl) {
+						const stepTop = newStep.offsetTop;
+						const stepCenter = stepTop + newStep.offsetHeight / 2;
+						scrollEl.scrollTop = stepCenter - scrollEl.clientHeight / 2;
+					}
+				});
+			})();
 		}));
 		actionRow.addButton(bt => bt.setButtonText('Preview chain').onClick(() => {
 			this.plugin.chainManager.previewChain(chain);
@@ -1311,7 +1316,53 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		addVar('datetime:FORMAT', 'Custom format', '{{datetime:MMMM YYYY}}');
 	}
 
+	private getWorkflowMeta(): { id: string; name: string; description: string; enabledKey: keyof CrucibleSettings; render: (containerEl: HTMLElement) => void }[] {
+		return [
+			{
+				id: 'daily_brief_lite',
+				name: 'Daily Brief Lite',
+				description: 'Fetch FX rates and weather, then inject them into today\'s daily note.',
+				enabledKey: 'orchestrationDailyBriefEnabled',
+				render: (el) => this.renderEditDailyBriefWorkflow(el),
+			},
+			{
+				id: 'transcript_refine',
+				name: 'Transcript Refine',
+				description: 'Run an AI chain against a target transcript note.',
+				enabledKey: 'orchestrationTranscriptRefineEnabled',
+				render: (el) => this.renderEditTranscriptRefineWorkflow(el),
+			},
+			{
+				id: 'youtube_tracker',
+				name: 'YouTube Tracker',
+				description: 'Poll configured YouTube channels for new videos and create intake notes.',
+				enabledKey: 'orchestrationYoutubeTrackerEnabled',
+				render: (el) => this.renderEditYoutubeTrackerWorkflow(el),
+			},
+			{
+				id: 'link_scan',
+				name: 'Link Scan',
+				description: 'Scan the vault for URLs and build a canonical link registry.',
+				enabledKey: 'orchestrationLinkScanEnabled',
+				render: (el) => this.renderEditLinkScanWorkflow(el),
+			},
+		];
+	}
+
 	private renderOrchestrationSettings(containerEl: HTMLElement) {
+		const workflows = this.getWorkflowMeta();
+
+		if (this.editingWorkflowId !== null) {
+			const meta = workflows.find(w => w.id === this.editingWorkflowId);
+			if (meta) {
+				new Setting(containerEl).setName(`Edit Workflow: ${meta.name}`).setHeading();
+				const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+				meta.render(group);
+				return;
+			}
+			this.editingWorkflowId = null;
+		}
+
 		new Setting(containerEl).setName('Orchestrator').setHeading();
 		containerEl.createEl('p', { text: 'Vault-native deterministic job runner. Jobs are markdown files in queue folders that move through inbox → running → done | failed. Manual execution only — use the "Orchestrator: Scan" and "Orchestrator: Run next" commands.' });
 
@@ -1364,139 +1415,28 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		});
 		setTzWarningVisibility(isValidTimezone(this.plugin.settings.orchestrationTimezone));
 
-		// --- Daily Brief Lite ---
-		new Setting(containerEl).setName('Daily Brief Lite').setHeading();
-		const dailyBriefGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-		new Setting(dailyBriefGroup)
-			.setName('Enabled')
-			.setDesc('Fetch FX rates and weather, then inject them into today\'s daily note.')
-			.addToggle(t => t.setValue(this.plugin.settings.orchestrationDailyBriefEnabled).onChange(async (v) => {
-				this.plugin.settings.orchestrationDailyBriefEnabled = v;
-				await this.plugin.saveSettings();
-			}));
-		dailyBriefGroup.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(dailyBriefGroup)
-			.setName('Target section')
-			.setDesc('Header to inject the brief under (e.g. # Daily Brief). If empty, defaults to "Daily Brief: External Context".')
-			.addText(t => t
-				.setPlaceholder('# Daily Brief: External Context')
-				.setValue(this.plugin.settings.orchestrationDailyBriefTargetSection)
-				.onChange(async (v) => {
-					this.plugin.settings.orchestrationDailyBriefTargetSection = v;
-					await this.plugin.saveSettings();
-				})
-				.inputEl.addClass('pi-width-normal'));
+		// --- Workflows list ---
+		new Setting(containerEl).setName('Workflows').setHeading();
+		containerEl.createEl('p', { text: 'Toggle workflows on or off here. Click the pencil to edit a workflow\'s settings.' });
 
-		// --- YouTube Tracker ---
-		new Setting(containerEl).setName('YouTube Tracker').setHeading();
-		const ytGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-		new Setting(ytGroup)
-			.setName('Enabled')
-			.setDesc('Poll configured YouTube channels for new videos and create intake notes.')
-			.addToggle(t => t.setValue(this.plugin.settings.orchestrationYoutubeTrackerEnabled).onChange(async (v) => {
-				this.plugin.settings.orchestrationYoutubeTrackerEnabled = v;
-				await this.plugin.saveSettings();
-			}));
-		ytGroup.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(ytGroup)
-			.setName('Channels note')
-			.setDesc('Markdown note containing the channel registry table.')
-			.addSearch(cb => {
-				cb.setPlaceholder('_system/youtube/Channels.md')
-					.setValue(this.plugin.settings.orchestrationYoutubeChannelsNote)
+		const workflowsGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		workflows.forEach((meta, index) => {
+			if (index > 0) workflowsGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(workflowsGroup)
+				.setName(meta.name)
+				.setDesc(meta.description)
+				.addToggle(t => t
+					.setTooltip('Enabled')
+					.setValue(this.plugin.settings[meta.enabledKey] as boolean)
 					.onChange(async (v) => {
-						this.plugin.settings.orchestrationYoutubeChannelsNote = v.trim() || '_system/youtube/Channels.md';
+						(this.plugin.settings[meta.enabledKey] as boolean) = v;
 						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FileSuggest(this.app, cb.inputEl);
-			});
-
-		// --- Link Scan ---
-		new Setting(containerEl).setName('Link Scan').setHeading();
-		const linkGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-		new Setting(linkGroup)
-			.setName('Enabled')
-			.setDesc('Scan the vault for URLs and build a canonical link registry.')
-			.addToggle(t => t.setValue(this.plugin.settings.orchestrationLinkScanEnabled).onChange(async (v) => {
-				this.plugin.settings.orchestrationLinkScanEnabled = v;
-				await this.plugin.saveSettings();
-			}));
-		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(linkGroup)
-			.setName('Registry root')
-			.setDesc('Vault folder where one note per canonical URL is stored.')
-			.addText(t => t
-				.setPlaceholder('_crucible/link_registry')
-				.setValue(this.plugin.settings.orchestrationLinkRegistryRoot)
-				.onChange(async (v) => {
-					this.plugin.settings.orchestrationLinkRegistryRoot = v.trim() || '_crucible/link_registry';
-					await this.plugin.saveSettings();
-				})
-				.inputEl.addClass('pi-width-normal'));
-		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
-
-		const autoSize = (el: HTMLTextAreaElement) => {
-			el.setCssProps({ height: 'auto' });
-			el.setCssProps({ height: `${el.scrollHeight}px` });
-		};
-
-		new Setting(linkGroup)
-			.setName('Scan exclusions')
-			.setDesc('Folders to skip during link scan (one path per line). The link registry root is always excluded.')
-			.addTextArea(t => {
-				t.setPlaceholder('_crucible')
-					.setValue(this.plugin.settings.orchestrationLinkScanExclusions.join('\n'))
-					.onChange(async (v) => {
-						this.plugin.settings.orchestrationLinkScanExclusions = v
-							.split('\n')
-							.map(s => s.trim())
-							.filter(s => s.length > 0);
-						await this.plugin.saveSettings();
-						autoSize(t.inputEl);
-					});
-				t.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal');
-				requestAnimationFrame(() => autoSize(t.inputEl));
-			});
-		linkGroup.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(linkGroup)
-			.setName('Tracked sources note')
-			.setDesc('Markdown note that will hold promoted tracked sources as a table (Base URL | Description | Date Added).')
-			.addSearch(cb => {
-				cb.setPlaceholder('Sources/Tracked Sources.md')
-					.setValue(this.plugin.settings.orchestrationTrackedSourcesNote)
-					.onChange(async (v) => {
-						this.plugin.settings.orchestrationTrackedSourcesNote = v.trim() || 'Sources/Tracked Sources.md';
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FileSuggest(this.app, cb.inputEl);
-			});
-
-		// --- Transcript Refine ---
-		new Setting(containerEl).setName('Transcript Refine').setHeading();
-		const refineGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-		new Setting(refineGroup)
-			.setName('Enabled')
-			.setDesc('Run an AI chain against a target transcript note.')
-			.addToggle(t => t.setValue(this.plugin.settings.orchestrationTranscriptRefineEnabled).onChange(async (v) => {
-				this.plugin.settings.orchestrationTranscriptRefineEnabled = v;
-				await this.plugin.saveSettings();
-			}));
-		refineGroup.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(refineGroup)
-			.setName('Default chain')
-			.setDesc('Chain to run when no agentChainName is specified in the job params.')
-			.addText(t => t
-				.setPlaceholder('Refine Transcript')
-				.setValue(this.plugin.settings.orchestrationTranscriptRefineChainName)
-				.onChange(async (v) => {
-					this.plugin.settings.orchestrationTranscriptRefineChainName = v.trim() || 'Refine Transcript';
-					await this.plugin.saveSettings();
-				})
-				.inputEl.addClass('pi-width-normal'));
+					}))
+				.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit workflow').onClick(() => {
+					this.editingWorkflowId = meta.id;
+					this.display();
+				}));
+		});
 
 		// --- Actions ---
 		new Setting(containerEl).setName('Actions').setHeading();
@@ -1514,6 +1454,195 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			.addButton(bt => bt.setButtonText('Run next').onClick(async () => {
 				await this.plugin.orchestrator.runNext();
 			}));
+	}
+
+	private renderEditDailyBriefWorkflow(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName('Target section')
+			.setDesc('Header to inject the brief under (e.g. # Daily Brief). If empty, defaults to "Daily Brief: External Context".')
+			.addText(t => t
+				.setPlaceholder('# Daily Brief: External Context')
+				.setValue(this.plugin.settings.orchestrationDailyBriefTargetSection)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationDailyBriefTargetSection = v;
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		// Currency pairs
+		new Setting(containerEl).setName('Currency pairs').setHeading();
+		containerEl.createEl('p', { text: 'FX rates to fetch from open.er-api.com. Base and quote are ISO codes (e.g. USD, MXN). Label is shown in the brief.' });
+
+		const fxGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const fxPairs = this.plugin.settings.orchestrationDailyBriefFxPairs;
+		if (fxPairs.length === 0) {
+			fxGroup.createDiv({ text: 'No currency pairs configured.', cls: 'crucible-empty-state' });
+		} else {
+			fxPairs.forEach((pair, index) => {
+				if (index > 0) fxGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				const row = new Setting(fxGroup);
+				row.addText(t => t
+					.setPlaceholder('base (USD)')
+					.setValue(pair.base)
+					.onChange(async (v) => { pair.base = v.trim().toUpperCase(); await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-small'));
+				row.addText(t => t
+					.setPlaceholder('quote (MXN)')
+					.setValue(pair.quote)
+					.onChange(async (v) => { pair.quote = v.trim().toUpperCase(); await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-small'));
+				row.addText(t => t
+					.setPlaceholder('label (USD → MXN)')
+					.setValue(pair.label)
+					.onChange(async (v) => { pair.label = v; await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-normal'));
+				row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove pair').onClick(async () => {
+					fxPairs.splice(index, 1);
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add currency pair').onClick(async () => {
+			fxPairs.push({ base: '', quote: '', label: '' });
+			await this.plugin.saveSettings();
+			this.display();
+		}));
+
+		// Weather locations
+		new Setting(containerEl).setName('Weather locations').setHeading();
+		containerEl.createEl('p', { text: 'Locations to fetch daily forecasts from open-meteo.com. Latitude and longitude are decimal degrees.' });
+
+		const wxGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const locations = this.plugin.settings.orchestrationDailyBriefWeatherLocations;
+		if (locations.length === 0) {
+			wxGroup.createDiv({ text: 'No locations configured.', cls: 'crucible-empty-state' });
+		} else {
+			locations.forEach((loc, index) => {
+				if (index > 0) wxGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				const row = new Setting(wxGroup);
+				row.addText(t => t
+					.setPlaceholder('label (Guadalajara, MX)')
+					.setValue(loc.label)
+					.onChange(async (v) => { loc.label = v; await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-normal'));
+				row.addText(t => {
+					t.setPlaceholder('lat')
+						.setValue(loc.lat.toString())
+						.onChange(async (v) => {
+							const n = Number(v);
+							if (Number.isFinite(n)) { loc.lat = n; await this.plugin.saveSettings(); }
+						});
+					t.inputEl.type = 'number';
+					t.inputEl.addClass('pi-width-small');
+				});
+				row.addText(t => {
+					t.setPlaceholder('lon')
+						.setValue(loc.lon.toString())
+						.onChange(async (v) => {
+							const n = Number(v);
+							if (Number.isFinite(n)) { loc.lon = n; await this.plugin.saveSettings(); }
+						});
+					t.inputEl.type = 'number';
+					t.inputEl.addClass('pi-width-small');
+				});
+				row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove location').onClick(async () => {
+					locations.splice(index, 1);
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add location').onClick(async () => {
+			locations.push({ label: '', lat: 0, lon: 0 });
+			await this.plugin.saveSettings();
+			this.display();
+		}));
+	}
+
+	private renderEditTranscriptRefineWorkflow(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName('Default chain')
+			.setDesc('Chain to run when no agentChainName is specified in the job params.')
+			.addText(t => t
+				.setPlaceholder('Refine Transcript')
+				.setValue(this.plugin.settings.orchestrationTranscriptRefineChainName)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationTranscriptRefineChainName = v.trim() || 'Refine Transcript';
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+	}
+
+	private renderEditYoutubeTrackerWorkflow(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName('Channels note')
+			.setDesc('Markdown note containing the channel registry table.')
+			.addSearch(cb => {
+				cb.setPlaceholder('_system/youtube/Channels.md')
+					.setValue(this.plugin.settings.orchestrationYoutubeChannelsNote)
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationYoutubeChannelsNote = v.trim() || '_system/youtube/Channels.md';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(this.app, cb.inputEl);
+			});
+	}
+
+	private renderEditLinkScanWorkflow(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName('Registry root')
+			.setDesc('Vault folder where one note per canonical URL is stored.')
+			.addText(t => t
+				.setPlaceholder('_crucible/link_registry')
+				.setValue(this.plugin.settings.orchestrationLinkRegistryRoot)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationLinkRegistryRoot = v.trim() || '_crucible/link_registry';
+					await this.plugin.saveSettings();
+				})
+				.inputEl.addClass('pi-width-normal'));
+
+		const autoSize = (el: HTMLTextAreaElement) => {
+			el.setCssProps({ height: 'auto' });
+			el.setCssProps({ height: `${el.scrollHeight}px` });
+		};
+
+		new Setting(containerEl)
+			.setName('Scan exclusions')
+			.setDesc('Folders to skip during link scan (one path per line). The link registry root is always excluded.')
+			.addTextArea(t => {
+				t.setPlaceholder('_crucible')
+					.setValue(this.plugin.settings.orchestrationLinkScanExclusions.join('\n'))
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationLinkScanExclusions = v
+							.split('\n')
+							.map(s => s.trim())
+							.filter(s => s.length > 0);
+						await this.plugin.saveSettings();
+						autoSize(t.inputEl);
+					});
+				t.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal');
+				requestAnimationFrame(() => autoSize(t.inputEl));
+			});
+
+		new Setting(containerEl)
+			.setName('Tracked sources note')
+			.setDesc('Markdown note that will hold promoted tracked sources as a table (Base URL | Description | Date Added).')
+			.addSearch(cb => {
+				cb.setPlaceholder('Sources/Tracked Sources.md')
+					.setValue(this.plugin.settings.orchestrationTrackedSourcesNote)
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationTrackedSourcesNote = v.trim() || 'Sources/Tracked Sources.md';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(this.app, cb.inputEl);
+			});
 	}
 
 	private renderLintSettings(containerEl: HTMLElement) {

@@ -1,6 +1,7 @@
 import { App, Modal, Notice, TFile, TextComponent, moment } from 'obsidian';
 import { CrucibleSettings, Capture } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
+import { insertIntoSection } from './sections';
 
 export class CaptureManager {
 	app: App;
@@ -62,48 +63,7 @@ export class CaptureManager {
 			let newContent = '';
 
 			if (capture.targetSection) {
-				const sectionHeader = capture.targetSection.trim();
-				const lines = existingContent.split('\n');
-				const headerIndex = lines.findIndex(line => line.trim() === sectionHeader);
-
-				if (headerIndex !== -1) {
-					// Find the end of this section (next header / horizontal rule, or EOF)
-					let endIndex = lines.length;
-					for (let i = headerIndex + 1; i < lines.length; i++) {
-						const line = lines[i];
-						if (line !== undefined && (line.trim().startsWith('#') || line.trim() === '---')) {
-							endIndex = i;
-							break;
-						}
-					}
-
-					if (writeMode === 'replace') {
-						lines.splice(headerIndex + 1, endIndex - (headerIndex + 1), content);
-					} else if (writeMode === 'prepend') {
-						lines.splice(headerIndex + 1, 0, content);
-					} else {
-						let insertIndex = endIndex;
-						for (let i = endIndex - 1; i > headerIndex; i--) {
-							const line = lines[i];
-							if (line !== undefined && line.trim() !== '') {
-								insertIndex = i + 1;
-								break;
-							}
-						}
-						if (insertIndex === endIndex && insertIndex > headerIndex + 1) {
-							// If we didn't find any non-empty lines, insert right after header
-							// or at the top of the blank space.
-							insertIndex = headerIndex + 1;
-						}
-
-						lines.splice(insertIndex, 0, content);
-					}
-					newContent = lines.join('\n');
-				} else {
-					const separator = existingContent.trim() ? "\n\n" : "";
-					const header = sectionHeader ? `${sectionHeader}\n` : "";
-					newContent = `${existingContent.trimEnd()}${separator}${header}${content}`;
-				}
+				newContent = insertIntoSection(existingContent, capture.targetSection, content, writeMode);
 			} else {
 				const yamlMatch = existingContent.match(FRONTMATTER_REGEX);
 				if (writeMode === 'replace') {
