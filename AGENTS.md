@@ -46,6 +46,7 @@ If a UI/UX bug is not resolved on the first attempt, or if the root cause is not
 - **Centering:** Vertical centering in settings rows is currently handled by the default Obsidian layout; do not attempt complex flex overrides without careful testing.
 - **Tabs:** The settings page is divided into "Settings", "Shortcuts", "Captures", "Lint", and "Variables".
 - **Fuzzy Search:** Use the custom `FileSuggest` and `FolderSuggest` classes for any file-path inputs.
+- **List + edit pattern:** Tabs that manage a collection (Captures, Chains, Providers, Agents, Workflows) render a list of rows on the main view — each with an Enable toggle (when applicable) and a pencil button — and flip into a per-item detail editor with a `← Back` button via the `editing*Index` / `editingWorkflowId` state on `CrucibleSettingTab`. New collection-style tabs should follow this pattern instead of inlining all fields.
 
 ## File & folder conventions
 
@@ -55,13 +56,16 @@ If a UI/UX bug is not resolved on the first attempt, or if the root cause is not
   src/
     main.ts           # Entry point, lifecycle, command/event registration
     settings.ts       # Settings tab UI and pane rendering
+    settingsView.ts   # ItemView wrapper that hosts the settings UI in a workspace tab
     types.ts          # Centralized TypeScript interfaces and DEFAULT_SETTINGS
     materialize.ts    # Logic for Day/Week/Month note and folder creation
     lint.ts           # Linting engine (word count, YAML formatting, date mgmt)
     captures.ts       # Capture execution logic and prompt modals
+    sections.ts       # Markdown section helpers (findSectionRange, isSectionEmpty, insertIntoSection) — shared between captures and orchestration workflows
     toc.ts            # Table of Contents UI component
     suggesters.ts     # Fuzzy-search autocomplete classes for files/folders
     utils.ts          # Shared helpers (template replacement, folder checks)
+    orchestration/    # Job runner, workflow registrations, and workflow-specific logic
   ```
 
 ## Template Engine

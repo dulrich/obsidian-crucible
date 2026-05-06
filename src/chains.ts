@@ -161,13 +161,13 @@ export class ChainManager {
 		const condition = step.guardCondition;
 		if (!condition) return true;
 
-		const file = targetFile ?? (this.app.workspace.getActiveFile() as TFile | null);
+		const file = targetFile ?? this.app.workspace.getActiveFile();
 		if (!file) return false;
 
 		const cache = this.app.metadataCache.getFileCache(file);
 		const fm = cache?.frontmatter ?? {};
 		const tags: string[] = [];
-		const rawTags = fm.tags;
+		const rawTags: unknown = fm.tags;
 		if (Array.isArray(rawTags)) {
 			tags.push(...rawTags.map((t: string) => t.replace(/^#/, '')));
 		} else if (typeof rawTags === 'string') {
