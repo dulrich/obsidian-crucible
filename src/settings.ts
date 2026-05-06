@@ -2,7 +2,7 @@
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType, Chain, CrucibleSettings } from "./types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType, Chain, CrucibleSettings } from "./types";
 import { agentCommandId } from "./agents";
 import { isValidTimezone } from "./orchestration/utils/dates";
 
@@ -123,7 +123,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			createTab('configure', 'settings', 'Configure');
 			createTab('automate', 'workflow', 'Automate');
 			createTab('ai', 'bot', 'AI');
-			createTab('orchestrator', 'list-todo', 'Orchestrator');
+			createTab('orchestrator', 'list-todo', 'Orchestrate');
 			createTab('lint', 'check-circle', 'Lint');
 			createTab('commands', 'terminal', 'Commands');
 		}
@@ -335,7 +335,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		}
 
 		new Setting(containerEl).addButton(bt => bt.setButtonText('Add capture').setCta().onClick(async () => {
-			this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSection: '', content: '', writeMode: 'append' });
+			this.plugin.settings.captures.push({ name: '', targetType: 'daily', source: 'dialog', file: '', targetSectionMode: 'fixed', targetSection: '', content: '', writeMode: 'append' });
 			await this.plugin.saveSettings();
 			this.plugin.registerCaptures();
 			this.editingCaptureIndex = this.plugin.settings.captures.length - 1;
@@ -347,7 +347,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const target = this.captureTargetLabel(capture);
 		const source = this.captureSourceLabel(capture.source || 'dialog');
 		const writeMode = this.captureWriteModeLabel(capture.writeMode || 'append');
-		return `${target} - ${source} - ${writeMode}`;
+		const sectionMode = (capture.targetSectionMode || 'fixed') === 'source' ? 'same section' : 'fixed section';
+		return `${target} - ${source} - ${sectionMode} - ${writeMode}`;
 	}
 
 	private captureTargetLabel(capture: Capture): string {
@@ -1363,8 +1364,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			this.editingWorkflowId = null;
 		}
 
-		new Setting(containerEl).setName('Orchestrator').setHeading();
-		containerEl.createEl('p', { text: 'Vault-native deterministic job runner. Jobs are markdown files in queue folders that move through inbox → running → done | failed. Manual execution only — use the "Orchestrator: Scan" and "Orchestrator: Run next" commands.' });
+		new Setting(containerEl).setName('Orchestrate').setHeading();
+		containerEl.createEl('p', { text: 'Vault-native deterministic job runner. Jobs are markdown files in queue folders that move through inbox → running → done | failed. Manual execution only — use the "Orchestrate: Scan" and "Orchestrate: Run next" commands.' });
 
 		const globalGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 
@@ -1807,8 +1808,27 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		group.createEl('hr', { cls: 'crucible-row-divider' });
 		new Setting(group)
-			.setName('Target section')
-			.setDesc('Header to target (e.g. # Captures). If empty, targets top/bottom of file.')
+			.setName('Target section mode')
+			.setDesc('Choose whether captures use a fixed section or the matching source-note section.')
+			.addDropdown(dd => {
+				dd.addOption('fixed', 'Fixed section')
+				  .addOption('source', 'Same source section')
+				  .setValue(capture.targetSectionMode || 'fixed')
+				  .onChange(async (value: CaptureTargetSectionMode) => {
+					  capture.targetSectionMode = value;
+					  await this.plugin.saveSettings();
+					  this.display();
+				  });
+				dd.selectEl.addClass('pi-width-half');
+			});
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		const targetSectionMode = capture.targetSectionMode || 'fixed';
+		new Setting(group)
+			.setName(targetSectionMode === 'source' ? 'Fallback section' : 'Target section')
+			.setDesc(targetSectionMode === 'source'
+				? 'Header used when the matching source section is not present in the target note.'
+				: 'Header to target (e.g. # Captures). If empty, targets top/bottom of file.')
 			.addText(t => t
 				.setPlaceholder('# header')
 				.setValue(capture.targetSection)

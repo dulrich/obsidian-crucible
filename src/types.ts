@@ -10,6 +10,7 @@ export interface Shortcut {
 
 export type CaptureTarget = 'daily' | 'weekly' | 'monthly' | 'selected' | 'active';
 export type CaptureSource = 'dialog' | 'line' | 'line-fallback' | 'selection' | 'selection-fallback';
+export type CaptureTargetSectionMode = 'fixed' | 'source';
 export type CaptureWriteMode = 'append' | 'prepend' | 'replace';
 
 export interface Capture {
@@ -17,6 +18,7 @@ export interface Capture {
 	targetType: CaptureTarget;
 	source: CaptureSource;
 	file: string;
+	targetSectionMode?: CaptureTargetSectionMode;
 	targetSection: string;
 	content: string;
 	writeMode: CaptureWriteMode;
