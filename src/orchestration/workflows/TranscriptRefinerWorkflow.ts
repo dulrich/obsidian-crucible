@@ -2,8 +2,6 @@ import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 
-const DEFAULT_CHAIN_NAME = 'Refine Transcript';
-
 export class TranscriptRefinerWorkflow implements Workflow {
 	async run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
@@ -20,7 +18,7 @@ export class TranscriptRefinerWorkflow implements Workflow {
 
 		const chainName = typeof params.agentChainName === 'string' && params.agentChainName
 			? params.agentChainName
-			: DEFAULT_CHAIN_NAME;
+			: plugin.settings.orchestrationTranscriptRefineChainName;
 		const chain = plugin.settings.chains.find(c => c.name === chainName);
 		if (!chain) {
 			return {

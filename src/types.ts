@@ -159,10 +159,20 @@ export interface CrucibleSettings {
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
+	// Workflow: daily_brief_lite
+	orchestrationDailyBriefEnabled: boolean;
+	orchestrationDailyBriefTargetSection: string;
+	// Workflow: youtube_tracker
+	orchestrationYoutubeTrackerEnabled: boolean;
 	orchestrationYoutubeChannelsNote: string;
+	// Workflow: link_scan
+	orchestrationLinkScanEnabled: boolean;
 	orchestrationLinkRegistryRoot: string;
 	orchestrationLinkScanExclusions: string[];
 	orchestrationTrackedSourcesNote: string;
+	// Workflow: transcript_refine
+	orchestrationTranscriptRefineEnabled: boolean;
+	orchestrationTranscriptRefineChainName: string;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -193,8 +203,14 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
+	orchestrationDailyBriefEnabled: true,
+	orchestrationDailyBriefTargetSection: 'Daily Brief: External Context',
+	orchestrationYoutubeTrackerEnabled: true,
 	orchestrationYoutubeChannelsNote: '_system/youtube/Channels.md',
+	orchestrationLinkScanEnabled: true,
 	orchestrationLinkRegistryRoot: '_crucible/link_registry',
 	orchestrationLinkScanExclusions: ['_crucible'],
 	orchestrationTrackedSourcesNote: 'Sources/Tracked Sources.md',
+	orchestrationTranscriptRefineEnabled: true,
+	orchestrationTranscriptRefineChainName: 'Refine Transcript',
 }
