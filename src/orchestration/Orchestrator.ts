@@ -20,21 +20,21 @@ export class Orchestrator {
 
 	async enqueue(type: JobType, params?: Record<string, unknown>): Promise<OrchestrationJob | null> {
 		if (!this.plugin.settings.orchestrationEnabled) {
-			new Notice('Orchestrator is disabled in settings.');
+			new Notice('Orchestrate: disabled in settings.');
 			return null;
 		}
 		if (!this.isWorkflowEnabled(type)) {
-			new Notice(`Orchestrator: workflow "${type}" is disabled in settings.`);
+			new Notice(`Orchestrate: workflow "${type}" is disabled in settings.`);
 			return null;
 		}
 		const job = await this.store.enqueue(type, { params });
-		new Notice(`Orchestrator: queued ${type} (${job.id})`);
+		new Notice(`Orchestrate: queued ${type} (${job.id})`);
 		return job;
 	}
 
 	async runNext(): Promise<OrchestrationJob | null> {
 		if (!this.plugin.settings.orchestrationEnabled) {
-			new Notice('Orchestrator is disabled in settings.');
+			new Notice('Orchestrate: disabled in settings.');
 			return null;
 		}
 		await this.store.ensureFolders();
@@ -42,7 +42,7 @@ export class Orchestrator {
 		const queued = await this.store.listFolder('queued');
 		const next = queued[0];
 		if (!next) {
-			new Notice('Orchestrator: nothing to run.');
+			new Notice('Orchestrate: nothing to run.');
 			return null;
 		}
 
@@ -51,7 +51,7 @@ export class Orchestrator {
 			const error = `Workflow "${moved.job.type}" is disabled in settings`;
 			await this.store.setError(moved.file, error);
 			const failed = await this.store.move(moved.file, moved.job, 'failed');
-			new Notice(`Orchestrator: ${moved.job.id} → failed (${error})`);
+			new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 			return failed.job;
 		}
 
@@ -60,7 +60,7 @@ export class Orchestrator {
 			const error = `No workflow registered for type "${moved.job.type}"`;
 			await this.store.setError(moved.file, error);
 			const failed = await this.store.move(moved.file, moved.job, 'failed');
-			new Notice(`Orchestrator: ${moved.job.id} → failed (${error})`);
+			new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 			return failed.job;
 		}
 
@@ -78,17 +78,17 @@ export class Orchestrator {
 			if (result.status === 'failed') {
 				await this.store.setError(moved.file, result.error ?? 'Workflow returned failed status');
 				const failed = await this.store.move(moved.file, moved.job, 'failed');
-				new Notice(`Orchestrator: ${moved.job.id} → failed`);
+				new Notice(`Orchestrate: ${moved.job.id} → failed`);
 				return failed.job;
 			}
 			const done = await this.store.move(moved.file, moved.job, 'done');
-			new Notice(`Orchestrator: ${moved.job.id} → done`);
+			new Notice(`Orchestrate: ${moved.job.id} → done`);
 			return done.job;
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
 			await this.store.setError(moved.file, message);
 			const failed = await this.store.move(moved.file, moved.job, 'failed');
-			new Notice(`Orchestrator: ${moved.job.id} → failed (${message})`);
+			new Notice(`Orchestrate: ${moved.job.id} → failed (${message})`);
 			return failed.job;
 		}
 	}
@@ -124,7 +124,7 @@ export class Orchestrator {
 		};
 
 		const summary =
-			`Orchestrator: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
+			`Orchestrate: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
 			(recovered > 0 ? `, recovered ${recovered}` : '');
 		new Notice(summary);
 		return report;
@@ -149,4 +149,3 @@ export class Orchestrator {
 		}
 	}
 }
-

@@ -1,7 +1,11 @@
 import { App, Modal, Notice, TFile, TextComponent, moment } from 'obsidian';
 import { CrucibleSettings, Capture } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
-import { insertIntoSection } from './sections';
+import { findSectionRange, insertIntoSection } from './sections';
+
+export interface CaptureExecutionContext {
+	sourceSectionHeader?: string | null;
+}
 
 export class CaptureManager {
 	app: App;
@@ -14,7 +18,12 @@ export class CaptureManager {
 		this.setMaterializing = setMaterializing;
 	}
 
-	async executeCapture(capture: Capture, value: string = '', targetFile?: TFile): Promise<boolean> {
+	async executeCapture(
+		capture: Capture,
+		value: string = '',
+		targetFile?: TFile,
+		context?: CaptureExecutionContext,
+	): Promise<boolean> {
 		this.setMaterializing(true);
 		try {
 			let targetPath = '';
@@ -60,10 +69,11 @@ export class CaptureManager {
 
 			const existingContent = await this.app.vault.read(file);
 			const writeMode = capture.writeMode;
+			const targetSection = resolveTargetSection(capture, existingContent, context);
 			let newContent = '';
 
-			if (capture.targetSection) {
-				newContent = insertIntoSection(existingContent, capture.targetSection, content, writeMode);
+			if (targetSection) {
+				newContent = insertIntoSection(existingContent, targetSection, content, writeMode);
 			} else {
 				const yamlMatch = existingContent.match(FRONTMATTER_REGEX);
 				if (writeMode === 'replace') {
@@ -104,6 +114,20 @@ export class CaptureManager {
 			this.setMaterializing(false);
 		}
 	}
+}
+
+function resolveTargetSection(
+	capture: Capture,
+	targetContent: string,
+	context?: CaptureExecutionContext,
+): string {
+	const fallbackSection = (capture.targetSection ?? '').trim();
+	if ((capture.targetSectionMode ?? 'fixed') !== 'source') return fallbackSection;
+
+	const sourceSection = (context?.sourceSectionHeader ?? '').trim();
+	if (sourceSection && findSectionRange(targetContent, sourceSection)) return sourceSection;
+
+	return fallbackSection;
 }
 
 export class TextInputModal extends Modal {
