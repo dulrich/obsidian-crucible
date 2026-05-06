@@ -17,6 +17,7 @@ import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptR
 import { YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
+import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
@@ -50,6 +51,8 @@ export default class CruciblePlugin extends Plugin {
 		this.registerInternalCommands();
 		this.agentManager.registerAgents();
 		this.registerChains();
+
+		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
 			this.app.setting.open();
@@ -165,6 +168,16 @@ export default class CruciblePlugin extends Plugin {
 						}
 					})();
 				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'open-settings-tab',
+			name: 'Open settings in a tab',
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('open-settings-tab')) return false;
+				if (!checking) { void this.activateSettingsView(); }
 				return true;
 			},
 		});
@@ -573,6 +586,16 @@ export default class CruciblePlugin extends Plugin {
 				}
 			});
 		});
+	}
+
+	async activateSettingsView() {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(CRUCIBLE_SETTINGS_VIEW_TYPE);
+		const leaf = existing[0] ?? workspace.getLeaf('tab');
+		if (!existing.length) {
+			await leaf.setViewState({ type: CRUCIBLE_SETTINGS_VIEW_TYPE, active: true });
+		}
+		await workspace.revealLeaf(leaf);
 	}
 
 	openDayPicker() {

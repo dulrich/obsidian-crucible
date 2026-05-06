@@ -73,8 +73,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		];
 	}
 
+	private getScrollContainer(): HTMLElement | null {
+		// In the settings modal the scroller is .vertical-tab-content; in the
+		// workspace-tab view it's the contentEl flagged with .crucible-settings-host.
+		return this.containerEl.closest('.vertical-tab-content, .crucible-settings-host') as HTMLElement | null;
+	}
+
 	private refreshDisplay() {
-		const scrollEl = this.containerEl.closest('.vertical-tab-content') as HTMLElement | null;
+		const scrollEl = this.getScrollContainer();
 		const scrollTop = scrollEl?.scrollTop ?? 0;
 		this.display();
 		requestAnimationFrame(() => { if (scrollEl) scrollEl.scrollTop = scrollTop; });
@@ -724,7 +730,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			const targetIndex = insertAt;
 			this.display();
 			requestAnimationFrame(() => {
-				const scrollEl = this.containerEl.closest('.vertical-tab-content') as HTMLElement | null;
+				const scrollEl = this.getScrollContainer();
 				const newStep = this.containerEl.querySelector(`[data-step-index="${targetIndex}"]`) as HTMLElement | null;
 				if (newStep && scrollEl) {
 					const stepTop = newStep.offsetTop;
