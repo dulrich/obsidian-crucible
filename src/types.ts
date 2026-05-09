@@ -140,6 +140,16 @@ export interface CrucibleSettings {
 	dailyFolder: string;
 	weeklyFolder: string;
 	monthlyFolder: string;
+	dailyEnabled: boolean;
+	weeklyEnabled: boolean;
+	monthlyEnabled: boolean;
+	dailyCreateAssetFolder: boolean;
+	weeklyCreateAssetFolder: boolean;
+	monthlyCreateAssetFolder: boolean;
+	moveFilePinDailyFolder: boolean;
+	moveFilePinWeeklyFolder: boolean;
+	moveFilePinMonthlyFolder: boolean;
+	moveFilePinnedFolders: string[];
 	dailyTemplate: string;
 	weeklyTemplate: string;
 	monthlyTemplate: string;
@@ -195,6 +205,16 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	dailyFolder: 'daily/day',
 	weeklyFolder: 'daily/week',
 	monthlyFolder: 'daily/month',
+	dailyEnabled: true,
+	weeklyEnabled: true,
+	monthlyEnabled: true,
+	dailyCreateAssetFolder: true,
+	weeklyCreateAssetFolder: false,
+	monthlyCreateAssetFolder: false,
+	moveFilePinDailyFolder: true,
+	moveFilePinWeeklyFolder: true,
+	moveFilePinMonthlyFolder: true,
+	moveFilePinnedFolders: [],
 	dailyTemplate: '',
 	weeklyTemplate: '',
 	monthlyTemplate: '',
