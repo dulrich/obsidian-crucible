@@ -2,6 +2,7 @@ import { App, Modal, Notice, TFile, TextComponent, moment } from 'obsidian';
 import { CrucibleSettings, Capture } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { findSectionRange, insertIntoSection } from './sections';
+import { getPeriodConfigByTarget, periodDisabledMessage } from './periods';
 
 export interface CaptureExecutionContext {
 	sourceSectionHeader?: string | null;
@@ -28,16 +29,21 @@ export class CaptureManager {
 		try {
 			let targetPath = '';
 			const now = moment();
+			const periodConfig = getPeriodConfigByTarget(capture.targetType, this.settings);
+			if (periodConfig && !periodConfig.enabled) {
+				new Notice(periodDisabledMessage(periodConfig.id));
+				return false;
+			}
 
 			switch (capture.targetType) {
 				case 'daily':
-					targetPath = `${this.settings.dailyFolder}/${now.format('YYYY-MM-DD')}.md`;
+					targetPath = `${periodConfig!.folder}/${now.format(periodConfig!.dateFormat)}.md`;
 					break;
 				case 'weekly':
-					targetPath = `${this.settings.weeklyFolder}/${now.format('GGGG-[W]WW')}.md`;
+					targetPath = `${periodConfig!.folder}/${now.format(periodConfig!.dateFormat)}.md`;
 					break;
 				case 'monthly':
-					targetPath = `${this.settings.monthlyFolder}/${now.format('YYYY-MM')}.md`;
+					targetPath = `${periodConfig!.folder}/${now.format(periodConfig!.dateFormat)}.md`;
 					break;
 				case 'selected':
 					targetPath = capture.file;

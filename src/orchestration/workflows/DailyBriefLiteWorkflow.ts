@@ -5,12 +5,16 @@ import { todayInTz } from '../utils/dates';
 import { fetchFxRate, FxRate } from '../utils/fx';
 import { fetchWeather, WeatherSnapshot } from '../utils/weather';
 import { insertIntoSection, isSectionEmpty } from '../../sections';
+import { periodDisabledMessage } from '../../periods';
 
 export class DailyBriefLiteWorkflow implements Workflow {
 	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
 		const app = plugin.app;
 		const tz = plugin.settings.orchestrationTimezone;
+		if (!plugin.settings.dailyEnabled) {
+			return { status: 'failed', error: periodDisabledMessage('daily') };
+		}
 		const date = todayInTz(tz);
 		const dailyFolder = plugin.settings.dailyFolder;
 		const path = normalizePath(`${dailyFolder}/${date}.md`);

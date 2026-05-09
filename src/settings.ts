@@ -5,6 +5,7 @@ import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, get
 import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType, Chain, CrucibleSettings } from "./types";
 import { agentCommandId } from "./agents";
 import { isValidTimezone } from "./orchestration/utils/dates";
+import { PERIOD_IDS, PeriodId, getPeriodConfig, getPeriodConfigByTarget } from "./periods";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
@@ -251,6 +252,11 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			name: `Agent: ${a.name || '(unnamed)'}`
 		}));
 
+		const fileCommands = [
+			{ id: 'move-current-file-to-daily-folder', name: 'Move current file to daily folder' },
+			{ id: 'move-current-file-to-folder', name: 'Move current file to folder...' },
+		];
+
 		const otherCommands = [
 			{ id: 'mark-as-forwarded', name: 'Mark as forwarded' },
 			{ id: 'reload-plugin', name: 'Reload plugin' }
@@ -262,6 +268,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		renderGroup('Shortcuts', shortcutCommands);
 		renderGroup('Chains', chainCommands);
 		renderGroup('Agents', agentCommands);
+		renderGroup('Files', fileCommands);
 		renderGroup('Other', otherCommands);
 		renderChainOnlyGroup('Chain Commands', this.getChainOnlyCommandList());
 	}
@@ -318,7 +325,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		} else {
 			this.plugin.settings.captures.forEach((capture, index) => {
 				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
-				new Setting(group)
+				const setting = new Setting(group)
 					.setName(capture.name || '(unnamed)')
 					.setDesc(this.describeCapture(capture))
 					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit capture').onClick(() => {
@@ -331,6 +338,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						this.plugin.registerCaptures();
 						this.display();
 					}));
+				const warning = this.getCaptureWarning(capture);
+				if (warning) this.addWarningIcon(setting.nameEl, warning);
 			});
 		}
 
@@ -349,6 +358,12 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const writeMode = this.captureWriteModeLabel(capture.writeMode || 'append');
 		const sectionMode = (capture.targetSectionMode || 'fixed') === 'source' ? 'same section' : 'fixed section';
 		return `${target} - ${source} - ${sectionMode} - ${writeMode}`;
+	}
+
+	private getCaptureWarning(capture: Capture): string | null {
+		const config = getPeriodConfigByTarget(capture.targetType, this.plugin.settings);
+		if (!config || config.enabled) return null;
+		return `${config.label} is disabled; this capture will show a warning and not run.`;
 	}
 
 	private captureTargetLabel(capture: Capture): string {
@@ -1165,109 +1180,10 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				});
 		}
 
-		new Setting(containerEl).setName('Folders').setHeading();
-		const foldersGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-
-		new Setting(foldersGroup)
-			.setName('Daily folder')
-			.setDesc('Folder for daily notes and day-specific assets.')
-			.addSearch(cb => {
-				cb.setPlaceholder('daily/day')
-					.setValue(this.plugin.settings.dailyFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.dailyFolder = value;
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FolderSuggest(this.app, cb.inputEl);
-			});
-
-		foldersGroup.createEl('hr', { cls: 'crucible-row-divider' });
-
-		new Setting(foldersGroup)
-			.setName('Weekly folder')
-			.setDesc('Folder for weekly notes.')
-			.addSearch(cb => {
-				cb.setPlaceholder('daily/week')
-					.setValue(this.plugin.settings.weeklyFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.weeklyFolder = value;
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FolderSuggest(this.app, cb.inputEl);
-			});
-
-		foldersGroup.createEl('hr', { cls: 'crucible-row-divider' });
-
-		new Setting(foldersGroup)
-			.setName('Monthly folder')
-			.setDesc('Folder for monthly notes.')
-			.addSearch(cb => {
-				cb.setPlaceholder('daily/month')
-					.setValue(this.plugin.settings.monthlyFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.monthlyFolder = value;
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FolderSuggest(this.app, cb.inputEl);
-			});
-
-		new Setting(containerEl).setName('Core templates').setHeading();
-		const templatesGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-
-		new Setting(templatesGroup)
-			.setName('Daily template')
-			.setDesc('Path to the daily note template file.')
-			.addSearch(cb => {
-				cb.setPlaceholder('templates/daily.md')
-					.setValue(this.plugin.settings.dailyTemplate)
-					.onChange(async (value) => {
-						this.plugin.settings.dailyTemplate = value;
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FileSuggest(this.app, cb.inputEl);
-			});
-
-		templatesGroup.createEl('hr', { cls: 'crucible-row-divider' });
-
-		new Setting(templatesGroup)
-			.setName('Weekly template')
-			.setDesc('Path to the weekly note template file.')
-			.addSearch(cb => {
-				cb.setPlaceholder('templates/weekly.md')
-					.setValue(this.plugin.settings.weeklyTemplate)
-					.onChange(async (value) => {
-						this.plugin.settings.weeklyTemplate = value;
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FileSuggest(this.app, cb.inputEl);
-			});
-
-		templatesGroup.createEl('hr', { cls: 'crucible-row-divider' });
-
-		new Setting(templatesGroup)
-			.setName('Monthly template')
-			.setDesc('Path to the monthly note template file.')
-			.addSearch(cb => {
-				cb.setPlaceholder('templates/monthly.md')
-					.setValue(this.plugin.settings.monthlyTemplate)
-					.onChange(async (value) => {
-						this.plugin.settings.monthlyTemplate = value;
-						await this.plugin.saveSettings();
-					});
-				const el = (cb as unknown as SearchWithContainer).containerEl;
-				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
-				new FileSuggest(this.app, cb.inputEl);
-			});
+		new Setting(containerEl).setName('Period notes').setHeading();
+		containerEl.createEl('p', { text: 'Configure daily, weekly, and monthly notes, asset folders, templates, and move-folder pins.' });
+		PERIOD_IDS.forEach(period => this.renderPeriodSettingsBlock(containerEl, period));
+		this.renderPinnedFoldersSettings(containerEl);
 
 		new Setting(containerEl).setName('Folder templates').setHeading();
 		containerEl.createEl('p', { text: 'Map arbitrary folders to templates. These will be applied automatically when a new file is created in the folder.' });
@@ -1317,6 +1233,135 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		addVar('datetime:FORMAT', 'Custom format', '{{datetime:MMMM YYYY}}');
 	}
 
+	private renderPeriodSettingsBlock(containerEl: HTMLElement, period: PeriodId): void {
+		const config = getPeriodConfig(this.plugin.settings, period);
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		if (!config.enabled) group.addClass('is-disabled');
+
+		const header = new Setting(group)
+			.setName(`${config.label} notes`)
+			.setDesc(`${config.label} note files are created under ${config.folder || config.exampleFolder}.`)
+			.addToggle(toggle => toggle
+				.setTooltip('Enabled')
+				.setValue(config.enabled)
+				.onChange(async (value) => {
+					await this.setSettingValue(config.enabledKey, value);
+					this.display();
+				}));
+		if (!config.enabled) {
+			this.addWarningIcon(header.nameEl, `${config.label} commands, captures, and automation will show a warning and not run.`);
+			header.descEl.createEl('div', {
+				cls: 'crucible-setting-warning',
+				text: `${config.label} is disabled. Related commands and automation will not run.`,
+			});
+		}
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName(`${config.label} folder`)
+			.setDesc(`${config.label} note root. Notes use ${config.folder || config.exampleFolder}/<period>.md.`)
+			.addSearch(cb => {
+				cb.setPlaceholder(config.exampleFolder)
+					.setValue(config.folder)
+					.onChange(async (value) => {
+						await this.setSettingValue(config.folderKey, value);
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FolderSuggest(this.app, cb.inputEl);
+			});
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Create asset folder')
+			.setDesc(`Also create ${config.folder || config.exampleFolder}/<period>/ beside the note.`)
+			.addToggle(toggle => toggle
+				.setValue(config.createAssetFolder)
+				.onChange(async (value) => {
+					await this.setSettingValue(config.assetFolderKey, value);
+				}));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName(`${config.label} template`)
+			.setDesc(`Template applied when a ${config.lowerLabel} note is created or materialized.`)
+			.addSearch(cb => {
+				cb.setPlaceholder(config.exampleTemplate)
+					.setValue(config.template)
+					.onChange(async (value) => {
+						await this.setSettingValue(config.templateKey, value);
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(this.app, cb.inputEl);
+			});
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName('Pin in move picker')
+			.setDesc(`Show the current ${config.lowerLabel} asset folder above normal results in "Move current file to folder...".`)
+			.addToggle(toggle => toggle
+				.setValue(config.pinInMovePicker)
+				.onChange(async (value) => {
+					await this.setSettingValue(config.movePinKey, value);
+				}));
+	}
+
+	private renderPinnedFoldersSettings(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Pinned folders').setHeading();
+		containerEl.createEl('p', { text: 'Additional folders shown after enabled Daily/Weekly/Monthly pins in the move-folder picker.' });
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const pinnedFolders = this.plugin.settings.moveFilePinnedFolders;
+		if (pinnedFolders.length === 0) {
+			group.createDiv({ text: 'No pinned folders configured.', cls: 'crucible-empty-state' });
+		} else {
+			pinnedFolders.forEach((folder, index) => {
+				if (index > 0) group.createEl('hr', { cls: 'crucible-mini-hr' });
+				const row = group.createDiv({ cls: 'crucible-folder-template-row' });
+				const setting = new Setting(row)
+					.addSearch(cb => {
+						cb.setPlaceholder('Folder')
+							.setValue(folder)
+							.onChange(async (value) => {
+								this.plugin.settings.moveFilePinnedFolders[index] = value;
+								await this.plugin.saveSettings();
+							});
+						const el = (cb as unknown as SearchWithContainer).containerEl;
+						if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+						new FolderSuggest(this.app, cb.inputEl);
+					})
+					.addExtraButton(cb => {
+						cb.setIcon('trash')
+							.setTooltip('Remove pinned folder')
+							.onClick(async () => {
+								this.plugin.settings.moveFilePinnedFolders.splice(index, 1);
+								await this.plugin.saveSettings();
+								this.display();
+							});
+					});
+				setting.infoEl.remove();
+			});
+		}
+		new Setting(group).addButton(bt => bt.setButtonText('Add pinned folder').setCta().onClick(async () => {
+			this.plugin.settings.moveFilePinnedFolders.push('');
+			await this.plugin.saveSettings();
+			this.display();
+		}));
+	}
+
+	private async setSettingValue<K extends keyof CrucibleSettings>(key: K, value: CrucibleSettings[K]): Promise<void> {
+		this.plugin.settings[key] = value;
+		await this.plugin.saveSettings();
+	}
+
+	private addWarningIcon(el: HTMLElement, tooltip: string): void {
+		const icon = el.createSpan({ cls: 'crucible-warning-icon' });
+		icon.setAttr('aria-label', tooltip);
+		icon.setAttr('title', tooltip);
+		setIcon(icon, 'triangle-alert');
+	}
+
 	private getWorkflowMeta(): { id: string; name: string; description: string; enabledKey: keyof CrucibleSettings; render: (containerEl: HTMLElement) => void }[] {
 		return [
 			{
@@ -1350,14 +1395,26 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		];
 	}
 
+	private getWorkflowWarning(workflowId: string): string | null {
+		if (workflowId === 'daily_brief_lite' && !this.plugin.settings.dailyEnabled) {
+			return 'Daily is disabled; this workflow will fail with a warning until Daily is enabled.';
+		}
+		return null;
+	}
+
 	private renderOrchestrationSettings(containerEl: HTMLElement) {
 		const workflows = this.getWorkflowMeta();
 
 		if (this.editingWorkflowId !== null) {
 			const meta = workflows.find(w => w.id === this.editingWorkflowId);
 			if (meta) {
-				new Setting(containerEl).setName(`Edit Workflow: ${meta.name}`).setHeading();
+				const heading = new Setting(containerEl).setName(`Edit Workflow: ${meta.name}`).setHeading();
+				const warning = this.getWorkflowWarning(meta.id);
+				if (warning) this.addWarningIcon(heading.nameEl, warning);
 				const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+				if (warning) {
+					group.createDiv({ cls: 'crucible-setting-warning', text: warning });
+				}
 				meta.render(group);
 				return;
 			}
@@ -1423,7 +1480,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const workflowsGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		workflows.forEach((meta, index) => {
 			if (index > 0) workflowsGroup.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(workflowsGroup)
+			const setting = new Setting(workflowsGroup)
 				.setName(meta.name)
 				.setDesc(meta.description)
 				.addToggle(t => t
@@ -1437,6 +1494,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					this.editingWorkflowId = meta.id;
 					this.display();
 				}));
+			const warning = this.getWorkflowWarning(meta.id);
+			if (warning) this.addWarningIcon(setting.nameEl, warning);
 		});
 
 		// --- Actions ---
@@ -1740,9 +1799,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		new Setting(containerEl).setName('Edit Capture').setHeading();
+		const heading = new Setting(containerEl).setName('Edit Capture').setHeading();
+		const captureWarning = this.getCaptureWarning(capture);
+		if (captureWarning) this.addWarningIcon(heading.nameEl, captureWarning);
 
 		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		if (captureWarning) {
+			group.createDiv({ cls: 'crucible-setting-warning', text: captureWarning });
+		}
 		new Setting(group)
 			.setName('Capture name')
 			.addText(t => t
