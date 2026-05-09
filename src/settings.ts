@@ -18,11 +18,17 @@ const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = {
 	openrouter: 'OpenRouter',
 	ollama: 'Ollama (Local API)',
 	'gemini-cli': 'Gemini CLI',
+	'claude-cli': 'Claude Code CLI',
+	'codex-cli': 'OpenAI Codex CLI',
+	'opencode-cli': 'OpenCode CLI',
 };
 
 function defaultCliCommand(kind: ProviderKind): string {
 	switch (kind) {
 		case 'gemini-cli': return 'gemini';
+		case 'claude-cli': return 'claude';
+		case 'codex-cli': return 'codex';
+		case 'opencode-cli': return 'opencode';
 		default: return '';
 	}
 }
@@ -35,6 +41,9 @@ function modelIdPlaceholder(kind: ProviderKind): string {
 		case 'openrouter': return 'anthropic/claude-3.5-sonnet';
 		case 'ollama': return 'llama3';
 		case 'gemini-cli': return 'gemini-2.5-pro';
+		case 'claude-cli': return 'claude-sonnet-4-5';
+		case 'codex-cli': return 'gpt-5';
+		case 'opencode-cli': return 'anthropic/claude-sonnet-4-5';
 		default: return '';
 	}
 }
