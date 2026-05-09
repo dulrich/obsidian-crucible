@@ -109,10 +109,13 @@ export type ProviderKind =
 	| 'google'
 	| 'openrouter'
 	| 'ollama'
-	| 'gemini-cli';
+	| 'gemini-cli'
+	| 'claude-cli'
+	| 'codex-cli'
+	| 'opencode-cli';
 
 export const API_PROVIDER_KINDS: ProviderKind[] = ['openai', 'anthropic', 'google', 'openrouter', 'ollama'];
-export const CLI_PROVIDER_KINDS: ProviderKind[] = ['gemini-cli'];
+export const CLI_PROVIDER_KINDS: ProviderKind[] = ['gemini-cli', 'claude-cli', 'codex-cli', 'opencode-cli'];
 
 export function providerModality(kind: ProviderKind): ProviderModality {
 	return CLI_PROVIDER_KINDS.includes(kind) ? 'cli' : 'api';
