@@ -1,0 +1,59 @@
+import { App, FuzzySuggestModal } from 'obsidian';
+import { Provider, ProviderModel, ProviderModelRef } from './types';
+
+export interface ModelPickerOption {
+	provider: Provider;
+	model: ProviderModel;
+}
+
+export class ModelPickerModal extends FuzzySuggestModal<ModelPickerOption> {
+	private picked = false;
+
+	constructor(
+		app: App,
+		private options: ModelPickerOption[],
+		private onPick: (ref: ProviderModelRef) => void,
+		private onCancel?: () => void,
+	) {
+		super(app);
+		this.setPlaceholder('Pick a model...');
+	}
+
+	getItems(): ModelPickerOption[] {
+		return this.options;
+	}
+
+	getItemText(item: ModelPickerOption): string {
+		const providerLabel = item.provider.name || item.provider.kind;
+		const modelLabel = item.model.label || item.model.id;
+		return `${providerLabel} · ${modelLabel}`;
+	}
+
+	onChooseItem(item: ModelPickerOption): void {
+		this.picked = true;
+		this.onPick({ providerId: item.provider.id, modelId: item.model.id });
+	}
+
+	onClose(): void {
+		super.onClose();
+		if (!this.picked && this.onCancel) this.onCancel();
+	}
+}
+
+export function buildModelPickerOptions(
+	providers: Provider[],
+	allow?: ProviderModelRef[],
+): ModelPickerOption[] {
+	const options: ModelPickerOption[] = [];
+	const allowSet = allow && allow.length > 0
+		? new Set(allow.map(r => `${r.providerId}:${r.modelId}`))
+		: null;
+
+	for (const provider of providers) {
+		for (const model of provider.models ?? []) {
+			if (allowSet && !allowSet.has(`${provider.id}:${model.id}`)) continue;
+			options.push({ provider, model });
+		}
+	}
+	return options;
+}

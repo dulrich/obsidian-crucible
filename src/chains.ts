@@ -49,10 +49,11 @@ export class ChainManager {
 			try {
 				const result = await this.executeStep(step, previousResponse, chainVars, editor, targetFile);
 
-				// Unwrap AgentResult: expose {{response}} and {{agent_model}} as chain vars
+				// Unwrap AgentResult: expose {{response}}, {{agent_model}}, {{agent_provider}} as chain vars
 				if (result !== null && typeof result === 'object' && 'response' in result && 'model' in result) {
 					const agentResult = result as AgentResult;
 					chainVars.agent_model = agentResult.model;
+					if (agentResult.provider) chainVars.agent_provider = agentResult.provider;
 					previousResponse = agentResult.response;
 				} else {
 					previousResponse = result;
