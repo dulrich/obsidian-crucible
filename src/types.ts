@@ -98,16 +98,42 @@ export interface Chain {
 export interface AgentResult {
 	response: string;
 	model: string;
+	provider: string;
 }
 
-export type LlmProviderType = 'openai' | 'anthropic' | 'google' | 'openrouter' | 'ollama';
+export type ProviderModality = 'api' | 'cli';
+
+export type ProviderKind =
+	| 'openai'
+	| 'anthropic'
+	| 'google'
+	| 'openrouter'
+	| 'ollama'
+	| 'gemini-cli';
+
+export const API_PROVIDER_KINDS: ProviderKind[] = ['openai', 'anthropic', 'google', 'openrouter', 'ollama'];
+export const CLI_PROVIDER_KINDS: ProviderKind[] = ['gemini-cli'];
+
+export function providerModality(kind: ProviderKind): ProviderModality {
+	return CLI_PROVIDER_KINDS.includes(kind) ? 'cli' : 'api';
+}
+
+export interface ProviderModel {
+	id: string;
+	label: string;
+}
 
 export interface Provider {
 	id: string;
 	name: string;
-	type: LlmProviderType;
-	model: string;
+	kind: ProviderKind;
+	models: ProviderModel[];
+	// API kinds
 	baseUrl?: string;
+	// CLI kinds
+	command?: string;
+	extraArgs?: string;
+	cwd?: string;
 }
 
 export interface FxPair {
@@ -124,10 +150,23 @@ export interface WeatherLocation {
 
 export type AgentPromptSource = 'text' | 'file';
 
+export type AgentBindingMode = 'pinned' | 'constrained' | 'runtime';
+
+export interface ProviderModelRef {
+	providerId: string;
+	modelId: string;
+}
+
+export interface AgentModelBinding {
+	mode: AgentBindingMode;
+	pinned?: ProviderModelRef;
+	allow?: ProviderModelRef[];
+}
+
 export interface Agent {
 	id: string;
 	name: string;
-	providerId: string;
+	modelBinding: AgentModelBinding;
 	systemPromptSource: AgentPromptSource;
 	systemPromptText: string;
 	systemPromptFile: string;

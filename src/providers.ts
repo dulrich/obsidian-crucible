@@ -1,7 +1,31 @@
 import { App, requestUrl } from 'obsidian';
-import { Provider } from './types';
+import { Provider, providerModality } from './types';
+
+// child_process is desktop-only; loaded lazily via require so mobile bundles can still import this module.
+interface ChildEvents {
+	on(event: 'data', listener: (chunk: unknown) => void): unknown;
+}
+interface SpawnedProcess {
+	stdout: ChildEvents;
+	stderr: ChildEvents;
+	on(event: 'error', listener: (err: Error) => void): unknown;
+	on(event: 'close', listener: (code: number | null) => void): unknown;
+	kill(signal?: string): void;
+}
+type SpawnFn = (command: string, args: string[], options: { cwd?: string }) => SpawnedProcess;
+
+let cachedSpawn: SpawnFn | null = null;
+function loadSpawn(): SpawnFn {
+	if (cachedSpawn) return cachedSpawn;
+	// eslint-disable-next-line @typescript-eslint/no-require-imports, import/no-nodejs-modules, no-undef
+	const cp = require('child_process') as { spawn: SpawnFn };
+	cachedSpawn = cp.spawn;
+	return cachedSpawn;
+}
 
 export const providerSecretKey = (id: string) => `crucible-provider-${id}-key`;
+
+const CLI_DEFAULT_TIMEOUT_MS = 120_000;
 
 export class ProviderManager {
 	app: App;
@@ -26,29 +50,42 @@ export class ProviderManager {
 		this.app.secretStorage.setSecret(providerSecretKey(providerId), '');
 	}
 
-	async complete(provider: Provider, system: string, user: string): Promise<string> {
-		const apiKey = provider.type === 'ollama' ? '' : await this.loadApiKey(provider.id);
-		if (!apiKey && provider.type !== 'ollama') {
+	async complete(provider: Provider, modelId: string, system: string, user: string): Promise<string> {
+		if (!modelId) {
+			throw new Error(`No model selected for provider "${provider.name || provider.id}"`);
+		}
+
+		if (providerModality(provider.kind) === 'cli') {
+			switch (provider.kind) {
+				case 'gemini-cli':
+					return await this.callGeminiCli(provider, modelId, system, user);
+				default:
+					throw new Error(`Unsupported CLI provider kind: ${provider.kind}`);
+			}
+		}
+
+		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
+		if (!apiKey && provider.kind !== 'ollama') {
 			throw new Error(`API key missing for provider "${provider.name || provider.id}"`);
 		}
 
-		switch (provider.type) {
+		switch (provider.kind) {
 			case 'openai':
-				return await this.callOpenAI(provider, apiKey, system, user);
+				return await this.callOpenAI(modelId, apiKey, system, user);
 			case 'anthropic':
-				return await this.callAnthropic(provider, apiKey, system, user);
+				return await this.callAnthropic(modelId, apiKey, system, user);
 			case 'google':
-				return await this.callGoogle(provider, apiKey, system, user);
+				return await this.callGoogle(modelId, apiKey, system, user);
 			case 'openrouter':
-				return await this.callOpenRouter(provider, apiKey, system, user);
+				return await this.callOpenRouter(modelId, apiKey, system, user);
 			case 'ollama':
-				return await this.callOllama(provider, system, user);
+				return await this.callOllama(provider, modelId, system, user);
 			default:
-				throw new Error("Unsupported provider type: " + (provider.type as string));
+				throw new Error("Unsupported provider kind: " + (provider.kind as string));
 		}
 	}
 
-	private async callOpenAI(provider: Provider, apiKey: string, system: string, user: string): Promise<string> {
+	private async callOpenAI(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
 		const response = await requestUrl({
 			url: 'https://api.openai.com/v1/chat/completions',
 			method: 'POST',
@@ -57,7 +94,7 @@ export class ProviderManager {
 				'Authorization': `Bearer ${apiKey}`
 			},
 			body: JSON.stringify({
-				model: provider.model,
+				model: modelId,
 				messages: [
 					{ role: 'system', content: system },
 					{ role: 'user', content: user }
@@ -76,7 +113,7 @@ export class ProviderManager {
 		return choice.message.content;
 	}
 
-	private async callAnthropic(provider: Provider, apiKey: string, system: string, user: string): Promise<string> {
+	private async callAnthropic(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
 		const response = await requestUrl({
 			url: 'https://api.anthropic.com/v1/messages',
 			method: 'POST',
@@ -86,7 +123,7 @@ export class ProviderManager {
 				'anthropic-version': '2023-06-01'
 			},
 			body: JSON.stringify({
-				model: provider.model,
+				model: modelId,
 				system: system,
 				messages: [
 					{ role: 'user', content: user }
@@ -105,9 +142,9 @@ export class ProviderManager {
 		return block.text;
 	}
 
-	private async callGoogle(provider: Provider, apiKey: string, system: string, user: string): Promise<string> {
+	private async callGoogle(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
 		const response = await requestUrl({
-			url: `https://generativelanguage.googleapis.com/v1beta/models/${provider.model}:generateContent?key=${apiKey}`,
+			url: `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json'
@@ -135,7 +172,7 @@ export class ProviderManager {
 		return part.text;
 	}
 
-	private async callOpenRouter(provider: Provider, apiKey: string, system: string, user: string): Promise<string> {
+	private async callOpenRouter(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
 		const response = await requestUrl({
 			url: 'https://openrouter.ai/api/v1/chat/completions',
 			method: 'POST',
@@ -146,7 +183,7 @@ export class ProviderManager {
 				'X-Title': 'Crucible Obsidian Plugin'
 			},
 			body: JSON.stringify({
-				model: provider.model,
+				model: modelId,
 				messages: [
 					{ role: 'system', content: system },
 					{ role: 'user', content: user }
@@ -164,7 +201,7 @@ export class ProviderManager {
 		return choice.message.content;
 	}
 
-	private async callOllama(provider: Provider, system: string, user: string): Promise<string> {
+	private async callOllama(provider: Provider, modelId: string, system: string, user: string): Promise<string> {
 		const baseUrl = provider.baseUrl || 'http://localhost:11434';
 		const response = await requestUrl({
 			url: `${baseUrl}/api/chat`,
@@ -173,7 +210,7 @@ export class ProviderManager {
 				'Content-Type': 'application/json'
 			},
 			body: JSON.stringify({
-				model: provider.model,
+				model: modelId,
 				messages: [
 					{ role: 'system', content: system },
 					{ role: 'user', content: user }
@@ -189,4 +226,66 @@ export class ProviderManager {
 		const data = response.json as { message: { content: string } };
 		return data.message.content;
 	}
+
+	private async callGeminiCli(provider: Provider, modelId: string, system: string, user: string): Promise<string> {
+		const command = (provider.command || '').trim() || 'gemini';
+		const extraArgs = parseExtraArgs(provider.extraArgs);
+		const prompt = system ? `${system}\n\n${user}` : user;
+		const args = ['-m', modelId, ...extraArgs, '-p', prompt];
+
+		return await runProcess(command, args, provider.cwd, CLI_DEFAULT_TIMEOUT_MS);
+	}
+}
+
+function parseExtraArgs(raw: string | undefined): string[] {
+	if (!raw) return [];
+	const out: string[] = [];
+	const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+	let match: RegExpExecArray | null;
+	while ((match = re.exec(raw)) !== null) {
+		out.push(match[1] ?? match[2] ?? match[3] ?? '');
+	}
+	return out;
+}
+
+function runProcess(command: string, args: string[], cwd: string | undefined, timeoutMs: number): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const spawn = loadSpawn();
+		const child = spawn(command, args, {
+			cwd: cwd && cwd.trim() ? cwd : undefined,
+		});
+
+		let stdout = '';
+		let stderr = '';
+		let settled = false;
+
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			try { child.kill('SIGTERM'); } catch { /* ignore */ }
+			reject(new Error(`CLI provider "${command}" timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+
+		child.stdout.on('data', (chunk: unknown) => { stdout += String(chunk); });
+		child.stderr.on('data', (chunk: unknown) => { stderr += String(chunk); });
+
+		child.on('error', (err: Error) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			reject(new Error(`CLI provider "${command}" failed to start: ${err.message}`));
+		});
+
+		child.on('close', (code: number | null) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (code !== 0) {
+				const trimmedErr = stderr.trim() || stdout.trim() || `exit ${code}`;
+				reject(new Error(`CLI provider "${command}" exited with ${code}: ${trimmedErr}`));
+				return;
+			}
+			resolve(stdout);
+		});
+	});
 }
