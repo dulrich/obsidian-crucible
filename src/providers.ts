@@ -56,12 +56,9 @@ export class ProviderManager {
 		}
 
 		if (providerModality(provider.kind) === 'cli') {
-			switch (provider.kind) {
-				case 'gemini-cli':
-					return await this.callGeminiCli(provider, modelId, system, user);
-				default:
-					throw new Error(`Unsupported CLI provider kind: ${provider.kind}`);
-			}
+			const shape = CLI_SHAPES[provider.kind];
+			if (!shape) throw new Error(`Unsupported CLI provider kind: ${provider.kind}`);
+			return await this.callCli(shape, provider, modelId, system, user);
 		}
 
 		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
@@ -227,15 +224,39 @@ export class ProviderManager {
 		return data.message.content;
 	}
 
-	private async callGeminiCli(provider: Provider, modelId: string, system: string, user: string): Promise<string> {
-		const command = (provider.command || '').trim() || 'gemini';
+	private async callCli(shape: CliShape, provider: Provider, modelId: string, system: string, user: string): Promise<string> {
+		const command = (provider.command || '').trim() || shape.defaultCommand;
 		const extraArgs = parseExtraArgs(provider.extraArgs);
 		const prompt = system ? `${system}\n\n${user}` : user;
-		const args = ['-m', modelId, ...extraArgs, '-p', prompt];
+
+		const args: string[] = [];
+		if (shape.subcommand) args.push(shape.subcommand);
+		args.push(shape.modelFlag, modelId);
+		args.push(...extraArgs);
+		if (shape.promptFlag) {
+			args.push(shape.promptFlag, prompt);
+		} else {
+			args.push(prompt);
+		}
 
 		return await runProcess(command, args, provider.cwd, CLI_DEFAULT_TIMEOUT_MS);
 	}
 }
+
+interface CliShape {
+	defaultCommand: string;
+	subcommand?: string;
+	modelFlag: string;
+	// If set, prompt is passed via this flag. Otherwise it's positional.
+	promptFlag?: string;
+}
+
+const CLI_SHAPES: Partial<Record<Provider['kind'], CliShape>> = {
+	'gemini-cli':   { defaultCommand: 'gemini',   modelFlag: '-m',      promptFlag: '-p' },
+	'claude-cli':   { defaultCommand: 'claude',   modelFlag: '--model', promptFlag: '-p' },
+	'codex-cli':    { defaultCommand: 'codex',    modelFlag: '-m',      subcommand: 'exec' },
+	'opencode-cli': { defaultCommand: 'opencode', modelFlag: '-m',      subcommand: 'run' },
+};
 
 function parseExtraArgs(raw: string | undefined): string[] {
 	if (!raw) return [];
