@@ -1,6 +1,7 @@
 import { App, TFile, Notice, moment } from 'obsidian';
 import { CrucibleSettings } from './types';
 import { ensureFolder, applyTemplateString } from './utils';
+import { PeriodId, getPeriodConfig, periodDisabledMessage } from './periods';
 
 export class Materializer {
 	app: App;
@@ -14,91 +15,41 @@ export class Materializer {
 	}
 
 	async materializeDay(date: moment.Moment): Promise<boolean> {
-		this.setMaterializing(true);
-		const dateStr = date.format('YYYY-MM-DD');
-		const dailyFolderBase = this.settings.dailyFolder;
-		const folderPath = `${dailyFolderBase}/${dateStr}`;
-		const filePath = `${dailyFolderBase}/${dateStr}.md`;
-
-		try {
-			await ensureFolder(this.app, folderPath);
-
-			const existingFile = this.app.vault.getAbstractFileByPath(filePath);
-			if (!(existingFile instanceof TFile)) {
-				const content = await this.applyTemplate(this.settings.dailyTemplate, date, dateStr);
-				await this.app.vault.create(filePath, content);
-				new Notice(`Created daily note and folder for ${dateStr}`);
-			} else if (existingFile.stat.size === 0) {
-				const content = await this.applyTemplate(this.settings.dailyTemplate, date, dateStr);
-				await this.app.vault.modify(existingFile, content);
-				new Notice(`Materialized empty daily note for ${dateStr}`);
-			}
-
-			const file = this.app.vault.getAbstractFileByPath(filePath);
-			if (file instanceof TFile) {
-				await this.app.workspace.getLeaf().openFile(file);
-			}
-			return true;
-		} catch (e) {
-			new Notice(`Error materializing day: ${(e as Error).message}`);
-			console.error(e);
-			return false;
-		} finally {
-			this.setMaterializing(false);
-		}
+		return await this.materializePeriod('daily', date);
 	}
 
 	async materializeWeek(date: moment.Moment): Promise<boolean> {
-		this.setMaterializing(true);
-		const weekStr = date.format('GGGG-[W]WW');
-		const folderPath = this.settings.weeklyFolder;
-		const filePath = `${folderPath}/${weekStr}.md`;
-
-		try {
-			await ensureFolder(this.app, folderPath);
-
-			const existingFile = this.app.vault.getAbstractFileByPath(filePath);
-			if (!(existingFile instanceof TFile)) {
-				const content = await this.applyTemplate(this.settings.weeklyTemplate, date, weekStr);
-				await this.app.vault.create(filePath, content);
-				new Notice(`Created weekly note for ${weekStr}`);
-			} else if (existingFile.stat.size === 0) {
-				const content = await this.applyTemplate(this.settings.weeklyTemplate, date, weekStr);
-				await this.app.vault.modify(existingFile, content);
-				new Notice(`Materialized empty weekly note for ${weekStr}`);
-			}
-
-			const file = this.app.vault.getAbstractFileByPath(filePath);
-			if (file instanceof TFile) {
-				await this.app.workspace.getLeaf().openFile(file);
-			}
-			return true;
-		} catch (e) {
-			new Notice(`Error materializing week: ${(e as Error).message}`);
-			return false;
-		} finally {
-			this.setMaterializing(false);
-		}
+		return await this.materializePeriod('weekly', date);
 	}
 
 	async materializeMonth(date: moment.Moment): Promise<boolean> {
+		return await this.materializePeriod('monthly', date);
+	}
+
+	private async materializePeriod(period: PeriodId, date: moment.Moment): Promise<boolean> {
+		const config = getPeriodConfig(this.settings, period);
+		if (!config.enabled) {
+			new Notice(periodDisabledMessage(period));
+			return false;
+		}
+
 		this.setMaterializing(true);
-		const monthStr = date.format('YYYY-MM');
-		const folderPath = this.settings.monthlyFolder;
-		const filePath = `${folderPath}/${monthStr}.md`;
+		const periodStr = date.format(config.dateFormat);
+		const filePath = `${config.folder}/${periodStr}.md`;
 
 		try {
-			await ensureFolder(this.app, folderPath);
+			await ensureFolder(this.app, config.createAssetFolder ? `${config.folder}/${periodStr}` : config.folder);
 
 			const existingFile = this.app.vault.getAbstractFileByPath(filePath);
 			if (!(existingFile instanceof TFile)) {
-				const content = await this.applyTemplate(this.settings.monthlyTemplate, date, monthStr);
+				const content = await this.applyTemplate(config.template, date, periodStr);
 				await this.app.vault.create(filePath, content);
-				new Notice(`Created monthly note for ${monthStr}`);
+				const assetSuffix = config.createAssetFolder ? ' and asset folder' : '';
+				new Notice(`Created ${config.lowerLabel} note${assetSuffix} for ${periodStr}`);
 			} else if (existingFile.stat.size === 0) {
-				const content = await this.applyTemplate(this.settings.monthlyTemplate, date, monthStr);
+				const content = await this.applyTemplate(config.template, date, periodStr);
 				await this.app.vault.modify(existingFile, content);
-				new Notice(`Materialized empty monthly note for ${monthStr}`);
+				new Notice(`Materialized empty ${config.lowerLabel} note for ${periodStr}`);
 			}
 
 			const file = this.app.vault.getAbstractFileByPath(filePath);
@@ -107,7 +58,7 @@ export class Materializer {
 			}
 			return true;
 		} catch (e) {
-			new Notice(`Error materializing month: ${(e as Error).message}`);
+			new Notice(`Error materializing ${config.lowerLabel}: ${(e as Error).message}`);
 			return false;
 		} finally {
 			this.setMaterializing(false);

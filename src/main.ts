@@ -1,4 +1,4 @@
-import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor } from 'obsidian';
+import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor, normalizePath } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema } from "./types";
 import { Materializer } from "./materialize";
@@ -8,7 +8,9 @@ import { ChainManager } from "./chains";
 import { ProviderManager } from "./providers";
 import { AgentManager } from "./agents";
 import { TableOfContentsUI } from "./toc";
-import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
+import { applyTemplateString, ensureFolder, FRONTMATTER_REGEX } from './utils';
+import { MoveFileFolderPickerModal, normalizeFolderPath } from './folderPicker';
+import { PeriodId, getCurrentPeriodAssetFolder, getPeriodConfig, periodDisabledMessage } from './periods';
 import { normalizeFrontmatterPropertyName, parseTagList, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterTags, withMaterializing } from './frontmatter';
 import { JobStore } from './orchestration/JobStore';
 import { Orchestrator } from './orchestration/Orchestrator';
@@ -182,6 +184,8 @@ export default class CruciblePlugin extends Plugin {
 			},
 		});
 
+		this.registerMoveFileCommands(prefix);
+
 		this.addCommand({
 			id: 'orchestrator-scan',
 			name: 'Orchestrate: scan',
@@ -314,6 +318,124 @@ export default class CruciblePlugin extends Plugin {
 				}
 			});
 		});
+	}
+
+	private registerMoveFileCommands(prefix: string): void {
+		const moveDailyId = 'move-current-file-to-daily-folder';
+		const moveFolderId = 'move-current-file-to-folder';
+
+		this.chainManager.registerInternalCommand(
+			`${prefix}:${moveDailyId}`,
+			async (_args, _prev, _editor, targetFile) => {
+				if (!this.settings.dailyEnabled) {
+					new Notice(periodDisabledMessage('daily'));
+					return false;
+				}
+				return await this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), targetFile);
+			},
+		);
+
+		this.chainManager.registerInternalCommand(
+			`${prefix}:${moveFolderId}`,
+			async (args, _prev, _editor, targetFile) => {
+				const folder = args.folder?.trim();
+				if (folder) return await this.moveFileToFolder(folder, targetFile);
+				return await this.openMoveFileFolderPicker(targetFile);
+			},
+			[
+				{
+					id: 'folder',
+					name: 'Destination folder',
+					type: 'folder',
+					description: 'Folder to move the current file into. Leave empty to show the folder picker.',
+				},
+			],
+		);
+
+		this.addCommand({
+			id: moveDailyId,
+			name: 'Move current file to daily folder',
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes(moveDailyId)) return false;
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) return false;
+				if (!checking) {
+					if (!this.settings.dailyEnabled) {
+						new Notice(periodDisabledMessage('daily'));
+						return true;
+					}
+					void this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), activeFile);
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: moveFolderId,
+			name: 'Move current file to folder...',
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes(moveFolderId)) return false;
+				const activeFile = this.app.workspace.getActiveFile();
+				if (!activeFile) return false;
+				if (!checking) void this.openMoveFileFolderPicker(activeFile);
+				return true;
+			},
+		});
+	}
+
+	private async openMoveFileFolderPicker(targetFile?: TFile): Promise<boolean> {
+		const file = targetFile ?? this.app.workspace.getActiveFile();
+		if (!file) {
+			new Notice('No active file to move.');
+			return false;
+		}
+
+		return await new Promise<boolean>((resolve) => {
+			new MoveFileFolderPickerModal(
+				this.app,
+				this.settings,
+				async (folderPath) => {
+					resolve(await this.moveFileToFolder(folderPath, file));
+				},
+				() => resolve(false),
+			).open();
+		});
+	}
+
+	private async moveFileToFolder(folderPath: string, targetFile?: TFile): Promise<boolean> {
+		try {
+			const file = targetFile ?? this.app.workspace.getActiveFile();
+			if (!file) {
+				new Notice('No active file to move.');
+				return false;
+			}
+
+			const normalizedFolder = normalizeFolderPath(folderPath);
+			if (!normalizedFolder) {
+				new Notice('Move target folder is not configured.');
+				return false;
+			}
+
+			await ensureFolder(this.app, normalizedFolder);
+			const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
+			if (targetPath === file.path) {
+				new Notice(`Already in ${normalizedFolder}`);
+				return true;
+			}
+
+			const existing = this.app.vault.getAbstractFileByPath(targetPath);
+			if (existing) {
+				new Notice(`Move target already exists: ${targetPath}`);
+				return false;
+			}
+
+			await this.app.fileManager.renameFile(file, targetPath);
+			new Notice(`Moved to ${normalizedFolder}`);
+			return true;
+		} catch (e) {
+			new Notice(`Error moving file: ${(e as Error).message}`);
+			return false;
+		}
 	}
 
 	registerCaptures() {
@@ -620,18 +742,30 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	openDayPicker() {
+		if (!this.settings.dailyEnabled) {
+			new Notice(periodDisabledMessage('daily'));
+			return;
+		}
 		new PickerModal(this.app, 'Pick a date', 'date', window.moment().format('YYYY-MM-DD'), (dateStr) => {
 			void this.materializer.materializeDay(window.moment(dateStr, 'YYYY-MM-DD'));
 		}).open();
 	}
 
 	openWeekPicker() {
+		if (!this.settings.weeklyEnabled) {
+			new Notice(periodDisabledMessage('weekly'));
+			return;
+		}
 		new PickerModal(this.app, 'Pick a week', 'week', window.moment().format('GGGG-[W]WW'), (weekStr) => {
 			void this.materializer.materializeWeek(window.moment(weekStr, 'GGGG-[W]WW'));
 		}).open();
 	}
 
 	openMonthPicker() {
+		if (!this.settings.monthlyEnabled) {
+			new Notice(periodDisabledMessage('monthly'));
+			return;
+		}
 		new PickerModal(this.app, 'Pick a month', 'month', window.moment().format('YYYY-MM'), (monthStr) => {
 			void this.materializer.materializeMonth(window.moment(monthStr, 'YYYY-MM'));
 		}).open();
@@ -646,38 +780,9 @@ export default class CruciblePlugin extends Plugin {
 		const parentPath = file.parent?.path || '';
 		const fileName = file.basename;
 
-		if (parentPath === this.settings.dailyFolder) {
-			const dateMatch = fileName.match(/^(\d{4}-\d{2}-\d{2})$/);
-			if (dateMatch) {
-				if (file.stat.size === 0) void this.materializer.materializeDay(window.moment(dateMatch[1], 'YYYY-MM-DD'));
-			} else {
-				await this.app.fileManager.trashFile(file);
-				this.openDayPicker();
-			}
-			return;
-		}
-
-		if (parentPath === this.settings.weeklyFolder) {
-			const weekMatch = fileName.match(/^(\d{4}-W\d{2})$/);
-			if (weekMatch) {
-				if (file.stat.size === 0) void this.materializer.materializeWeek(window.moment(weekMatch[1], 'GGGG-[W]WW'));
-			} else {
-				await this.app.fileManager.trashFile(file);
-				this.openWeekPicker();
-			}
-			return;
-		}
-
-		if (parentPath === this.settings.monthlyFolder) {
-			const monthMatch = fileName.match(/^(\d{4}-\d{2})$/);
-			if (monthMatch) {
-				if (file.stat.size === 0) void this.materializer.materializeMonth(window.moment(monthMatch[1], 'YYYY-MM'));
-			} else {
-				await this.app.fileManager.trashFile(file);
-				this.openMonthPicker();
-			}
-			return;
-		}
+		if (await this.handlePeriodFileCreate(file, parentPath, fileName, 'daily')) return;
+		if (await this.handlePeriodFileCreate(file, parentPath, fileName, 'weekly')) return;
+		if (await this.handlePeriodFileCreate(file, parentPath, fileName, 'monthly')) return;
 
 		const mapping = this.settings.folderTemplates.find(ft => ft.folder === parentPath);
 		if (mapping && mapping.template) {
@@ -696,6 +801,48 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}
 	}
+
+	private async handlePeriodFileCreate(
+		file: TFile,
+		parentPath: string,
+		fileName: string,
+		period: PeriodId,
+	): Promise<boolean> {
+		const config = getPeriodConfig(this.settings, period);
+		if (parentPath !== config.folder) return false;
+
+		if (!config.enabled) {
+			new Notice(periodDisabledMessage(period));
+			return true;
+		}
+
+		const dateMatch = fileName.match(periodFileNameRegex(period));
+		if (dateMatch) {
+			void this.materializePeriodFromString(period, dateMatch[1]!);
+		} else {
+			await this.app.fileManager.trashFile(file);
+			this.openPeriodPicker(period);
+		}
+		return true;
+	}
+
+	private async materializePeriodFromString(period: PeriodId, value: string): Promise<boolean> {
+		if (period === 'daily') return await this.materializer.materializeDay(window.moment(value, 'YYYY-MM-DD'));
+		if (period === 'weekly') return await this.materializer.materializeWeek(window.moment(value, 'GGGG-[W]WW'));
+		return await this.materializer.materializeMonth(window.moment(value, 'YYYY-MM'));
+	}
+
+	private openPeriodPicker(period: PeriodId): void {
+		if (period === 'daily') this.openDayPicker();
+		else if (period === 'weekly') this.openWeekPicker();
+		else this.openMonthPicker();
+	}
+}
+
+function periodFileNameRegex(period: PeriodId): RegExp {
+	if (period === 'daily') return /^(\d{4}-\d{2}-\d{2})$/;
+	if (period === 'weekly') return /^(\d{4}-W\d{2})$/;
+	return /^(\d{4}-\d{2})$/;
 }
 
 function findCurrentSectionHeader(editor: Editor): string | null {
