@@ -2,13 +2,51 @@
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentPromptSource, Provider, LlmProviderType, Chain, CrucibleSettings } from "./types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings } from "./types";
 import { agentCommandId } from "./agents";
 import { isValidTimezone } from "./orchestration/utils/dates";
 import { PERIOD_IDS, PeriodId, getPeriodConfig, getPeriodConfigByTarget } from "./periods";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
+}
+
+const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = {
+	openai: 'OpenAI',
+	anthropic: 'Anthropic',
+	google: 'Google (Gemini)',
+	openrouter: 'OpenRouter',
+	ollama: 'Ollama (Local API)',
+	'gemini-cli': 'Gemini CLI',
+};
+
+function defaultCliCommand(kind: ProviderKind): string {
+	switch (kind) {
+		case 'gemini-cli': return 'gemini';
+		default: return '';
+	}
+}
+
+function modelIdPlaceholder(kind: ProviderKind): string {
+	switch (kind) {
+		case 'openai': return 'gpt-4o';
+		case 'anthropic': return 'claude-3-5-sonnet-latest';
+		case 'google': return 'gemini-1.5-pro';
+		case 'openrouter': return 'anthropic/claude-3.5-sonnet';
+		case 'ollama': return 'llama3';
+		case 'gemini-cli': return 'gemini-2.5-pro';
+		default: return '';
+	}
+}
+
+function collectAllRefs(providers: Provider[]): ProviderModelRef[] {
+	const refs: ProviderModelRef[] = [];
+	for (const provider of providers) {
+		for (const model of provider.models ?? []) {
+			refs.push({ providerId: provider.id, modelId: model.id });
+		}
+	}
+	return refs;
 }
 
 type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'orchestrator' | 'lint' | 'commands';
@@ -818,7 +856,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).addButton(bt => bt.setButtonText('Add provider').setCta().onClick(async () => {
 			const id = Math.random().toString(36).substring(2, 9);
-			this.plugin.settings.providers.push({ id, name: '', type: 'openai', model: 'gpt-4o' });
+			this.plugin.settings.providers.push({ id, name: '', kind: 'openai', models: [] });
 			await this.plugin.saveSettings();
 			this.editingProviderIndex = this.plugin.settings.providers.length - 1;
 			this.display();
@@ -826,14 +864,10 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	}
 
 	private describeProvider(provider: Provider): string {
-		const typeLabels: Record<LlmProviderType, string> = {
-			openai: 'OpenAI',
-			anthropic: 'Anthropic',
-			google: 'Google',
-			openrouter: 'OpenRouter',
-			ollama: 'Ollama'
-		};
-		return `${typeLabels[provider.type]} - ${provider.model || '(no model)'}`;
+		const kindLabel = PROVIDER_KIND_LABELS[provider.kind] ?? provider.kind;
+		const count = provider.models?.length ?? 0;
+		const summary = count === 0 ? 'no models' : count === 1 ? '1 model' : `${count} models`;
+		return `${kindLabel} · ${summary}`;
 	}
 
 	private async deleteProvider(index: number) {
@@ -860,7 +894,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Name')
 			.addText(t => t
-				.setPlaceholder('e.g. GPT-4o')
+				.setPlaceholder('e.g. OpenRouter')
 				.setValue(provider.name)
 				.onChange(async (v) => { provider.name = v; await this.plugin.saveSettings(); })
 				.inputEl.addClass('pi-width-normal'));
@@ -868,59 +902,120 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 
 		new Setting(containerEl)
-			.setName('Type')
+			.setName('Kind')
+			.setDesc('Determines how this provider is invoked. API kinds use HTTP; CLI kinds spawn a local command.')
 			.addDropdown(d => {
-				d.addOption('openai', 'OpenAI')
-					.addOption('anthropic', 'Anthropic')
-					.addOption('google', 'Google (Gemini)')
-					.addOption('openrouter', 'OpenRouter')
-					.addOption('ollama', 'Ollama (Local)')
-					.setValue(provider.type)
-					.onChange(async (v: LlmProviderType) => { provider.type = v; await this.plugin.saveSettings(); this.display(); });
+				for (const [kind, label] of Object.entries(PROVIDER_KIND_LABELS)) {
+					d.addOption(kind, label);
+				}
+				d.setValue(provider.kind)
+				 .onChange(async (v: ProviderKind) => { provider.kind = v; await this.plugin.saveSettings(); this.display(); });
 				d.selectEl.addClass('pi-width-half');
 			});
 
-		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		const modality = providerModality(provider.kind);
 
-		new Setting(containerEl)
-			.setName('Model')
-			.addText(t => {
-				let placeholder = 'e.g. gpt-4o';
-				if (provider.type === 'ollama') placeholder = 'e.g. llama3';
-				if (provider.type === 'google') placeholder = 'e.g. gemini-1.5-pro';
-				if (provider.type === 'openrouter') placeholder = 'e.g. anthropic/claude-3.5-sonnet';
-
-				t.setPlaceholder(placeholder)
-				 .setValue(provider.model)
-				 .onChange(async (v) => { provider.model = v; await this.plugin.saveSettings(); });
-				t.inputEl.addClass('pi-width-normal');
-			});
-
-		if (provider.type !== 'ollama') {
-			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(containerEl)
-				.setName('API Key')
-				.setDesc('Stored securely in Obsidian Secret Storage.')
-				.addText(t => {
-					t.inputEl.type = 'password';
-					t.setPlaceholder('Enter API key...')
-					 .onChange(async (v) => {
-						await this.plugin.providerManager.storeApiKey(provider.id, v);
-					 });
-					t.inputEl.addClass('pi-width-normal');
-					// We don't load the key back into the UI for security
-				});
+		if (modality === 'api') {
+			if (provider.kind === 'ollama') {
+				containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(containerEl)
+					.setName('Ollama URL')
+					.setDesc('Default is http://localhost:11434')
+					.addText(t => t
+						.setPlaceholder('http://localhost:11434')
+						.setValue(provider.baseUrl || '')
+						.onChange(async (v) => { provider.baseUrl = v; await this.plugin.saveSettings(); })
+						.inputEl.addClass('pi-width-normal'));
+			} else {
+				containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(containerEl)
+					.setName('API Key')
+					.setDesc('Stored securely in Obsidian Secret Storage.')
+					.addText(t => {
+						t.inputEl.type = 'password';
+						t.setPlaceholder('Enter API key...')
+						 .onChange(async (v) => {
+							await this.plugin.providerManager.storeApiKey(provider.id, v);
+						 });
+						t.inputEl.addClass('pi-width-normal');
+						// We don't load the key back into the UI for security
+					});
+			}
 		} else {
 			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 			new Setting(containerEl)
-				.setName('Ollama URL')
-				.setDesc('Default is http://localhost:11434')
+				.setName('Command')
+				.setDesc(`Path or name of the executable. Leave blank to use the default for this kind.`)
 				.addText(t => t
-					.setPlaceholder('http://localhost:11434')
-					.setValue(provider.baseUrl || '')
-					.onChange(async (v) => { provider.baseUrl = v; await this.plugin.saveSettings(); })
+					.setPlaceholder(defaultCliCommand(provider.kind))
+					.setValue(provider.command || '')
+					.onChange(async (v) => { provider.command = v; await this.plugin.saveSettings(); })
 					.inputEl.addClass('pi-width-normal'));
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(containerEl)
+				.setName('Extra arguments')
+				.setDesc('Optional. Whitespace-separated arguments to pass before the prompt. Quotes are respected.')
+				.addText(t => t
+					.setPlaceholder('--no-color')
+					.setValue(provider.extraArgs || '')
+					.onChange(async (v) => { provider.extraArgs = v; await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-wide'));
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(containerEl)
+				.setName('Working directory')
+				.setDesc('Optional. Vault-relative or absolute path. Leave blank for the process default.')
+				.addText(t => t
+					.setPlaceholder('/absolute/path')
+					.setValue(provider.cwd || '')
+					.onChange(async (v) => { provider.cwd = v; await this.plugin.saveSettings(); })
+					.inputEl.addClass('pi-width-wide'));
 		}
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		this.renderProviderModelsList(containerEl, provider);
+	}
+
+	private renderProviderModelsList(containerEl: HTMLElement, provider: Provider) {
+		new Setting(containerEl).setName('Models').setHeading();
+		containerEl.createEl('p', {
+			text: 'Configure one or more models. Agents bind to a (provider, model) pair, and chain steps can override via {{model}}.',
+			cls: 'mod-muted',
+		});
+
+		const list = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const models = provider.models ?? (provider.models = []);
+
+		if (models.length === 0) {
+			list.createDiv({ text: 'No models configured.', cls: 'crucible-empty-state' });
+		} else {
+			models.forEach((model, modelIndex) => {
+				if (modelIndex > 0) list.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(list)
+					.addText(t => t
+						.setPlaceholder(modelIdPlaceholder(provider.kind))
+						.setValue(model.id)
+						.onChange(async (v) => { model.id = v; await this.plugin.saveSettings(); })
+						.inputEl.addClass('pi-width-normal'))
+					.addText(t => t
+						.setPlaceholder('Display label (optional)')
+						.setValue(model.label)
+						.onChange(async (v) => { model.label = v; await this.plugin.saveSettings(); })
+						.inputEl.addClass('pi-width-normal'))
+					.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove model').onClick(async () => {
+						models.splice(modelIndex, 1);
+						await this.plugin.saveSettings();
+						this.display();
+					}));
+			});
+		}
+
+		new Setting(containerEl).addButton(bt => bt.setButtonText('Add model').onClick(async () => {
+			models.push({ id: '', label: '' });
+			await this.plugin.saveSettings();
+			this.display();
+		}));
 	}
 
 	private renderAgentListSection(containerEl: HTMLElement) {
@@ -959,10 +1054,13 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			.onClick(async () => {
 				const id = Math.random().toString(36).substring(2, 9);
 				const firstProvider = this.plugin.settings.providers[0];
+				const firstModel = firstProvider?.models?.[0];
 				this.plugin.settings.agents.push({
 					id,
 					name: '',
-					providerId: firstProvider ? firstProvider.id : '',
+					modelBinding: firstProvider && firstModel
+						? { mode: 'pinned', pinned: { providerId: firstProvider.id, modelId: firstModel.id } }
+						: { mode: 'runtime' },
 					systemPromptSource: 'text',
 					systemPromptText: '',
 					systemPromptFile: '',
@@ -978,9 +1076,22 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	}
 
 	private describeAgent(agent: Agent): string {
-		const provider = this.plugin.settings.providers.find(p => p.id === agent.providerId);
-		const providerName = provider ? provider.name || `(unnamed ${provider.type})` : 'No provider selected';
-		return `${providerName} - ${agentCommandId(agent.id)}`;
+		const binding = agent.modelBinding;
+		if (binding?.mode === 'pinned' && binding.pinned) {
+			const provider = this.plugin.settings.providers.find(p => p.id === binding.pinned!.providerId);
+			const model = provider?.models?.find(m => m.id === binding.pinned!.modelId);
+			const providerName = provider ? provider.name || `(unnamed ${provider.kind})` : 'unknown provider';
+			const modelName = model ? model.label || model.id : binding.pinned.modelId || '(no model)';
+			return `${providerName} · ${modelName} — ${agentCommandId(agent.id)}`;
+		}
+		if (binding?.mode === 'constrained') {
+			const count = binding.allow?.length ?? 0;
+			return `Constrained (${count} allowed) — ${agentCommandId(agent.id)}`;
+		}
+		if (binding?.mode === 'runtime') {
+			return `Runtime pick — ${agentCommandId(agent.id)}`;
+		}
+		return `Unconfigured — ${agentCommandId(agent.id)}`;
 	}
 
 	private async deleteAgent(index: number) {
@@ -1018,27 +1129,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 
-		new Setting(containerEl)
-			.setName('Provider')
-			.setDesc('LLM connection used to run this agent.')
-			.addDropdown(d => {
-				if (this.plugin.settings.providers.length === 0) {
-					d.addOption('', 'No providers configured');
-				} else {
-					if (!agent.providerId || !this.plugin.settings.providers.find(p => p.id === agent.providerId)) {
-						d.addOption('', 'Select a provider...');
-					}
-					this.plugin.settings.providers.forEach(p => {
-						d.addOption(p.id, p.name || `(unnamed ${p.type})`);
-					});
-				}
-				d.setValue(agent.providerId)
-				 .onChange(async (v) => {
-					agent.providerId = v;
-					await this.plugin.saveSettings();
-				 });
-				d.selectEl.addClass('pi-width-normal');
-			});
+		this.renderAgentBindingEditor(containerEl, agent);
 
 		const autoSize = (el: HTMLTextAreaElement) => {
 			el.setCssProps({ height: 'auto' });
@@ -1126,6 +1217,167 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			() => agent.userPromptFile || '',
 			async (v) => { agent.userPromptFile = v; await this.plugin.saveSettings(); },
 		);
+	}
+
+	private renderAgentBindingEditor(containerEl: HTMLElement, agent: Agent) {
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		const binding = agent.modelBinding ?? (agent.modelBinding = { mode: 'runtime' });
+
+		new Setting(containerEl)
+			.setName('Model selection')
+			.setDesc('How this agent picks a (provider, model) when invoked.')
+			.addDropdown(d => {
+				d.addOption('pinned', 'Pinned: always use one model')
+				 .addOption('constrained', 'Constrained: pick from an allowlist at run time')
+				 .addOption('runtime', 'Runtime: pick from all configured models at run time')
+				 .setValue(binding.mode)
+				 .onChange(async (v: AgentBindingMode) => {
+					 binding.mode = v;
+					 await this.plugin.saveSettings();
+					 this.display();
+				 });
+				d.selectEl.addClass('pi-width-wide');
+			});
+
+		const allProviders = this.plugin.settings.providers;
+		const hasAnyModels = allProviders.some(p => (p.models ?? []).length > 0);
+
+		if (binding.mode === 'pinned') {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+			if (!hasAnyModels) {
+				containerEl.createDiv({ text: 'Add at least one model to a provider to pin.', cls: 'crucible-empty-state' });
+				return;
+			}
+
+			const pinned = binding.pinned ?? (binding.pinned = { providerId: '', modelId: '' });
+
+			new Setting(containerEl)
+				.setName('Provider')
+				.addDropdown(d => {
+					if (!pinned.providerId || !allProviders.find(p => p.id === pinned.providerId)) {
+						d.addOption('', 'Select a provider...');
+					}
+					allProviders.forEach(p => {
+						d.addOption(p.id, p.name || `(unnamed ${p.kind})`);
+					});
+					d.setValue(pinned.providerId)
+					 .onChange(async (v) => {
+						 pinned.providerId = v;
+						 // Reset modelId if it doesn't belong to the new provider.
+						 const newProvider = allProviders.find(p => p.id === v);
+						 if (!newProvider?.models?.some(m => m.id === pinned.modelId)) {
+							 pinned.modelId = '';
+						 }
+						 await this.plugin.saveSettings();
+						 this.display();
+					 });
+					d.selectEl.addClass('pi-width-normal');
+				});
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+			const provider = allProviders.find(p => p.id === pinned.providerId);
+			const models = provider?.models ?? [];
+
+			new Setting(containerEl)
+				.setName('Model')
+				.addDropdown(d => {
+					if (models.length === 0) {
+						d.addOption('', 'No models on this provider');
+					} else {
+						if (!pinned.modelId || !models.find(m => m.id === pinned.modelId)) {
+							d.addOption('', 'Select a model...');
+						}
+						models.forEach(m => {
+							d.addOption(m.id, m.label || m.id);
+						});
+					}
+					d.setValue(pinned.modelId)
+					 .onChange(async (v) => {
+						 pinned.modelId = v;
+						 await this.plugin.saveSettings();
+					 });
+					d.selectEl.addClass('pi-width-normal');
+				});
+		} else if (binding.mode === 'constrained') {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+			if (!hasAnyModels) {
+				containerEl.createDiv({ text: 'Add at least one model to a provider to populate the allowlist.', cls: 'crucible-empty-state' });
+				return;
+			}
+
+			const allow = binding.allow ?? (binding.allow = []);
+
+			new Setting(containerEl)
+				.setName('Allowed models')
+				.setDesc('When this agent runs, the user picks one of these. Chain steps may also override via the model arg.');
+
+			const list = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+			if (allow.length === 0) {
+				list.createDiv({ text: 'No models allowed. Add at least one.', cls: 'crucible-empty-state' });
+			} else {
+				allow.forEach((ref, allowIndex) => {
+					if (allowIndex > 0) list.createEl('hr', { cls: 'crucible-row-divider' });
+					const provider = allProviders.find(p => p.id === ref.providerId);
+					const model = provider?.models?.find((m: ProviderModel) => m.id === ref.modelId);
+					const label = provider && model
+						? `${provider.name || provider.kind} · ${model.label || model.id}`
+						: `${ref.providerId}:${ref.modelId} (missing)`;
+					new Setting(list)
+						.setName(label)
+						.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove').onClick(async () => {
+							allow.splice(allowIndex, 1);
+							await this.plugin.saveSettings();
+							this.display();
+						}));
+				});
+			}
+
+			const addable = collectAllRefs(allProviders).filter(
+				ref => !allow.some(a => a.providerId === ref.providerId && a.modelId === ref.modelId)
+			);
+
+			if (addable.length > 0) {
+				let pendingProvider = '';
+				let pendingModel = '';
+				new Setting(containerEl)
+					.setName('Add to allowlist')
+					.addDropdown(d => {
+						d.addOption('', 'Pick a model...');
+						addable.forEach(ref => {
+							const provider = allProviders.find(p => p.id === ref.providerId);
+							const model = provider?.models?.find(m => m.id === ref.modelId);
+							const label = provider && model
+								? `${provider.name || provider.kind} · ${model.label || model.id}`
+								: `${ref.providerId}:${ref.modelId}`;
+							d.addOption(`${ref.providerId}:${ref.modelId}`, label);
+						});
+						d.onChange((v) => {
+							const sep = v.indexOf(':');
+							if (sep === -1) { pendingProvider = ''; pendingModel = ''; return; }
+							pendingProvider = v.slice(0, sep);
+							pendingModel = v.slice(sep + 1);
+						});
+						d.selectEl.addClass('pi-width-wide');
+					})
+					.addButton(bt => bt.setButtonText('Add').onClick(async () => {
+						if (!pendingProvider || !pendingModel) return;
+						allow.push({ providerId: pendingProvider, modelId: pendingModel });
+						await this.plugin.saveSettings();
+						this.display();
+					}));
+			}
+		} else {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			containerEl.createEl('p', {
+				text: 'When invoked, this agent will open a picker showing every configured (provider, model) pair. Chain steps may bypass the picker via the model arg.',
+				cls: 'mod-muted',
+			});
+		}
 	}
 
 	private renderSettings(containerEl: HTMLElement) {

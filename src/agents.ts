@@ -1,8 +1,9 @@
 import { App, Notice, TFile, moment } from 'obsidian';
-import { Agent, AgentResult, CrucibleSettings, Provider, CommandArgSchema } from './types';
+import { Agent, AgentResult, CrucibleSettings, Provider, ProviderModelRef, CommandArgSchema } from './types';
 import { ChainManager } from './chains';
 import { ProviderManager } from './providers';
 import { applyTemplateString } from './utils';
+import { ModelPickerModal, buildModelPickerOptions } from './modelPicker';
 
 export const agentCommandId = (id: string) => `crucible:agent:${id}`;
 
@@ -12,6 +13,12 @@ const AGENT_INPUT_SCHEMA: CommandArgSchema[] = [
 		name: 'Input',
 		type: 'textarea',
 		description: 'Text passed to the agent. Supports {{response}} from the previous chain step.'
+	},
+	{
+		id: 'model',
+		name: 'Model override',
+		type: 'text',
+		description: 'Optional. Format: providerId:modelId. Supports chain variables (e.g. {{router_model}}). Overrides the agent\'s configured model.'
 	}
 ];
 
@@ -51,9 +58,10 @@ export class AgentManager {
 	}
 
 	async executeAgent(agent: Agent, args: Record<string, string>, targetFile?: TFile): Promise<AgentResult> {
-		const provider = this.getProvider(agent.providerId);
+		const ref = await this.resolveModel(agent, args);
+		const provider = this.getProvider(ref.providerId);
 		if (!provider) {
-			const msg = `Agent "${agent.name || agent.id}" has no valid provider`;
+			const msg = `Agent "${agent.name || agent.id}" references unknown provider "${ref.providerId}"`;
 			new Notice(msg);
 			throw new Error(msg);
 		}
@@ -73,15 +81,77 @@ export class AgentManager {
 		const spinner = new Notice(`Agent "${label}" is thinking...`, 0);
 
 		try {
-			const response = await this.providerManager.complete(provider, system, user);
+			const response = await this.providerManager.complete(provider, ref.modelId, system, user);
 			spinner.hide();
-			return { response, model: provider.model };
+			return { response, model: ref.modelId, provider: provider.id };
 		} catch (e: unknown) {
 			const message = e instanceof Error ? e.message : String(e);
 			spinner.hide();
 			new Notice("Agent error: " + message);
 			throw e instanceof Error ? e : new Error(message);
 		}
+	}
+
+	private async resolveModel(agent: Agent, args: Record<string, string>): Promise<ProviderModelRef> {
+		const binding = agent.modelBinding;
+		const override = parseModelRef(args.model);
+
+		if (override) {
+			if (!this.isAllowed(binding, override)) {
+				throw new Error(
+					`Model override "${args.model}" is not allowed by agent "${agent.name || agent.id}" (mode: ${binding.mode}).`
+				);
+			}
+			if (!this.refExists(override)) {
+				throw new Error(`Model override "${args.model}" does not match any configured provider/model.`);
+			}
+			return override;
+		}
+
+		if (binding.mode === 'pinned') {
+			if (!binding.pinned || !binding.pinned.providerId || !binding.pinned.modelId) {
+				throw new Error(`Agent "${agent.name || agent.id}" has no pinned model configured.`);
+			}
+			if (!this.refExists(binding.pinned)) {
+				throw new Error(`Agent "${agent.name || agent.id}" pinned model is no longer configured.`);
+			}
+			return binding.pinned;
+		}
+
+		// constrained or runtime → open the picker
+		const options = buildModelPickerOptions(
+			this.settings.providers,
+			binding.mode === 'constrained' ? binding.allow : undefined,
+		);
+
+		if (options.length === 0) {
+			throw new Error(
+				binding.mode === 'constrained'
+					? `Agent "${agent.name || agent.id}" has no allowed models configured.`
+					: `No provider/model pairs are configured.`
+			);
+		}
+
+		return await new Promise<ProviderModelRef>((resolve, reject) => {
+			new ModelPickerModal(
+				this.app,
+				options,
+				(ref) => resolve(ref),
+				() => reject(new Error('Model selection cancelled')),
+			).open();
+		});
+	}
+
+	private isAllowed(binding: Agent['modelBinding'], ref: ProviderModelRef): boolean {
+		if (binding.mode !== 'constrained') return true;
+		const allow = binding.allow ?? [];
+		return allow.some(a => a.providerId === ref.providerId && a.modelId === ref.modelId);
+	}
+
+	private refExists(ref: ProviderModelRef): boolean {
+		const provider = this.settings.providers.find(p => p.id === ref.providerId);
+		if (!provider) return false;
+		return (provider.models ?? []).some(m => m.id === ref.modelId);
 	}
 
 	private async resolvePrompt(agent: Agent, kind: 'system' | 'user'): Promise<string> {
@@ -98,4 +168,16 @@ export class AgentManager {
 		}
 		return (kind === 'system' ? agent.systemPromptText : agent.userPromptText) || '';
 	}
+}
+
+function parseModelRef(raw: string | undefined): ProviderModelRef | null {
+	if (!raw) return null;
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	const sep = trimmed.indexOf(':');
+	if (sep === -1) return null;
+	const providerId = trimmed.slice(0, sep).trim();
+	const modelId = trimmed.slice(sep + 1).trim();
+	if (!providerId || !modelId) return null;
+	return { providerId, modelId };
 }
