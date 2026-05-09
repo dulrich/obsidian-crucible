@@ -76,9 +76,10 @@ export class Orchestrator {
 				}
 			}
 			if (result.status === 'failed') {
-				await this.store.setError(moved.file, result.error ?? 'Workflow returned failed status');
+				const error = result.error ?? 'Workflow returned failed status';
+				await this.store.setError(moved.file, error);
 				const failed = await this.store.move(moved.file, moved.job, 'failed');
-				new Notice(`Orchestrate: ${moved.job.id} → failed`);
+				new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 				return failed.job;
 			}
 			const done = await this.store.move(moved.file, moved.job, 'done');
