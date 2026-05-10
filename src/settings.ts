@@ -1985,6 +1985,26 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
 				new FileSuggest(this.app, cb.inputEl);
 			});
+
+		new Setting(containerEl)
+			.setName('Diff against prior runs')
+			.setDesc('On: each run surfaces only videos not in any prior intake file. Off: each run surfaces every video that has no vault note (independent of prior intakes).')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.orchestrationYoutubeTrackerDiffMode !== false)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationYoutubeTrackerDiffMode = v;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Write empty intake files')
+			.setDesc('On: every run writes an intake file even when no new videos and no channel failures (audit trail). Off: skip writing when there is nothing to report.')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.orchestrationYoutubeTrackerWriteEmptyRuns === true)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationYoutubeTrackerWriteEmptyRuns = v;
+					await this.plugin.saveSettings();
+				}));
 	}
 
 	private renderEditLinkScanWorkflow(containerEl: HTMLElement) {
