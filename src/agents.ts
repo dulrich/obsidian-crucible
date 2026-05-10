@@ -1,7 +1,7 @@
 import { App, Notice, TFile, moment } from 'obsidian';
 import { Agent, AgentResult, CrucibleSettings, Provider, ProviderModelRef, CommandArgSchema } from './types';
 import { ChainManager } from './chains';
-import { ProviderManager } from './providers';
+import { CLI_DEFAULT_TIMEOUT_SECONDS, ProviderManager } from './providers';
 import { applyTemplateString } from './utils';
 import { ModelPickerModal, buildModelPickerOptions } from './modelPicker';
 
@@ -19,6 +19,12 @@ const AGENT_INPUT_SCHEMA: CommandArgSchema[] = [
 		name: 'Model override',
 		type: 'text',
 		description: 'Optional. Format: providerId:modelId. Supports chain variables (e.g. {{router_model}}). Overrides the agent\'s configured model.'
+	},
+	{
+		id: 'timeout_seconds',
+		name: 'Timeout seconds',
+		type: 'text',
+		description: `Optional. Overrides the CLI provider timeout for this run. Default is ${CLI_DEFAULT_TIMEOUT_SECONDS}. Use 600 for long transcript workflows.`
 	}
 ];
 
@@ -76,12 +82,17 @@ export class AgentManager {
 
 		const system = await applyTemplateString(systemTemplate, now, fileName, input);
 		const user = await applyTemplateString(userTemplate, now, fileName, input);
+		const timeoutSeconds = parseTimeoutSeconds(args.timeout_seconds);
 
 		const label = agent.name || agent.id;
 		const spinner = new Notice(`Agent "${label}" is thinking...`, 0);
 
 		try {
-			const response = await this.providerManager.complete(provider, ref.modelId, system, user);
+			const response = await this.providerManager.complete(provider, ref.modelId, system, user, {
+				timeoutSeconds,
+				executionMode: agent.executionMode || 'read-only',
+				agentLabel: label,
+			});
 			spinner.hide();
 			return { response, model: ref.modelId, provider: provider.id };
 		} catch (e: unknown) {
@@ -180,4 +191,16 @@ function parseModelRef(raw: string | undefined): ProviderModelRef | null {
 	const modelId = trimmed.slice(sep + 1).trim();
 	if (!providerId || !modelId) return null;
 	return { providerId, modelId };
+}
+
+function parseTimeoutSeconds(raw: string | undefined): number | undefined {
+	if (!raw) return undefined;
+	const trimmed = raw.trim();
+	if (!trimmed) return undefined;
+
+	const seconds = Number(trimmed);
+	if (!Number.isFinite(seconds) || seconds <= 0) {
+		throw new Error(`Timeout seconds must be a positive number, got "${raw}".`);
+	}
+	return Math.ceil(seconds);
 }
