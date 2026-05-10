@@ -1,6 +1,6 @@
 import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor, normalizePath } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
-import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema } from "./types";
+import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema, Provider } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
@@ -289,8 +289,34 @@ export default class CruciblePlugin extends Plugin {
 	}
 	
 	private async migrateSettings() {
-		// Pre-1.0 migrations only. Add real migrations here once the data model ships.
-		return Promise.resolve();
+		let dirty = false;
+
+		for (const agent of this.settings.agents) {
+			if (!agent.executionMode) {
+				agent.executionMode = 'read-only';
+				dirty = true;
+			}
+		}
+
+		for (const provider of this.settings.providers) {
+			const legacy = provider as Provider & { cliLogEnabled?: boolean; cliLogDirectory?: string };
+			if ('cliLogEnabled' in legacy) {
+				if (provider.cliRunArtifactsEnabled === undefined) {
+					provider.cliRunArtifactsEnabled = legacy.cliLogEnabled;
+				}
+				delete legacy.cliLogEnabled;
+				dirty = true;
+			}
+			if ('cliLogDirectory' in legacy) {
+				if (provider.cliRunDirectory === undefined && legacy.cliLogDirectory) {
+					provider.cliRunDirectory = legacy.cliLogDirectory;
+				}
+				delete legacy.cliLogDirectory;
+				dirty = true;
+			}
+		}
+
+		if (dirty) await this.saveSettings();
 	}
 
 	registerAgents() {

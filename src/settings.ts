@@ -2,8 +2,9 @@
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings } from "./types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings } from "./types";
 import { agentCommandId } from "./agents";
+import { CLI_DEFAULT_TIMEOUT_SECONDS } from "./providers";
 import { isValidTimezone } from "./orchestration/utils/dates";
 import { PERIOD_IDS, PeriodId, getPeriodConfig, getPeriodConfigByTarget } from "./periods";
 
@@ -980,6 +981,60 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					.setValue(provider.cwd || '')
 					.onChange(async (v) => { provider.cwd = v; await this.plugin.saveSettings(); })
 					.inputEl.addClass('pi-width-wide'));
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(containerEl)
+				.setName('Timeout seconds')
+				.setDesc(`Blank uses the default ${CLI_DEFAULT_TIMEOUT_SECONDS}s. Use 600 for long transcript workflows.`)
+				.addText(t => {
+					t.setPlaceholder(String(CLI_DEFAULT_TIMEOUT_SECONDS))
+						.setValue(provider.timeoutSeconds ? String(provider.timeoutSeconds) : '')
+						.onChange(async (v) => {
+							const trimmed = v.trim();
+							if (!trimmed) {
+								delete provider.timeoutSeconds;
+								await this.plugin.saveSettings();
+								return;
+							}
+
+							const seconds = Number(trimmed);
+							if (Number.isFinite(seconds) && seconds > 0) {
+								provider.timeoutSeconds = Math.ceil(seconds);
+								await this.plugin.saveSettings();
+							}
+						});
+					t.inputEl.type = 'number';
+					t.inputEl.min = '1';
+					t.inputEl.step = '1';
+					t.inputEl.addClass('pi-width-half');
+				});
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(containerEl)
+				.setName('Capture run artifacts')
+				.setDesc('Per run, write task.md, system.md, invocation.json, response.md, progress.log to the run directory.')
+				.addToggle(t => t
+					.setValue(provider.cliRunArtifactsEnabled !== false)
+					.onChange(async (v) => {
+						provider.cliRunArtifactsEnabled = v;
+						await this.plugin.saveSettings();
+						this.display();
+					}));
+
+			if (provider.cliRunArtifactsEnabled !== false) {
+				containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(containerEl)
+					.setName('Run directory')
+					.setDesc('Vault-relative folder. Each run lands in <dir>/<timestamp>-<agent>/. latest.log is updated for tailing.')
+					.addSearch(cb => {
+						cb.setPlaceholder('_crucible/cli-runs')
+							.setValue(provider.cliRunDirectory || '')
+							.onChange(async (v) => { provider.cliRunDirectory = v.trim(); await this.plugin.saveSettings(); });
+						const el = (cb as unknown as SearchWithContainer).containerEl;
+						if (el) el.addClass('crucible-search-container', 'pi-width-wide');
+						new FolderSuggest(this.app, cb.inputEl);
+					});
+			}
 		}
 
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
@@ -1075,7 +1130,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					systemPromptFile: '',
 					userPromptSource: 'text',
 					userPromptText: '{{input}}',
-					userPromptFile: ''
+					userPromptFile: '',
+					executionMode: 'read-only'
 				});
 				await this.plugin.saveSettings();
 				this.plugin.registerAgents();
@@ -1139,6 +1195,23 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 
 		this.renderAgentBindingEditor(containerEl, agent);
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Execution mode')
+			.setDesc('Read-only: CLI agents run with sandbox/tool restrictions where supported (Claude --tools Read, Codex --sandbox read-only). Edit: agent may write within its working directory. Unrestricted: no sandbox flags applied.')
+			.addDropdown(d => {
+				d.addOption('read-only', 'Read-only (default)')
+				 .addOption('edit', 'Edit')
+				 .addOption('unrestricted', 'Unrestricted')
+				 .setValue(agent.executionMode || 'read-only')
+				 .onChange(async (v: AgentExecutionMode) => {
+					 agent.executionMode = v;
+					 await this.plugin.saveSettings();
+				 });
+				d.selectEl.addClass('pi-width-wide');
+			});
 
 		const autoSize = (el: HTMLTextAreaElement) => {
 			el.setCssProps({ height: 'auto' });
