@@ -150,9 +150,17 @@ export default class CruciblePlugin extends Plugin {
 		this.addCommand({
 			id: 'mark-as-forwarded',
 			name: 'Mark as forwarded',
-			editorCallback: (editor) => {
-				if (this.settings.hiddenCommands.includes('mark-as-forwarded')) return;
-				void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('mark-as-forwarded')) return false;
+				if (!checking) {
+					const editor = this.activeEditor();
+					if (!editor) {
+						new Notice('Switch to edit mode to use this command');
+						return;
+					}
+					void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
+				}
+				return true;
 			}
 		});
 
@@ -271,7 +279,11 @@ export default class CruciblePlugin extends Plugin {
 		if (this.tocComponent) this.tocComponent.unload();
 	}
 
-	async loadSettings() { 
+	private activeEditor(): Editor | undefined {
+		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
+	}
+
+	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CrucibleSettings>); 
 		await this.migrateSettings();
 	}
@@ -446,32 +458,33 @@ export default class CruciblePlugin extends Plugin {
 			const fullId = `${prefix}:${id}`;
 
 			// Register in ChainManager so it can handle args/responses
-			this.chainManager.registerInternalCommand(fullId, async (args, prev, editor, targetFile) => {
+			this.chainManager.registerInternalCommand(fullId, async (args, _prev, editor, targetFile) => {
 				const resolvedValue = args._default || await this.resolveCaptureValue(capture, editor);
 				if (resolvedValue === null) return false;
 				return await this.captureManager.executeCapture(
 					capture,
 					resolvedValue,
 					targetFile,
-					this.resolveCaptureContext(editor),
+					this.resolveCaptureContext(editor, capture),
 				);
 			});
 
 			this.addCommand({
 				id,
 				name: `Capture: ${capture.name}`,
-				editorCheckCallback: (checking: boolean, editor: Editor) => {
+				checkCallback: (checking: boolean) => {
 					if (this.settings.hiddenCommands.includes(id)) return false;
 					if (!checking) {
 						void (async () => {
+							const editor = this.activeEditor();
 							const value = await this.resolveCaptureValue(capture, editor);
-							if (value === null) return; 
-							
+							if (value === null) return;
+
 							await this.captureManager.executeCapture(
 								capture,
 								value,
 								undefined,
-								this.resolveCaptureContext(editor),
+								this.resolveCaptureContext(editor, capture),
 							);
 						})();
 					}
@@ -483,34 +496,46 @@ export default class CruciblePlugin extends Plugin {
 
 	private async resolveCaptureValue(capture: Capture, editor?: Editor): Promise<string | null> {
 		const source = capture.source || 'dialog';
-		
+
 		switch (source) {
 			case 'line':
 				if (editor) return editor.getLine(editor.getCursor().line);
-				break;
+				new Notice('This capture reads the current line — switch to edit mode.');
+				return null;
 			case 'line-fallback':
 				if (editor) {
 					const line = editor.getLine(editor.getCursor().line);
 					if (line.trim()) return line;
 				}
 				return await this.promptForCaptureValue(capture);
-			case 'selection':
+			case 'selection': {
 				if (editor) return editor.getSelection();
-				break;
-			case 'selection-fallback':
+				const dom = window.getSelection()?.toString() ?? '';
+				if (dom) return dom;
+				new Notice('No text selected. Select text in the note first.');
+				return null;
+			}
+			case 'selection-fallback': {
 				if (editor) {
 					const selection = editor.getSelection();
 					if (selection.trim()) return selection;
+				} else {
+					const dom = window.getSelection()?.toString() ?? '';
+					if (dom.trim()) return dom;
 				}
 				return await this.promptForCaptureValue(capture);
+			}
 			case 'dialog':
 			default:
 				return await this.promptForCaptureValue(capture);
 		}
-		return '';
 	}
 
-	private resolveCaptureContext(editor?: Editor): CaptureExecutionContext {
+	private resolveCaptureContext(editor: Editor | undefined, capture: Capture): CaptureExecutionContext {
+		if ((capture.targetSectionMode ?? 'fixed') === 'source' && !editor) {
+			new Notice('This capture targets the source section but no editor is active. Switch to edit mode.');
+			throw new Error('Source-section capture requires an active editor');
+		}
 		return {
 			sourceSectionHeader: editor ? findCurrentSectionHeader(editor) : null,
 		};
@@ -574,9 +599,11 @@ export default class CruciblePlugin extends Plugin {
 			return true;
 		});
 
-		register('source:selection', async (args, prev, editor) => {
-			if (!editor) throw new Error('No editor available');
-			return editor.getSelection();
+		register('source:selection', async (_args, _prev, editor) => {
+			if (editor) return editor.getSelection();
+			const dom = window.getSelection()?.toString() ?? '';
+			if (!dom) throw new Error('No text selected. Select text in the note first.');
+			return dom;
 		});
 
 		register('source:input', async (args) => {
@@ -594,8 +621,8 @@ export default class CruciblePlugin extends Plugin {
 			{ id: 'title', name: 'Title', type: 'text', description: 'Heading shown above the input box.' }
 		]);
 		
-		register('mark-as-forwarded', async (args, prev, editor) => {
-			if (!editor) return false;
+		register('mark-as-forwarded', async (_args, _prev, editor) => {
+			if (!editor) throw new Error('mark-as-forwarded requires edit mode');
 			const cursor = editor.getCursor();
 			const lineNum = cursor.line;
 			const line = editor.getLine(lineNum);
@@ -656,7 +683,7 @@ export default class CruciblePlugin extends Plugin {
 			{ id: 'content', name: 'Content', type: 'textarea', description: 'New body for the note. If empty, uses {{response}} from the previous step.' }
 		]);
 
-		register('capture', async (args, prev, editor, tf) => {
+		register('capture', async (args, _prev, editor, tf) => {
 			const name = args.name;
 			const manualValue = args.value;
 			const capture = this.settings.captures.find(c => c.name === name);
@@ -667,7 +694,7 @@ export default class CruciblePlugin extends Plugin {
 					capture,
 					resolvedValue,
 					tf,
-					this.resolveCaptureContext(editor),
+					this.resolveCaptureContext(editor, capture),
 				);
 			}
 			new Notice(`Capture not found: ${name}`);
@@ -717,9 +744,10 @@ export default class CruciblePlugin extends Plugin {
 			this.addCommand({
 				id,
 				name: `Chain: ${chain.name}`,
-				editorCheckCallback: (checking: boolean, editor: Editor) => {
+				checkCallback: (checking: boolean) => {
 					if (this.settings.hiddenCommands.includes(id)) return false;
 					if (!checking) {
+						const editor = this.activeEditor();
 						// Capture the active file at invocation time so async steps never
 						// accidentally target a different note if the user navigates away.
 						const spawnFile = this.app.workspace.getActiveFile() ?? undefined;
