@@ -140,7 +140,8 @@ export class CommandSuggest extends AbstractInputSuggest<Command> {
 }
 
 export function getCommandSuggestItems(app: App, extraCommands: Command[] = []): Command[] {
-	const commands = app.commands.listCommands();
+	const registry = (app as unknown as { commands: { commands: Record<string, Command> } }).commands.commands;
+	const commands = Object.values(registry);
 	return [...extraCommands, ...commands];
 }
 
