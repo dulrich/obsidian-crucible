@@ -8,6 +8,17 @@ export function todayInTz(timezone: string): string {
 	return fmt.format(new Date());
 }
 
+export function nowTimeInTz(timezone: string): string {
+	const fmt = new Intl.DateTimeFormat('en-GB', {
+		timeZone: timezone,
+		hour: '2-digit',
+		minute: '2-digit',
+		second: '2-digit',
+		hour12: false,
+	});
+	return fmt.format(new Date()).replace(/:/g, '-');
+}
+
 export function nowIso(): string {
 	return new Date().toISOString();
 }
