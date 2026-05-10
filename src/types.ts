@@ -137,6 +137,9 @@ export interface Provider {
 	command?: string;
 	extraArgs?: string;
 	cwd?: string;
+	timeoutSeconds?: number;
+	cliRunArtifactsEnabled?: boolean;
+	cliRunDirectory?: string;
 }
 
 export interface FxPair {
@@ -154,6 +157,8 @@ export interface WeatherLocation {
 export type AgentPromptSource = 'text' | 'file';
 
 export type AgentBindingMode = 'pinned' | 'constrained' | 'runtime';
+
+export type AgentExecutionMode = 'read-only' | 'edit' | 'unrestricted';
 
 export interface ProviderModelRef {
 	providerId: string;
@@ -176,6 +181,7 @@ export interface Agent {
 	userPromptSource: AgentPromptSource;
 	userPromptText: string;
 	userPromptFile: string;
+	executionMode: AgentExecutionMode;
 }
 
 export interface CrucibleSettings {
