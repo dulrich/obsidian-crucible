@@ -1,7 +1,7 @@
 import { TFile, normalizePath } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
-import { todayInTz } from '../utils/dates';
+import { nowTimeInTz, todayInTz } from '../utils/dates';
 import { ensureFolder } from '../../utils';
 import {
 	ChannelEntry,
@@ -14,6 +14,8 @@ import {
 
 const INTAKE_ROOT = '_crucible/orchestration/youtube/new-videos';
 const QUEUE_SCAN_SKIP_PREFIX = '_crucible/orchestration/';
+const FEED_FETCH_CONCURRENCY = 4;
+const FEED_FETCH_MIN_INTERVAL_MS = 250;
 
 interface ChannelOutcome {
 	channel: ChannelEntry;
@@ -48,10 +50,14 @@ export class YoutubeTrackerWorkflow implements Workflow {
 			};
 		}
 
-		const seen = this.buildSeenIdSet(plugin);
+		const diffMode = plugin.settings.orchestrationYoutubeTrackerDiffMode !== false;
+		const seen = this.buildSeenIdSet(plugin, diffMode);
 
-		const fetchSettled = await Promise.allSettled(
-			channels.map(c => fetchChannelFeed(c.channelId)),
+		const fetchSettled = await rateLimitedAllSettled(
+			channels,
+			c => fetchChannelFeed(c.channelId),
+			FEED_FETCH_CONCURRENCY,
+			FEED_FETCH_MIN_INTERVAL_MS,
 		);
 
 		const outcomes: ChannelOutcome[] = channels.map((channel, i) => {
@@ -66,6 +72,16 @@ export class YoutubeTrackerWorkflow implements Workflow {
 
 		const failedCount = outcomes.filter(o => o.error).length;
 		const totalNew = outcomes.reduce((sum, o) => sum + o.newVideos.length, 0);
+
+		const writeEmpty = plugin.settings.orchestrationYoutubeTrackerWriteEmptyRuns === true;
+		if (totalNew === 0 && failedCount === 0 && !writeEmpty) {
+			return {
+				status: 'done',
+				outputPaths: [],
+				notes: `No new videos; intake file not written (set "Write empty intake files" to keep an audit trail).`,
+			};
+		}
+
 		const intakePath = await this.writeIntakeNote(plugin, outcomes, totalNew);
 
 		if (failedCount === channels.length) {
@@ -102,15 +118,21 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		await plugin.app.vault.create(path, EXAMPLE_CHANNELS_TABLE);
 	}
 
-	private buildSeenIdSet(plugin: WorkflowContext['plugin']): Set<string> {
+	private buildSeenIdSet(plugin: WorkflowContext['plugin'], diffMode: boolean): Set<string> {
 		const app = plugin.app;
 		const seen = new Set<string>();
+		const intakePrefix = `${INTAKE_ROOT}/`;
 		for (const file of app.vault.getMarkdownFiles()) {
-			if (file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX)) continue;
+			const inIntake = file.path.startsWith(intakePrefix);
+			const inSkip = file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX);
+			if (inSkip && !(diffMode && inIntake)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
 			ingestProperty(fm['youtube-id'], seen, false);
 			ingestProperty(fm['source'], seen, true);
+			if (diffMode && inIntake) {
+				ingestProperty(fm['video_ids'], seen, false);
+			}
 		}
 		return seen;
 	}
@@ -121,26 +143,37 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		totalNew: number,
 	): Promise<string> {
 		const app = plugin.app;
-		const date = todayInTz(plugin.settings.orchestrationTimezone);
-		const path = normalizePath(`${INTAKE_ROOT}/${date}.md`);
+		const tz = plugin.settings.orchestrationTimezone;
+		const date = todayInTz(tz);
+		const time = nowTimeInTz(tz);
+		const displayTime = time.replace(/-/g, ':');
+		const path = await this.allocateIntakePath(app, date, time);
 		await ensureFolder(app, INTAKE_ROOT);
 
 		const failedChannels = outcomes.filter(o => o.error);
 		const channelsWithNew = outcomes.filter(o => o.newVideos.length > 0).length;
+		const videoIds = outcomes.flatMap(o => o.newVideos.map(v => v.videoId));
 
-		const fm = [
+		const fmLines = [
 			'---',
 			`date: ${date}`,
+			`run_at: ${date}T${time}`,
 			'generated_by: orchestrator/youtube_tracker',
 			`channels_total: ${outcomes.length}`,
 			`channels_with_new: ${channelsWithNew}`,
 			`videos_total: ${totalNew}`,
 			`channels_failed: ${failedChannels.length}`,
-			'---',
-			'',
-		].join('\n');
+		];
+		if (videoIds.length > 0) {
+			fmLines.push('video_ids:');
+			for (const id of videoIds) fmLines.push(`  - ${id}`);
+		} else {
+			fmLines.push('video_ids: []');
+		}
+		fmLines.push('---', '');
+		const fm = fmLines.join('\n');
 
-		const sections: string[] = [`# YouTube intake — ${date}`, ''];
+		const sections: string[] = [`# YouTube intake — ${date} ${displayTime}`, ''];
 
 		if (outcomes.length === 0) {
 			sections.push('_No channels configured._');
@@ -169,13 +202,19 @@ export class YoutubeTrackerWorkflow implements Workflow {
 
 		const body = `${fm}${sections.join('\n').replace(/\n+$/, '\n')}`;
 
-		const existing = app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile) {
-			await app.vault.modify(existing, body);
-		} else {
-			await app.vault.create(path, body);
-		}
+		await app.vault.create(path, body);
 		return path;
+	}
+
+	private async allocateIntakePath(app: WorkflowContext['plugin']['app'], date: string, time: string): Promise<string> {
+		const base = `${INTAKE_ROOT}/${date}T${time}`;
+		let candidate = normalizePath(`${base}.md`);
+		let suffix = 1;
+		while (app.vault.getAbstractFileByPath(candidate) instanceof TFile) {
+			candidate = normalizePath(`${base}-${suffix}.md`);
+			suffix += 1;
+		}
+		return candidate;
 	}
 }
 
@@ -208,4 +247,43 @@ function describeReason(reason: unknown): string {
 
 function escapeBrackets(text: string): string {
 	return text.replace(/\[/g, '\\[').replace(/\]/g, '\\]');
+}
+
+type SettledResult<R> = { status: 'fulfilled'; value: R } | { status: 'rejected'; reason: unknown };
+
+async function rateLimitedAllSettled<T, R>(
+	items: T[],
+	fn: (item: T) => Promise<R>,
+	maxParallel: number,
+	minIntervalMs: number,
+): Promise<SettledResult<R>[]> {
+	const results: SettledResult<R>[] = items.map(() => ({ status: 'rejected', reason: new Error('not started') }));
+	let nextIdx = 0;
+	let nextStartAllowed = 0;
+
+	const reserveSlot = (): number => {
+		const now = Date.now();
+		const start = Math.max(now, nextStartAllowed);
+		nextStartAllowed = start + minIntervalMs;
+		return start - now;
+	};
+
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const i = nextIdx++;
+			const item = items[i];
+			if (i >= items.length || item === undefined) return;
+			const wait = reserveSlot();
+			if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+			try {
+				results[i] = { status: 'fulfilled', value: await fn(item) };
+			} catch (reason) {
+				results[i] = { status: 'rejected', reason };
+			}
+		}
+	};
+
+	const workerCount = Math.min(Math.max(1, maxParallel), items.length);
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+	return results;
 }
