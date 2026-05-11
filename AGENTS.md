@@ -38,6 +38,17 @@ If a UI/UX bug is not resolved on the first attempt, or if the root cause is not
 - **State Context:** What was the specific state of the active note and target note (e.g., selection active, focus location)?
 - **Trigger Specifics:** Does the behavior change if a different UI element is used to trigger the same logic?
 
+When debugging a UI-observable Obsidian plugin failure, do not compensate for missing runtime evidence by expanding scope. Add targeted instrumentation or request a sandboxed UI rerun.
+
+If the next useful evidence would come from seeing the UI, stop and return a rerun packet instead of inspecting Obsidian internals.
+
+A valid rerun packet includes:
+- patch applied
+- command to rebuild/reload
+- exact UI steps
+- expected console/log output
+- what to report back
+
 ## UI & UX Standards
 
 - **Grouped Cards:** All settings must be organized within `.crucible-settings-group` containers to match the native Obsidian "Options" look.
@@ -93,3 +104,9 @@ Supported tokens in any template or property injection:
   ln -s /path/to/plugin <Vault>/.obsidian/plugins/obsidian-crucible
   ```
 - Use the **Reload Plugin** command from the palette after a re-build.
+
+## Quirks
+
+Non-obvious Obsidian/runtime behaviors that bit us once and would bite again. Add entries here when a fix turned out to hinge on something the API docs don't surface.
+
+- **`FuzzySuggestModal.selectSuggestion` closes before it chooses.** The base implementation calls `this.close()` *before* `onChooseSuggestion`/`onChooseItem`, so any "did the user pick something?" flag set inside `onChooseItem` is too late — `onClose` has already run with the flag still false. If the modal uses an `onCancel` callback distinct from `onChoose`, override `selectSuggestion` to flip the flag (and invoke the resolve callback) *before* calling `super`, or skip `super` and call `close()` yourself. See `src/modelPicker.ts`.
