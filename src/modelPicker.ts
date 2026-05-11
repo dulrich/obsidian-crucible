@@ -1,4 +1,4 @@
-import { App, FuzzySuggestModal } from 'obsidian';
+import { App, FuzzyMatch, FuzzySuggestModal } from 'obsidian';
 import { Provider, ProviderModel, ProviderModelRef } from './types';
 
 export interface ModelPickerOption {
@@ -27,6 +27,15 @@ export class ModelPickerModal extends FuzzySuggestModal<ModelPickerOption> {
 		const providerLabel = item.provider.name || item.provider.kind;
 		const modelLabel = item.model.label || item.model.id;
 		return `${providerLabel} · ${modelLabel}`;
+	}
+
+	// Obsidian's FuzzySuggestModal.selectSuggestion calls close() before onChooseSuggestion,
+	// so onClose runs while picked is still false. Mark picked and resolve up-front to avoid
+	// a spurious cancel; onChooseItem stays in place as a redundant safety net.
+	selectSuggestion(value: FuzzyMatch<ModelPickerOption>, evt: MouseEvent | KeyboardEvent): void {
+		this.picked = true;
+		this.onPick({ providerId: value.item.provider.id, modelId: value.item.model.id });
+		this.close();
 	}
 
 	onChooseItem(item: ModelPickerOption): void {
