@@ -3,6 +3,7 @@ import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { nowTimeInTz, todayInTz } from '../utils/dates';
 import { ensureFolder } from '../../utils';
+import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontmatter';
 import {
 	ChannelEntry,
 	EXAMPLE_CHANNELS_TABLE,
@@ -49,6 +50,8 @@ export class YoutubeTrackerWorkflow implements Workflow {
 				notes: `Registry at ${registryPath} has no channels. Wrote empty intake.`,
 			};
 		}
+
+		await this.canonicalizeDetectedIds(plugin);
 
 		const diffMode = plugin.settings.orchestrationYoutubeTrackerDiffMode !== false;
 		const seen = this.buildSeenIdSet(plugin, diffMode);
@@ -118,6 +121,24 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		await plugin.app.vault.create(path, EXAMPLE_CHANNELS_TABLE);
 	}
 
+	private async canonicalizeDetectedIds(plugin: WorkflowContext['plugin']): Promise<void> {
+		const app = plugin.app;
+		for (const file of app.vault.getMarkdownFiles()) {
+			if (file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX)) continue;
+			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm) continue;
+			const existing: unknown = fm['yt-video-id'];
+			if (typeof existing === 'string' && existing.trim()) continue;
+			const detected = detectVideoIdSource(fm);
+			if (!detected) continue;
+			await updateFrontmatter(app, file, current => {
+				const present = current['yt-video-id'];
+				if (typeof present === 'string' && present.trim()) return;
+				insertFrontmatterPropertyAfter(current, detected.sourceKey, 'yt-video-id', detected.id);
+			});
+		}
+	}
+
 	private buildSeenIdSet(plugin: WorkflowContext['plugin'], diffMode: boolean): Set<string> {
 		const app = plugin.app;
 		const seen = new Set<string>();
@@ -128,7 +149,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 			if (inSkip && !(diffMode && inIntake)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
-			ingestProperty(fm['youtube-id'], seen, false);
+			ingestProperty(fm['yt-video-id'], seen, false);
 			ingestProperty(fm['source'], seen, true);
 			if (diffMode && inIntake) {
 				ingestProperty(fm['video_ids'], seen, false);
@@ -216,6 +237,26 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		}
 		return candidate;
 	}
+}
+
+function detectVideoIdSource(fm: Record<string, unknown>): { id: string; sourceKey: string } | null {
+	const fromSource = firstUrlId(fm['source']);
+	if (fromSource) return { id: fromSource, sourceKey: 'source' };
+	return null;
+}
+
+function firstUrlId(value: unknown): string | null {
+	if (typeof value === 'string') {
+		return extractVideoIdFromUrl(value.trim());
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (typeof item !== 'string') continue;
+			const id = extractVideoIdFromUrl(item.trim());
+			if (id) return id;
+		}
+	}
+	return null;
 }
 
 function ingestProperty(value: unknown, seen: Set<string>, urlMode: boolean): void {

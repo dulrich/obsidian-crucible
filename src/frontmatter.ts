@@ -34,6 +34,29 @@ export function upsertFrontmatterPropertyIfEmpty(fm: FrontmatterRecord, property
 	}
 }
 
+export function insertFrontmatterPropertyAfter(
+	fm: FrontmatterRecord,
+	anchorKey: string,
+	newKey: string,
+	value: unknown,
+): void {
+	if (newKey in fm) {
+		fm[newKey] = value;
+		return;
+	}
+	if (!(anchorKey in fm)) {
+		fm[newKey] = value;
+		return;
+	}
+	const ordered: FrontmatterRecord = {};
+	for (const k of Object.keys(fm)) {
+		ordered[k] = fm[k];
+		if (k === anchorKey) ordered[newKey] = value;
+	}
+	for (const k of Object.keys(fm)) delete fm[k];
+	for (const k of Object.keys(ordered)) fm[k] = ordered[k];
+}
+
 export function sortFrontmatterProperties(fm: FrontmatterRecord, priority: string[]): void {
 	const sortedFm: FrontmatterRecord = {};
 
