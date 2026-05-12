@@ -16,7 +16,7 @@ import { JobStore } from './orchestration/JobStore';
 import { Orchestrator } from './orchestration/Orchestrator';
 import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
 import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
-import { YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
+import { YoutubeTrackerConsolidateWorkflow, YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
@@ -48,6 +48,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
 		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow());
 		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow());
+		this.orchestrator.register('youtube_tracker_consolidate', new YoutubeTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 
 		this.registerInternalCommands();
@@ -226,6 +227,12 @@ export default class CruciblePlugin extends Plugin {
 			id: 'orchestrator-enqueue-youtube-tracker',
 			name: 'Orchestrate: enqueue YouTube tracker',
 			callback: () => { void this.orchestrator.enqueue('youtube_tracker'); },
+		});
+
+		this.addCommand({
+			id: 'orchestrator-enqueue-youtube-tracker-consolidation',
+			name: 'Orchestrate: enqueue YouTube tracker consolidation',
+			callback: () => { void this.orchestrator.enqueue('youtube_tracker_consolidate'); },
 		});
 
 		this.addCommand({

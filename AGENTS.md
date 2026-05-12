@@ -96,6 +96,10 @@ Supported tokens in any template or property injection:
 - **Recursive Safety:** Use the `isMaterializing` flag to wrap all plugin-driven file modifications to prevent infinite loops (especially with "Lint on Save").
 - **Path Awareness:** Always check `isPathIgnored` from the `Linter` class before running automated note body operations.
 
+## Write out Plans
+
+- When a plan is approved in Plan Mode, write a copy to plans/descriptive-name.md before proceeding with implementation
+
 ## Testing
 
 - **Hot reload watcher:** At the start of implementation or debugging work, remind the user to run `npm run dev` in a separate terminal. This watcher is for the user's Obsidian hot-reload workflow; without it, changes may compile only during the final build and can appear not to have taken effect in Obsidian. Do not run `npm run dev` automatically unless the user explicitly asks or the task specifically requires watching live build output. If you do run it, stop it before the full cleanup loop.

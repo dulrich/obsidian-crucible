@@ -136,6 +136,7 @@ export class Orchestrator {
 		switch (type) {
 			case 'daily_brief_lite': return s.orchestrationDailyBriefEnabled;
 			case 'youtube_tracker': return s.orchestrationYoutubeTrackerEnabled;
+			case 'youtube_tracker_consolidate': return s.orchestrationYoutubeTrackerEnabled;
 			case 'link_scan': return s.orchestrationLinkScanEnabled;
 			case 'transcript_refine': return s.orchestrationTranscriptRefineEnabled;
 			default: return true;
