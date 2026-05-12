@@ -1,5 +1,5 @@
 import { App, Notice, TFile, moment } from 'obsidian';
-import { Agent, AgentResult, CrucibleSettings, Provider, ProviderModelRef, CommandArgSchema } from './types';
+import { Agent, AgentResult, CrucibleSettings, Provider, ProviderCompletionResult, ProviderModelRef, CommandArgSchema, providerModality } from './types';
 import { ChainManager } from './chains';
 import { CLI_DEFAULT_TIMEOUT_SECONDS, ProviderManager } from './providers';
 import { applyTemplateString } from './utils';
@@ -88,19 +88,40 @@ export class AgentManager {
 		const spinner = new Notice(`Agent "${label}" is thinking...`, 0);
 
 		try {
-			const response = await this.providerManager.complete(provider, ref.modelId, system, user, {
+			const completion = await this.providerManager.complete(provider, ref.modelId, system, user, {
 				timeoutSeconds,
 				executionMode: agent.executionMode || 'read-only',
 				agentLabel: label,
 			});
+			this.enforceNormalFinishReason(agent, provider, ref.modelId, completion);
 			spinner.hide();
-			return { response, model: ref.modelId, provider: provider.id };
+			return {
+				response: completion.text,
+				model: ref.modelId,
+				provider: provider.id,
+				finishReason: completion.finishReason,
+				rawFinishReason: completion.rawFinishReason,
+			};
 		} catch (e: unknown) {
 			const message = e instanceof Error ? e.message : String(e);
 			spinner.hide();
 			new Notice("Agent error: " + message);
 			throw e instanceof Error ? e : new Error(message);
 		}
+	}
+
+	private enforceNormalFinishReason(agent: Agent, provider: Provider, modelId: string, completion: ProviderCompletionResult): void {
+		if (providerModality(provider.kind) !== 'api') return;
+		if ((agent.requireNormalFinishReason ?? true) === false) return;
+		if (completion.finishReason === 'stop') return;
+
+		const label = agent.name || agent.id;
+		const providerLabel = provider.name || provider.id;
+		const rawReason = completion.rawFinishReason ?? 'missing';
+		throw new Error(
+			`Agent "${label}" using provider "${providerLabel}" model "${modelId}" finished with non-normal reason "${rawReason}" ` +
+			`(normalized: ${completion.finishReason}; partial response length: ${completion.text.length}).`
+		);
 	}
 
 	private async resolveModel(agent: Agent, args: Record<string, string>): Promise<ProviderModelRef> {

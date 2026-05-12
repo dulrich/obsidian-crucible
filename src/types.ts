@@ -99,9 +99,26 @@ export interface AgentResult {
 	response: string;
 	model: string;
 	provider: string;
+	finishReason?: ProviderFinishReason;
+	rawFinishReason?: string;
 }
 
 export type ProviderModality = 'api' | 'cli';
+
+export type ProviderFinishReason =
+	| 'stop'
+	| 'length'
+	| 'content_filter'
+	| 'tool_calls'
+	| 'error'
+	| 'unknown'
+	| 'other';
+
+export interface ProviderCompletionResult {
+	text: string;
+	finishReason: ProviderFinishReason;
+	rawFinishReason?: string;
+}
 
 export type ProviderKind =
 	| 'openai'
@@ -182,6 +199,7 @@ export interface Agent {
 	userPromptText: string;
 	userPromptFile: string;
 	executionMode: AgentExecutionMode;
+	requireNormalFinishReason: boolean;
 }
 
 export interface CrucibleSettings {
