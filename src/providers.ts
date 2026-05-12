@@ -1,5 +1,5 @@
 import { App, FileSystemAdapter, normalizePath, requestUrl } from 'obsidian';
-import { AgentExecutionMode, Provider, ProviderKind, providerModality } from './types';
+import { AgentExecutionMode, Provider, ProviderCompletionResult, ProviderFinishReason, ProviderKind, providerModality } from './types';
 
 // child_process is desktop-only; loaded lazily via require so mobile bundles can still import this module.
 interface ChildEvents {
@@ -67,13 +67,14 @@ export class ProviderManager {
 		this.app.secretStorage.setSecret(providerSecretKey(providerId), '');
 	}
 
-	async complete(provider: Provider, modelId: string, system: string, user: string, options: ProviderCompletionOptions = {}): Promise<string> {
+	async complete(provider: Provider, modelId: string, system: string, user: string, options: ProviderCompletionOptions = {}): Promise<ProviderCompletionResult> {
 		if (!modelId) {
 			throw new Error(`No model selected for provider "${provider.name || provider.id}"`);
 		}
 
 		if (providerModality(provider.kind) === 'cli') {
-			return await this.callCli(provider, modelId, system, user, options);
+			const text = await this.callCli(provider, modelId, system, user, options);
+			return { text, finishReason: 'stop' };
 		}
 
 		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
@@ -97,7 +98,7 @@ export class ProviderManager {
 		}
 	}
 
-	private async callOpenAI(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
+	private async callOpenAI(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const response = await requestUrl({
 			url: 'https://api.openai.com/v1/chat/completions',
 			method: 'POST',
@@ -119,13 +120,18 @@ export class ProviderManager {
 			throw new Error(`OpenAI API returned ${response.status}: ${response.text}`);
 		}
 
-		const data = response.json as { choices: { message: { content: string } }[] };
+		const data = response.json as { choices: { message?: { content?: string }, finish_reason?: string | null }[] };
 		const choice = data.choices[0];
 		if (!choice) throw new Error('OpenAI API returned no choices');
-		return choice.message.content;
+		const rawFinishReason = normalizeRawFinishReason(choice.finish_reason);
+		return {
+			text: choice.message?.content ?? '',
+			finishReason: normalizeChatCompletionFinishReason(rawFinishReason),
+			rawFinishReason,
+		};
 	}
 
-	private async callAnthropic(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
+	private async callAnthropic(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const response = await requestUrl({
 			url: 'https://api.anthropic.com/v1/messages',
 			method: 'POST',
@@ -148,13 +154,16 @@ export class ProviderManager {
 			throw new Error(`Anthropic API returned ${response.status}: ${response.text}`);
 		}
 
-		const data = response.json as { content: { text: string }[] };
-		const block = data.content[0];
-		if (!block) throw new Error('Anthropic API returned no content');
-		return block.text;
+		const data = response.json as { content?: { text?: string }[], stop_reason?: string | null };
+		const rawFinishReason = normalizeRawFinishReason(data.stop_reason);
+		return {
+			text: (data.content ?? []).map(block => block.text ?? '').join(''),
+			finishReason: normalizeAnthropicFinishReason(rawFinishReason),
+			rawFinishReason,
+		};
 	}
 
-	private async callGoogle(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
+	private async callGoogle(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const response = await requestUrl({
 			url: `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
 			method: 'POST',
@@ -177,14 +186,18 @@ export class ProviderManager {
 			throw new Error("Google API returned " + response.status + ": " + response.text);
 		}
 
-		const data = response.json as { candidates: { content: { parts: { text: string }[] } }[] };
+		const data = response.json as { candidates: { content?: { parts?: { text?: string }[] }, finishReason?: string }[] };
 		const candidate = data.candidates[0];
-		const part = candidate?.content.parts[0];
-		if (!part) throw new Error('Google API returned no candidates');
-		return part.text;
+		if (!candidate) throw new Error('Google API returned no candidates');
+		const rawFinishReason = normalizeRawFinishReason(candidate.finishReason);
+		return {
+			text: (candidate.content?.parts ?? []).map(part => part.text ?? '').join(''),
+			finishReason: normalizeGoogleFinishReason(rawFinishReason),
+			rawFinishReason,
+		};
 	}
 
-	private async callOpenRouter(modelId: string, apiKey: string, system: string, user: string): Promise<string> {
+	private async callOpenRouter(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const response = await requestUrl({
 			url: 'https://openrouter.ai/api/v1/chat/completions',
 			method: 'POST',
@@ -207,13 +220,18 @@ export class ProviderManager {
 			throw new Error("OpenRouter API returned " + response.status + ": " + response.text);
 		}
 
-		const data = response.json as { choices: { message: { content: string } }[] };
+		const data = response.json as { choices: { message?: { content?: string }, finish_reason?: string | null }[] };
 		const choice = data.choices[0];
 		if (!choice) throw new Error('OpenRouter API returned no choices');
-		return choice.message.content;
+		const rawFinishReason = normalizeRawFinishReason(choice.finish_reason);
+		return {
+			text: choice.message?.content ?? '',
+			finishReason: normalizeChatCompletionFinishReason(rawFinishReason),
+			rawFinishReason,
+		};
 	}
 
-	private async callOllama(provider: Provider, modelId: string, system: string, user: string): Promise<string> {
+	private async callOllama(provider: Provider, modelId: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const baseUrl = provider.baseUrl || 'http://localhost:11434';
 		const response = await requestUrl({
 			url: `${baseUrl}/api/chat`,
@@ -235,8 +253,13 @@ export class ProviderManager {
 			throw new Error(`Ollama API returned ${response.status}: ${response.text}`);
 		}
 
-		const data = response.json as { message: { content: string } };
-		return data.message.content;
+		const data = response.json as { message?: { content?: string }, done_reason?: string | null };
+		const rawFinishReason = normalizeRawFinishReason(data.done_reason);
+		return {
+			text: data.message?.content ?? '',
+			finishReason: normalizeOllamaFinishReason(rawFinishReason),
+			rawFinishReason,
+		};
 	}
 
 	private async callCli(provider: Provider, modelId: string, system: string, user: string, options: ProviderCompletionOptions): Promise<string> {
@@ -311,6 +334,66 @@ export class ProviderManager {
 			`${rootDirectory}/${runDirName}`,
 			[progressStream, latestStream],
 		);
+	}
+}
+
+function normalizeRawFinishReason(reason: unknown): string | undefined {
+	if (typeof reason !== 'string') return undefined;
+	const trimmed = reason.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function normalizeChatCompletionFinishReason(raw: string | undefined): ProviderFinishReason {
+	if (!raw) return 'unknown';
+	switch (raw.toLowerCase()) {
+		case 'stop': return 'stop';
+		case 'length':
+		case 'max_tokens': return 'length';
+		case 'content_filter':
+		case 'safety': return 'content_filter';
+		case 'tool_calls':
+		case 'function_call': return 'tool_calls';
+		case 'error': return 'error';
+		default: return 'other';
+	}
+}
+
+function normalizeAnthropicFinishReason(raw: string | undefined): ProviderFinishReason {
+	if (!raw) return 'unknown';
+	switch (raw.toLowerCase()) {
+		case 'end_turn':
+		case 'stop_sequence': return 'stop';
+		case 'max_tokens': return 'length';
+		case 'tool_use': return 'tool_calls';
+		case 'refusal': return 'content_filter';
+		case 'pause_turn': return 'other';
+		default: return 'other';
+	}
+}
+
+function normalizeGoogleFinishReason(raw: string | undefined): ProviderFinishReason {
+	if (!raw) return 'unknown';
+	switch (raw.toUpperCase()) {
+		case 'STOP': return 'stop';
+		case 'MAX_TOKENS': return 'length';
+		case 'SAFETY':
+		case 'RECITATION':
+		case 'BLOCKLIST':
+		case 'PROHIBITED_CONTENT':
+		case 'SPII': return 'content_filter';
+		case 'MALFORMED_FUNCTION_CALL': return 'tool_calls';
+		case 'FINISH_REASON_UNSPECIFIED': return 'unknown';
+		default: return 'other';
+	}
+}
+
+function normalizeOllamaFinishReason(raw: string | undefined): ProviderFinishReason {
+	if (!raw) return 'unknown';
+	switch (raw.toLowerCase()) {
+		case 'stop': return 'stop';
+		case 'length':
+		case 'max_tokens': return 'length';
+		default: return 'other';
 	}
 }
 
