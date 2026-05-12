@@ -376,6 +376,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				const setting = new Setting(group)
 					.setName(capture.name || '(unnamed)')
 					.setDesc(this.describeCapture(capture))
+					.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate capture').onClick(async () => {
+						const copy = JSON.parse(JSON.stringify(capture)) as Capture;
+						copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
+						this.plugin.settings.captures.push(copy);
+						await this.plugin.saveSettings();
+						this.plugin.registerCaptures();
+						this.display();
+					}))
 					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit capture').onClick(() => {
 						this.editingCaptureIndex = index;
 						this.display();
@@ -1101,6 +1109,15 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				new Setting(listGroup)
 					.setName(agent.name || '(unnamed)')
 					.setDesc(this.describeAgent(agent))
+					.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate agent').onClick(async () => {
+						const copy = JSON.parse(JSON.stringify(agent)) as Agent;
+						copy.id = Math.random().toString(36).substring(2, 9);
+						copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
+						this.plugin.settings.agents.push(copy);
+						await this.plugin.saveSettings();
+						this.plugin.registerAgents();
+						this.display();
+					}))
 					.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit agent').onClick(() => {
 						this.editingAgentIndex = index;
 						this.display();
@@ -1131,7 +1148,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					userPromptSource: 'text',
 					userPromptText: '{{input}}',
 					userPromptFile: '',
-					executionMode: 'read-only'
+					executionMode: 'read-only',
+					requireNormalFinishReason: true
 				});
 				await this.plugin.saveSettings();
 				this.plugin.registerAgents();
@@ -1212,6 +1230,18 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				 });
 				d.selectEl.addClass('pi-width-wide');
 			});
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName('Require normal API finish')
+			.setDesc('API agents fail when generation stops for truncation, filtering, tool calls, errors, or an unknown reason. CLI agents ignore this setting.')
+			.addToggle(t => t
+				.setValue(agent.requireNormalFinishReason ?? true)
+				.onChange(async (v) => {
+					agent.requireNormalFinishReason = v;
+					await this.plugin.saveSettings();
+				}));
 
 		const autoSize = (el: HTMLTextAreaElement) => {
 			el.setCssProps({ height: 'auto' });
