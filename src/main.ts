@@ -296,6 +296,10 @@ export default class CruciblePlugin extends Plugin {
 				agent.executionMode = 'read-only';
 				dirty = true;
 			}
+			if (agent.requireNormalFinishReason === undefined) {
+				agent.requireNormalFinishReason = true;
+				dirty = true;
+			}
 		}
 
 		for (const provider of this.settings.providers) {
