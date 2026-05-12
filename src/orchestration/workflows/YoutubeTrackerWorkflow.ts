@@ -17,11 +17,24 @@ const INTAKE_ROOT = '_crucible/orchestration/youtube/new-videos';
 const QUEUE_SCAN_SKIP_PREFIX = '_crucible/orchestration/';
 const FEED_FETCH_CONCURRENCY = 4;
 const FEED_FETCH_MIN_INTERVAL_MS = 250;
+const TRACKER_GENERATED_BY = 'orchestrator/youtube_tracker';
+const CONSOLIDATE_GENERATED_BY = 'orchestrator/youtube_tracker_consolidate';
 
 interface ChannelOutcome {
 	channel: ChannelEntry;
 	newVideos: RemoteVideo[];
 	error?: string;
+}
+
+interface ConsolidationScan {
+	outcomes: ChannelOutcome[];
+	runsScanned: number;
+	videosSeenInRuns: number;
+}
+
+interface IntakeVideoEntry {
+	channel: ChannelEntry;
+	video: RemoteVideo;
 }
 
 export class YoutubeTrackerWorkflow implements Workflow {
@@ -121,7 +134,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		await plugin.app.vault.create(path, EXAMPLE_CHANNELS_TABLE);
 	}
 
-	private async canonicalizeDetectedIds(plugin: WorkflowContext['plugin']): Promise<void> {
+	protected async canonicalizeDetectedIds(plugin: WorkflowContext['plugin']): Promise<void> {
 		const app = plugin.app;
 		for (const file of app.vault.getMarkdownFiles()) {
 			if (file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX)) continue;
@@ -139,7 +152,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		}
 	}
 
-	private buildSeenIdSet(plugin: WorkflowContext['plugin'], diffMode: boolean): Set<string> {
+	protected buildSeenIdSet(plugin: WorkflowContext['plugin'], diffMode: boolean): Set<string> {
 		const app = plugin.app;
 		const seen = new Set<string>();
 		const intakePrefix = `${INTAKE_ROOT}/`;
@@ -158,10 +171,11 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		return seen;
 	}
 
-	private async writeIntakeNote(
+	protected async writeIntakeNote(
 		plugin: WorkflowContext['plugin'],
 		outcomes: ChannelOutcome[],
 		totalNew: number,
+		generatedBy = TRACKER_GENERATED_BY,
 	): Promise<string> {
 		const app = plugin.app;
 		const tz = plugin.settings.orchestrationTimezone;
@@ -179,7 +193,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 			'---',
 			`date: ${date}`,
 			`run_at: ${date}T${time}`,
-			'generated_by: orchestrator/youtube_tracker',
+			`generated_by: ${generatedBy}`,
 			`channels_total: ${outcomes.length}`,
 			`channels_with_new: ${channelsWithNew}`,
 			`videos_total: ${totalNew}`,
@@ -237,6 +251,147 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		}
 		return candidate;
 	}
+}
+
+export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
+	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+		const { plugin } = ctx;
+
+		await this.canonicalizeDetectedIds(plugin);
+		const seenInVault = this.buildSeenIdSet(plugin, false);
+		const scan = await this.scanRegularTrackerRuns(plugin, seenInVault);
+		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newVideos.length, 0);
+
+		if (scan.runsScanned === 0) {
+			return {
+				status: 'done',
+				outputPaths: [],
+				notes: 'No regular YouTube tracker intake runs found; consolidated intake file not written.',
+			};
+		}
+
+		if (totalNew === 0) {
+			return {
+				status: 'done',
+				outputPaths: [],
+				notes: `No videos from ${scan.runsScanned} regular YouTube tracker run(s) are missing from the vault; consolidated intake file not written.`,
+			};
+		}
+
+		const intakePath = await this.writeIntakeNote(plugin, scan.outcomes, totalNew, CONSOLIDATE_GENERATED_BY);
+		return {
+			status: 'done',
+			outputPaths: [intakePath],
+			notes: `Runs scanned: ${scan.runsScanned}; Videos in runs: ${scan.videosSeenInRuns}; Still missing: ${totalNew}`,
+		};
+	}
+
+	private async scanRegularTrackerRuns(plugin: WorkflowContext['plugin'], seenInVault: Set<string>): Promise<ConsolidationScan> {
+		const app = plugin.app;
+		const intakePrefix = `${INTAKE_ROOT}/`;
+		const intakeFiles = app.vault.getMarkdownFiles()
+			.filter(file => file.path.startsWith(intakePrefix))
+			.sort((a, b) => a.path.localeCompare(b.path));
+
+		const byId = new Map<string, { channel: ChannelEntry; video: RemoteVideo }>();
+		let runsScanned = 0;
+		let videosSeenInRuns = 0;
+
+		for (const file of intakeFiles) {
+			const content = await app.vault.read(file);
+			const generatedBy: unknown = app.metadataCache.getFileCache(file)?.frontmatter?.generated_by;
+			const isTrackerRun = generatedBy === TRACKER_GENERATED_BY || frontmatterHasGeneratedBy(content, TRACKER_GENERATED_BY);
+			if (!isTrackerRun) continue;
+			runsScanned++;
+
+			for (const entry of parseIntakeVideos(content)) {
+				videosSeenInRuns++;
+				if (seenInVault.has(entry.video.videoId) || byId.has(entry.video.videoId)) continue;
+				byId.set(entry.video.videoId, entry);
+			}
+		}
+
+		const byChannel = new Map<string, ChannelOutcome>();
+		for (const entry of byId.values()) {
+			const existing = byChannel.get(entry.channel.channelId);
+			if (existing) {
+				existing.newVideos.push(entry.video);
+			} else {
+				byChannel.set(entry.channel.channelId, {
+					channel: entry.channel,
+					newVideos: [entry.video],
+				});
+			}
+		}
+
+		return {
+			outcomes: Array.from(byChannel.values()),
+			runsScanned,
+			videosSeenInRuns,
+		};
+	}
+}
+
+function parseIntakeVideos(content: string): IntakeVideoEntry[] {
+	const entries: IntakeVideoEntry[] = [];
+	let currentChannel: ChannelEntry | null = null;
+
+	for (const line of content.split(/\r?\n/)) {
+		const channel = parseChannelHeading(line);
+		if (channel) {
+			currentChannel = channel;
+			continue;
+		}
+
+		if (line.startsWith('## ')) {
+			currentChannel = null;
+			continue;
+		}
+
+		if (!currentChannel) continue;
+		const video = parseVideoBullet(line, currentChannel.name);
+		if (video) entries.push({ channel: currentChannel, video });
+	}
+
+	return entries;
+}
+
+function parseChannelHeading(line: string): ChannelEntry | null {
+	const match = line.match(/^##\s+(.+)\s+\((UC[A-Za-z0-9_-]+)\)\s*$/);
+	const name = match?.[1]?.trim();
+	const channelId = match?.[2]?.trim();
+	if (!name || !channelId) return null;
+	return { name, channelId, tags: [], priority: 'normal' };
+}
+
+function parseVideoBullet(line: string, channelName: string): RemoteVideo | null {
+	const match = line.match(/^- \*\*(.*)\*\* — published ([^—]+) — (https?:\/\/\S+)/);
+	const rawTitle = match?.[1]?.trim();
+	const publishedAt = match?.[2]?.trim();
+	const url = match?.[3]?.trim();
+	if (!rawTitle || !publishedAt || !url) return null;
+	const videoId = extractVideoIdFromUrl(url);
+	if (!videoId) return null;
+	return {
+		videoId,
+		title: unescapeBrackets(rawTitle),
+		publishedAt,
+		channelName,
+		url,
+	};
+}
+
+function unescapeBrackets(text: string): string {
+	return text.replace(/\\\[/g, '[').replace(/\\\]/g, ']');
+}
+
+function frontmatterHasGeneratedBy(content: string, expected: string): boolean {
+	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+	const frontmatter = match?.[1];
+	if (!frontmatter) return false;
+	return frontmatter
+		.split(/\r?\n/)
+		.some(line => line.trim() === `generated_by: ${expected}`);
 }
 
 function detectVideoIdSource(fm: Record<string, unknown>): { id: string; sourceKey: string } | null {
