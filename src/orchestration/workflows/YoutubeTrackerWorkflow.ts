@@ -192,7 +192,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		const fmLines = [
 			'---',
 			`date: ${date}`,
-			`run_at: ${date}T${time}`,
+			`run_at: ${date}T${displayTime}`,
 			`generated_by: ${generatedBy}`,
 			`channels_total: ${outcomes.length}`,
 			`channels_with_new: ${channelsWithNew}`,
@@ -259,7 +259,8 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 
 		await this.canonicalizeDetectedIds(plugin);
 		const seenInVault = this.buildSeenIdSet(plugin, false);
-		const scan = await this.scanRegularTrackerRuns(plugin, seenInVault);
+		const configuredChannelIds = await this.loadConfiguredChannelIds(plugin);
+		const scan = await this.scanRegularTrackerRuns(plugin, seenInVault, configuredChannelIds);
 		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newVideos.length, 0);
 
 		if (scan.runsScanned === 0) {
@@ -286,7 +287,20 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 		};
 	}
 
-	private async scanRegularTrackerRuns(plugin: WorkflowContext['plugin'], seenInVault: Set<string>): Promise<ConsolidationScan> {
+	private async loadConfiguredChannelIds(plugin: WorkflowContext['plugin']): Promise<Set<string>> {
+		const app = plugin.app;
+		const registryPath = normalizePath(plugin.settings.orchestrationYoutubeChannelsNote);
+		const registryFile = app.vault.getAbstractFileByPath(registryPath);
+		if (!(registryFile instanceof TFile)) return new Set();
+		const content = await app.vault.read(registryFile);
+		return new Set(parseChannelsTable(content).map(c => c.channelId));
+	}
+
+	private async scanRegularTrackerRuns(
+		plugin: WorkflowContext['plugin'],
+		seenInVault: Set<string>,
+		configuredChannelIds: Set<string>,
+	): Promise<ConsolidationScan> {
 		const app = plugin.app;
 		const intakePrefix = `${INTAKE_ROOT}/`;
 		const intakeFiles = app.vault.getMarkdownFiles()
@@ -306,6 +320,7 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 
 			for (const entry of parseIntakeVideos(content)) {
 				videosSeenInRuns++;
+				if (!configuredChannelIds.has(entry.channel.channelId)) continue;
 				if (seenInVault.has(entry.video.videoId) || byId.has(entry.video.videoId)) continue;
 				byId.set(entry.video.videoId, entry);
 			}
