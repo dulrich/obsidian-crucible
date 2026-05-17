@@ -6,6 +6,7 @@ import { getPeriodConfigByTarget, periodDisabledMessage } from './periods';
 
 export interface CaptureExecutionContext {
 	sourceSectionHeader?: string | null;
+	sourceFile?: TFile | null;
 }
 
 export class CaptureManager {
@@ -65,7 +66,13 @@ export class CaptureManager {
 				return false;
 			}
 
-			const rawContent = await applyTemplateString(capture.content, now, file.basename, value);
+			const rawContent = await applyTemplateString(
+				capture.content,
+				now,
+				file.basename,
+				value,
+				getCaptureTemplateTokens(context),
+			);
 			const contentRaw = rawContent.trim();
 			if (!contentRaw) return true;
 
@@ -120,6 +127,25 @@ export class CaptureManager {
 			this.setMaterializing(false);
 		}
 	}
+}
+
+function getCaptureTemplateTokens(context?: CaptureExecutionContext): Record<string, string> {
+	const sourceFile = context?.sourceFile;
+	if (!sourceFile) {
+		return {
+			source_link: '',
+			source_path: '',
+			source_title: '',
+		};
+	}
+
+	const sourcePath = sourceFile.path.replace(/\.md$/i, '');
+	const sourceTitle = sourceFile.basename;
+	return {
+		source_link: `[[${sourcePath}|${sourceTitle}]]`,
+		source_path: sourcePath,
+		source_title: sourceTitle,
+	};
 }
 
 function resolveTargetSection(
