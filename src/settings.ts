@@ -30,6 +30,18 @@ const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = {
 	'opencode-cli': 'OpenCode CLI',
 };
 
+function sortByNameWithEmptyLast<T>(items: T[], getName: (item: T) => string): { item: T; index: number }[] {
+	return items
+		.map((item, index) => ({ item, index }))
+		.sort((a, b) => {
+			const an = getName(a.item) || '';
+			const bn = getName(b.item) || '';
+			if (!an && bn) return 1;
+			if (an && !bn) return -1;
+			return an.localeCompare(bn);
+		});
+}
+
 function defaultCliCommand(kind: ProviderKind): string {
 	switch (kind) {
 		case 'gemini-cli': return 'gemini';
@@ -464,8 +476,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.captures.length === 0) {
 			group.createDiv({ text: 'No captures configured.', cls: 'crucible-empty-state' });
 		} else {
-			this.plugin.settings.captures.forEach((capture, index) => {
-				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+			sortByNameWithEmptyLast(this.plugin.settings.captures, c => c.name).forEach(({ item: capture, index }, displayIdx) => {
+				if (displayIdx > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
 				const setting = new Setting(group)
 					.setName(capture.name || '(unnamed)')
 					.setDesc(this.describeCapture(capture))
@@ -546,8 +558,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.chains.length === 0) {
 			group.createDiv({ text: 'No chains defined.', cls: 'crucible-empty-state' });
 		} else {
-			this.plugin.settings.chains.forEach((chain, index) => {
-				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+			sortByNameWithEmptyLast(this.plugin.settings.chains, c => c.name).forEach(({ item: chain, index }, displayIdx) => {
+				if (displayIdx > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
 				new Setting(group)
 					.setName(chain.name || '(unnamed)')
 					.setDesc(`${chain.steps.length} steps`)
@@ -966,8 +978,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.providers.length === 0) {
 			group.createDiv({ text: 'No providers configured.', cls: 'crucible-empty-state' });
 		} else {
-			this.plugin.settings.providers.forEach((provider, index) => {
-				if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+			sortByNameWithEmptyLast(this.plugin.settings.providers, p => p.name).forEach(({ item: provider, index }, displayIdx) => {
+				if (displayIdx > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
 				new Setting(group)
 					.setName(provider.name || '(unnamed)')
 					.setDesc(this.describeProvider(provider))
@@ -1213,8 +1225,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.agents.length === 0) {
 			listGroup.createDiv({ text: 'No agents configured.', cls: 'crucible-empty-state' });
 		} else {
-			this.plugin.settings.agents.forEach((agent, index) => {
-				if (index > 0) listGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			sortByNameWithEmptyLast(this.plugin.settings.agents, a => a.name).forEach(({ item: agent, index }, displayIdx) => {
+				if (displayIdx > 0) listGroup.createEl('hr', { cls: 'crucible-row-divider' });
 				new Setting(listGroup)
 					.setName(agent.name || '(unnamed)')
 					.setDesc(this.describeAgent(agent))
@@ -2265,8 +2277,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Shortcuts').setHeading();
 		containerEl.createEl('p', { text: 'Create custom commands to open specific files directly from the Command Palette.' });
 		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
-		this.plugin.settings.shortcuts.forEach((shortcut, index) => {
-			if (index > 0) group.createEl('hr', { cls: 'crucible-mini-hr' });
+		sortByNameWithEmptyLast(this.plugin.settings.shortcuts, s => s.name).forEach(({ item: shortcut, index }, displayIdx) => {
+			if (displayIdx > 0) group.createEl('hr', { cls: 'crucible-mini-hr' });
 			const row = group.createDiv({ cls: 'crucible-folder-template-row' });
 			const s = new Setting(row).addText(t => t.setPlaceholder('Shortcut name').setValue(shortcut.name).onChange(async (v) => { shortcut.name = v; await this.plugin.saveSettings(); this.plugin.registerShortcuts(); }).inputEl.addClass('pi-width-normal'))
 				.addSearch(cb => {
