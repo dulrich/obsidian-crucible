@@ -16,7 +16,13 @@ export async function ensureFolder(app: App, path: string): Promise<void> {
 	}
 }
 
-export async function applyTemplateString(template: string, date: moment.Moment, fileName: string, value: string = ''): Promise<string> {
+export async function applyTemplateString(
+	template: string,
+	date: moment.Moment,
+	fileName: string,
+	value: string = '',
+	extraTokens: Record<string, string> = {},
+): Promise<string> {
 	const now = window.moment();
 	let content = template;
 
@@ -33,5 +39,12 @@ export async function applyTemplateString(template: string, date: moment.Moment,
 
 	content = replaceTokens(content);
 	content = content.replace(/{{title}}/g, fileName);
+	for (const [token, tokenValue] of Object.entries(extraTokens)) {
+		content = content.replace(new RegExp(`{{${escapeRegExp(token)}}}`, 'g'), tokenValue);
+	}
 	return content;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -502,7 +502,7 @@ export default class CruciblePlugin extends Plugin {
 					capture,
 					resolvedValue,
 					targetFile,
-					this.resolveCaptureContext(editor, capture),
+					this.resolveCaptureContext(editor, capture, targetFile),
 				);
 			});
 
@@ -546,9 +546,12 @@ export default class CruciblePlugin extends Plugin {
 				}
 				return await this.promptForCaptureValue(capture);
 			case 'selection': {
-				if (editor) return editor.getSelection();
+				if (editor) {
+					const selection = editor.getSelection();
+					if (selection.trim()) return selection;
+				}
 				const dom = window.getSelection()?.toString() ?? '';
-				if (dom) return dom;
+				if (dom.trim()) return dom;
 				new Notice('No text selected. Select text in the note first.');
 				return null;
 			}
@@ -556,10 +559,9 @@ export default class CruciblePlugin extends Plugin {
 				if (editor) {
 					const selection = editor.getSelection();
 					if (selection.trim()) return selection;
-				} else {
-					const dom = window.getSelection()?.toString() ?? '';
-					if (dom.trim()) return dom;
 				}
+				const dom = window.getSelection()?.toString() ?? '';
+				if (dom.trim()) return dom;
 				return await this.promptForCaptureValue(capture);
 			}
 			case 'dialog':
@@ -568,13 +570,14 @@ export default class CruciblePlugin extends Plugin {
 		}
 	}
 
-	private resolveCaptureContext(editor: Editor | undefined, capture: Capture): CaptureExecutionContext {
+	private resolveCaptureContext(editor: Editor | undefined, capture: Capture, sourceFile?: TFile): CaptureExecutionContext {
 		if ((capture.targetSectionMode ?? 'fixed') === 'source' && !editor) {
 			new Notice('This capture targets the source section but no editor is active. Switch to edit mode.');
 			throw new Error('Source-section capture requires an active editor');
 		}
 		return {
 			sourceSectionHeader: editor ? findCurrentSectionHeader(editor) : null,
+			sourceFile: sourceFile ?? this.app.workspace.getActiveFile(),
 		};
 	}
 
@@ -731,7 +734,7 @@ export default class CruciblePlugin extends Plugin {
 					capture,
 					resolvedValue,
 					tf,
-					this.resolveCaptureContext(editor, capture),
+					this.resolveCaptureContext(editor, capture, tf),
 				);
 			}
 			new Notice(`Capture not found: ${name}`);
