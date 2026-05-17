@@ -1,5 +1,5 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon, Platform, Command } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent } from "obsidian";
 import CruciblePlugin from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
 import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings } from "./types";
@@ -10,6 +10,12 @@ import { PERIOD_IDS, PeriodId, getPeriodConfig, getPeriodConfigByTarget } from "
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
+}
+
+interface TemplateVariableInfo {
+	token: string;
+	description: string;
+	example: string;
 }
 
 const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = {
@@ -69,6 +75,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	private editingProviderIndex: number = -1;
 	private editingAgentIndex: number = -1;
 	private editingWorkflowId: string | null = null;
+	private expandedTemplateVariablePanels: Set<string> = new Set();
 
 	constructor(app: App, plugin: CruciblePlugin) {
 		super(app, plugin);
@@ -136,6 +143,92 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const scrollTop = scrollEl?.scrollTop ?? 0;
 		this.display();
 		requestAnimationFrame(() => { if (scrollEl) scrollEl.scrollTop = scrollTop; });
+	}
+
+	private baseTemplateVariables(includeValue: boolean = true): TemplateVariableInfo[] {
+		const variables: TemplateVariableInfo[] = [
+			{ token: 'date', description: 'Target date (YYYY-MM-DD)', example: '2026-04-24' },
+			{ token: 'time', description: 'Target time (HH:mm)', example: '14:30' },
+			{ token: 'today', description: 'Current date', example: '2026-04-24' },
+			{ token: 'now', description: 'ISO datetime', example: '2026-04-24T14:30:00' },
+			{ token: 'title', description: 'Note title', example: 'April 2026' },
+		];
+		if (includeValue) {
+			variables.push({ token: 'value', description: 'Runtime input', example: 'My thought' });
+		}
+		variables.push({ token: 'datetime:FORMAT', description: 'Custom format', example: '{{datetime:MMMM YYYY}}' });
+		return variables;
+	}
+
+	private captureTemplateVariables(): TemplateVariableInfo[] {
+		return [
+			...this.baseTemplateVariables(),
+			{ token: 'source_link', description: 'Capture source note link', example: '[[Projects/Ideas|Ideas]]' },
+			{ token: 'source_path', description: 'Capture source note path', example: 'Projects/Ideas' },
+			{ token: 'source_title', description: 'Capture source note title', example: 'Ideas' },
+		];
+	}
+
+	private chainArgumentVariables(chain: Chain): TemplateVariableInfo[] {
+		const variables: TemplateVariableInfo[] = [
+			{ token: 'response', description: 'Previous step output', example: 'Refined transcript...' },
+			{ token: 'target_path', description: 'Path of the note active when the chain started', example: 'Projects/Ideas.md' },
+			{ token: 'agent_model', description: 'Model returned by the previous agent step', example: 'gpt-5' },
+			{ token: 'agent_provider', description: 'Provider returned by the previous agent step', example: 'openai' },
+		];
+		for (const key of Object.keys(chain.variables ?? {}).filter(Boolean)) {
+			variables.push({ token: key, description: 'Chain variable', example: chain.variables?.[key] ?? '' });
+		}
+		return variables;
+	}
+
+	private agentPromptVariables(includeInput: boolean): TemplateVariableInfo[] {
+		const variables = this.baseTemplateVariables();
+		if (includeInput) {
+			variables.push({ token: 'input', description: 'Runtime input; same value as {{value}}', example: 'Text to summarize' });
+		}
+		return variables;
+	}
+
+	private periodTemplateVariables(): TemplateVariableInfo[] {
+		return this.baseTemplateVariables(false);
+	}
+
+	private renderTemplateVariableGrid(containerEl: HTMLElement, variables: TemplateVariableInfo[]): HTMLElement {
+		const grid = containerEl.createDiv({ cls: 'crucible-variables-grid' });
+		for (const variable of variables) {
+			const row = grid.createDiv({ cls: 'crucible-variable-row' });
+			row.createDiv({ cls: 'crucible-variable-token', text: `{{${variable.token}}}` });
+			row.createDiv({ cls: 'crucible-variable-description', text: variable.description });
+			row.createDiv({ cls: 'crucible-variable-example', text: variable.example });
+		}
+		return grid;
+	}
+
+	private addTemplateVariablesToggle(setting: Setting, panelKey: string, variables: TemplateVariableInfo[]): void {
+		const expanded = this.expandedTemplateVariablePanels.has(panelKey);
+		setting.addExtraButton((button: ExtraButtonComponent) => {
+			button
+				.setIcon('braces')
+				.setTooltip(expanded ? 'Hide template variables' : 'Show template variables')
+				.onClick(() => {
+					if (expanded) {
+						this.expandedTemplateVariablePanels.delete(panelKey);
+					} else {
+						this.expandedTemplateVariablePanels.add(panelKey);
+					}
+					this.refreshDisplay();
+				});
+			button.extraSettingsEl.addClass('crucible-template-vars-toggle');
+			setting.controlEl.appendChild(button.extraSettingsEl);
+		});
+		setting.settingEl.toggleClass('has-crucible-template-vars', variables.length > 0);
+	}
+
+	private renderTemplateVariablesPanel(containerEl: HTMLElement, panelKey: string, variables: TemplateVariableInfo[]): void {
+		if (!this.expandedTemplateVariablePanels.has(panelKey)) return;
+		const panel = containerEl.createDiv({ cls: 'crucible-template-variable-panel' });
+		this.renderTemplateVariableGrid(panel, variables);
 	}
 
 	display(): void {
@@ -705,6 +798,15 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						const s = new Setting(stepGroup)
 							.setName(arg.name)
 							.setDesc(arg.description || '');
+						const supportsTemplateVariables = arg.type === 'text' ||
+							arg.type === 'textarea' ||
+							arg.type === 'file' ||
+							arg.type === 'folder';
+						const panelKey = `chain-${this.editingChainIndex}-step-${index}-arg-${arg.id}`;
+						const variables = this.chainArgumentVariables(chain);
+						if (supportsTemplateVariables) {
+							this.addTemplateVariablesToggle(s, panelKey, variables);
+						}
 
 						switch (arg.type) {
 							case 'text':
@@ -748,11 +850,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 								});
 								break;
 						}
+						if (supportsTemplateVariables) {
+							this.renderTemplateVariablesPanel(stepGroup, panelKey, variables);
+						}
 					});
 				} else {
 					// Fallback for commands without schema (standard Obsidian commands)
 					stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
-					new Setting(stepGroup)
+					const argsSetting = new Setting(stepGroup)
 						.setName('Arguments')
 						.setDesc('Support variables like {{response}} from the previous step.')
 						.addText(t => t
@@ -762,6 +867,10 @@ export class CrucibleSettingTab extends PluginSettingTab {
 								step.args._default = v;
 								await this.plugin.saveSettings();
 							}).inputEl.addClass('pi-width-normal'));
+					const panelKey = `chain-${this.editingChainIndex}-step-${index}-args`;
+					const variables = this.chainArgumentVariables(chain);
+					this.addTemplateVariablesToggle(argsSetting, panelKey, variables);
+					this.renderTemplateVariablesPanel(stepGroup, panelKey, variables);
 				}
 			}
 
@@ -1249,9 +1358,11 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		};
 
 		const renderPromptEditor = (
+			panelKey: string,
 			label: string,
 			description: string,
 			placeholder: string,
+			variables: TemplateVariableInfo[],
 			getSource: () => AgentPromptSource,
 			setSource: (v: AgentPromptSource) => Promise<void>,
 			getText: () => string,
@@ -1290,7 +1401,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						new FileSuggest(this.app, cb.inputEl);
 					});
 			} else {
-				new Setting(containerEl)
+				const promptSetting = new Setting(containerEl)
 					.setName(`${label} text`)
 					.setDesc('Inline prompt template.')
 					.addTextArea(t => {
@@ -1303,13 +1414,17 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						t.inputEl.addClass('crucible-setting-textarea', 'pi-width-wide');
 						requestAnimationFrame(() => autoSize(t.inputEl));
 					});
+				this.addTemplateVariablesToggle(promptSetting, panelKey, variables);
+				this.renderTemplateVariablesPanel(containerEl, panelKey, variables);
 			}
 		};
 
 		renderPromptEditor(
+			`agent-${index}-system-prompt`,
 			'System prompt',
 			'Persistent instructions for the agent. Supports template tokens like {{today}}, {{datetime:FORMAT}}.',
 			'You are a helpful assistant...',
+			this.agentPromptVariables(false),
 			() => agent.systemPromptSource || 'text',
 			async (v) => { agent.systemPromptSource = v; await this.plugin.saveSettings(); },
 			() => agent.systemPromptText || '',
@@ -1319,9 +1434,11 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		);
 
 		renderPromptEditor(
+			`agent-${index}-user-prompt`,
 			'User prompt template',
 			'Template for the user message. {{input}} (or {{value}}) is replaced by the runtime input passed to the agent.',
 			'Summarize the following:\n\n{{input}}',
+			this.agentPromptVariables(true),
 			() => agent.userPromptSource || 'text',
 			async (v) => { agent.userPromptSource = v; await this.plugin.saveSettings(); },
 			() => agent.userPromptText || '',
@@ -1581,20 +1698,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Template variables').setHeading();
 		const desc = containerEl.createDiv({ cls: 'crucible-variables-desc' });
 		desc.createEl('p', { text: 'Use these tokens in your template files. They will be replaced when a note is "materialized" or created in a mapped folder.' });
-		const grid = containerEl.createDiv({ cls: 'crucible-variables-grid' });
-		const addVar = (t: string, d: string, e: string) => { 
-			const row = grid.createDiv({ cls: 'crucible-variable-row' }); 
-			row.createDiv({ cls: 'crucible-variable-token', text: `{{${t}}}` }); 
-			row.createDiv({ cls: 'crucible-variable-description', text: d }); 
-			row.createDiv({ cls: 'crucible-variable-example', text: e }); 
-		};
-		addVar('date', 'Target date (YYYY-MM-DD)', '2026-04-24'); 
-		addVar('time', 'Target time (HH:mm)', '14:30'); 
-		addVar('today', 'Current date', '2026-04-24'); 
-		addVar('now', 'ISO datetime', '2026-04-24T14:30:00'); 
-		addVar('title', 'Note title', 'April 2026'); 
-		addVar('value', 'User input', 'My thought'); 
-		addVar('datetime:FORMAT', 'Custom format', '{{datetime:MMMM YYYY}}');
+		this.renderTemplateVariableGrid(containerEl, this.captureTemplateVariables());
 	}
 
 	private renderPeriodSettingsBlock(containerEl: HTMLElement, period: PeriodId): void {
@@ -1646,7 +1750,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				}));
 
 		group.createEl('hr', { cls: 'crucible-row-divider' });
-		new Setting(group)
+		const templateSetting = new Setting(group)
 			.setName(`${config.label} template`)
 			.setDesc(`Template applied when a ${config.lowerLabel} note is created or materialized.`)
 			.addSearch(cb => {
@@ -1659,6 +1763,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
 				new FileSuggest(this.app, cb.inputEl);
 			});
+		this.addTemplateVariablesToggle(templateSetting, `period-${period}-template`, this.periodTemplateVariables());
+		this.renderTemplateVariablesPanel(group, `period-${period}-template`, this.periodTemplateVariables());
 
 		group.createEl('hr', { cls: 'crucible-row-divider' });
 		new Setting(group)
@@ -2304,9 +2410,9 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			el.setCssProps({ height: 'auto' });
 			el.setCssProps({ height: `${el.scrollHeight}px` });
 		};
-		new Setting(group)
+		const contentSetting = new Setting(group)
 			.setName('Content template')
-			.setDesc('Text to capture (supports variables like {{now}}, {{value}}).')
+			.setDesc('Text to capture (supports variables like {{now}}, {{value}}, {{source_link}}).')
 			.addTextArea(t => {
 				t.setPlaceholder('- {{now}}: {{value}}')
 					.setValue(capture.content)
@@ -2318,6 +2424,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				t.inputEl.addClass('crucible-setting-textarea', 'pi-width-wide');
 				requestAnimationFrame(() => autoSize(t.inputEl));
 			});
+		this.addTemplateVariablesToggle(contentSetting, 'capture-content', this.captureTemplateVariables());
+		this.renderTemplateVariablesPanel(group, 'capture-content', this.captureTemplateVariables());
 
 		group.createEl('hr', { cls: 'crucible-row-divider' });
 		new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => {
