@@ -138,12 +138,21 @@ export default class CruciblePlugin extends Plugin {
 				return true;
 			}
 		});
-		this.addCommand({ 
-			id: 'lint-vault', 
-			name: 'Lint: vault', 
+		this.addCommand({
+			id: 'lint-vault',
+			name: 'Lint: vault',
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes('lint-vault')) return false;
 				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-vault`, {}); }
+				return true;
+			}
+		});
+		this.addCommand({
+			id: 'lint-cleanup-transcript',
+			name: 'Lint: cleanup transcript',
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes('lint-cleanup-transcript')) return false;
+				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-cleanup-transcript`, {}); }
 				return true;
 			}
 		});
@@ -618,6 +627,7 @@ export default class CruciblePlugin extends Plugin {
 		register('lint-note', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
 		register('lint-vault', async () => await this.linter.lintVault());
 		register('word-count', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
+		register('lint-cleanup-transcript', async (_a, _p, _e, tf) => await this.linter.cleanupTranscriptInFile(tf));
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));

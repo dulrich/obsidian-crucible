@@ -2,6 +2,61 @@ import { App, MarkdownView, Notice, moment, TFile, TFolder } from 'obsidian';
 import { CrucibleSettings } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing } from './frontmatter';
+import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
+
+const YT_EMBED_RE = /^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n/;
+const TRANSCRIPT_HEADER_RE = /^([ \t]*\r?\n)*[ \t]*##[ \t]+Transcript[ \t]*\r?\n/;
+const TIMESTAMP_PARA_RE = /^\*\*\d+:\d+\*\*/;
+const TIMESTAMP_PREFIX_RE = /^\*\*\d+:\d+\*\*[ \t·•|–—-]*/;
+const BRACKET_ANNOTATION_RE = /\\?\[[A-Za-z][A-Za-z ]*\\?\](?!\()/g;
+const PARAGRAPH_SPLIT_RE = /\r?\n[ \t]*\r?\n\s*/;
+
+function cleanTranscriptParagraph(para: string): string {
+	let out = para.replace(TIMESTAMP_PREFIX_RE, '');
+	out = out.replace(BRACKET_ANNOTATION_RE, '');
+	return out.replace(/\s+/g, ' ').trim();
+}
+
+export function cleanupYoutubeTranscript(content: string): string {
+	const fmMatch = content.match(FRONTMATTER_REGEX);
+	const fmText = fmMatch ? fmMatch[0] : '';
+	const body = fmMatch ? content.slice(fmMatch[0].length) : content;
+
+	const embedMatch = body.match(YT_EMBED_RE);
+	if (!embedMatch) return content;
+	const embedUrl = embedMatch[2];
+	if (!embedUrl || !extractVideoIdFromUrl(embedUrl)) return content;
+
+	const afterEmbed = body.slice(embedMatch[0].length);
+	const headerMatch = afterEmbed.match(TRANSCRIPT_HEADER_RE);
+	if (!headerMatch) return content;
+
+	const afterHeader = afterEmbed.slice(headerMatch[0].length).replace(/^([ \t]*\r?\n)+/, '');
+	if (!TIMESTAMP_PARA_RE.test(afterHeader.trimStart())) return content;
+
+	const paragraphs = afterHeader.split(PARAGRAPH_SPLIT_RE);
+	let firstNonTranscript = paragraphs.length;
+	for (let i = 0; i < paragraphs.length; i++) {
+		const p = paragraphs[i] ?? '';
+		if (!TIMESTAMP_PARA_RE.test(p.trimStart())) {
+			firstNonTranscript = i;
+			break;
+		}
+	}
+	if (firstNonTranscript === 0) return content;
+
+	const cleanedTranscript = paragraphs
+		.slice(0, firstNonTranscript)
+		.map(cleanTranscriptParagraph)
+		.filter(p => p.length > 0)
+		.join('\n\n');
+
+	const trailing = paragraphs.slice(firstNonTranscript).join('\n\n').trimEnd();
+
+	let result = cleanedTranscript;
+	if (trailing.length > 0) result += '\n\n' + trailing;
+	return fmText + result + '\n';
+}
 
 interface Segmenter {
 	segment(text: string): Iterable<{ isWordLike: boolean }>;
@@ -172,5 +227,36 @@ export class Linter {
 			new Notice('Note linted');
 		}
 		return true;
+	}
+
+	async cleanupTranscriptInFile(viewOrFile?: MarkdownView | TFile, silent: boolean = false): Promise<boolean> {
+		let resolved: TFile | undefined;
+		if (viewOrFile instanceof TFile) {
+			resolved = viewOrFile;
+		} else {
+			const targetView = viewOrFile || this.app.workspace.getActiveViewOfType(MarkdownView);
+			if (targetView && targetView.file) resolved = targetView.file;
+		}
+		if (!resolved) return false;
+		const file: TFile = resolved;
+		if (this.isPathIgnored(file.path)) return true;
+
+		try {
+			const content = await this.app.vault.read(file);
+			const cleaned = cleanupYoutubeTranscript(content);
+			if (cleaned === content) {
+				if (!silent) new Notice('Transcript cleanup: no changes');
+				return true;
+			}
+			await withMaterializing(this.setMaterializing, async () => {
+				await this.app.vault.modify(file, cleaned);
+			});
+			if (!silent) new Notice('Transcript cleaned');
+			return true;
+		} catch (e) {
+			if (!silent) new Notice(`Transcript cleanup failed (${file.path}): ${(e as Error).message}`);
+			console.error(`Transcript cleanup failed (${file.path}):`, e);
+			return false;
+		}
 	}
 }
