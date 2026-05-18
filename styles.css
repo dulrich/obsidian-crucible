@@ -139,9 +139,9 @@ If your plugin does not need CSS, delete this file.
 .crucible-hotkey-display kbd {
   background-color: var(--background-modifier-border);
   color: var(--text-normal);
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.85em;
+  font-size: var(--font-ui-smaller);
   border: none;
   box-shadow: none;
   font-family: var(--font-interface);
@@ -310,9 +310,10 @@ If your plugin does not need CSS, delete this file.
 }
 
 .crucible-toggle-header {
-  font-size: 0.8em;
+  font-size: var(--font-ui-smaller);
   color: var(--text-muted);
   width: 38px;
+  flex-shrink: 0;
   text-align: center;
   display: inline-block;
 }

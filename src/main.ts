@@ -6,7 +6,7 @@ import { Linter } from "./lint";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
 import { ChainManager } from "./chains";
 import { ProviderManager } from "./providers";
-import { AgentManager } from "./agents";
+import { AgentManager, agentCommandId } from "./agents";
 import { TableOfContentsUI } from "./toc";
 import { applyTemplateString, ensureFolder, FRONTMATTER_REGEX } from './utils';
 import { MoveFileFolderPickerModal, normalizeFolderPath } from './folderPicker';
@@ -21,9 +21,27 @@ import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 
+export type CrucibleCommandGroup =
+	| 'Materialize'
+	| 'Lint'
+	| 'Files'
+	| 'Shortcuts'
+	| 'Captures'
+	| 'Chains'
+	| 'Agents'
+	| 'Orchestrations'
+	| 'Other';
+
+export interface CrucibleCommandEntry {
+	id: string;
+	name: string;
+	group: CrucibleCommandGroup;
+}
+
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
 	linter: Linter;
+	commandRegistry: CrucibleCommandEntry[] = [];
 	private isMaterializing = false;
 	private materializer: Materializer;
 	private captureManager: CaptureManager;
@@ -52,7 +70,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 
 		this.registerInternalCommands();
-		this.agentManager.registerAgents();
+		this.registerAgents();
 		this.registerChains();
 
 		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
@@ -65,189 +83,156 @@ export default class CruciblePlugin extends Plugin {
 		// --- Commands ---
 		const prefix = this.manifest.id;
 
-		this.addCommand({ 
-			id: 'materialize-day-today', 
-			name: 'Materialize day: today', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('materialize-day-today')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-day-today`, {}); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'materialize-day-today',
+			name: 'Materialize day: today',
+			group: 'Materialize',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:materialize-day-today`, {}),
 		});
-		this.addCommand({ 
-			id: 'materialize-day-picker', 
-			name: 'Materialize day: pick date', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('materialize-day-picker')) return false;
-				if (!checking) { this.openDayPicker(); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'materialize-day-picker',
+			name: 'Materialize day: pick date',
+			group: 'Materialize',
+			run: () => this.openDayPicker(),
 		});
-		this.addCommand({ 
-			id: 'materialize-week-today', 
-			name: 'Materialize week: current', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('materialize-week-today')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-week-today`, {}); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'materialize-week-today',
+			name: 'Materialize week: current',
+			group: 'Materialize',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:materialize-week-today`, {}),
 		});
-		this.addCommand({ 
-			id: 'materialize-week-picker', 
-			name: 'Materialize week: pick week', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('materialize-week-picker')) return false;
-				if (!checking) { this.openWeekPicker(); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'materialize-week-picker',
+			name: 'Materialize week: pick week',
+			group: 'Materialize',
+			run: () => this.openWeekPicker(),
 		});
-		this.addCommand({ 
-			id: 'materialize-month-today', 
-			name: 'Materialize month: current', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('materialize-month-today')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:materialize-month-today`, {}); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'materialize-month-today',
+			name: 'Materialize month: current',
+			group: 'Materialize',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:materialize-month-today`, {}),
 		});
-		this.addCommand({ 
-			id: 'materialize-month-picker', 
-			name: 'Materialize month: pick month', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('materialize-month-picker')) return false;
-				if (!checking) { this.openMonthPicker(); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'materialize-month-picker',
+			name: 'Materialize month: pick month',
+			group: 'Materialize',
+			run: () => this.openMonthPicker(),
 		});
 
-		this.addCommand({ 
-			id: 'word-count', 
-			name: 'Lint: word count', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('word-count')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:word-count`, {}); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'word-count',
+			name: 'Lint: word count',
+			group: 'Lint',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:word-count`, {}),
 		});
-		this.addCommand({ 
-			id: 'lint-note', 
-			name: 'Lint: all', 
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('lint-note')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-note`, {}); }
-				return true;
-			}
+		this.registerCrucibleCommand({
+			id: 'lint-note',
+			name: 'Lint: all',
+			group: 'Lint',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-note`, {}),
 		});
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'lint-vault',
 			name: 'Lint: vault',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('lint-vault')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-vault`, {}); }
-				return true;
-			}
+			group: 'Lint',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-vault`, {}),
 		});
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'lint-cleanup-transcript',
 			name: 'Lint: cleanup transcript',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('lint-cleanup-transcript')) return false;
-				if (!checking) { void this.chainManager.executeInternalCommand(`${prefix}:lint-cleanup-transcript`, {}); }
-				return true;
-			}
+			group: 'Lint',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-cleanup-transcript`, {}),
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'mark-as-forwarded',
 			name: 'Mark as forwarded',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('mark-as-forwarded')) return false;
-				if (!checking) {
-					const editor = this.activeEditor();
-					if (!editor) {
-						new Notice('Switch to edit mode to use this command');
-						return;
-					}
-					void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
+			group: 'Other',
+			available: () => this.activeEditor() !== undefined,
+			run: () => {
+				const editor = this.activeEditor();
+				if (!editor) {
+					new Notice('Switch to edit mode to use this command');
+					return;
 				}
-				return true;
-			}
+				void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
+			},
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'reload-plugin',
 			name: 'Reload plugin',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('reload-plugin')) return false;
-				if (!checking) {
-					void (async () => {
-						if (this.app.plugins) {
-							await this.app.plugins.disablePlugin(this.manifest.id);
-							await this.app.plugins.enablePlugin(this.manifest.id);
-							new Notice('Plugin reloaded');
-						}
-					})();
+			group: 'Other',
+			run: async () => {
+				if (this.app.plugins) {
+					await this.app.plugins.disablePlugin(this.manifest.id);
+					await this.app.plugins.enablePlugin(this.manifest.id);
+					new Notice('Plugin reloaded');
 				}
-				return true;
 			},
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'open-settings-tab',
 			name: 'Open settings in a tab',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes('open-settings-tab')) return false;
-				if (!checking) { void this.activateSettingsView(); }
-				return true;
-			},
+			group: 'Other',
+			run: () => this.activateSettingsView(),
 		});
 
 		this.registerMoveFileCommands(prefix);
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-scan',
 			name: 'Orchestrate: scan',
-			callback: () => { void this.orchestrator.scan(); },
+			group: 'Orchestrations',
+			run: () => this.orchestrator.scan(),
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-run-next',
 			name: 'Orchestrate: run next',
-			callback: () => { void this.orchestrator.runNext(); },
+			group: 'Orchestrations',
+			run: () => this.orchestrator.runNext(),
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-enqueue-daily-brief-lite',
 			name: 'Orchestrate: enqueue daily brief lite',
-			callback: () => { void this.orchestrator.enqueue('daily_brief_lite'); },
+			group: 'Orchestrations',
+			run: () => this.orchestrator.enqueue('daily_brief_lite'),
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-enqueue-transcript-refine',
 			name: 'Orchestrate: enqueue transcript refine',
-			callback: () => {
+			group: 'Orchestrations',
+			run: () => {
 				new FilePickerModal(this.app, 'Pick a transcript note', (file) => {
 					void this.orchestrator.enqueue('transcript_refine', { targetPath: file.path });
 				}).open();
 			},
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-enqueue-youtube-tracker',
 			name: 'Orchestrate: enqueue YouTube tracker',
-			callback: () => { void this.orchestrator.enqueue('youtube_tracker'); },
+			group: 'Orchestrations',
+			run: () => this.orchestrator.enqueue('youtube_tracker'),
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-enqueue-youtube-tracker-consolidation',
 			name: 'Orchestrate: enqueue YouTube tracker consolidation',
-			callback: () => { void this.orchestrator.enqueue('youtube_tracker_consolidate'); },
+			group: 'Orchestrations',
+			run: () => this.orchestrator.enqueue('youtube_tracker_consolidate'),
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: 'orchestrator-enqueue-link-scan',
 			name: 'Orchestrate: enqueue link scan',
-			callback: () => { void this.orchestrator.enqueue('link_scan'); },
+			group: 'Orchestrations',
+			run: () => this.orchestrator.enqueue('link_scan'),
 		});
 
 		// --- Events ---
@@ -299,6 +284,30 @@ export default class CruciblePlugin extends Plugin {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
+	registerCrucibleCommand(opts: {
+		id: string;
+		name: string;
+		group: CrucibleCommandGroup;
+		run: () => unknown;
+		available?: () => boolean;
+	}): void {
+		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group });
+		this.addCommand({
+			id: opts.id,
+			name: opts.name,
+			checkCallback: (checking: boolean) => {
+				if (this.settings.hiddenCommands.includes(opts.id)) return false;
+				if (opts.available && !opts.available()) return false;
+				if (!checking) { void opts.run(); }
+				return true;
+			},
+		});
+	}
+
+	private clearCommandRegistryGroup(group: CrucibleCommandGroup): void {
+		this.commandRegistry = this.commandRegistry.filter(c => c.group !== group);
+	}
+
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CrucibleSettings>); 
 		await this.migrateSettings();
@@ -341,6 +350,15 @@ export default class CruciblePlugin extends Plugin {
 
 	registerAgents() {
 		this.agentManager.registerAgents();
+		this.clearCommandRegistryGroup('Agents');
+		for (const agent of this.settings.agents) {
+			if (!agent.id) continue;
+			this.commandRegistry.push({
+				id: agentCommandId(agent.id),
+				name: `Agent: ${agent.name || '(unnamed)'}`,
+				group: 'Agents',
+			});
+		}
 	}
 
 	async saveSettings() { 
@@ -358,22 +376,18 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	registerShortcuts() {
+		this.clearCommandRegistryGroup('Shortcuts');
 		this.settings.shortcuts.forEach((shortcut, index) => {
 			if (!shortcut.name || !shortcut.file) return;
 			const id = `shortcut-${index}`;
-			this.addCommand({
+			this.registerCrucibleCommand({
 				id,
 				name: `Shortcut: ${shortcut.name}`,
-				checkCallback: (checking: boolean) => {
-					if (this.settings.hiddenCommands.includes(id)) return false;
-					if (!checking) {
-						void (async () => {
-							const file = this.app.vault.getAbstractFileByPath(shortcut.file);
-							if (file instanceof TFile) await this.app.workspace.getLeaf().openFile(file);
-						})();
-					}
-					return true;
-				}
+				group: 'Shortcuts',
+				run: async () => {
+					const file = this.app.vault.getAbstractFileByPath(shortcut.file);
+					if (file instanceof TFile) await this.app.workspace.getLeaf().openFile(file);
+				},
 			});
 		});
 	}
@@ -410,33 +424,30 @@ export default class CruciblePlugin extends Plugin {
 			],
 		);
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: moveDailyId,
 			name: 'Move current file to daily folder',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes(moveDailyId)) return false;
+			group: 'Files',
+			available: () => this.app.workspace.getActiveFile() !== null,
+			run: () => {
 				const activeFile = this.app.workspace.getActiveFile();
-				if (!activeFile) return false;
-				if (!checking) {
-					if (!this.settings.dailyEnabled) {
-						new Notice(periodDisabledMessage('daily'));
-						return true;
-					}
-					void this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), activeFile);
+				if (!activeFile) return;
+				if (!this.settings.dailyEnabled) {
+					new Notice(periodDisabledMessage('daily'));
+					return;
 				}
-				return true;
+				void this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), activeFile);
 			},
 		});
 
-		this.addCommand({
+		this.registerCrucibleCommand({
 			id: moveFolderId,
 			name: 'Move current file to folder...',
-			checkCallback: (checking: boolean) => {
-				if (this.settings.hiddenCommands.includes(moveFolderId)) return false;
+			group: 'Files',
+			available: () => this.app.workspace.getActiveFile() !== null,
+			run: () => {
 				const activeFile = this.app.workspace.getActiveFile();
-				if (!activeFile) return false;
-				if (!checking) void this.openMoveFileFolderPicker(activeFile);
-				return true;
+				if (activeFile) void this.openMoveFileFolderPicker(activeFile);
 			},
 		});
 	}
@@ -498,6 +509,7 @@ export default class CruciblePlugin extends Plugin {
 
 	registerCaptures() {
 		const prefix = this.manifest.id;
+		this.clearCommandRegistryGroup('Captures');
 		this.settings.captures.forEach((capture, index) => {
 			if (!capture.name) return;
 			const id = `capture-${index}`;
@@ -515,27 +527,22 @@ export default class CruciblePlugin extends Plugin {
 				);
 			});
 
-			this.addCommand({
+			this.registerCrucibleCommand({
 				id,
 				name: `Capture: ${capture.name}`,
-				checkCallback: (checking: boolean) => {
-					if (this.settings.hiddenCommands.includes(id)) return false;
-					if (!checking) {
-						void (async () => {
-							const editor = this.activeEditor();
-							const value = await this.resolveCaptureValue(capture, editor);
-							if (value === null) return;
+				group: 'Captures',
+				run: async () => {
+					const editor = this.activeEditor();
+					const value = await this.resolveCaptureValue(capture, editor);
+					if (value === null) return;
 
-							await this.captureManager.executeCapture(
-								capture,
-								value,
-								undefined,
-								this.resolveCaptureContext(editor, capture),
-							);
-						})();
-					}
-					return true;
-				}
+					await this.captureManager.executeCapture(
+						capture,
+						value,
+						undefined,
+						this.resolveCaptureContext(editor, capture),
+					);
+				},
 			});
 		});
 	}
@@ -788,23 +795,21 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	registerChains() {
+		this.clearCommandRegistryGroup('Chains');
 		this.settings.chains.forEach((chain, index) => {
 			if (!chain.name) return;
 			const id = `chain-${index}`;
-			this.addCommand({
+			this.registerCrucibleCommand({
 				id,
 				name: `Chain: ${chain.name}`,
-				checkCallback: (checking: boolean) => {
-					if (this.settings.hiddenCommands.includes(id)) return false;
-					if (!checking) {
-						const editor = this.activeEditor();
-						// Capture the active file at invocation time so async steps never
-						// accidentally target a different note if the user navigates away.
-						const spawnFile = this.app.workspace.getActiveFile() ?? undefined;
-						void this.chainManager.executeChain(chain, editor, spawnFile);
-					}
-					return true;
-				}
+				group: 'Chains',
+				run: () => {
+					const editor = this.activeEditor();
+					// Capture the active file at invocation time so async steps never
+					// accidentally target a different note if the user navigates away.
+					const spawnFile = this.app.workspace.getActiveFile() ?? undefined;
+					void this.chainManager.executeChain(chain, editor, spawnFile);
+				},
 			});
 		});
 	}
