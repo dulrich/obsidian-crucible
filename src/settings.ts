@@ -1,6 +1,6 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent } from "obsidian";
-import CruciblePlugin from "./main";
+import CruciblePlugin, { CrucibleCommandGroup } from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
 import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings } from "./types";
 import { agentCommandId } from "./agents";
@@ -370,59 +370,24 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			});
 		};
 
-		const materializeCommands = [
-			{ id: 'materialize-day-today', name: 'Materialize day: today' },
-			{ id: 'materialize-day-picker', name: 'Materialize day: pick date' },
-			{ id: 'materialize-week-today', name: 'Materialize week: current' },
-			{ id: 'materialize-week-picker', name: 'Materialize week: pick week' },
-			{ id: 'materialize-month-today', name: 'Materialize month: current' },
-			{ id: 'materialize-month-picker', name: 'Materialize month: pick month' },
+		const GROUP_ORDER: CrucibleCommandGroup[] = [
+			'Materialize',
+			'Lint',
+			'Captures',
+			'Shortcuts',
+			'Chains',
+			'Agents',
+			'Files',
+			'Orchestrations',
+			'Other',
 		];
 
-		const lintCommands = [
-			{ id: 'word-count', name: 'Lint: word count' },
-			{ id: 'lint-note', name: 'Lint: all' },
-			{ id: 'lint-vault', name: 'Lint: vault' },
-		];
-
-		const shortcutCommands = this.plugin.settings.shortcuts.map((s, i) => ({
-			id: `shortcut-${i}`,
-			name: `Shortcut: ${s.name || '(unnamed)'}`
-		}));
-
-		const captureCommands = this.plugin.settings.captures.map((c, i) => ({
-			id: `capture-${i}`,
-			name: `Capture: ${c.name || '(unnamed)'}`
-		}));
-
-		const chainCommands = this.plugin.settings.chains.map((c, i) => ({
-			id: `chain-${i}`,
-			name: `Chain: ${c.name || '(unnamed)'}`
-		}));
-
-		const agentCommands = this.plugin.settings.agents.map(a => ({
-			id: agentCommandId(a.id),
-			name: `Agent: ${a.name || '(unnamed)'}`
-		}));
-
-		const fileCommands = [
-			{ id: 'move-current-file-to-daily-folder', name: 'Move current file to daily folder' },
-			{ id: 'move-current-file-to-folder', name: 'Move current file to folder...' },
-		];
-
-		const otherCommands = [
-			{ id: 'mark-as-forwarded', name: 'Mark as forwarded' },
-			{ id: 'reload-plugin', name: 'Reload plugin' }
-		];
-
-		renderGroup('Materialize', materializeCommands);
-		renderGroup('Lint', lintCommands);
-		renderGroup('Captures', captureCommands);
-		renderGroup('Shortcuts', shortcutCommands);
-		renderGroup('Chains', chainCommands);
-		renderGroup('Agents', agentCommands);
-		renderGroup('Files', fileCommands);
-		renderGroup('Other', otherCommands);
+		for (const group of GROUP_ORDER) {
+			const commands = this.plugin.commandRegistry
+				.filter(c => c.group === group)
+				.map(c => ({ id: c.id, name: c.name }));
+			renderGroup(group, commands);
+		}
 		renderChainOnlyGroup('Chain Commands', this.getChainOnlyCommandList());
 	}
 
