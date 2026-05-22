@@ -4,6 +4,8 @@ export type JobType =
 	| 'daily_brief_lite'
 	| 'youtube_tracker'
 	| 'youtube_tracker_consolidate'
+	| 'blogs_tracker'
+	| 'blogs_tracker_consolidate'
 	| 'transcript_refine'
 	| 'link_scan';
 
