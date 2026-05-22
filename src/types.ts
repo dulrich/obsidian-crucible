@@ -259,6 +259,11 @@ export interface CrucibleSettings {
 	orchestrationYoutubeChannelsNote: string;
 	orchestrationYoutubeTrackerDiffMode: boolean;
 	orchestrationYoutubeTrackerWriteEmptyRuns: boolean;
+	// Workflow: blogs_tracker
+	orchestrationBlogsTrackerEnabled: boolean;
+	orchestrationBlogsNote: string;
+	orchestrationBlogsTrackerDiffMode: boolean;
+	orchestrationBlogsTrackerWriteEmptyRuns: boolean;
 	// Workflow: link_scan
 	orchestrationLinkScanEnabled: boolean;
 	orchestrationLinkRegistryRoot: string;
@@ -322,6 +327,10 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationYoutubeChannelsNote: '_system/youtube/Channels.md',
 	orchestrationYoutubeTrackerDiffMode: true,
 	orchestrationYoutubeTrackerWriteEmptyRuns: false,
+	orchestrationBlogsTrackerEnabled: true,
+	orchestrationBlogsNote: '_system/blogs/Blogs.md',
+	orchestrationBlogsTrackerDiffMode: true,
+	orchestrationBlogsTrackerWriteEmptyRuns: false,
 	orchestrationLinkScanEnabled: true,
 	orchestrationLinkRegistryRoot: '_crucible/link_registry',
 	orchestrationLinkScanExclusions: ['_crucible'],

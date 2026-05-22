@@ -17,6 +17,7 @@ import { Orchestrator } from './orchestration/Orchestrator';
 import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
 import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
 import { YoutubeTrackerConsolidateWorkflow, YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
+import { BlogsTrackerConsolidateWorkflow, BlogsTrackerWorkflow } from './orchestration/workflows/BlogsTrackerWorkflow';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
@@ -67,6 +68,8 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow());
 		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow());
 		this.orchestrator.register('youtube_tracker_consolidate', new YoutubeTrackerConsolidateWorkflow());
+		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
+		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 
 		this.registerInternalCommands();
@@ -226,6 +229,20 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Orchestrate: enqueue YouTube tracker consolidation',
 			group: 'Orchestrations',
 			run: () => this.orchestrator.enqueue('youtube_tracker_consolidate'),
+		});
+
+		this.registerCrucibleCommand({
+			id: 'orchestrator-enqueue-blogs-tracker',
+			name: 'Orchestrate: enqueue Blogs tracker',
+			group: 'Orchestrations',
+			run: () => this.orchestrator.enqueue('blogs_tracker'),
+		});
+
+		this.registerCrucibleCommand({
+			id: 'orchestrator-enqueue-blogs-tracker-consolidation',
+			name: 'Orchestrate: enqueue Blogs tracker consolidation',
+			group: 'Orchestrations',
+			run: () => this.orchestrator.enqueue('blogs_tracker_consolidate'),
 		});
 
 		this.registerCrucibleCommand({
