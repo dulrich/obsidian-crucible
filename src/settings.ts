@@ -1833,6 +1833,13 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				render: (el) => this.renderEditYoutubeTrackerWorkflow(el),
 			},
 			{
+				id: 'blogs_tracker',
+				name: 'Blogs Tracker',
+				description: 'Poll configured blog RSS feeds for new posts and create intake notes.',
+				enabledKey: 'orchestrationBlogsTrackerEnabled',
+				render: (el) => this.renderEditBlogsTrackerWorkflow(el),
+			},
+			{
 				id: 'link_scan',
 				name: 'Link Scan',
 				description: 'Scan the vault for URLs and build a canonical link registry.',
@@ -2116,6 +2123,43 @@ export class CrucibleSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.orchestrationYoutubeTrackerWriteEmptyRuns === true)
 				.onChange(async (v) => {
 					this.plugin.settings.orchestrationYoutubeTrackerWriteEmptyRuns = v;
+					await this.plugin.saveSettings();
+				}));
+	}
+
+	private renderEditBlogsTrackerWorkflow(containerEl: HTMLElement) {
+		new Setting(containerEl)
+			.setName('Blogs note')
+			.setDesc('Markdown note containing the blogs registry table (Name | Link | Method | Tags | Priority).')
+			.addSearch(cb => {
+				cb.setPlaceholder('_system/blogs/Blogs.md')
+					.setValue(this.plugin.settings.orchestrationBlogsNote)
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationBlogsNote = v.trim() || '_system/blogs/Blogs.md';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(this.app, cb.inputEl);
+			});
+
+		new Setting(containerEl)
+			.setName('Diff against prior runs')
+			.setDesc('On: each run surfaces only posts not in any prior intake file. Off: each run surfaces every post that has no vault note (independent of prior intakes).')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.orchestrationBlogsTrackerDiffMode !== false)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationBlogsTrackerDiffMode = v;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Write empty intake files')
+			.setDesc('On: every run writes an intake file even when no new posts and no blog failures (audit trail). Off: skip writing when there is nothing to report.')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.orchestrationBlogsTrackerWriteEmptyRuns === true)
+				.onChange(async (v) => {
+					this.plugin.settings.orchestrationBlogsTrackerWriteEmptyRuns = v;
 					await this.plugin.saveSettings();
 				}));
 	}
