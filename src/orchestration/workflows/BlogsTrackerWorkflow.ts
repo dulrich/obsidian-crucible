@@ -307,22 +307,22 @@ export class BlogsTrackerConsolidateWorkflow extends BlogsTrackerWorkflow {
 		};
 	}
 
-	private async loadConfiguredBlogs(plugin: WorkflowContext['plugin']): Promise<Map<string, BlogEntry>> {
+	private async loadConfiguredBlogs(plugin: WorkflowContext['plugin']): Promise<Map<string, { blog: BlogEntry; index: number }>> {
 		const app = plugin.app;
 		const registryPath = normalizePath(plugin.settings.orchestrationBlogsNote);
 		const registryFile = app.vault.getAbstractFileByPath(registryPath);
-		const out = new Map<string, BlogEntry>();
+		const out = new Map<string, { blog: BlogEntry; index: number }>();
 		if (!(registryFile instanceof TFile)) return out;
 		const content = await app.vault.read(registryFile);
 		const { entries } = parseBlogsTable(content);
-		for (const entry of entries) out.set(entry.link, entry);
+		entries.forEach((blog, index) => out.set(blog.link, { blog, index }));
 		return out;
 	}
 
 	private async scanRegularTrackerRuns(
 		plugin: WorkflowContext['plugin'],
 		seenInVault: Set<string>,
-		configuredBlogs: Map<string, BlogEntry>,
+		configuredBlogs: Map<string, { blog: BlogEntry; index: number }>,
 	): Promise<ConsolidationScan> {
 		const app = plugin.app;
 		const intakePrefix = `${INTAKE_ROOT}/`;
@@ -347,7 +347,7 @@ export class BlogsTrackerConsolidateWorkflow extends BlogsTrackerWorkflow {
 				if (!configured) continue;
 				if (seenInVault.has(entry.post.postId) || seenInVault.has(postIdFromUrl(entry.post.url))) continue;
 				if (byId.has(entry.post.postId)) continue;
-				byId.set(entry.post.postId, { blog: configured, post: entry.post });
+				byId.set(entry.post.postId, { blog: configured.blog, post: entry.post });
 			}
 		}
 
@@ -364,8 +364,14 @@ export class BlogsTrackerConsolidateWorkflow extends BlogsTrackerWorkflow {
 			}
 		}
 
+		const outcomes = Array.from(byBlog.values()).sort((a, b) => {
+			const ai = configuredBlogs.get(a.blog.link)?.index ?? Number.MAX_SAFE_INTEGER;
+			const bi = configuredBlogs.get(b.blog.link)?.index ?? Number.MAX_SAFE_INTEGER;
+			return ai - bi;
+		});
+
 		return {
-			outcomes: Array.from(byBlog.values()),
+			outcomes,
 			runsScanned,
 			postsSeenInRuns,
 		};
