@@ -302,6 +302,7 @@ export interface CrucibleSettings {
 	orchestrationYoutubeChannelsNote: string;
 	orchestrationYoutubeTrackerDiffMode: boolean;
 	orchestrationYoutubeTrackerWriteEmptyRuns: boolean;
+	orchestrationYoutubeMetadataRoot: string;
 	// Workflow: blogs_tracker
 	orchestrationBlogsTrackerEnabled: boolean;
 	orchestrationBlogsNote: string;
@@ -399,6 +400,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationYoutubeChannelsNote: '_system/youtube/Channels.md',
 	orchestrationYoutubeTrackerDiffMode: true,
 	orchestrationYoutubeTrackerWriteEmptyRuns: false,
+	orchestrationYoutubeMetadataRoot: '_yt_metadata',
 	orchestrationBlogsTrackerEnabled: true,
 	orchestrationBlogsNote: '_system/blogs/Blogs.md',
 	orchestrationBlogsTrackerDiffMode: true,
