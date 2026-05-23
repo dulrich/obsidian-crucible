@@ -1,3 +1,5 @@
+import { extractVideoIdFromUrl } from './youtube';
+
 export interface TrackedSourceHint {
 	type: 'youtube-channel';
 	canonical: string;
@@ -26,7 +28,6 @@ const TRACKING_PARAMS = new Set([
 	'mc_eid',
 ]);
 
-const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const YT_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
 const YOUTU_BE_HOSTS = new Set(['youtu.be', 'www.youtu.be']);
 const ARXIV_HOSTS = new Set(['arxiv.org', 'www.arxiv.org']);
@@ -53,7 +54,7 @@ export function canonicalizeUrl(raw: string): CanonicalizedUrl | null {
 	let trackedSource: TrackedSourceHint | undefined;
 
 	if (YT_HOSTS.has(host)) {
-		const watchId = extractYouTubeWatchId(parsed);
+		const watchId = extractVideoIdFromUrl(parsed.toString());
 		if (watchId) {
 			parsed.hostname = 'www.youtube.com';
 			parsed.pathname = '/watch';
@@ -66,8 +67,8 @@ export function canonicalizeUrl(raw: string): CanonicalizedUrl | null {
 			}
 		}
 	} else if (YOUTU_BE_HOSTS.has(host)) {
-		const id = parsed.pathname.replace(/^\/+/, '').split('/')[0] ?? '';
-		if (VIDEO_ID_RE.test(id)) {
+		const id = extractVideoIdFromUrl(parsed.toString());
+		if (id) {
 			parsed.hostname = 'www.youtube.com';
 			parsed.pathname = '/watch';
 			parsed.search = `?v=${id}`;
@@ -133,18 +134,6 @@ export function shortHash(input: string): string {
 		h = Math.imul(h, 0x01000193);
 	}
 	return (h >>> 0).toString(16).padStart(8, '0').slice(0, 4);
-}
-
-function extractYouTubeWatchId(parsed: URL): string | null {
-	if (parsed.pathname === '/watch') {
-		const v = parsed.searchParams.get('v');
-		if (v && VIDEO_ID_RE.test(v)) return v;
-	}
-	const shorts = parsed.pathname.match(/^\/shorts\/([A-Za-z0-9_-]{11})\/?$/);
-	if (shorts && shorts[1]) return shorts[1];
-	const embed = parsed.pathname.match(/^\/embed\/([A-Za-z0-9_-]{11})\/?$/);
-	if (embed && embed[1]) return embed[1];
-	return null;
 }
 
 function detectYouTubeChannelHint(parsed: URL): string | null {

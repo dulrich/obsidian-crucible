@@ -3,6 +3,7 @@ import { CrucibleSettings } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing } from './frontmatter';
 import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
+import { postIdFromUrl } from './orchestration/utils/blogs';
 
 const YT_EMBED_RE = /^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n/;
 const TRANSCRIPT_HEADER_RE = /^([ \t]*\r?\n)*[ \t]*##[ \t]+Transcript[ \t]*\r?\n/;
@@ -15,6 +16,27 @@ function cleanTranscriptParagraph(para: string): string {
 	let out = para.replace(TIMESTAMP_PREFIX_RE, '');
 	out = out.replace(BRACKET_ANNOTATION_RE, '');
 	return out.replace(/\s+/g, ' ').trim();
+}
+
+function deriveSourceIdProperties(fm: Record<string, unknown>): void {
+	const raw = fm['source'];
+	if (typeof raw !== 'string') return;
+	const source = raw.trim();
+	if (!source) return;
+
+	const videoId = extractVideoIdFromUrl(source);
+	if (videoId) {
+		upsertFrontmatterPropertyIfEmpty(fm, 'yt-video-id', videoId);
+		return;
+	}
+
+	if (!/^https?:\/\//i.test(source)) return;
+	try {
+		new URL(source);
+	} catch {
+		return;
+	}
+	upsertFrontmatterPropertyIfEmpty(fm, 'post-id', postIdFromUrl(source));
 }
 
 export function cleanupYoutubeTranscript(content: string): string {
@@ -188,6 +210,7 @@ export class Linter {
 					upsertFrontmatterPropertyIfEmpty(fm, 'title', file.basename);
 					if (this.settings.lintModifiedKey) upsertFrontmatterProperty(fm, this.settings.lintModifiedKey, todayStr);
 					upsertFrontmatterProperty(fm, 'word-count', wordCount);
+					deriveSourceIdProperties(fm);
 					sortFrontmatterProperties(fm, this.settings.lintYamlKeyPriority);
 				});
 
@@ -227,6 +250,65 @@ export class Linter {
 			new Notice('Note linted');
 		}
 		return true;
+	}
+
+	async renamePropertyInVault(oldKey: string, newKey: string): Promise<boolean> {
+		const oldK = oldKey.trim();
+		const newK = newKey.trim();
+		if (!oldK || !newK) {
+			new Notice('Property rename: both old and new key names are required');
+			return false;
+		}
+		if (oldK === newK) {
+			new Notice('Property rename: old and new keys are identical');
+			return false;
+		}
+
+		const files = this.app.vault.getMarkdownFiles().filter(f => !this.isPathIgnored(f.path));
+		if (files.length === 0) {
+			new Notice('No Markdown files to scan');
+			return true;
+		}
+
+		const notice = new Notice(`Renaming property in ${files.length} notes...`, 0);
+		let scanned = 0;
+		let renamed = 0;
+		let failed = 0;
+
+		try {
+			await withMaterializing(this.setMaterializing, async () => {
+				for (const file of files) {
+					try {
+						let didRename = false;
+						await updateFrontmatter(this.app, file, (fm) => {
+							if (!(oldK in fm)) return;
+							const value = fm[oldK];
+							delete fm[oldK];
+							if (!(newK in fm) || fm[newK] === undefined || fm[newK] === null || fm[newK] === '') {
+								fm[newK] = value;
+							}
+							didRename = true;
+						});
+						if (didRename) renamed++;
+					} catch (e) {
+						failed++;
+						console.error(`Property rename failed (${file.path}):`, e);
+					}
+					scanned++;
+					if (scanned % 25 === 0) {
+						notice.setMessage(`Renaming property... (${scanned}/${files.length}, renamed ${renamed})`);
+					}
+				}
+			});
+		} finally {
+			notice.hide();
+		}
+
+		const summary = failed > 0
+			? `Renamed ${renamed} of ${files.length} notes (${failed} failed)`
+			: `Renamed ${renamed} of ${files.length} notes`;
+		new Notice(summary);
+		return failed === 0;
 	}
 
 	async cleanupTranscriptInFile(viewOrFile?: MarkdownView | TFile, silent: boolean = false): Promise<boolean> {
