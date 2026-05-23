@@ -18,6 +18,7 @@ import { Orchestrator } from './orchestration/Orchestrator';
 import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
 import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
 import { YoutubeTrackerConsolidateWorkflow, YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
+import { ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
 import { BlogsTrackerConsolidateWorkflow, BlogsTrackerWorkflow } from './orchestration/workflows/BlogsTrackerWorkflow';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
@@ -280,6 +281,13 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Orchestrate: enqueue YouTube tracker consolidation',
 			group: 'Orchestrations',
 			run: () => this.orchestrator.enqueue('youtube_tracker_consolidate'),
+		});
+
+		this.registerCrucibleCommand({
+			id: 'youtube-fetch-video-metadata',
+			name: 'YouTube: fetch video metadata for active note',
+			group: 'Orchestrations',
+			run: () => this.fetchYoutubeMetadataForActiveNote(),
 		});
 
 		this.registerCrucibleCommand({
@@ -928,6 +936,46 @@ export default class CruciblePlugin extends Plugin {
 		return true;
 	}
 
+	private async fetchYoutubeMetadataForActiveNote(): Promise<void> {
+		const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+		if (!file) {
+			new Notice('No active note');
+			return;
+		}
+		const fm: Record<string, unknown> | undefined = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		const raw: unknown = fm ? fm['yt-video-id'] : undefined;
+		const videoId = coerceVideoId(raw);
+		if (!videoId) {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
+			new Notice('Active note has no yt-video-id in frontmatter');
+			return;
+		}
+
+		try {
+			const result = await withMaterializing(state => { this.isMaterializing = state; }, () =>
+				ingestYoutubeVideoMetadata(this, file, videoId),
+			);
+			switch (result.status) {
+				case 'created':
+					new Notice(`YouTube metadata saved: ${result.metadataPath}`);
+					break;
+				case 'exists':
+					new Notice(`YouTube metadata already exists; linked.`);
+					break;
+				case 'no-video-id':
+					// eslint-disable-next-line obsidianmd/ui/sentence-case
+					new Notice('Active note has no yt-video-id in frontmatter');
+					break;
+				case 'no-api-key':
+					new Notice('YouTube data API key not set — configure it in settings → orchestrator → YouTube tracker');
+					break;
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			new Notice(`YouTube fetch failed: ${message}`);
+		}
+	}
+
 	registerChains() {
 		this.clearCommandRegistryGroup('Chains');
 		this.settings.chains.forEach((chain, index) => {
@@ -1064,6 +1112,17 @@ function periodFileNameRegex(period: PeriodId): RegExp {
 	if (period === 'daily') return /^(\d{4}-\d{2}-\d{2})$/;
 	if (period === 'weekly') return /^(\d{4}-W\d{2})$/;
 	return /^(\d{4}-\d{2})$/;
+}
+
+function coerceVideoId(value: unknown): string {
+	if (typeof value === 'string') return value.trim();
+	if (typeof value === 'number') return String(value).trim();
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (typeof item === 'string' && item.trim()) return item.trim();
+		}
+	}
+	return '';
 }
 
 function findCurrentSectionHeader(editor: Editor): string | null {

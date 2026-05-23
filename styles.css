@@ -121,6 +121,22 @@ If your plugin does not need CSS, delete this file.
 .pi-width-half { width: 150px !important; }
 .pi-width-wide { width: 450px !important; }
 
+.crucible-secret-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.crucible-secret-indicator-text {
+  background-color: var(--background-modifier-border);
+  color: var(--text-normal);
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 .crucible-settings-group .setting-item-control {
   gap: 8px;
 }
