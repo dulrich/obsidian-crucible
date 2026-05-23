@@ -178,6 +178,18 @@ export default class CruciblePlugin extends Plugin {
 				});
 			},
 		});
+		this.registerCrucibleCommand({
+			id: 'lint-remove-property',
+			name: 'Lint: remove property from vault',
+			group: 'Lint',
+			run: async () => {
+				const key = await this.promptForText('Property name to remove');
+				if (key === null || key.trim() === '') return;
+				await this.chainManager.executeInternalCommand(`${prefix}:lint-remove-property`, {
+					key: key.trim(),
+				});
+			},
+		});
 
 		this.registerCrucibleCommand({
 			id: 'mark-as-forwarded',
@@ -753,6 +765,9 @@ export default class CruciblePlugin extends Plugin {
 		register('lint-rename-property', async (args) => await this.linter.renamePropertyInVault(
 			typeof args['oldKey'] === 'string' ? args['oldKey'] : '',
 			typeof args['newKey'] === 'string' ? args['newKey'] : '',
+		));
+		register('lint-remove-property', async (args) => await this.linter.removePropertyFromVault(
+			typeof args['key'] === 'string' ? args['key'] : '',
 		));
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
