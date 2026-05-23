@@ -163,6 +163,21 @@ export default class CruciblePlugin extends Plugin {
 			group: 'Lint',
 			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-localize-attachments-vault`, {}),
 		});
+		this.registerCrucibleCommand({
+			id: 'lint-rename-property',
+			name: 'Lint: update property in vault',
+			group: 'Lint',
+			run: async () => {
+				const oldKey = await this.promptForText('Old property name');
+				if (oldKey === null || oldKey.trim() === '') return;
+				const newKey = await this.promptForText('New property name');
+				if (newKey === null || newKey.trim() === '') return;
+				await this.chainManager.executeInternalCommand(`${prefix}:lint-rename-property`, {
+					oldKey: oldKey.trim(),
+					newKey: newKey.trim(),
+				});
+			},
+		});
 
 		this.registerCrucibleCommand({
 			id: 'mark-as-forwarded',
@@ -671,6 +686,23 @@ export default class CruciblePlugin extends Plugin {
 		};
 	}
 
+	private async promptForText(title: string): Promise<string | null> {
+		return new Promise((resolve) => {
+			let submitted = false;
+			new TextInputModal(
+				this.app,
+				title,
+				(value) => {
+					submitted = true;
+					resolve(value);
+				},
+				() => {
+					if (!submitted) resolve(null);
+				},
+			).open();
+		});
+	}
+
 	private async promptForCaptureValue(capture: Capture): Promise<string | null> {
 		return new Promise((resolve) => {
 			new TextInputModal(
@@ -718,6 +750,10 @@ export default class CruciblePlugin extends Plugin {
 			return await this.attachmentLocalizer.localizeNote(file);
 		});
 		register('lint-localize-attachments-vault', async () => await this.attachmentLocalizer.localizeVault());
+		register('lint-rename-property', async (args) => await this.linter.renamePropertyInVault(
+			typeof args['oldKey'] === 'string' ? args['oldKey'] : '',
+			typeof args['newKey'] === 'string' ? args['newKey'] : '',
+		));
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));

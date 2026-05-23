@@ -168,7 +168,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 			ingestProperty(fm['yt-video-id'], seen, false);
 			ingestProperty(fm['source'], seen, true);
 			if (diffMode && inIntake) {
-				ingestProperty(fm['video_ids'], seen, false);
+				ingestProperty(fm['yt-video-ids'], seen, false);
 			}
 		}
 		return seen;
@@ -207,10 +207,10 @@ export class YoutubeTrackerWorkflow implements Workflow {
 			`channels_failed: ${failedChannels.length}`,
 		];
 		if (videoIds.length > 0) {
-			fmLines.push('video_ids:');
+			fmLines.push('yt-video-ids:');
 			for (const id of videoIds) fmLines.push(`  - ${id}`);
 		} else {
-			fmLines.push('video_ids: []');
+			fmLines.push('yt-video-ids: []');
 		}
 		fmLines.push('---', '');
 		const fm = fmLines.join('\n');
