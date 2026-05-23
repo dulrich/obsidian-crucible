@@ -3,6 +3,7 @@ import { CrucibleSettingTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema, Provider } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
+import { AttachmentLocalizer } from "./localizeAttachments";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
 import { ChainManager } from "./chains";
 import { ProviderManager } from "./providers";
@@ -42,6 +43,7 @@ export interface CrucibleCommandEntry {
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
 	linter: Linter;
+	attachmentLocalizer: AttachmentLocalizer;
 	commandRegistry: CrucibleCommandEntry[] = [];
 	private isMaterializing = false;
 	private materializer: Materializer;
@@ -58,6 +60,7 @@ export default class CruciblePlugin extends Plugin {
 
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
+		this.attachmentLocalizer = new AttachmentLocalizer(this.app, this.settings, this.linter, (state: boolean) => { this.isMaterializing = state; });
 		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.chainManager = new ChainManager(this.app);
 		this.providerManager = new ProviderManager(this.app);
@@ -146,6 +149,18 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Lint: cleanup transcript',
 			group: 'Lint',
 			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-cleanup-transcript`, {}),
+		});
+		this.registerCrucibleCommand({
+			id: 'lint-localize-attachments',
+			name: 'Lint: localize attachments',
+			group: 'Lint',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-localize-attachments`, {}),
+		});
+		this.registerCrucibleCommand({
+			id: 'lint-localize-attachments-vault',
+			name: 'Lint: localize attachments (vault)',
+			group: 'Lint',
+			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-localize-attachments-vault`, {}),
 		});
 
 		this.registerCrucibleCommand({
@@ -264,8 +279,33 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}, 2000, true);
 
+		const debouncedLocalize = debounce(async (file: TFile) => {
+			if (this.settings.localizeAttachmentsTriggerOnEdit && !this.isMaterializing) {
+				await this.attachmentLocalizer.localizeNote(file, true);
+			}
+		}, 3000, true);
+
 		this.registerEvent(this.app.vault.on('modify', (file) => {
-			if (file instanceof TFile && file.extension === 'md') debouncedLint(file);
+			if (file instanceof TFile && file.extension === 'md') {
+				debouncedLint(file);
+				debouncedLocalize(file);
+			}
+		}));
+
+		this.registerEvent(this.app.workspace.on('editor-paste', (evt, editor, view) => {
+			if (!this.settings.localizeAttachmentsTriggerOnPaste) return;
+			if (!(view instanceof MarkdownView)) return;
+			void this.attachmentLocalizer.handlePaste(evt, editor, view);
+		}));
+
+		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+			if (file instanceof TFile && file.extension === 'md') {
+				void this.attachmentLocalizer.onNoteRename(file, oldPath);
+			}
+		}));
+
+		this.registerEvent(this.app.vault.on('delete', (file) => {
+			void this.attachmentLocalizer.onNoteDelete(file.path);
 		}));
 
 		this.registerEvent(
@@ -277,6 +317,14 @@ export default class CruciblePlugin extends Plugin {
 							.setIcon('check-circle')
 							.onClick(async () => {
 								await this.linter.lintFolder(file);
+							});
+					});
+					menu.addItem((item) => {
+						item
+							.setTitle('Localize attachments in folder')
+							.setIcon('image-down')
+							.onClick(async () => {
+								await this.attachmentLocalizer.localizeFolder(file);
 							});
 					});
 				}
@@ -652,6 +700,15 @@ export default class CruciblePlugin extends Plugin {
 		register('lint-vault', async () => await this.linter.lintVault());
 		register('word-count', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
 		register('lint-cleanup-transcript', async (_a, _p, _e, tf) => await this.linter.cleanupTranscriptInFile(tf));
+		register('lint-localize-attachments', async (_a, _p, _e, tf) => {
+			const file = tf ?? this.app.workspace.getActiveFile();
+			if (!file || file.extension !== 'md') {
+				new Notice('Open a Markdown note to localize attachments');
+				return false;
+			}
+			return await this.attachmentLocalizer.localizeNote(file);
+		});
+		register('lint-localize-attachments-vault', async () => await this.attachmentLocalizer.localizeVault());
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
@@ -873,7 +930,11 @@ export default class CruciblePlugin extends Plugin {
 
 	async handleFileCreate(file: TAbstractFile) {
 		if (this.isMaterializing || !(file instanceof TFile) || file.extension !== 'md') return;
-		
+
+		if (this.settings.localizeAttachmentsTriggerOnCreate && file.stat.size > 0) {
+			void this.attachmentLocalizer.localizeNote(file, true);
+		}
+
 		// CRITICAL: Only proceed if the file is truly empty to avoid overwriting existing notes on startup
 		if (file.stat.size > 0) return;
 
