@@ -21,6 +21,8 @@ const FEED_FETCH_MIN_INTERVAL_MS = 250;
 const TRACKER_GENERATED_BY = 'orchestrator/youtube_tracker';
 const CONSOLIDATE_GENERATED_BY = 'orchestrator/youtube_tracker_consolidate';
 
+const PRIORITY_ORDER: Record<ChannelEntry['priority'], number> = { high: 0, normal: 1, low: 2 };
+
 interface ChannelOutcome {
 	channel: ChannelEntry;
 	newVideos: RemoteVideo[];
@@ -186,16 +188,20 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		const path = await this.allocateIntakePath(app, date, time);
 		await ensureFolder(app, INTAKE_ROOT);
 
-		const failedChannels = outcomes.filter(o => o.error);
-		const channelsWithNew = outcomes.filter(o => o.newVideos.length > 0).length;
-		const videoIds = outcomes.flatMap(o => o.newVideos.map(v => v.videoId));
+		const sortedOutcomes = [...outcomes].sort(
+			(a, b) => PRIORITY_ORDER[a.channel.priority] - PRIORITY_ORDER[b.channel.priority],
+		);
+
+		const failedChannels = sortedOutcomes.filter(o => o.error);
+		const channelsWithNew = sortedOutcomes.filter(o => o.newVideos.length > 0).length;
+		const videoIds = sortedOutcomes.flatMap(o => o.newVideos.map(v => v.videoId));
 
 		const fmLines = [
 			'---',
 			`date: ${date}`,
 			`run_at: ${date}T${displayTime}`,
 			`generated_by: ${generatedBy}`,
-			`channels_total: ${outcomes.length}`,
+			`channels_total: ${sortedOutcomes.length}`,
 			`channels_with_new: ${channelsWithNew}`,
 			`videos_total: ${totalNew}`,
 			`channels_failed: ${failedChannels.length}`,
@@ -211,10 +217,10 @@ export class YoutubeTrackerWorkflow implements Workflow {
 
 		const sections: string[] = [`# YouTube intake — ${date} ${displayTime}`, ''];
 
-		if (outcomes.length === 0) {
+		if (sortedOutcomes.length === 0) {
 			sections.push('_No channels configured._');
 		} else {
-			const withNew = outcomes.filter(o => o.newVideos.length > 0);
+			const withNew = sortedOutcomes.filter(o => o.newVideos.length > 0);
 			if (withNew.length === 0) {
 				sections.push('_No new videos across all channels._', '');
 			}
@@ -260,8 +266,8 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 
 		await this.canonicalizeDetectedIds(plugin);
 		const seenInVault = this.buildSeenIdSet(plugin, false);
-		const configuredChannelIds = await this.loadConfiguredChannelIds(plugin);
-		const scan = await this.scanRegularTrackerRuns(plugin, seenInVault, configuredChannelIds);
+		const configuredChannels = await this.loadConfiguredChannels(plugin);
+		const scan = await this.scanRegularTrackerRuns(plugin, seenInVault, configuredChannels);
 		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newVideos.length, 0);
 
 		if (scan.runsScanned === 0) {
@@ -288,19 +294,22 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 		};
 	}
 
-	private async loadConfiguredChannelIds(plugin: WorkflowContext['plugin']): Promise<Set<string>> {
+	private async loadConfiguredChannels(plugin: WorkflowContext['plugin']): Promise<Map<string, { channel: ChannelEntry; index: number }>> {
 		const app = plugin.app;
 		const registryPath = normalizePath(plugin.settings.orchestrationYoutubeChannelsNote);
 		const registryFile = app.vault.getAbstractFileByPath(registryPath);
-		if (!(registryFile instanceof TFile)) return new Set();
+		const out = new Map<string, { channel: ChannelEntry; index: number }>();
+		if (!(registryFile instanceof TFile)) return out;
 		const content = await app.vault.read(registryFile);
-		return new Set(parseChannelsTable(content).map(c => c.channelId));
+		const entries = parseChannelsTable(content);
+		entries.forEach((channel, index) => out.set(channel.channelId, { channel, index }));
+		return out;
 	}
 
 	private async scanRegularTrackerRuns(
 		plugin: WorkflowContext['plugin'],
 		seenInVault: Set<string>,
-		configuredChannelIds: Set<string>,
+		configuredChannels: Map<string, { channel: ChannelEntry; index: number }>,
 	): Promise<ConsolidationScan> {
 		const app = plugin.app;
 		const intakePrefix = `${INTAKE_ROOT}/`;
@@ -321,9 +330,10 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 
 			for (const entry of parseIntakeVideos(content)) {
 				videosSeenInRuns++;
-				if (!configuredChannelIds.has(entry.channel.channelId)) continue;
+				const configured = configuredChannels.get(entry.channel.channelId);
+				if (!configured) continue;
 				if (seenInVault.has(entry.video.videoId) || byId.has(entry.video.videoId)) continue;
-				byId.set(entry.video.videoId, entry);
+				byId.set(entry.video.videoId, { channel: configured.channel, video: entry.video });
 			}
 		}
 
@@ -340,8 +350,14 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 			}
 		}
 
+		const outcomes = Array.from(byChannel.values()).sort((a, b) => {
+			const ai = configuredChannels.get(a.channel.channelId)?.index ?? Number.MAX_SAFE_INTEGER;
+			const bi = configuredChannels.get(b.channel.channelId)?.index ?? Number.MAX_SAFE_INTEGER;
+			return ai - bi;
+		});
+
 		return {
-			outcomes: Array.from(byChannel.values()),
+			outcomes,
 			runsScanned,
 			videosSeenInRuns,
 		};
