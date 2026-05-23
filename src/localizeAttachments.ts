@@ -511,8 +511,11 @@ export class AttachmentLocalizer {
 		const items = evt.clipboardData?.items;
 		if (!items || items.length === 0) return false;
 
-		const inserts: string[] = [];
-		let consumed = false;
+		// Synchronously collect eligible files and File handles BEFORE any await.
+		// preventDefault must run in the same tick as the event, otherwise Obsidian's
+		// default paste handler inserts its own embed (and any sibling text/URL items
+		// like Firefox screenshot links) and we end up with a duplicate next to ours.
+		const eligible: { file: File; ext: string }[] = [];
 		for (const item of Array.from(items)) {
 			if (item.kind !== 'file') continue;
 			const mime = item.type || '';
@@ -521,7 +524,15 @@ export class AttachmentLocalizer {
 			if (!this.isEligiblePasted(ext)) continue;
 			const file = item.getAsFile();
 			if (!file) continue;
+			eligible.push({ file, ext });
+		}
+		if (eligible.length === 0) return false;
+		evt.preventDefault();
+		evt.stopPropagation();
 
+		const noteFile = view.file;
+		const inserts: string[] = [];
+		for (const { file, ext } of eligible) {
 			let bytes = await file.arrayBuffer();
 			let outExt = ext;
 			const isImage = this.classifyExtension(ext) === 'images';
@@ -536,16 +547,12 @@ export class AttachmentLocalizer {
 				outExt = converted.ext;
 			}
 			const originalName = file.name.replace(/\.[^.]+$/, '') || 'pasted';
-			const targetPath = await this.writeAttachment(view.file, bytes, outExt, originalName);
+			const targetPath = await this.writeAttachment(noteFile, bytes, outExt, originalName);
 			inserts.push(this.formatEmbed('wiki', targetPath, originalName));
-			consumed = true;
 		}
 
-		if (consumed) {
-			evt.preventDefault();
-			editor.replaceSelection(inserts.join('\n'));
-		}
-		return consumed;
+		editor.replaceSelection(inserts.join('\n'));
+		return true;
 	}
 
 	attachmentFolderForNote(note: TFile): string {
