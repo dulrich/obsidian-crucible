@@ -1,5 +1,5 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent, TextComponent } from "obsidian";
 import CruciblePlugin, { CrucibleCommandGroup } from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
 import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, CrucibleCommandPaletteFilterMode, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "./types";
@@ -7,6 +7,7 @@ import { agentCommandId } from "./agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS } from "./providers";
 import { isValidTimezone } from "./orchestration/utils/dates";
 import { PERIOD_IDS, PeriodId, getPeriodConfig, getPeriodConfigByTarget } from "./periods";
+import { deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "./orchestration/utils/youtubeApi";
 
 interface SearchWithContainer {
 	containerEl: HTMLElement;
@@ -1140,6 +1141,48 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		this.display();
 	}
 
+	private mountSecretControl(setting: Setting, opts: {
+		placeholder?: string;
+		indicatorText?: string;
+		load: () => Promise<string>;
+		store: (value: string) => Promise<void>;
+		clear: () => Promise<void>;
+	}): void {
+		const placeholder = opts.placeholder ?? 'Enter API key...';
+		const indicatorText = opts.indicatorText ?? 'API Key in Obsidian Secrets';
+		const wrapper = setting.controlEl.createDiv({ cls: 'crucible-secret-control' });
+
+		const renderIndicator = () => {
+			wrapper.empty();
+			wrapper.createSpan({ text: indicatorText, cls: 'crucible-secret-indicator-text' });
+			new ExtraButtonComponent(wrapper)
+				.setIcon('trash')
+				.setTooltip('Clear API key')
+				.onClick(async () => {
+					await opts.clear();
+					renderInput(true);
+				});
+		};
+
+		const renderInput = (focus = false) => {
+			wrapper.empty();
+			const text = new TextComponent(wrapper);
+			text.inputEl.type = 'password';
+			text.setPlaceholder(placeholder);
+			text.inputEl.addClass('pi-width-normal');
+			text.onChange(async (v) => { await opts.store(v); });
+			text.inputEl.addEventListener('blur', () => {
+				if (text.inputEl.value) renderIndicator();
+			});
+			if (focus) text.inputEl.focus();
+		};
+
+		renderInput();
+		void opts.load().then(value => {
+			if (value) renderIndicator();
+		});
+	}
+
 	private renderEditProvider(containerEl: HTMLElement, provider: Provider, index: number) {
 		new Setting(containerEl)
 			.setName(`Provider: ${provider.name || '(unnamed)'}`)
@@ -1186,18 +1229,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 						.inputEl.addClass('pi-width-normal'));
 			} else {
 				containerEl.createEl('hr', { cls: 'crucible-row-divider' });
-				new Setting(containerEl)
+				const apiKeySetting = new Setting(containerEl)
 					.setName('API Key')
-					.setDesc('Stored securely in Obsidian Secret Storage.')
-					.addText(t => {
-						t.inputEl.type = 'password';
-						t.setPlaceholder('Enter API key...')
-						 .onChange(async (v) => {
-							await this.plugin.providerManager.storeApiKey(provider.id, v);
-						 });
-						t.inputEl.addClass('pi-width-normal');
-						// We don't load the key back into the UI for security
-					});
+					.setDesc('Stored securely in Obsidian Secret Storage.');
+				this.mountSecretControl(apiKeySetting, {
+					load: () => this.plugin.providerManager.loadApiKey(provider.id),
+					store: (v) => this.plugin.providerManager.storeApiKey(provider.id, v),
+					clear: () => this.plugin.providerManager.deleteApiKey(provider.id),
+				});
 			}
 		} else {
 			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
@@ -2279,6 +2318,30 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					this.plugin.settings.orchestrationYoutubeTrackerWriteEmptyRuns = v;
 					await this.plugin.saveSettings();
 				}));
+
+		new Setting(containerEl)
+			.setName('Metadata root folder')
+			.setDesc('Folder where per-video metadata notes are saved (one subfolder per channel).')
+			.addSearch(cb => {
+				cb.setPlaceholder('_yt_metadata')
+					.setValue(this.plugin.settings.orchestrationYoutubeMetadataRoot)
+					.onChange(async (v) => {
+						this.plugin.settings.orchestrationYoutubeMetadataRoot = v.trim() || '_yt_metadata';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FolderSuggest(this.app, cb.inputEl);
+			});
+
+		const youtubeKeySetting = new Setting(containerEl)
+			.setName('YouTube Data API key')
+			.setDesc('Stored securely in Obsidian Secret Storage. Required for the per-video metadata fetch command.');
+		this.mountSecretControl(youtubeKeySetting, {
+			load: () => loadYoutubeApiKey(this.app),
+			store: (v) => storeYoutubeApiKey(this.app, v),
+			clear: () => deleteYoutubeApiKey(this.app),
+		});
 	}
 
 	private renderEditBlogsTrackerWorkflow(containerEl: HTMLElement) {
