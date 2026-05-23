@@ -2,7 +2,7 @@
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent } from "obsidian";
 import CruciblePlugin, { CrucibleCommandGroup } from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "./types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, CrucibleCommandPaletteFilterMode, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "./types";
 import { agentCommandId } from "./agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS } from "./providers";
 import { isValidTimezone } from "./orchestration/utils/dates";
@@ -389,6 +389,160 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			renderGroup(group, commands);
 		}
 		renderChainOnlyGroup('Chain Commands', this.getChainOnlyCommandList());
+
+		this.renderCrucibleCommandPaletteSettings(containerEl);
+	}
+
+	private renderCrucibleCommandPaletteSettings(containerEl: HTMLElement) {
+		new Setting(containerEl).setName('Command palette').setHeading();
+		containerEl.createEl('p', { text: 'A replacement command palette with pinned commands and whitelist/blacklist filtering of non-Crucible commands. Crucible commands always honor the visibility toggles above.' });
+
+		const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		new Setting(group)
+			.setName('Enable Crucible command palette')
+			.setDesc('Registers the "Open Crucible command palette" command. Bind a hotkey in Obsidian\'s Hotkeys settings to invoke it.')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.crucibleCommandPaletteEnabled)
+				.onChange(async (v) => {
+					this.plugin.settings.crucibleCommandPaletteEnabled = v;
+					await this.plugin.saveSettings();
+					this.refreshDisplay();
+				}));
+
+		if (!this.plugin.settings.crucibleCommandPaletteEnabled) return;
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		this.renderPinnedCommandList(group);
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+		this.renderPaletteFilterSection(group);
+	}
+
+	private renderPinnedCommandList(containerEl: HTMLElement) {
+		const pinned = this.plugin.settings.crucibleCommandPalettePinned;
+
+		new Setting(containerEl)
+			.setName('Pinned commands')
+			.setDesc('Pinned commands appear at the top of the palette in this order.')
+			.addSearch(cb => {
+				cb.setPlaceholder('Search for a command to pin...');
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new CommandSuggest(this.app, cb.inputEl, [], (command) => {
+					if (pinned.includes(command.id)) return;
+					pinned.push(command.id);
+					cb.setValue('');
+					void this.plugin.saveSettings();
+					this.refreshDisplay();
+				}, pinned);
+			});
+
+		if (pinned.length === 0) {
+			containerEl.createDiv({ text: 'No pinned commands.', cls: 'crucible-empty-state' });
+			return;
+		}
+
+		const list = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		pinned.forEach((id, index) => {
+			if (index > 0) list.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(list)
+				.setName(getCommandSuggestDisplayName(this.app, id))
+				.setDesc(id)
+				.addExtraButton(cb => cb
+					.setIcon('arrow-up')
+					.setTooltip('Move up')
+					.setDisabled(index === 0)
+					.onClick(async () => {
+						if (index === 0) return;
+						const tmp = pinned[index - 1]!;
+						pinned[index - 1] = pinned[index]!;
+						pinned[index] = tmp;
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+					}))
+				.addExtraButton(cb => cb
+					.setIcon('arrow-down')
+					.setTooltip('Move down')
+					.setDisabled(index === pinned.length - 1)
+					.onClick(async () => {
+						if (index === pinned.length - 1) return;
+						const tmp = pinned[index + 1]!;
+						pinned[index + 1] = pinned[index]!;
+						pinned[index] = tmp;
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+					}))
+				.addExtraButton(cb => cb
+					.setIcon('trash')
+					.setTooltip('Remove from pinned')
+					.onClick(async () => {
+						pinned.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+					}));
+		});
+	}
+
+	private renderPaletteFilterSection(containerEl: HTMLElement) {
+		const settings = this.plugin.settings;
+
+		new Setting(containerEl)
+			.setName('Filter non-Crucible commands')
+			.setDesc('Whitelist: only the listed non-Crucible commands appear. Blacklist: all non-Crucible commands appear except the listed ones.')
+			.addDropdown(d => d
+				.addOption('blacklist', 'Blacklist')
+				.addOption('whitelist', 'Whitelist')
+				.setValue(settings.crucibleCommandPaletteFilterMode)
+				.onChange(async (v) => {
+					settings.crucibleCommandPaletteFilterMode = v as CrucibleCommandPaletteFilterMode;
+					await this.plugin.saveSettings();
+					this.refreshDisplay();
+				}));
+
+		const mode = settings.crucibleCommandPaletteFilterMode;
+		const list = mode === 'whitelist' ? settings.crucibleCommandPaletteWhitelist : settings.crucibleCommandPaletteBlacklist;
+		const label = mode === 'whitelist' ? 'Whitelisted commands' : 'Blacklisted commands';
+		const placeholder = mode === 'whitelist' ? 'Search for a command to whitelist...' : 'Search for a command to blacklist...';
+
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(containerEl)
+			.setName(label)
+			.addSearch(cb => {
+				cb.setPlaceholder(placeholder);
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new CommandSuggest(this.app, cb.inputEl, [], (command) => {
+					if (list.includes(command.id)) return;
+					list.push(command.id);
+					cb.setValue('');
+					void this.plugin.saveSettings();
+					this.refreshDisplay();
+				}, list);
+			});
+
+		if (list.length === 0) {
+			containerEl.createDiv({ text: mode === 'whitelist' ? 'No commands whitelisted.' : 'No commands blacklisted.', cls: 'crucible-empty-state' });
+			return;
+		}
+
+		const entries = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		list.slice().sort((a, b) => getCommandSuggestDisplayName(this.app, a).localeCompare(getCommandSuggestDisplayName(this.app, b))).forEach((id, displayIdx) => {
+			if (displayIdx > 0) entries.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(entries)
+				.setName(getCommandSuggestDisplayName(this.app, id))
+				.setDesc(id)
+				.addExtraButton(cb => cb
+					.setIcon('trash')
+					.setTooltip('Remove')
+					.onClick(async () => {
+						const idx = list.indexOf(id);
+						if (idx !== -1) list.splice(idx, 1);
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+					}));
+		});
 	}
 
 	private renderHotkey(el: HTMLElement, commandId: string) {

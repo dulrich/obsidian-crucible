@@ -37,6 +37,8 @@ export interface Capture {
 export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-right';
 export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
+export type CrucibleCommandPaletteFilterMode = 'whitelist' | 'blacklist';
+
 import { Hotkey, Command } from 'obsidian';
 
 declare module 'obsidian' {
@@ -280,6 +282,12 @@ export interface CrucibleSettings {
 	// Commands
 	hiddenCommands: string[];
 	hiddenFromChainSearch: string[];
+	// Crucible Command Palette (optional replacement palette)
+	crucibleCommandPaletteEnabled: boolean;
+	crucibleCommandPalettePinned: string[];
+	crucibleCommandPaletteFilterMode: CrucibleCommandPaletteFilterMode;
+	crucibleCommandPaletteWhitelist: string[];
+	crucibleCommandPaletteBlacklist: string[];
 	// Orchestrator
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
@@ -368,6 +376,11 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	tocCollapseBehavior: 'manual',
 	hiddenCommands: [],
 	hiddenFromChainSearch: [],
+	crucibleCommandPaletteEnabled: false,
+	crucibleCommandPalettePinned: [],
+	crucibleCommandPaletteFilterMode: 'blacklist',
+	crucibleCommandPaletteWhitelist: [],
+	crucibleCommandPaletteBlacklist: [],
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',

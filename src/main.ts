@@ -22,6 +22,7 @@ import { BlogsTrackerConsolidateWorkflow, BlogsTrackerWorkflow } from './orchest
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
+import { CrucibleCommandPaletteModal } from './commandPalette';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -196,6 +197,14 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Open settings in a tab',
 			group: 'Other',
 			run: () => this.activateSettingsView(),
+		});
+
+		this.registerCrucibleCommand({
+			id: 'open-crucible-command-palette',
+			name: 'Open Crucible command palette',
+			group: 'Other',
+			available: () => this.settings.crucibleCommandPaletteEnabled,
+			run: () => new CrucibleCommandPaletteModal(this.app, this).open(),
 		});
 
 		this.registerMoveFileCommands(prefix);
