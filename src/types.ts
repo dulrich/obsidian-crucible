@@ -13,6 +13,16 @@ export type CaptureSource = 'dialog' | 'line' | 'line-fallback' | 'selection' | 
 export type CaptureTargetSectionMode = 'fixed' | 'source';
 export type CaptureWriteMode = 'append' | 'prepend' | 'replace';
 
+export type LocalizeMediaType = 'images' | 'audio' | 'video' | 'pdf';
+export type ImageConvertFormat = 'jpeg' | 'webp';
+
+export const OBSIDIAN_NATIVE_EMBED_FORMATS: Record<LocalizeMediaType, string[]> = {
+	images: ['avif', 'bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'webp'],
+	audio: ['flac', 'm4a', 'mp3', 'ogg', 'wav', 'webm', '3gp'],
+	video: ['mkv', 'mov', 'mp4', 'ogv', 'webm'],
+	pdf: ['pdf'],
+};
+
 export interface Capture {
 	name: string;
 	targetType: CaptureTarget;
@@ -228,6 +238,31 @@ export interface CrucibleSettings {
 	lintModifiedKey: string;
 	lintBlankLineAfterYaml: boolean;
 	lintOnSave: boolean;
+	// Lint: Localize Attachments
+	localizeAttachmentsTriggerOnCreate: boolean;
+	localizeAttachmentsTriggerOnEdit: boolean;
+	localizeAttachmentsTriggerOnPaste: boolean;
+	localizeAttachmentsImagesProcessAttached: boolean;
+	localizeAttachmentsImagesProcessPasted: boolean;
+	localizeAttachmentsImagesWhitelist: string[];
+	localizeAttachmentsAudioProcessAttached: boolean;
+	localizeAttachmentsAudioProcessPasted: boolean;
+	localizeAttachmentsAudioWhitelist: string[];
+	localizeAttachmentsVideoProcessAttached: boolean;
+	localizeAttachmentsVideoProcessPasted: boolean;
+	localizeAttachmentsVideoWhitelist: string[];
+	localizeAttachmentsPdfProcessAttached: boolean;
+	localizeAttachmentsPdfProcessPasted: boolean;
+	localizeAttachmentsPdfWhitelist: string[];
+	localizeAttachmentsConvertAttachedImages: boolean;
+	localizeAttachmentsAttachedImageFormat: ImageConvertFormat;
+	localizeAttachmentsAttachedImageQuality: number;
+	localizeAttachmentsConvertPastedImages: boolean;
+	localizeAttachmentsPastedImageFormat: ImageConvertFormat;
+	localizeAttachmentsPastedImageQuality: number;
+	localizeAttachmentsFolderTemplate: string;
+	localizeAttachmentsNameTemplate: string;
+	localizeAttachmentsFollowNoteLifecycle: boolean;
 	// Shortcuts
 	shortcuts: Shortcut[];
 	// Captures
@@ -299,6 +334,30 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	lintModifiedKey: 'updated',
 	lintBlankLineAfterYaml: true,
 	lintOnSave: false,
+	localizeAttachmentsTriggerOnCreate: false,
+	localizeAttachmentsTriggerOnEdit: false,
+	localizeAttachmentsTriggerOnPaste: false,
+	localizeAttachmentsImagesProcessAttached: true,
+	localizeAttachmentsImagesProcessPasted: true,
+	localizeAttachmentsImagesWhitelist: ['avif', 'bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'webp'],
+	localizeAttachmentsAudioProcessAttached: false,
+	localizeAttachmentsAudioProcessPasted: false,
+	localizeAttachmentsAudioWhitelist: ['flac', 'm4a', 'mp3', 'ogg', 'wav', 'webm', '3gp'],
+	localizeAttachmentsVideoProcessAttached: false,
+	localizeAttachmentsVideoProcessPasted: false,
+	localizeAttachmentsVideoWhitelist: ['mkv', 'mov', 'mp4', 'ogv', 'webm'],
+	localizeAttachmentsPdfProcessAttached: false,
+	localizeAttachmentsPdfProcessPasted: false,
+	localizeAttachmentsPdfWhitelist: ['pdf'],
+	localizeAttachmentsConvertAttachedImages: false,
+	localizeAttachmentsAttachedImageFormat: 'webp',
+	localizeAttachmentsAttachedImageQuality: 85,
+	localizeAttachmentsConvertPastedImages: true,
+	localizeAttachmentsPastedImageFormat: 'webp',
+	localizeAttachmentsPastedImageQuality: 80,
+	localizeAttachmentsFolderTemplate: '{{folder}}/_attachments/{{slug}}',
+	localizeAttachmentsNameTemplate: '{{md5}}_MD5.{{ext}}',
+	localizeAttachmentsFollowNoteLifecycle: true,
 	shortcuts: [],
 	captures: [],
 	chains: [],

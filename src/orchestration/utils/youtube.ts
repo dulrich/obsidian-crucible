@@ -38,12 +38,13 @@ export function parseChannelsTable(content: string): ChannelEntry[] {
 		const name = (row.Channel ?? '').trim();
 		const channelId = (row.ID ?? '').trim();
 		if (!name || !channelId) continue;
+		const rawPriority = (row.Priority ?? '').trim().toLowerCase();
+		if (rawPriority === 'skip' || rawPriority === 'ignore') continue;
 		if (!channelId.startsWith('UC')) continue;
 		const tags = (row.Tags ?? '')
 			.split(',')
 			.map(t => t.trim())
 			.filter(t => t.length > 0);
-		const rawPriority = (row.Priority ?? '').trim().toLowerCase();
 		const priority: ChannelEntry['priority'] =
 			rawPriority === 'low' || rawPriority === 'high' ? rawPriority : 'normal';
 		entries.push({ name, channelId, tags, priority });

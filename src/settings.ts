@@ -2,7 +2,7 @@
 import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent } from "obsidian";
 import CruciblePlugin, { CrucibleCommandGroup } from "./main";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings } from "./types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "./types";
 import { agentCommandId } from "./agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS } from "./providers";
 import { isValidTimezone } from "./orchestration/utils/dates";
@@ -2280,6 +2280,112 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			s.infoEl.remove();
 		});
 		new Setting(ignoreGroup).addButton(bt => bt.setButtonText('Add ignored folder').setCta().onClick(async () => { this.plugin.settings.lintIgnoredFolders.push(''); await this.plugin.saveSettings(); this.display(); }));
+
+		this.renderLocalizeAttachmentsSettings(containerEl);
+	}
+
+	private renderLocalizeAttachmentsSettings(containerEl: HTMLElement) {
+		const s = this.plugin.settings;
+		containerEl.createEl('hr');
+		new Setting(containerEl).setName('Localize attachments').setHeading();
+		containerEl.createEl('p', { text: 'Standalone Lint command (not part of Lint: all). Downloads remote media, moves local attachments into a per-note folder, and optionally converts images.' });
+
+		new Setting(containerEl).setName('Automatic triggers').setHeading();
+		const triggerGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(triggerGroup).setName('On note create').setDesc('Run localize when a Markdown note is created with content.').addToggle(t => t.setValue(s.localizeAttachmentsTriggerOnCreate).onChange(async (v) => { s.localizeAttachmentsTriggerOnCreate = v; await this.plugin.saveSettings(); }));
+		triggerGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(triggerGroup).setName('On note edit').setDesc('Debounced run on modify (3s).').addToggle(t => t.setValue(s.localizeAttachmentsTriggerOnEdit).onChange(async (v) => { s.localizeAttachmentsTriggerOnEdit = v; await this.plugin.saveSettings(); }));
+		triggerGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(triggerGroup).setName('On paste').setDesc('Intercept pasted media and route into the attachment folder.').addToggle(t => t.setValue(s.localizeAttachmentsTriggerOnPaste).onChange(async (v) => { s.localizeAttachmentsTriggerOnPaste = v; await this.plugin.saveSettings(); }));
+
+		new Setting(containerEl).setName('Media types').setHeading();
+		const renderTypeGroup = (type: LocalizeMediaType, label: string) => {
+			new Setting(containerEl).setName(label).setHeading();
+			const g = containerEl.createDiv({ cls: 'crucible-settings-group' });
+			const getProcessAttached = () => this.getLocalizeFlag(type, 'attached');
+			const getProcessPasted = () => this.getLocalizeFlag(type, 'pasted');
+			const getWhitelist = () => this.getLocalizeWhitelist(type);
+
+			new Setting(g).setName('Handle when attached or remote').addToggle(t => t.setValue(getProcessAttached()).onChange(async (v) => { this.setLocalizeFlag(type, 'attached', v); await this.plugin.saveSettings(); }));
+			g.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(g).setName('Handle when pasted').addToggle(t => t.setValue(getProcessPasted()).onChange(async (v) => { this.setLocalizeFlag(type, 'pasted', v); await this.plugin.saveSettings(); }));
+			g.createEl('hr', { cls: 'crucible-row-divider' });
+			const wlSetting = new Setting(g).setName('Allowed extensions').setDesc('Only extensions checked here are eligible.');
+			const grid = wlSetting.controlEl.createDiv({ cls: 'crucible-checkbox-grid' });
+			for (const ext of OBSIDIAN_NATIVE_EMBED_FORMATS[type]) {
+				const label = grid.createEl('label', { cls: 'crucible-checkbox-grid-item' });
+				const cb = label.createEl('input', { type: 'checkbox' });
+				cb.checked = getWhitelist().includes(ext);
+				label.createSpan({ text: ext });
+				cb.addEventListener('change', () => {
+					void (async () => {
+						const list = getWhitelist();
+						const has = list.includes(ext);
+						if (cb.checked && !has) list.push(ext);
+						else if (!cb.checked && has) list.splice(list.indexOf(ext), 1);
+						list.sort();
+						await this.plugin.saveSettings();
+					})();
+				});
+			}
+		};
+		renderTypeGroup('images', 'Images');
+		renderTypeGroup('audio', 'Audio');
+		renderTypeGroup('video', 'Video');
+		renderTypeGroup('pdf', 'PDF');
+
+		new Setting(containerEl).setName('Image conversion').setHeading();
+		const conv = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(conv).setName('Convert attached images').addToggle(t => t.setValue(s.localizeAttachmentsConvertAttachedImages).onChange(async (v) => { s.localizeAttachmentsConvertAttachedImages = v; await this.plugin.saveSettings(); this.display(); }));
+		if (s.localizeAttachmentsConvertAttachedImages) {
+			conv.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(conv).setName('Attached: target format').addDropdown(d => { d.addOption('webp', 'WebP').addOption('jpeg', 'JPEG').setValue(s.localizeAttachmentsAttachedImageFormat).onChange(async (v: ImageConvertFormat) => { s.localizeAttachmentsAttachedImageFormat = v; await this.plugin.saveSettings(); }); d.selectEl.addClass('pi-width-half'); });
+			conv.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(conv).setName('Attached: quality (30–100)').addText(t => { t.inputEl.type = 'number'; t.inputEl.min = '30'; t.inputEl.max = '100'; t.inputEl.step = '1'; t.setValue(String(s.localizeAttachmentsAttachedImageQuality)).onChange(async (v) => { s.localizeAttachmentsAttachedImageQuality = Math.min(100, Math.max(30, parseInt(v) || 85)); await this.plugin.saveSettings(); }); t.inputEl.addClass('pi-width-half'); });
+		}
+		conv.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(conv).setName('Convert pasted images').addToggle(t => t.setValue(s.localizeAttachmentsConvertPastedImages).onChange(async (v) => { s.localizeAttachmentsConvertPastedImages = v; await this.plugin.saveSettings(); this.display(); }));
+		if (s.localizeAttachmentsConvertPastedImages) {
+			conv.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(conv).setName('Pasted: target format').addDropdown(d => { d.addOption('webp', 'WebP').addOption('jpeg', 'JPEG').setValue(s.localizeAttachmentsPastedImageFormat).onChange(async (v: ImageConvertFormat) => { s.localizeAttachmentsPastedImageFormat = v; await this.plugin.saveSettings(); }); d.selectEl.addClass('pi-width-half'); });
+			conv.createEl('hr', { cls: 'crucible-row-divider' });
+			new Setting(conv).setName('Pasted: quality (30–100)').addText(t => { t.inputEl.type = 'number'; t.inputEl.min = '30'; t.inputEl.max = '100'; t.inputEl.step = '1'; t.setValue(String(s.localizeAttachmentsPastedImageQuality)).onChange(async (v) => { s.localizeAttachmentsPastedImageQuality = Math.min(100, Math.max(30, parseInt(v) || 80)); await this.plugin.saveSettings(); }); t.inputEl.addClass('pi-width-half'); });
+		}
+
+		new Setting(containerEl).setName('Storage').setHeading();
+		const store = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(store).setName('Attachment folder template').setDesc('Tokens: {{folder}}, {{slug}}, {{name}}, {{date}}, {{datetime:FMT}}.').addText(t => t.setPlaceholder('{{folder}}/_attachments/{{slug}}').setValue(s.localizeAttachmentsFolderTemplate).onChange(async (v) => { s.localizeAttachmentsFolderTemplate = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-wide'));
+		store.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(store).setName('Attachment name template').setDesc('Tokens: {{md5}}, {{ext}}, {{original}}, {{name}}, {{slug}}.').addText(t => t.setPlaceholder('{{md5}}_MD5.{{ext}}').setValue(s.localizeAttachmentsNameTemplate).onChange(async (v) => { s.localizeAttachmentsNameTemplate = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-wide'));
+		store.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(store).setName('Follow note lifecycle').setDesc('Rename, move, or delete the attachment folder when the note is renamed, moved, or deleted.').addToggle(t => t.setValue(s.localizeAttachmentsFollowNoteLifecycle).onChange(async (v) => { s.localizeAttachmentsFollowNoteLifecycle = v; await this.plugin.saveSettings(); }));
+
+		const actions = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		new Setting(actions).setName('Run now').addButton(bt => bt.setButtonText('Localize this note').onClick(async () => { const f = this.app.workspace.getActiveFile(); if (f && f.extension === 'md') await this.plugin.attachmentLocalizer.localizeNote(f); else new (await import('obsidian')).Notice('Open a Markdown note first'); })).addButton(bt => bt.setButtonText('Localize vault').setWarning().onClick(async () => { await this.plugin.attachmentLocalizer.localizeVault(); }));
+	}
+
+	private getLocalizeFlag(type: LocalizeMediaType, kind: 'attached' | 'pasted'): boolean {
+		const s = this.plugin.settings;
+		if (type === 'images') return kind === 'attached' ? s.localizeAttachmentsImagesProcessAttached : s.localizeAttachmentsImagesProcessPasted;
+		if (type === 'audio') return kind === 'attached' ? s.localizeAttachmentsAudioProcessAttached : s.localizeAttachmentsAudioProcessPasted;
+		if (type === 'video') return kind === 'attached' ? s.localizeAttachmentsVideoProcessAttached : s.localizeAttachmentsVideoProcessPasted;
+		return kind === 'attached' ? s.localizeAttachmentsPdfProcessAttached : s.localizeAttachmentsPdfProcessPasted;
+	}
+
+	private setLocalizeFlag(type: LocalizeMediaType, kind: 'attached' | 'pasted', value: boolean): void {
+		const s = this.plugin.settings;
+		if (type === 'images') { if (kind === 'attached') s.localizeAttachmentsImagesProcessAttached = value; else s.localizeAttachmentsImagesProcessPasted = value; return; }
+		if (type === 'audio') { if (kind === 'attached') s.localizeAttachmentsAudioProcessAttached = value; else s.localizeAttachmentsAudioProcessPasted = value; return; }
+		if (type === 'video') { if (kind === 'attached') s.localizeAttachmentsVideoProcessAttached = value; else s.localizeAttachmentsVideoProcessPasted = value; return; }
+		if (kind === 'attached') s.localizeAttachmentsPdfProcessAttached = value; else s.localizeAttachmentsPdfProcessPasted = value;
+	}
+
+	private getLocalizeWhitelist(type: LocalizeMediaType): string[] {
+		const s = this.plugin.settings;
+		if (type === 'images') return s.localizeAttachmentsImagesWhitelist;
+		if (type === 'audio') return s.localizeAttachmentsAudioWhitelist;
+		if (type === 'video') return s.localizeAttachmentsVideoWhitelist;
+		return s.localizeAttachmentsPdfWhitelist;
 	}
 
 	private renderShortcutSettings(containerEl: HTMLElement) {

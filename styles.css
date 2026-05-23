@@ -125,6 +125,20 @@ If your plugin does not need CSS, delete this file.
   gap: 8px;
 }
 
+.crucible-checkbox-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+}
+
+.crucible-checkbox-grid-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-ui-small);
+}
+
 .crucible-template-vars-toggle {
   flex: 0 0 auto;
   order: 100;

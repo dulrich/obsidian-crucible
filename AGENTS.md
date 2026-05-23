@@ -90,6 +90,14 @@ Supported tokens in any template or property injection:
 - `{{value}}`: User input (supported in Captures).
 - `{{datetime:FORMAT}}`: Custom Moment.js format string.
 
+Additional tokens available in **attachment** folder/name templates (`applyAttachmentTemplate` in `src/utils.ts`):
+- `{{folder}}`: The note's parent folder path.
+- `{{slug}}`: Lowercase-sluggified note basename.
+- `{{name}}`: Note basename (alias of `{{title}}`).
+- `{{ext}}`: Attachment extension (no dot).
+- `{{md5}}`: Hex MD5 of the attachment bytes (only in the name template).
+- `{{original}}`: Original attachment filename without extension.
+
 ## Coding Conventions
 
 - **Safe YAML:** Always use `this.app.fileManager.processFrontMatter` for metadata updates to ensure structural integrity.
@@ -115,3 +123,4 @@ Non-obvious Obsidian/runtime behaviors that bit us once and would bite again. Ad
 
 - **`FuzzySuggestModal.selectSuggestion` closes before it chooses.** The base implementation calls `this.close()` *before* `onChooseSuggestion`/`onChooseItem`, so any "did the user pick something?" flag set inside `onChooseItem` is too late — `onClose` has already run with the flag still false. If the modal uses an `onCancel` callback distinct from `onChoose`, override `selectSuggestion` to flip the flag (and invoke the resolve callback) *before* calling `super`, or skip `super` and call `close()` yourself. See `src/modelPicker.ts`.
 - **Commands must be registered via `this.registerCrucibleCommand({ ..., group })`, not `this.addCommand` directly.** The settings UI (`Crucible → Settings → Commands`) renders from `plugin.commandRegistry`, which is populated only by the helper. A command registered with `this.addCommand` will work but be invisible to the visibility toggles — that's how `lint-cleanup-transcript` slipped through. The `group` literal (`'Lint'`, `'Materialize'`, `'Orchestrations'`, etc.) controls which section it appears in; new groups need an entry in the `CrucibleCommandGroup` union in `src/main.ts` and the `GROUP_ORDER` array in `src/settings.ts`. For dynamic command sets (Shortcuts, Captures, Chains, Agents), the re-register methods call `clearCommandRegistryGroup(group)` first to avoid duplicate entries.
+- **`Lint: localize attachments` is NOT part of `Lint: all`.** It's a standalone command in `src/localizeAttachments.ts` that touches binary files and (when downloading remote URLs) the network. Adding it to `lintNote()` would surprise users running plain frontmatter linting. The command still respects `lintIgnoredFolders` via `linter.isPathIgnored()`. Automatic triggers (create/edit/paste) are off by default for the same reason. If you add a future "lint everything everywhere" command, opt it into attachment localization explicitly — don't fold it into `lint-note`.
