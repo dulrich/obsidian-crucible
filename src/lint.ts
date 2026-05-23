@@ -311,6 +311,56 @@ export class Linter {
 		return failed === 0;
 	}
 
+	async removePropertyFromVault(key: string): Promise<boolean> {
+		const k = key.trim();
+		if (!k) {
+			new Notice('Property remove: a property name is required');
+			return false;
+		}
+
+		const files = this.app.vault.getMarkdownFiles().filter(f => !this.isPathIgnored(f.path));
+		if (files.length === 0) {
+			new Notice('No Markdown files to scan');
+			return true;
+		}
+
+		const notice = new Notice(`Removing property from ${files.length} notes...`, 0);
+		let scanned = 0;
+		let removed = 0;
+		let failed = 0;
+
+		try {
+			await withMaterializing(this.setMaterializing, async () => {
+				for (const file of files) {
+					try {
+						let didRemove = false;
+						await updateFrontmatter(this.app, file, (fm) => {
+							if (!(k in fm)) return;
+							delete fm[k];
+							didRemove = true;
+						});
+						if (didRemove) removed++;
+					} catch (e) {
+						failed++;
+						console.error(`Property remove failed (${file.path}):`, e);
+					}
+					scanned++;
+					if (scanned % 25 === 0) {
+						notice.setMessage(`Removing property... (${scanned}/${files.length}, removed ${removed})`);
+					}
+				}
+			});
+		} finally {
+			notice.hide();
+		}
+
+		const summary = failed > 0
+			? `Removed ${removed} of ${files.length} notes (${failed} failed)`
+			: `Removed ${removed} of ${files.length} notes`;
+		new Notice(summary);
+		return failed === 0;
+	}
+
 	async cleanupTranscriptInFile(viewOrFile?: MarkdownView | TFile, silent: boolean = false): Promise<boolean> {
 		let resolved: TFile | undefined;
 		if (viewOrFile instanceof TFile) {
