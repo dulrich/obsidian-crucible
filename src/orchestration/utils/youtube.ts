@@ -21,6 +21,7 @@ const URL_PATTERNS: RegExp[] = [
 	/(?:youtube\.com\/watch\?[^"\s]*\bv=)([A-Za-z0-9_-]{11})/,
 	/(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
 	/(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
+	/(?:youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/,
 ];
 
 export function extractVideoIdFromUrl(value: string): string | null {

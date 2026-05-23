@@ -146,14 +146,14 @@ export class BlogsTrackerWorkflow implements Workflow {
 			if (file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
-			const existing: unknown = fm['blog-post-id'];
+			const existing: unknown = fm['post-id'];
 			if (typeof existing === 'string' && existing.trim()) continue;
 			const detected = detectPostIdSource(fm);
 			if (!detected) continue;
 			await updateFrontmatter(app, file, current => {
-				const present = current['blog-post-id'];
+				const present = current['post-id'];
 				if (typeof present === 'string' && present.trim()) return;
-				insertFrontmatterPropertyAfter(current, detected.sourceKey, 'blog-post-id', detected.id);
+				insertFrontmatterPropertyAfter(current, detected.sourceKey, 'post-id', detected.id);
 			});
 		}
 	}
@@ -168,10 +168,10 @@ export class BlogsTrackerWorkflow implements Workflow {
 			if (inSkip && !(diffMode && inIntake)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
-			ingestStringProperty(fm['blog-post-id'], seen);
+			ingestStringProperty(fm['post-id'], seen);
 			ingestSourceProperty(fm['source'], seen);
 			if (diffMode && inIntake) {
-				ingestStringProperty(fm['post_ids'], seen);
+				ingestStringProperty(fm['post-ids'], seen);
 			}
 		}
 		return seen;
@@ -212,10 +212,10 @@ export class BlogsTrackerWorkflow implements Workflow {
 			`rows_skipped: ${rowErrors.length}`,
 		];
 		if (postIds.length > 0) {
-			fmLines.push('post_ids:');
+			fmLines.push('post-ids:');
 			for (const id of postIds) fmLines.push(`  - ${yamlScalar(id)}`);
 		} else {
-			fmLines.push('post_ids: []');
+			fmLines.push('post-ids: []');
 		}
 		fmLines.push('---', '');
 		const fm = fmLines.join('\n');
