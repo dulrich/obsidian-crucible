@@ -13,32 +13,21 @@ import {
 	fetchChannelFeed,
 	parseChannelsTable,
 } from '../utils/youtube';
+import {
+	CONSOLIDATE_GENERATED_BY_YOUTUBE,
+	INTAKE_ROOT_YOUTUBE,
+	QUEUE_SCAN_SKIP_PREFIX_YOUTUBE,
+	TRACKER_GENERATED_BY_YOUTUBE,
+	YoutubeChannelOutcome,
+	buildYoutubeSeenIdSet,
+	loadConfiguredChannels,
+	scanYoutubeTrackerRuns,
+} from '../utils/youtubeIntake';
 
-const INTAKE_ROOT = '_crucible/orchestration/youtube/new-videos';
-const QUEUE_SCAN_SKIP_PREFIX = '_crucible/orchestration/';
 const FEED_FETCH_CONCURRENCY = 4;
 const FEED_FETCH_MIN_INTERVAL_MS = 250;
-const TRACKER_GENERATED_BY = 'orchestrator/youtube_tracker';
-const CONSOLIDATE_GENERATED_BY = 'orchestrator/youtube_tracker_consolidate';
 
 const PRIORITY_ORDER: Record<ChannelEntry['priority'], number> = { high: 0, normal: 1, low: 2 };
-
-interface ChannelOutcome {
-	channel: ChannelEntry;
-	newVideos: RemoteVideo[];
-	error?: string;
-}
-
-interface ConsolidationScan {
-	outcomes: ChannelOutcome[];
-	runsScanned: number;
-	videosSeenInRuns: number;
-}
-
-interface IntakeVideoEntry {
-	channel: ChannelEntry;
-	video: RemoteVideo;
-}
 
 export class YoutubeTrackerWorkflow implements Workflow {
 	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
@@ -70,7 +59,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		await this.canonicalizeDetectedIds(plugin);
 
 		const diffMode = plugin.settings.orchestrationYoutubeTrackerDiffMode !== false;
-		const seen = this.buildSeenIdSet(plugin, diffMode);
+		const seen = buildYoutubeSeenIdSet(app, diffMode);
 
 		const fetchSettled = await rateLimitedAllSettled(
 			channels,
@@ -79,7 +68,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 			FEED_FETCH_MIN_INTERVAL_MS,
 		);
 
-		const outcomes: ChannelOutcome[] = channels.map((channel, i) => {
+		const outcomes: YoutubeChannelOutcome[] = channels.map((channel, i) => {
 			const settled = fetchSettled[i];
 			if (!settled || settled.status === 'rejected') {
 				const reason = settled?.status === 'rejected' ? describeReason(settled.reason) : 'unknown';
@@ -140,7 +129,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 	protected async canonicalizeDetectedIds(plugin: WorkflowContext['plugin']): Promise<void> {
 		const app = plugin.app;
 		for (const file of app.vault.getMarkdownFiles()) {
-			if (file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX)) continue;
+			if (file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX_YOUTUBE)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
 			const existing: unknown = fm['yt-video-id'];
@@ -155,30 +144,11 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		}
 	}
 
-	protected buildSeenIdSet(plugin: WorkflowContext['plugin'], diffMode: boolean): Set<string> {
-		const app = plugin.app;
-		const seen = new Set<string>();
-		const intakePrefix = `${INTAKE_ROOT}/`;
-		for (const file of app.vault.getMarkdownFiles()) {
-			const inIntake = file.path.startsWith(intakePrefix);
-			const inSkip = file.path.startsWith(QUEUE_SCAN_SKIP_PREFIX);
-			if (inSkip && !(diffMode && inIntake)) continue;
-			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
-			if (!fm) continue;
-			ingestProperty(fm['yt-video-id'], seen, false);
-			ingestProperty(fm['source'], seen, true);
-			if (diffMode && inIntake) {
-				ingestProperty(fm['yt-video-ids'], seen, false);
-			}
-		}
-		return seen;
-	}
-
 	protected async writeIntakeNote(
 		plugin: WorkflowContext['plugin'],
-		outcomes: ChannelOutcome[],
+		outcomes: YoutubeChannelOutcome[],
 		totalNew: number,
-		generatedBy = TRACKER_GENERATED_BY,
+		generatedBy = TRACKER_GENERATED_BY_YOUTUBE,
 	): Promise<string> {
 		const app = plugin.app;
 		const tz = plugin.settings.orchestrationTimezone;
@@ -186,7 +156,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		const time = nowTimeInTz(tz);
 		const displayTime = time.replace(/-/g, ':');
 		const path = await this.allocateIntakePath(app, date, time);
-		await ensureFolder(app, INTAKE_ROOT);
+		await ensureFolder(app, INTAKE_ROOT_YOUTUBE);
 
 		const sortedOutcomes = [...outcomes].sort(
 			(a, b) => PRIORITY_ORDER[a.channel.priority] - PRIORITY_ORDER[b.channel.priority],
@@ -249,7 +219,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 	}
 
 	private async allocateIntakePath(app: WorkflowContext['plugin']['app'], date: string, time: string): Promise<string> {
-		const base = `${INTAKE_ROOT}/${date}T${time}`;
+		const base = `${INTAKE_ROOT_YOUTUBE}/${date}T${time}`;
 		let candidate = normalizePath(`${base}.md`);
 		let suffix = 1;
 		while (app.vault.getAbstractFileByPath(candidate) instanceof TFile) {
@@ -263,11 +233,12 @@ export class YoutubeTrackerWorkflow implements Workflow {
 export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
+		const app = plugin.app;
 
 		await this.canonicalizeDetectedIds(plugin);
-		const seenInVault = this.buildSeenIdSet(plugin, false);
-		const configuredChannels = await this.loadConfiguredChannels(plugin);
-		const scan = await this.scanRegularTrackerRuns(plugin, seenInVault, configuredChannels);
+		const seenInVault = buildYoutubeSeenIdSet(app, false);
+		const configuredChannels = await loadConfiguredChannels(app, plugin);
+		const scan = await scanYoutubeTrackerRuns(app, seenInVault, configuredChannels);
 		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newVideos.length, 0);
 
 		if (scan.runsScanned === 0) {
@@ -286,144 +257,13 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 			};
 		}
 
-		const intakePath = await this.writeIntakeNote(plugin, scan.outcomes, totalNew, CONSOLIDATE_GENERATED_BY);
+		const intakePath = await this.writeIntakeNote(plugin, scan.outcomes, totalNew, CONSOLIDATE_GENERATED_BY_YOUTUBE);
 		return {
 			status: 'done',
 			outputPaths: [intakePath],
 			notes: `Runs scanned: ${scan.runsScanned}; Videos in runs: ${scan.videosSeenInRuns}; Still missing: ${totalNew}`,
 		};
 	}
-
-	private async loadConfiguredChannels(plugin: WorkflowContext['plugin']): Promise<Map<string, { channel: ChannelEntry; index: number }>> {
-		const app = plugin.app;
-		const registryPath = normalizePath(plugin.settings.orchestrationYoutubeChannelsNote);
-		const registryFile = app.vault.getAbstractFileByPath(registryPath);
-		const out = new Map<string, { channel: ChannelEntry; index: number }>();
-		if (!(registryFile instanceof TFile)) return out;
-		const content = await app.vault.read(registryFile);
-		const entries = parseChannelsTable(content);
-		entries.forEach((channel, index) => out.set(channel.channelId, { channel, index }));
-		return out;
-	}
-
-	private async scanRegularTrackerRuns(
-		plugin: WorkflowContext['plugin'],
-		seenInVault: Set<string>,
-		configuredChannels: Map<string, { channel: ChannelEntry; index: number }>,
-	): Promise<ConsolidationScan> {
-		const app = plugin.app;
-		const intakePrefix = `${INTAKE_ROOT}/`;
-		const intakeFiles = app.vault.getMarkdownFiles()
-			.filter(file => file.path.startsWith(intakePrefix))
-			.sort((a, b) => a.path.localeCompare(b.path));
-
-		const byId = new Map<string, { channel: ChannelEntry; video: RemoteVideo }>();
-		let runsScanned = 0;
-		let videosSeenInRuns = 0;
-
-		for (const file of intakeFiles) {
-			const content = await app.vault.read(file);
-			const generatedBy: unknown = app.metadataCache.getFileCache(file)?.frontmatter?.generated_by;
-			const isTrackerRun = generatedBy === TRACKER_GENERATED_BY || frontmatterHasGeneratedBy(content, TRACKER_GENERATED_BY);
-			if (!isTrackerRun) continue;
-			runsScanned++;
-
-			for (const entry of parseIntakeVideos(content)) {
-				videosSeenInRuns++;
-				const configured = configuredChannels.get(entry.channel.channelId);
-				if (!configured) continue;
-				if (seenInVault.has(entry.video.videoId) || byId.has(entry.video.videoId)) continue;
-				byId.set(entry.video.videoId, { channel: configured.channel, video: entry.video });
-			}
-		}
-
-		const byChannel = new Map<string, ChannelOutcome>();
-		for (const entry of byId.values()) {
-			const existing = byChannel.get(entry.channel.channelId);
-			if (existing) {
-				existing.newVideos.push(entry.video);
-			} else {
-				byChannel.set(entry.channel.channelId, {
-					channel: entry.channel,
-					newVideos: [entry.video],
-				});
-			}
-		}
-
-		const outcomes = Array.from(byChannel.values()).sort((a, b) => {
-			const ai = configuredChannels.get(a.channel.channelId)?.index ?? Number.MAX_SAFE_INTEGER;
-			const bi = configuredChannels.get(b.channel.channelId)?.index ?? Number.MAX_SAFE_INTEGER;
-			return ai - bi;
-		});
-
-		return {
-			outcomes,
-			runsScanned,
-			videosSeenInRuns,
-		};
-	}
-}
-
-function parseIntakeVideos(content: string): IntakeVideoEntry[] {
-	const entries: IntakeVideoEntry[] = [];
-	let currentChannel: ChannelEntry | null = null;
-
-	for (const line of content.split(/\r?\n/)) {
-		const channel = parseChannelHeading(line);
-		if (channel) {
-			currentChannel = channel;
-			continue;
-		}
-
-		if (line.startsWith('## ')) {
-			currentChannel = null;
-			continue;
-		}
-
-		if (!currentChannel) continue;
-		const video = parseVideoBullet(line, currentChannel.name);
-		if (video) entries.push({ channel: currentChannel, video });
-	}
-
-	return entries;
-}
-
-function parseChannelHeading(line: string): ChannelEntry | null {
-	const match = line.match(/^##\s+(.+)\s+\((UC[A-Za-z0-9_-]+)\)\s*$/);
-	const name = match?.[1]?.trim();
-	const channelId = match?.[2]?.trim();
-	if (!name || !channelId) return null;
-	return { name, channelId, tags: [], priority: 'normal' };
-}
-
-function parseVideoBullet(line: string, channelName: string): RemoteVideo | null {
-	const match = line.match(/^- \*\*(.*)\*\* — published ([^—]+) — (https?:\/\/\S+)/);
-	const rawTitle = match?.[1]?.trim();
-	const publishedAt = match?.[2]?.trim();
-	const url = match?.[3]?.trim();
-	if (!rawTitle || !publishedAt || !url) return null;
-	const videoId = extractVideoIdFromUrl(url);
-	if (!videoId) return null;
-	return {
-		videoId,
-		title: unescapeBrackets(rawTitle),
-		publishedAt,
-		channelName,
-		url,
-	};
-}
-
-function unescapeBrackets(text: string): string {
-	return text.replace(/\\\[/g, '[').replace(/\\\]/g, ']');
-}
-
-function frontmatterHasGeneratedBy(content: string, expected: string): boolean {
-	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-	const frontmatter = match?.[1];
-	if (!frontmatter) return false;
-	return frontmatter
-		.split(/\r?\n/)
-		.some(line => line.trim() === `generated_by: ${expected}`);
 }
 
 function detectVideoIdSource(fm: Record<string, unknown>): { id: string; sourceKey: string } | null {
@@ -446,27 +286,6 @@ function firstUrlId(value: unknown): string | null {
 	return null;
 }
 
-function ingestProperty(value: unknown, seen: Set<string>, urlMode: boolean): void {
-	if (typeof value === 'string') {
-		addId(value, seen, urlMode);
-	} else if (Array.isArray(value)) {
-		for (const item of value) {
-			if (typeof item === 'string') addId(item, seen, urlMode);
-		}
-	}
-}
-
-function addId(value: string, seen: Set<string>, urlMode: boolean): void {
-	const trimmed = value.trim();
-	if (!trimmed) return;
-	if (urlMode) {
-		const id = extractVideoIdFromUrl(trimmed);
-		if (id) seen.add(id);
-	} else if (/^[A-Za-z0-9_-]{11}$/.test(trimmed)) {
-		seen.add(trimmed);
-	}
-}
-
 function describeReason(reason: unknown): string {
 	if (reason instanceof Error) return reason.message;
 	if (typeof reason === 'string') return reason;
@@ -476,3 +295,6 @@ function describeReason(reason: unknown): string {
 function escapeBrackets(text: string): string {
 	return text.replace(/\[/g, '\\[').replace(/\]/g, '\\]');
 }
+
+// Re-export RemoteVideo for callers that imported it from this module previously.
+export type { RemoteVideo };

@@ -2161,6 +2161,70 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			.addButton(bt => bt.setButtonText('Run next').onClick(async () => {
 				await this.plugin.orchestrator.runNext();
 			}));
+
+		// --- Ingestion Dashboard ---
+		new Setting(containerEl).setName('Ingestion dashboard').setHeading();
+		containerEl.createEl('p', { text: 'Live view of clippings, transcripts, tracker runs, and uncaptured posts/videos. Open via the "Crucible: Open ingestion dashboard" command.' });
+
+		const ingestionGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+		new Setting(ingestionGroup)
+			.setName('Clipper inbox folder')
+			.setDesc('Markdown files directly under this folder are shown in the "Unprocessed Clippings" section.')
+			.addSearch(cb => {
+				cb.setPlaceholder('_clippings/inbox')
+					.setValue(this.plugin.settings.ingestionClipperInboxFolder)
+					.onChange(async (v) => {
+						this.plugin.settings.ingestionClipperInboxFolder = v.trim() || '_clippings/inbox';
+						await this.plugin.saveSettings();
+					});
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FolderSuggest(this.app, cb.inputEl);
+			});
+
+		ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(ingestionGroup)
+			.setName('Reading speed (words per minute)')
+			.setDesc('Used to estimate read time for unrefined transcripts.')
+			.addText(t => {
+				t.setPlaceholder('250')
+					.setValue(String(this.plugin.settings.ingestionReadingWpm))
+					.onChange(async (v) => {
+						const n = Number(v.trim());
+						this.plugin.settings.ingestionReadingWpm = Number.isFinite(n) && n > 0 ? n : 250;
+						await this.plugin.saveSettings();
+					});
+				t.inputEl.type = 'number';
+				t.inputEl.addClass('pi-width-small');
+			});
+
+		ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(ingestionGroup)
+			.setName('Auto-enrich YouTube metadata')
+			.setDesc('When on, the dashboard drains the Uncaptured Videos list (in current sort order) through the YouTube Data API. Requires a configured API key.')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true)
+				.onChange(async (v) => {
+					this.plugin.settings.ingestionYoutubeAutoEnrichEnabled = v;
+					await this.plugin.saveSettings();
+				}));
+
+		ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(ingestionGroup)
+			.setName('Enrichment rate limit (seconds)')
+			.setDesc('Minimum seconds between YouTube Data API requests when draining the enrichment queue.')
+			.addText(t => {
+				t.setPlaceholder('2')
+					.setValue(String(this.plugin.settings.ingestionYoutubeEnrichRateLimitSeconds))
+					.onChange(async (v) => {
+						const n = Number(v.trim());
+						this.plugin.settings.ingestionYoutubeEnrichRateLimitSeconds = Number.isFinite(n) && n >= 0 ? n : 2;
+						await this.plugin.saveSettings();
+					});
+				t.inputEl.type = 'number';
+				t.inputEl.addClass('pi-width-small');
+			});
 	}
 
 	private renderEditDailyBriefWorkflow(containerEl: HTMLElement) {

@@ -292,6 +292,7 @@ export interface CrucibleSettings {
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
+	orchestrationQueueAutorunEnabled: boolean;
 	// Workflow: daily_brief_lite
 	orchestrationDailyBriefEnabled: boolean;
 	orchestrationDailyBriefTargetSection: string;
@@ -316,6 +317,11 @@ export interface CrucibleSettings {
 	// Workflow: transcript_refine
 	orchestrationTranscriptRefineEnabled: boolean;
 	orchestrationTranscriptRefineChainName: string;
+	// Ingestion Dashboard
+	ingestionClipperInboxFolder: string;
+	ingestionYoutubeEnrichRateLimitSeconds: number;
+	ingestionYoutubeAutoEnrichEnabled: boolean;
+	ingestionReadingWpm: number;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -385,6 +391,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
+	orchestrationQueueAutorunEnabled: false,
 	orchestrationDailyBriefEnabled: true,
 	orchestrationDailyBriefTargetSection: 'Daily Brief: External Context',
 	orchestrationDailyBriefFxPairs: [
@@ -411,4 +418,8 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationTrackedSourcesNote: 'Sources/Tracked Sources.md',
 	orchestrationTranscriptRefineEnabled: true,
 	orchestrationTranscriptRefineChainName: 'Refine Transcript',
+	ingestionClipperInboxFolder: '_clippings/inbox',
+	ingestionYoutubeEnrichRateLimitSeconds: 2,
+	ingestionYoutubeAutoEnrichEnabled: false,
+	ingestionReadingWpm: 250,
 }
