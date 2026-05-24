@@ -24,6 +24,10 @@ import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 import { CrucibleCommandPaletteModal } from './commandPalette';
+import { IngestionDashboardView, INGESTION_DASHBOARD_VIEW_TYPE } from './ingestionDashboardView';
+import { IngestionEventBus } from './orchestration/events';
+import { EnrichmentQueueService } from './orchestration/EnrichmentQueueService';
+import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -34,6 +38,7 @@ export type CrucibleCommandGroup =
 	| 'Chains'
 	| 'Agents'
 	| 'Orchestrations'
+	| 'Ingestion'
 	| 'Other';
 
 export interface CrucibleCommandEntry {
@@ -55,6 +60,9 @@ export default class CruciblePlugin extends Plugin {
 	agentManager: AgentManager;
 	jobStore: JobStore;
 	orchestrator: Orchestrator;
+	ingestionEvents: IngestionEventBus;
+	enrichmentQueue: EnrichmentQueueService;
+	orchestrationAutoRunner: OrchestrationAutoRunner;
 	private tocComponent: TableOfContentsUI | null = null;
 
 	async onload() {
@@ -69,6 +77,8 @@ export default class CruciblePlugin extends Plugin {
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 		this.jobStore = new JobStore(this);
 		this.orchestrator = new Orchestrator(this, this.jobStore);
+		this.ingestionEvents = new IngestionEventBus();
+		this.enrichmentQueue = new EnrichmentQueueService(this);
 		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
 		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow());
 		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow());
@@ -76,12 +86,14 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
 		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
+		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 
 		this.registerInternalCommands();
 		this.registerAgents();
 		this.registerChains();
 
 		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
+		this.registerView(INGESTION_DASHBOARD_VIEW_TYPE, (leaf) => new IngestionDashboardView(leaf, this));
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
 			this.app.setting.open();
@@ -225,6 +237,13 @@ export default class CruciblePlugin extends Plugin {
 			name: 'Open settings in a tab',
 			group: 'Other',
 			run: () => this.activateSettingsView(),
+		});
+
+		this.registerCrucibleCommand({
+			id: 'open-ingestion-dashboard',
+			name: 'Open ingestion dashboard',
+			group: 'Ingestion',
+			run: () => this.activateIngestionDashboardView(),
 		});
 
 		this.registerCrucibleCommand({
@@ -387,6 +406,9 @@ export default class CruciblePlugin extends Plugin {
 
 	onunload() {
 		if (this.tocComponent) this.tocComponent.unload();
+		this.orchestrationAutoRunner?.dispose();
+		this.enrichmentQueue?.dispose();
+		this.ingestionEvents?.dispose();
 	}
 
 	private activeEditor(): Editor | undefined {
@@ -958,9 +980,11 @@ export default class CruciblePlugin extends Plugin {
 			switch (result.status) {
 				case 'created':
 					new Notice(`YouTube metadata saved: ${result.metadataPath}`);
+					this.emitMetadataEnriched(videoId, result.metadataPath, file);
 					break;
 				case 'exists':
 					new Notice(`YouTube metadata already exists; linked.`);
+					this.emitMetadataEnriched(videoId, result.metadataPath, file);
 					break;
 				case 'no-video-id':
 					// eslint-disable-next-line obsidianmd/ui/sentence-case
@@ -1002,6 +1026,24 @@ export default class CruciblePlugin extends Plugin {
 		const leaf = existing[0] ?? workspace.getLeaf('tab');
 		if (!existing.length) {
 			await leaf.setViewState({ type: CRUCIBLE_SETTINGS_VIEW_TYPE, active: true });
+		}
+		await workspace.revealLeaf(leaf);
+	}
+
+	private emitMetadataEnriched(videoId: string, metadataPath: string, sourceFile?: TFile): void {
+		const bus = this.ingestionEvents;
+		if (!bus) return;
+		const file = this.app.vault.getAbstractFileByPath(metadataPath);
+		if (!(file instanceof TFile)) return;
+		bus.emit('metadata-enriched', { videoId, metadataFile: file, sourceFile });
+	}
+
+	async activateIngestionDashboardView() {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(INGESTION_DASHBOARD_VIEW_TYPE);
+		const leaf = existing[0] ?? workspace.getLeaf('tab');
+		if (!existing.length) {
+			await leaf.setViewState({ type: INGESTION_DASHBOARD_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
 	}
