@@ -1,4 +1,4 @@
-import { App, Notice } from 'obsidian';
+import { App, Notice, TFile } from 'obsidian';
 import { JobStore } from './JobStore';
 import { JobType, OrchestrationJob, ScanReport, WorkflowResult } from './types';
 import { Workflow } from './workflows/Workflow';
@@ -29,6 +29,7 @@ export class Orchestrator {
 		}
 		const job = await this.store.enqueue(type, { params });
 		new Notice(`Orchestrate: queued ${type} (${job.id})`);
+		void this.emitQueueUpdate();
 		return job;
 	}
 
@@ -47,10 +48,12 @@ export class Orchestrator {
 		}
 
 		const moved = await this.store.move(next.file, next.job, 'running');
+		void this.emitQueueUpdate();
 		if (!this.isWorkflowEnabled(moved.job.type)) {
 			const error = `Workflow "${moved.job.type}" is disabled in settings`;
 			await this.store.setError(moved.file, error);
 			const failed = await this.store.move(moved.file, moved.job, 'failed');
+			void this.emitQueueUpdate();
 			new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 			return failed.job;
 		}
@@ -60,6 +63,7 @@ export class Orchestrator {
 			const error = `No workflow registered for type "${moved.job.type}"`;
 			await this.store.setError(moved.file, error);
 			const failed = await this.store.move(moved.file, moved.job, 'failed');
+			void this.emitQueueUpdate();
 			new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 			return failed.job;
 		}
@@ -79,16 +83,21 @@ export class Orchestrator {
 				const error = result.error ?? 'Workflow returned failed status';
 				await this.store.setError(moved.file, error);
 				const failed = await this.store.move(moved.file, moved.job, 'failed');
+				void this.emitQueueUpdate();
+				this.emitTrackerEvent(moved.job.type, result, 'failed');
 				new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 				return failed.job;
 			}
 			const done = await this.store.move(moved.file, moved.job, 'done');
+			void this.emitQueueUpdate();
+			this.emitTrackerEvent(moved.job.type, result, 'done');
 			new Notice(`Orchestrate: ${moved.job.id} → done`);
 			return done.job;
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
 			await this.store.setError(moved.file, message);
 			const failed = await this.store.move(moved.file, moved.job, 'failed');
+			void this.emitQueueUpdate();
 			new Notice(`Orchestrate: ${moved.job.id} → failed (${message})`);
 			return failed.job;
 		}
@@ -151,5 +160,35 @@ export class Orchestrator {
 			this.plugin.settings.lintIgnoredFolders = [...this.plugin.settings.lintIgnoredFolders, root];
 			await this.plugin.saveSettings();
 		}
+	}
+
+	private async emitQueueUpdate(): Promise<void> {
+		const bus = this.plugin.ingestionEvents;
+		if (!bus) return;
+		try {
+			const [queued, running] = await Promise.all([
+				this.store.listFolder('queued'),
+				this.store.listFolder('running'),
+			]);
+			bus.emit('orchestration-queue-updated', { queued: queued.length, running: running.length });
+		} catch (err) {
+			console.error('[crucible] failed to emit orchestration-queue-updated:', err);
+		}
+	}
+
+	private emitTrackerEvent(type: JobType, result: WorkflowResult, status: 'done' | 'failed'): void {
+		const bus = this.plugin.ingestionEvents;
+		if (!bus) return;
+		let kind: 'blog' | 'youtube' | null = null;
+		if (type === 'blogs_tracker' || type === 'blogs_tracker_consolidate') kind = 'blog';
+		else if (type === 'youtube_tracker' || type === 'youtube_tracker_consolidate') kind = 'youtube';
+		if (!kind) return;
+		const outPath = result.outputPaths?.[0];
+		const runFile = outPath ? this.app.vault.getAbstractFileByPath(outPath) : null;
+		bus.emit('tracker-run', {
+			kind,
+			runFile: runFile instanceof TFile ? runFile : null,
+			status,
+		});
 	}
 }
