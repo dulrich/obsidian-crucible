@@ -195,32 +195,43 @@ export class AttachmentLocalizer {
 		if (this.linter.isPathIgnored(file.path)) return true;
 		if (file.extension !== 'md') return true;
 
+		const spinner = silent ? null : new Notice(`Localizing attachments in "${file.basename}"...`, 0);
+
 		try {
-			const original = await this.app.vault.read(file);
-			const matches = this.parseAttachmentRefs(original, file);
-			if (matches.length === 0) {
-				if (!silent) new Notice('No attachments to localize');
-				return true;
-			}
-
-			let updated = original;
-			let changed = 0;
-			for (const match of matches) {
-				const newRef = await this.processMatch(match, file);
-				if (newRef && newRef !== match.original) {
-					updated = updated.split(match.original).join(newRef);
-					changed++;
+			return await withMaterializing(this.setMaterializing, async () => {
+				const original = await this.app.vault.read(file);
+				const matches = this.parseAttachmentRefs(original, file);
+				if (matches.length === 0) {
+					spinner?.hide();
+					if (!silent) new Notice('No attachments to localize');
+					return true;
 				}
-			}
 
-			if (updated !== original) {
-				await withMaterializing(this.setMaterializing, async () => {
-					await this.app.vault.modify(file, updated);
-				});
-			}
-			if (!silent) new Notice(`Localized ${changed} of ${matches.length} attachments`);
-			return true;
+				const replacements: Array<{ from: string; to: string }> = [];
+				let i = 0;
+				for (const match of matches) {
+					spinner?.setMessage(`Localizing attachment ${++i}/${matches.length} in "${file.basename}"...`);
+					const newRef = await this.processMatch(match, file);
+					if (newRef && newRef !== match.original) {
+						replacements.push({ from: match.original, to: newRef });
+					}
+				}
+
+				if (replacements.length > 0) {
+					const fresh = await this.app.vault.read(file);
+					let updated = fresh;
+					for (const r of replacements) updated = updated.split(r.from).join(r.to);
+					if (updated !== fresh) {
+						await this.app.vault.modify(file, updated);
+					}
+				}
+
+				spinner?.hide();
+				if (!silent) new Notice(`Localized ${replacements.length} of ${matches.length} attachments`);
+				return true;
+			});
 		} catch (e) {
+			spinner?.hide();
 			console.error(`Localize attachments failed (${file.path}):`, e);
 			if (!silent) new Notice(`Localize failed: ${(e as Error).message}`);
 			return false;
