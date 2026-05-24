@@ -198,6 +198,37 @@ export async function writeYoutubeMetadataNote(app: App, path: string, meta: You
 	return await app.vault.create(path, body);
 }
 
+export async function enrichYoutubeMetadataStandalone(
+	plugin: CruciblePlugin,
+	videoId: string,
+): Promise<IngestResult> {
+	const app = plugin.app;
+	const trimmedId = videoId.trim();
+	if (!trimmedId) return { status: 'no-video-id', metadataPath: null };
+
+	const root = normalizePath(plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata');
+
+	const existing = await findExistingMetadataNote(app, root, trimmedId);
+	if (existing) {
+		return { status: 'exists', metadataPath: existing.path, createdNew: false, linkUpdated: false };
+	}
+
+	const apiKey = await loadYoutubeApiKey(app);
+	if (!apiKey) return { status: 'no-api-key', metadataPath: null };
+
+	const meta = await fetchYoutubeVideo(apiKey, trimmedId);
+	const channelFolder = await resolveChannelFolder(app, plugin, meta.channelId, meta.channelTitle);
+	const path = youtubeMetadataNotePath(root, channelFolder, trimmedId);
+
+	const collision = app.vault.getAbstractFileByPath(path);
+	if (collision instanceof TFile) {
+		return { status: 'exists', metadataPath: path, createdNew: false, linkUpdated: false };
+	}
+
+	await writeYoutubeMetadataNote(app, path, meta);
+	return { status: 'created', metadataPath: path, createdNew: true, linkUpdated: false };
+}
+
 export async function ingestYoutubeVideoMetadata(
 	plugin: CruciblePlugin,
 	sourceFile: TFile,

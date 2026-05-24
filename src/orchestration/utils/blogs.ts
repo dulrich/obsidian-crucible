@@ -136,7 +136,7 @@ function parseRssItems(doc: Document, fallbackBlogName: string): RemotePost[] {
 		const link = (textOf(item, 'link') ?? '').trim();
 		const guidRaw = textOf(item, 'guid');
 		const guid = guidRaw ? guidRaw.trim() : '';
-		const publishedAt = (textOf(item, 'pubDate') ?? textOf(item, 'dc:date') ?? '').trim();
+		const publishedAt = normalizePublishedAt(textOf(item, 'pubDate') ?? textOf(item, 'dc:date') ?? '');
 		const url = link || guid;
 		if (!url) continue;
 		const postId = guid || postIdFromUrl(url);
@@ -155,13 +155,27 @@ function parseAtomEntries(doc: Document, fallbackBlogName: string): RemotePost[]
 		const title = (textOf(entry, 'title') ?? '(untitled)').trim();
 		const id = (textOf(entry, 'id') ?? '').trim();
 		const linkHref = atomLinkHref(entry);
-		const publishedAt = (textOf(entry, 'published') ?? textOf(entry, 'updated') ?? '').trim();
+		const publishedAt = normalizePublishedAt(textOf(entry, 'published') ?? textOf(entry, 'updated') ?? '');
 		const url = linkHref || id;
 		if (!url) continue;
 		const postId = id || postIdFromUrl(url);
 		out.push({ postId, title, publishedAt, blogName: feedTitle, url });
 	}
 	return out;
+}
+
+export function normalizePublishedAt(raw: string | null | undefined): string {
+	const trimmed = (raw ?? '').trim();
+	if (!trimmed) return '';
+	// Already ISO-like (YYYY-MM-DD…): keep as-is.
+	if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed;
+	const parsed = Date.parse(trimmed);
+	if (!Number.isFinite(parsed)) return trimmed;
+	const d = new Date(parsed);
+	const y = d.getUTCFullYear();
+	const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+	const day = String(d.getUTCDate()).padStart(2, '0');
+	return `${y}-${m}-${day}`;
 }
 
 function atomLinkHref(entry: Element): string {
