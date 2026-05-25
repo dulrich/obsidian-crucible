@@ -1,6 +1,7 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon, Platform, Command, ExtraButtonComponent, TextComponent } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Command, ExtraButtonComponent, TextComponent } from "obsidian";
 import CruciblePlugin, { CrucibleCommandGroup } from "./main";
+import { getCommandHotkeyLabel } from "./utils";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
 import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, CrucibleCommandPaletteFilterMode, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "./types";
 import { agentCommandId } from "./agents";
@@ -414,6 +415,28 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		if (!this.plugin.settings.crucibleCommandPaletteEnabled) return;
 
 		group.createEl('hr', { cls: 'crucible-row-divider' });
+
+		new Setting(group)
+			.setName('Show configured hotkeys')
+			.setDesc('Display each command\'s bound hotkey as a pill in the palette.')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.crucibleCommandPaletteShowHotkeys)
+				.onChange(async (v) => {
+					this.plugin.settings.crucibleCommandPaletteShowHotkeys = v;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(group)
+			.setName('Show shortest unique fuzzy string')
+			.setDesc('Display the shortest text you could type to surface each command on its own, as a pill.')
+			.addToggle(t => t
+				.setValue(this.plugin.settings.crucibleCommandPaletteShowUniqueString)
+				.onChange(async (v) => {
+					this.plugin.settings.crucibleCommandPaletteShowUniqueString = v;
+					await this.plugin.saveSettings();
+				}));
+
+		group.createEl('hr', { cls: 'crucible-row-divider' });
 		this.renderPinnedCommandList(group);
 
 		group.createEl('hr', { cls: 'crucible-row-divider' });
@@ -547,28 +570,14 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	}
 
 	private renderHotkey(el: HTMLElement, commandId: string) {
-		const prefix = this.plugin.manifest.id;
-		const fullId = `${prefix}:${commandId}`;
-		const hotkeys = this.app.hotkeyManager.getHotkeys(fullId);
-		
-		if (!hotkeys || hotkeys.length === 0) return;
-
-		const hotkey = hotkeys[0];
-		if (!hotkey) return;
-		const parts: string[] = hotkey.modifiers.map(mod => {
-			if (mod === 'Mod') return Platform.isMacOS ? 'Cmd' : 'Ctrl';
-			return mod;
-		});
-
-		let key = hotkey.key;
-		if (key.length === 1) key = key.toUpperCase();
-		if (key === ' ') key = 'Space';
-		parts.push(key);
+		const fullId = `${this.plugin.manifest.id}:${commandId}`;
+		const label = getCommandHotkeyLabel(this.app, fullId);
+		if (!label) return;
 
 		const hotkeyEl = document.createElement('div');
 		hotkeyEl.classList.add('crucible-hotkey-display');
-		hotkeyEl.createEl('kbd', { text: parts.join(' + ') });
-		
+		hotkeyEl.createEl('kbd', { text: label });
+
 		el.prepend(hotkeyEl);
 	}
 

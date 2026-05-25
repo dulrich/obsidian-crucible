@@ -1,5 +1,29 @@
-import { App, TFolder, moment } from 'obsidian';
+import { App, Platform, TFolder, moment } from 'obsidian';
 import { LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from './types';
+
+/**
+ * Returns a display label for the first hotkey bound to a command, e.g. "Cmd + B",
+ * or null when the command (identified by its FULL, already-prefixed id) has no hotkey.
+ */
+export function getCommandHotkeyLabel(app: App, fullCommandId: string): string | null {
+	const hotkeys = app.hotkeyManager.getHotkeys(fullCommandId);
+	if (!hotkeys || hotkeys.length === 0) return null;
+
+	const hotkey = hotkeys[0];
+	if (!hotkey) return null;
+
+	const parts: string[] = hotkey.modifiers.map(mod => {
+		if (mod === 'Mod') return Platform.isMacOS ? 'Cmd' : 'Ctrl';
+		return mod;
+	});
+
+	let key = hotkey.key;
+	if (key.length === 1) key = key.toUpperCase();
+	if (key === ' ') key = 'Space';
+	parts.push(key);
+
+	return parts.join(' + ');
+}
 
 export const FRONTMATTER_REGEX = new RegExp('^[\\uFEFF]?---\\s*[^\\S\\r\\n]*[\\r\\n]+([\\s\\S]*?)[\\r\\n]+---[^\\S\\r\\n]*([\\r\\n]*)');
 
