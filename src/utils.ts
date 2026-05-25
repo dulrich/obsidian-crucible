@@ -1,4 +1,5 @@
 import { App, TFolder, moment } from 'obsidian';
+import { LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from './types';
 
 export const FRONTMATTER_REGEX = new RegExp('^[\\uFEFF]?---\\s*[^\\S\\r\\n]*[\\r\\n]+([\\s\\S]*?)[\\r\\n]+---[^\\S\\r\\n]*([\\r\\n]*)');
 
@@ -56,6 +57,22 @@ export function slugify(value: string): string {
 		.replace(/[̀-ͯ]/g, '')
 		.replace(/[^a-z0-9]+/g, '-')
 		.replace(/^-+|-+$/g, '');
+}
+
+const LOCALIZE_PROCESSABLE_TYPES: LocalizeMediaType[] = ['images', 'audio', 'video', 'pdf'];
+
+/**
+ * Classify a file extension into the Localize media type it belongs to, or null
+ * if it is not a localizable media type. Mirrors the convention used by
+ * AttachmentLocalizer.classifyExtension (webm prefers video).
+ */
+export function classifyLocalizeMediaType(extRaw: string): LocalizeMediaType | null {
+	const ext = extRaw.toLowerCase().replace(/^\./, '');
+	if (ext === 'webm') return 'video';
+	for (const type of LOCALIZE_PROCESSABLE_TYPES) {
+		if (OBSIDIAN_NATIVE_EMBED_FORMATS[type].includes(ext)) return type;
+	}
+	return null;
 }
 
 export interface AttachmentTemplateContext {

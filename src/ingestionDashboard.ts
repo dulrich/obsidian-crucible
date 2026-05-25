@@ -1,5 +1,9 @@
-import { App, EventRef, Notice, TFile, TFolder, debounce, getAllTags } from 'obsidian';
+import { App, EventRef, Notice, TFile, TFolder, debounce, getAllTags, setIcon } from 'obsidian';
 import type CruciblePlugin from './main';
+import { LocalizeMediaType } from './types';
+import { MD5_NAME_RE } from './localizeAttachments';
+import { classifyLocalizeMediaType } from './utils';
+import { ConfirmModal } from './confirmModal';
 import {
 	BlogOutcome,
 	BlogsIntakeRunStat,
@@ -18,7 +22,7 @@ import {
 	loadConfiguredChannels,
 	scanYoutubeTrackerRuns,
 } from './orchestration/utils/youtubeIntake';
-import { findExistingMetadataNote } from './orchestration/utils/youtubeApi';
+import { findExistingMetadataNote, parseIso8601Duration } from './orchestration/utils/youtubeApi';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueService';
@@ -32,7 +36,8 @@ type SectionId =
 	| 'orchestrationQueue'
 	| 'uncapturedPosts'
 	| 'enrichmentQueue'
-	| 'uncapturedVideos';
+	| 'uncapturedVideos'
+	| 'orphanedAttachments';
 
 type IntakeKind = 'blog' | 'youtube';
 
@@ -53,6 +58,7 @@ interface UncapturedVideoRow {
 	title: string;
 	publishedAt: string;
 	url: string;
+	durationSeconds: number | null;
 	enrichmentFile: TFile | null;
 }
 
@@ -65,11 +71,21 @@ interface UncapturedPostRow {
 	url: string;
 }
 
+interface OrphanRow {
+	file: TFile;
+	folder: string;
+	type: LocalizeMediaType;
+	size: number;
+	mtime: number;
+}
+
 interface SectionContext {
 	id: SectionId;
 	title: string;
 	description: string;
 	body: HTMLElement;
+	countEl: HTMLElement;
+	metaEl: HTMLElement;
 	refresh: () => Promise<void> | void;
 	sort: SortState | null;
 }
@@ -90,6 +106,7 @@ export class IngestionDashboardUI {
 	private readonly eventRefs: EventRef[] = [];
 	private sections = new Map<SectionId, SectionContext>();
 	private uncapturedVideosCache: UncapturedVideoRow[] = [];
+	private orphanedAttachmentsCache: OrphanRow[] = [];
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly container: HTMLElement) {
@@ -108,12 +125,18 @@ export class IngestionDashboardUI {
 
 		this.buildSection('unprocessedClippings', 'Unprocessed clippings', 'Markdown files directly under the configured clipper inbox folder.');
 		this.buildSection('unrefinedTranscripts', 'Unrefined transcripts', 'Notes tagged #transcript that are not yet tagged #refined.');
-		this.buildSection('blogIntake', 'Blog intake', 'Blog tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'blog'));
-		this.buildSection('youtubeIntake', 'YouTube intake', 'YouTube tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'youtube'));
+		this.buildSection('blogIntake', 'Blog intake', 'Blog tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'blog'), true);
+		this.buildSection('youtubeIntake', 'YouTube intake', 'YouTube tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'youtube'), true);
 		this.buildOrchestrationQueueSection();
 		this.buildSection('uncapturedPosts', 'Uncaptured posts', 'Blog posts seen in tracker runs but not yet captured as a vault note.');
 		this.buildEnrichmentQueueSection();
 		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.');
+		this.buildSection(
+			'orphanedAttachments',
+			'Orphaned attachments',
+			'Localized attachments (…_MD5.ext) with no back-reference from any note.',
+			(heading) => this.renderCleanupAllButton(heading),
+		);
 
 		this.registerListeners();
 		void this.refreshAll();
@@ -145,6 +168,7 @@ export class IngestionDashboardUI {
 		const debouncedUncapturedPosts = debounce(() => void this.refresh('uncapturedPosts'), DEBOUNCE_MS, true);
 		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), DEBOUNCE_MS, true);
 		const debouncedQueue = debounce(() => void this.refresh('enrichmentQueue'), DEBOUNCE_MS, true);
+		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), DEBOUNCE_MS, true);
 		const debouncedOrchestrationQueue = debounce(() => {
 			void this.refresh('orchestrationQueue');
 			void this.refreshIntakeButton('blog');
@@ -169,6 +193,8 @@ export class IngestionDashboardUI {
 			// Source/post-id/yt-video-id frontmatter on arbitrary notes affects uncaptured lists.
 			debouncedUncapturedPosts();
 			debouncedUncapturedVideos();
+			// Any note edit, or any attachment created/deleted/renamed, can change orphan status.
+			debouncedOrphans();
 		};
 
 		this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path)));
@@ -190,17 +216,45 @@ export class IngestionDashboardUI {
 		}
 	}
 
+	// Builds the callout-style collapsible header shared by every section: a
+	// chevron toggle on the left, the title with a (count) suffix, a meta slot
+	// (e.g. "last run X ago"), and the description. Clicking the header collapses
+	// the card (CSS hides the body + any queue controls) unless the click landed
+	// on an interactive control.
+	private createSectionHeader(
+		card: HTMLElement,
+		title: string,
+		description: string,
+		defaultCollapsed: boolean,
+	): { heading: HTMLElement; countEl: HTMLElement; metaEl: HTMLElement } {
+		if (defaultCollapsed) card.addClass('is-collapsed');
+		const heading = card.createDiv({ cls: 'crucible-ingestion-section-header' });
+		const toggle = heading.createDiv({ cls: 'crucible-ingestion-section-toggle' });
+		setIcon(toggle, defaultCollapsed ? 'chevron-right' : 'chevron-down');
+		const h3 = heading.createEl('h3', { text: title });
+		const countEl = h3.createSpan({ cls: 'crucible-ingestion-section-count' });
+		const metaEl = heading.createSpan({ cls: 'crucible-ingestion-section-meta' });
+		const sub = heading.createDiv({ cls: 'crucible-ingestion-section-desc' });
+		sub.setText(description);
+
+		heading.addEventListener('click', evt => {
+			if ((evt.target as HTMLElement).closest('button, input, a, label')) return;
+			const collapsed = card.classList.toggle('is-collapsed');
+			setIcon(toggle, collapsed ? 'chevron-right' : 'chevron-down');
+		});
+
+		return { heading, countEl, metaEl };
+	}
+
 	private buildSection(
 		id: SectionId,
 		title: string,
 		description: string,
 		decorateHeader?: (heading: HTMLElement) => void,
+		defaultCollapsed = false,
 	): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
-		const heading = card.createDiv({ cls: 'crucible-ingestion-section-header' });
-		heading.createEl('h3', { text: title });
-		const sub = heading.createDiv({ cls: 'crucible-ingestion-section-desc' });
-		sub.setText(description);
+		const { heading, countEl, metaEl } = this.createSectionHeader(card, title, description, defaultCollapsed);
 		const refreshBtn = heading.createEl('button', { text: 'Refresh', cls: 'crucible-ingestion-refresh' });
 		decorateHeader?.(heading);
 		const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
@@ -211,6 +265,8 @@ export class IngestionDashboardUI {
 			title,
 			description,
 			body,
+			countEl,
+			metaEl,
 			sort: null,
 			refresh: async () => {
 				await this.renderSection(id, body, ctx);
@@ -220,12 +276,26 @@ export class IngestionDashboardUI {
 		refreshBtn.addEventListener('click', () => void ctx.refresh());
 	}
 
+	private setSectionCount(id: SectionId, n: number): void {
+		const ctx = this.sections.get(id);
+		if (!ctx) return;
+		ctx.countEl.setText(n > 0 ? ` (${n})` : '');
+	}
+
+	private setSectionMeta(id: SectionId, text: string): void {
+		const ctx = this.sections.get(id);
+		if (!ctx) return;
+		ctx.metaEl.setText(text);
+	}
+
 	private buildEnrichmentQueueSection(): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
-		const heading = card.createDiv({ cls: 'crucible-ingestion-section-header' });
-		heading.createEl('h3', { text: 'Video enrichment queue' });
-		const desc = heading.createDiv({ cls: 'crucible-ingestion-section-desc' });
-		desc.setText('Drains pending videos through the YouTube data API at the configured rate.');
+		const { countEl, metaEl } = this.createSectionHeader(
+			card,
+			'Video enrichment queue',
+			'Drains pending videos through the YouTube data API at the configured rate.',
+			false,
+		);
 
 		const controls = card.createDiv({ cls: 'crucible-ingestion-queue-controls' });
 
@@ -268,6 +338,8 @@ export class IngestionDashboardUI {
 			title: 'Video Enrichment Queue',
 			description: '',
 			body,
+			countEl,
+			metaEl,
 			sort: null,
 			refresh: () => this.renderEnrichmentQueue(body),
 		};
@@ -281,10 +353,12 @@ export class IngestionDashboardUI {
 
 	private buildOrchestrationQueueSection(): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
-		const heading = card.createDiv({ cls: 'crucible-ingestion-section-header' });
-		heading.createEl('h3', { text: 'Orchestration queue' });
-		const desc = heading.createDiv({ cls: 'crucible-ingestion-section-desc' });
-		desc.setText('Jobs queued for the orchestrator. Run next executes one job; autorun drains as they arrive.');
+		const { countEl, metaEl } = this.createSectionHeader(
+			card,
+			'Orchestration queue',
+			'Jobs queued for the orchestrator. Run next executes one job; autorun drains as they arrive.',
+			false,
+		);
 
 		const controls = card.createDiv({ cls: 'crucible-ingestion-queue-controls' });
 
@@ -313,6 +387,8 @@ export class IngestionDashboardUI {
 			title: 'Orchestration queue',
 			description: '',
 			body,
+			countEl,
+			metaEl,
 			sort: null,
 			refresh: () => this.renderOrchestrationQueue(body, ctx),
 		};
@@ -376,6 +452,7 @@ export class IngestionDashboardUI {
 		body.empty();
 		const store = this.plugin.jobStore;
 		if (!store) {
+			this.setSectionCount('orchestrationQueue', 0);
 			body.createDiv({ cls: 'crucible-empty-state', text: 'Orchestrator not available.' });
 			return;
 		}
@@ -384,6 +461,7 @@ export class IngestionDashboardUI {
 		try {
 			[running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
 		} catch (e) {
+			this.setSectionCount('orchestrationQueue', 0);
 			body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read queue: ${e instanceof Error ? e.message : String(e)}` });
 			return;
 		}
@@ -392,6 +470,7 @@ export class IngestionDashboardUI {
 			...running.map(e => ({ id: e.job.id, type: e.job.type, status: 'running' as const, created: e.job.created ?? '' })),
 			...queued.map(e => ({ id: e.job.id, type: e.job.type, status: 'queued' as const, created: e.job.created ?? '' })),
 		];
+		this.setSectionCount('orchestrationQueue', rows.length);
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 			return;
@@ -415,6 +494,7 @@ export class IngestionDashboardUI {
 			'uncapturedPosts',
 			'enrichmentQueue',
 			'uncapturedVideos',
+			'orphanedAttachments',
 		];
 		for (const id of ids) await this.refresh(id);
 	}
@@ -434,6 +514,7 @@ export class IngestionDashboardUI {
 			case 'orchestrationQueue': return this.renderOrchestrationQueue(body, ctx);
 			case 'uncapturedPosts': return this.renderUncapturedPosts(body, ctx);
 			case 'uncapturedVideos': return this.renderUncapturedVideos(body, ctx);
+			case 'orphanedAttachments': return this.renderOrphanedAttachments(body, ctx);
 			case 'enrichmentQueue': this.renderEnrichmentQueue(body); return;
 		}
 	}
@@ -444,6 +525,7 @@ export class IngestionDashboardUI {
 		const root = this.app.vault.getAbstractFileByPath(folder);
 		body.empty();
 		if (!(root instanceof TFolder)) {
+			this.setSectionCount('unprocessedClippings', 0);
 			body.createDiv({ cls: 'crucible-empty-state', text: `Inbox folder "${folder}" not found.` });
 			return;
 		}
@@ -456,6 +538,7 @@ export class IngestionDashboardUI {
 				size: f.stat.size,
 			}));
 
+		this.setSectionCount('unprocessedClippings', rows.length);
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'No unprocessed clippings.' });
 			return;
@@ -475,6 +558,7 @@ export class IngestionDashboardUI {
 		const folder = this.app.vault.getAbstractFileByPath(dailyFolder);
 		body.empty();
 		if (!(folder instanceof TFolder)) {
+			this.setSectionCount('unrefinedTranscripts', 0);
 			body.createDiv({ cls: 'crucible-empty-state', text: `Daily folder "${dailyFolder}" not found.` });
 			return;
 		}
@@ -522,6 +606,7 @@ export class IngestionDashboardUI {
 		};
 		visit(folder);
 
+		this.setSectionCount('unrefinedTranscripts', rows.length);
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'No unrefined transcripts.' });
 			return;
@@ -544,6 +629,8 @@ export class IngestionDashboardUI {
 	private renderBlogIntake(body: HTMLElement, ctx: SectionContext): void {
 		const rows = listBlogsIntakeRuns(this.app);
 		body.empty();
+		this.setSectionCount('blogIntake', rows.length);
+		this.setSectionMeta('blogIntake', lastRunLabel(rows.map(r => r.runAt)));
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'No blog tracker runs yet.' });
 			return;
@@ -565,6 +652,8 @@ export class IngestionDashboardUI {
 	private renderYoutubeIntake(body: HTMLElement, ctx: SectionContext): void {
 		const rows = listYoutubeIntakeRuns(this.app);
 		body.empty();
+		this.setSectionCount('youtubeIntake', rows.length);
+		this.setSectionMeta('youtubeIntake', lastRunLabel(rows.map(r => r.runAt)));
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'No YouTube tracker runs yet.' });
 			return;
@@ -604,6 +693,7 @@ export class IngestionDashboardUI {
 		}
 
 		placeholder.remove();
+		this.setSectionCount('uncapturedPosts', rows.length);
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'No uncaptured posts.' });
 			return;
@@ -626,6 +716,7 @@ export class IngestionDashboardUI {
 		this.uncapturedVideosCache = rows;
 		placeholder.remove();
 
+		this.setSectionCount('uncapturedVideos', rows.length);
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'No uncaptured videos.' });
 			return;
@@ -636,6 +727,7 @@ export class IngestionDashboardUI {
 			{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => this.renderChannelLink(td, r.channelId, r.channelName) },
 			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
 			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
+			{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
 			{ key: 'watch', label: '', render: (r, td) => this.renderExternalLink(td, r.url, 'watch') },
 			{ key: 'enriched', label: 'Enriched?', render: (r, td) => this.renderEnrichedCell(td, r) },
 		], rows, ctx);
@@ -663,11 +755,24 @@ export class IngestionDashboardUI {
 					title: video.title,
 					publishedAt: video.publishedAt,
 					url: video.url,
+					durationSeconds: this.readDurationSeconds(enrichmentFile),
 					enrichmentFile,
 				});
 			}
 		}
 		return out;
+	}
+
+	// Reads the video length from an enrichment metadata note's frontmatter.
+	// Prefers the pre-parsed `duration_seconds`; falls back to parsing the raw
+	// ISO-8601 `duration` (e.g. PT20M4S). Returns null when unavailable.
+	private readDurationSeconds(enrichmentFile: TFile | null): number | null {
+		if (!enrichmentFile) return null;
+		const fm: Record<string, unknown> = this.app.metadataCache.getFileCache(enrichmentFile)?.frontmatter ?? {};
+		const secs = fm['duration_seconds'];
+		if (typeof secs === 'number' && Number.isFinite(secs)) return secs;
+		const raw = fm['duration'];
+		return typeof raw === 'string' ? parseIso8601Duration(raw) : null;
 	}
 
 	private uncapturedQueueItems(): EnrichmentQueueItem[] {
@@ -680,15 +785,117 @@ export class IngestionDashboardUI {
 			}));
 	}
 
+	// --- Section: Orphaned Attachments ---
+	private renderOrphanedAttachments(body: HTMLElement, ctx: SectionContext): void {
+		body.empty();
+		const rows = this.computeOrphanedAttachmentRows();
+		this.orphanedAttachmentsCache = rows;
+		this.setSectionCount('orphanedAttachments', rows.length);
+		if (rows.length === 0) {
+			body.createDiv({ cls: 'crucible-empty-state', text: 'No orphaned attachments.' });
+			return;
+		}
+		if (!ctx.sort) ctx.sort = { column: 'size', direction: 'desc' };
+
+		this.renderSortableTable<OrphanRow>(body, [
+			{ key: 'name', label: 'Name', sortable: true, sortKey: r => r.file.name.toLowerCase(), render: (r, td) => this.renderFileLink(td, r.file, r.file.name) },
+			{ key: 'folder', label: 'Folder', sortable: true, sortKey: r => r.folder.toLowerCase(), render: (r, td) => td.setText(r.folder) },
+			{ key: 'type', label: 'Type', sortable: true, sortKey: r => r.type, render: (r, td) => td.setText(r.type) },
+			{ key: 'size', label: 'Size (KB)', sortable: true, sortKey: r => r.size, render: (r, td) => td.setText((r.size / 1024).toFixed(1)) },
+			{ key: 'mtime', label: 'Modified', sortable: true, sortKey: r => r.mtime, render: (r, td) => td.setText(formatDateTime(r.mtime)) },
+			{ key: 'delete', label: '', render: (r, td) => this.renderDeleteButton(td, r, ctx) },
+		], rows, ctx);
+	}
+
+	private computeOrphanedAttachmentRows(): OrphanRow[] {
+		// resolvedLinks maps each source note to the targets it references (embeds
+		// included). A managed attachment with no entry here has no back-reference.
+		const referenced = new Set<string>();
+		const resolved = this.app.metadataCache.resolvedLinks;
+		for (const source in resolved) {
+			for (const target in resolved[source]) referenced.add(target);
+		}
+
+		const rows: OrphanRow[] = [];
+		for (const file of this.app.vault.getFiles()) {
+			if (!MD5_NAME_RE.test(file.name)) continue;
+			const type = classifyLocalizeMediaType(file.extension);
+			if (!type) continue;
+			if (referenced.has(file.path)) continue;
+			rows.push({
+				file,
+				folder: file.parent?.path ?? '',
+				type,
+				size: file.stat.size,
+				mtime: file.stat.mtime,
+			});
+		}
+		return rows;
+	}
+
+	private renderDeleteButton(td: HTMLElement, row: OrphanRow, ctx: SectionContext): void {
+		const btn = td.createEl('button', { text: 'Delete' });
+		btn.addClass('mod-warning');
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					await this.app.fileManager.trashFile(row.file);
+					new Notice(`Trashed ${row.file.name}`);
+				} catch (e) {
+					new Notice(`Failed to trash ${row.file.name}: ${e instanceof Error ? e.message : String(e)}`);
+				}
+				void ctx.refresh();
+			})();
+		});
+	}
+
+	private renderCleanupAllButton(heading: HTMLElement): void {
+		const btn = heading.createEl('button', { text: 'Cleanup all', cls: 'crucible-ingestion-cleanup-all' });
+		btn.addClass('mod-warning');
+		btn.addEventListener('click', () => {
+			void (async () => {
+				const rows = this.orphanedAttachmentsCache;
+				if (rows.length === 0) {
+					new Notice('No orphaned attachments to clean up.');
+					return;
+				}
+				const totalKb = rows.reduce((sum, r) => sum + r.size, 0) / 1024;
+				const confirmed = await new ConfirmModal(this.app, {
+					title: 'Cleanup orphaned attachments',
+					message: `Trash ${rows.length} orphaned attachment${rows.length === 1 ? '' : 's'} (${totalKb.toFixed(1)} KB)? Files go to the vault's configured trash.`,
+					confirmText: 'Trash all',
+					destructive: true,
+				}).openAndAwait();
+				if (!confirmed) return;
+
+				let failed = 0;
+				for (const row of rows) {
+					try {
+						await this.app.fileManager.trashFile(row.file);
+					} catch (e) {
+						failed++;
+						console.warn('Cleanup: could not trash', row.file.path, e);
+					}
+				}
+				const ok = rows.length - failed;
+				new Notice(failed === 0 ? `Trashed ${ok} attachment${ok === 1 ? '' : 's'}.` : `Trashed ${ok}, ${failed} failed.`);
+				void this.refresh('orphanedAttachments');
+			})();
+		});
+	}
+
 	// --- Section: Enrichment Queue ---
 	private renderEnrichmentQueue(body: HTMLElement): void {
 		body.empty();
 		const queue = this.plugin.enrichmentQueue;
 		if (!queue) {
+			this.setSectionCount('enrichmentQueue', 0);
 			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue service not available.' });
 			return;
 		}
 		const entries = queue.getSnapshot();
+		this.setSectionCount('enrichmentQueue', entries.length);
 		if (entries.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 			return;
@@ -864,6 +1071,39 @@ function formatDateTime(epochMs: number): string {
 	const hh = String(d.getHours()).padStart(2, '0');
 	const mm = String(d.getMinutes()).padStart(2, '0');
 	return `${date} ${hh}:${mm}`;
+}
+
+function formatRelativeTime(epochMs: number): string {
+	if (!epochMs) return '';
+	const diff = Date.now() - epochMs;
+	if (diff < 0) return 'just now';
+	const sec = Math.floor(diff / 1000);
+	if (sec < 60) return 'just now';
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m ago`;
+	const hr = Math.floor(min / 60);
+	if (hr < 24) return `${hr}h ago`;
+	const days = Math.floor(hr / 24);
+	return `${days}d ago`;
+}
+
+// Builds the "last run X ago" header label from a list of ISO timestamps.
+function lastRunLabel(runAts: string[]): string {
+	const latest = Math.max(0, ...runAts.map(r => Date.parse(r) || 0));
+	if (!latest) return '';
+	return `last run ${formatRelativeTime(latest)}`;
+}
+
+// Formats a duration in seconds as clock time (M:SS, or H:MM:SS past an hour).
+// Returns "--" when unknown.
+function formatDuration(seconds: number | null): string {
+	if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return '--';
+	const total = Math.floor(seconds);
+	const h = Math.floor(total / 3600);
+	const m = Math.floor((total % 3600) / 60);
+	const s = total % 60;
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 // Re-export for re-use elsewhere if needed.
