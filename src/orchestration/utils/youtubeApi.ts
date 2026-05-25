@@ -275,7 +275,7 @@ function stripMdExt(path: string): string {
 	return path.endsWith('.md') ? path.slice(0, -3) : path;
 }
 
-function parseIso8601Duration(value: string): number | null {
+export function parseIso8601Duration(value: string): number | null {
 	if (!value) return null;
 	const m = value.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
 	if (!m) return null;

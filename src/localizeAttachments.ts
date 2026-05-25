@@ -3,15 +3,13 @@ import {
 	CrucibleSettings,
 	ImageConvertFormat,
 	LocalizeMediaType,
-	OBSIDIAN_NATIVE_EMBED_FORMATS,
 } from './types';
 import { Linter } from './lint';
-import { applyAttachmentTemplate, ensureFolder } from './utils';
+import { applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
 import { withMaterializing } from './frontmatter';
 
-const MD5_NAME_RE = /_MD5\.[A-Za-z0-9]+$/;
+export const MD5_NAME_RE = /_MD5\.[A-Za-z0-9]+$/;
 const REMOTE_MD_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
-const PROCESSABLE_TYPES: LocalizeMediaType[] = ['images', 'audio', 'video', 'pdf'];
 
 interface AttachmentMatch {
 	original: string;
@@ -141,13 +139,7 @@ export class AttachmentLocalizer {
 	}
 
 	classifyExtension(extRaw: string): LocalizeMediaType | null {
-		const ext = extRaw.toLowerCase().replace(/^\./, '');
-		// webm prefers video per convention
-		if (ext === 'webm') return 'video';
-		for (const type of PROCESSABLE_TYPES) {
-			if (OBSIDIAN_NATIVE_EMBED_FORMATS[type].includes(ext)) return type;
-		}
-		return null;
+		return classifyLocalizeMediaType(extRaw);
 	}
 
 	isTypeEnabledForAttached(type: LocalizeMediaType): boolean {
