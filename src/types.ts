@@ -288,6 +288,8 @@ export interface CrucibleSettings {
 	crucibleCommandPaletteFilterMode: CrucibleCommandPaletteFilterMode;
 	crucibleCommandPaletteWhitelist: string[];
 	crucibleCommandPaletteBlacklist: string[];
+	crucibleCommandPaletteShowHotkeys: boolean;
+	crucibleCommandPaletteShowUniqueString: boolean;
 	// Orchestrator
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
@@ -388,6 +390,8 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	crucibleCommandPaletteFilterMode: 'blacklist',
 	crucibleCommandPaletteWhitelist: [],
 	crucibleCommandPaletteBlacklist: [],
+	crucibleCommandPaletteShowHotkeys: true,
+	crucibleCommandPaletteShowUniqueString: false,
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
