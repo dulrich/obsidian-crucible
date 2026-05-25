@@ -264,6 +264,20 @@ export async function ingestYoutubeVideoMetadata(
 	return { status: 'created', metadataPath: path, createdNew: true, linkUpdated: true };
 }
 
+// Coerces a frontmatter `yt-video-id` value into a trimmed string. Accepts a
+// string, number, or array (taking the first non-empty string). Returns '' when
+// no usable id is present.
+export function coerceVideoId(value: unknown): string {
+	if (typeof value === 'string') return value.trim();
+	if (typeof value === 'number') return String(value).trim();
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (typeof item === 'string' && item.trim()) return item.trim();
+		}
+	}
+	return '';
+}
+
 async function setYtMetadataLink(plugin: CruciblePlugin, sourceFile: TFile, metadataPath: string): Promise<void> {
 	const link = `[[${stripMdExt(metadataPath)}]]`;
 	await updateFrontmatter(plugin.app, sourceFile, fm => {

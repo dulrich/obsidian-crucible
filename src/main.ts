@@ -21,6 +21,7 @@ import { YoutubeTrackerConsolidateWorkflow, YoutubeTrackerWorkflow } from './orc
 import { ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
 import { BlogsTrackerConsolidateWorkflow, BlogsTrackerWorkflow } from './orchestration/workflows/BlogsTrackerWorkflow';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
+import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 import { CrucibleCommandPaletteModal } from './commandPalette';
@@ -86,6 +87,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
 		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
+		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow());
 		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 
 		this.registerInternalCommands();
