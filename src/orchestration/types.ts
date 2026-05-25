@@ -7,7 +7,8 @@ export type JobType =
 	| 'blogs_tracker'
 	| 'blogs_tracker_consolidate'
 	| 'transcript_refine'
-	| 'link_scan';
+	| 'link_scan'
+	| 'youtube_metadata_fetch';
 
 export type JobPriority = 'low' | 'normal' | 'high';
 
