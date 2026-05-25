@@ -166,7 +166,8 @@ If your plugin does not need CSS, delete this file.
   margin-right: 12px;
 }
 
-.crucible-hotkey-display kbd {
+.crucible-hotkey-display kbd,
+.crucible-palette-pills kbd {
   background-color: var(--background-modifier-border);
   color: var(--text-normal);
   padding: 1px 5px;
@@ -177,6 +178,23 @@ If your plugin does not need CSS, delete this file.
   font-family: var(--font-interface);
   line-height: 1.2;
   white-space: nowrap;
+}
+
+/* Crucible command palette: hotkey + shortest-unique-string pills */
+.crucible-command-palette .suggestion-item {
+  display: flex;
+  align-items: center;
+}
+
+.crucible-command-palette .crucible-palette-pills {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+.crucible-palette-pills .crucible-palette-fuzzy-hint {
+  color: var(--text-accent);
 }
 
 .crucible-settings-group input[type="text"],
