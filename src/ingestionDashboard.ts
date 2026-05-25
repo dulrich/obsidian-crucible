@@ -22,7 +22,7 @@ import {
 	loadConfiguredChannels,
 	scanYoutubeTrackerRuns,
 } from './orchestration/utils/youtubeIntake';
-import { findExistingMetadataNote, parseIso8601Duration } from './orchestration/utils/youtubeApi';
+import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from './orchestration/utils/youtubeApi';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueService';
@@ -37,6 +37,7 @@ type SectionId =
 	| 'uncapturedPosts'
 	| 'enrichmentQueue'
 	| 'uncapturedVideos'
+	| 'youtubeWithoutMetadata'
 	| 'orphanedAttachments';
 
 type IntakeKind = 'blog' | 'youtube';
@@ -60,6 +61,13 @@ interface UncapturedVideoRow {
 	url: string;
 	durationSeconds: number | null;
 	enrichmentFile: TFile | null;
+}
+
+interface YoutubeNoMetadataRow {
+	file: TFile;
+	title: string;
+	created: number;
+	videoId: string;
 }
 
 interface UncapturedPostRow {
@@ -132,6 +140,12 @@ export class IngestionDashboardUI {
 		this.buildEnrichmentQueueSection();
 		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.');
 		this.buildSection(
+			'youtubeWithoutMetadata',
+			'YouTube captures without metadata',
+			'Vault notes with a yt-video-id in frontmatter but no yt-metadata link yet.',
+			(heading) => this.renderEnqueueAllMetadataButton(heading),
+		);
+		this.buildSection(
 			'orphanedAttachments',
 			'Orphaned attachments',
 			'Localized attachments (…_MD5.ext) with no back-reference from any note.',
@@ -167,6 +181,7 @@ export class IngestionDashboardUI {
 		const debouncedYoutubeIntake = debounce(() => void this.refresh('youtubeIntake'), DEBOUNCE_MS, true);
 		const debouncedUncapturedPosts = debounce(() => void this.refresh('uncapturedPosts'), DEBOUNCE_MS, true);
 		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), DEBOUNCE_MS, true);
+		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), DEBOUNCE_MS, true);
 		const debouncedQueue = debounce(() => void this.refresh('enrichmentQueue'), DEBOUNCE_MS, true);
 		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), DEBOUNCE_MS, true);
 		const debouncedOrchestrationQueue = debounce(() => {
@@ -193,6 +208,8 @@ export class IngestionDashboardUI {
 			// Source/post-id/yt-video-id frontmatter on arbitrary notes affects uncaptured lists.
 			debouncedUncapturedPosts();
 			debouncedUncapturedVideos();
+			// yt-video-id added or yt-metadata linked changes the "without metadata" list.
+			debouncedYoutubeNoMetadata();
 			// Any note edit, or any attachment created/deleted/renamed, can change orphan status.
 			debouncedOrphans();
 		};
@@ -210,7 +227,10 @@ export class IngestionDashboardUI {
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => debouncedUncapturedVideos()));
 			this.disposers.push(bus.on('enrichment-queue-updated', () => debouncedQueue()));
-			this.disposers.push(bus.on('orchestration-queue-updated', () => debouncedOrchestrationQueue()));
+			this.disposers.push(bus.on('orchestration-queue-updated', () => {
+				debouncedOrchestrationQueue();
+				debouncedYoutubeNoMetadata();
+			}));
 			this.disposers.push(bus.on('clipping-captured', () => debouncedClippings()));
 			this.disposers.push(bus.on('transcript-refined', () => debouncedTranscripts()));
 		}
@@ -494,6 +514,7 @@ export class IngestionDashboardUI {
 			'uncapturedPosts',
 			'enrichmentQueue',
 			'uncapturedVideos',
+			'youtubeWithoutMetadata',
 			'orphanedAttachments',
 		];
 		for (const id of ids) await this.refresh(id);
@@ -514,6 +535,7 @@ export class IngestionDashboardUI {
 			case 'orchestrationQueue': return this.renderOrchestrationQueue(body, ctx);
 			case 'uncapturedPosts': return this.renderUncapturedPosts(body, ctx);
 			case 'uncapturedVideos': return this.renderUncapturedVideos(body, ctx);
+			case 'youtubeWithoutMetadata': return this.renderYoutubeNoMetadata(body, ctx);
 			case 'orphanedAttachments': return this.renderOrphanedAttachments(body, ctx);
 			case 'enrichmentQueue': this.renderEnrichmentQueue(body); return;
 		}
@@ -785,6 +807,117 @@ export class IngestionDashboardUI {
 			}));
 	}
 
+	// --- Section: YouTube captures without metadata ---
+	private async renderYoutubeNoMetadata(body: HTMLElement, ctx: SectionContext): Promise<void> {
+		body.empty();
+		const rows = this.computeYoutubeNoMetadataRows();
+		const inFlight = await this.youtubeMetadataInFlight();
+
+		this.setSectionCount('youtubeWithoutMetadata', rows.length);
+		if (rows.length === 0) {
+			body.createDiv({ cls: 'crucible-empty-state', text: 'No captures awaiting metadata.' });
+			return;
+		}
+		if (!ctx.sort) ctx.sort = { column: 'created', direction: 'desc' };
+
+		this.renderSortableTable<YoutubeNoMetadataRow>(body, [
+			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => this.renderFileLink(td, r.file) },
+			{ key: 'created', label: 'Create Date', sortable: true, sortKey: r => r.created, render: (r, td) => td.setText(formatDate(r.created)) },
+			{ key: 'enqueue', label: '', render: (r, td) => this.renderEnqueueMetadataCell(td, r, inFlight) },
+		], rows, ctx);
+	}
+
+	// Scans every markdown note for the backlog: a usable `yt-video-id` in
+	// frontmatter with no `yt-metadata` link yet. Keying on `yt-video-id` matches
+	// the "fetch video metadata for active note" command.
+	private computeYoutubeNoMetadataRows(): YoutubeNoMetadataRow[] {
+		const out: YoutubeNoMetadataRow[] = [];
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm) continue;
+			const videoId = coerceVideoId(fm['yt-video-id']);
+			if (!videoId) continue;
+			if (isYtMetadataLinked(fm['yt-metadata'])) continue;
+			const createdRaw: unknown = fm['created'];
+			const created = typeof createdRaw === 'string' ? Date.parse(createdRaw) || file.stat.ctime : file.stat.ctime;
+			out.push({ file, title: file.basename, created, videoId });
+		}
+		return out;
+	}
+
+	// Reads queued + running orchestrator jobs once and maps each
+	// youtube_metadata_fetch job's target note path to its status, so rows show
+	// in-flight state instead of an enqueue button.
+	private async youtubeMetadataInFlight(): Promise<Map<string, 'queued' | 'running'>> {
+		const map = new Map<string, 'queued' | 'running'>();
+		const store = this.plugin.jobStore;
+		if (!store) return map;
+		try {
+			const [running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
+			for (const e of running) this.recordMetadataJob(map, e.job, 'running');
+			for (const e of queued) this.recordMetadataJob(map, e.job, 'queued');
+		} catch {
+			/* leave map empty on read failure */
+		}
+		return map;
+	}
+
+	private recordMetadataJob(map: Map<string, 'queued' | 'running'>, job: OrchestrationJob, status: 'queued' | 'running'): void {
+		if (job.type !== 'youtube_metadata_fetch') return;
+		const path = typeof job.params?.targetPath === 'string' ? job.params.targetPath : '';
+		if (path && !map.has(path)) map.set(path, status);
+	}
+
+	private renderEnqueueMetadataCell(td: HTMLElement, row: YoutubeNoMetadataRow, inFlight: Map<string, 'queued' | 'running'>): void {
+		const state = inFlight.get(row.file.path);
+		if (state) {
+			td.setText(state === 'running' ? 'running…' : 'queued');
+			return;
+		}
+		const btn = td.createEl('button', { text: 'Enqueue metadata' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				const job = await this.plugin.orchestrator.enqueue('youtube_metadata_fetch', {
+					targetPath: row.file.path,
+					videoId: row.videoId,
+				});
+				if (job) btn.setText('Queued');
+				else btn.disabled = false;
+			})();
+		});
+	}
+
+	private renderEnqueueAllMetadataButton(heading: HTMLElement): void {
+		const btn = heading.createEl('button', { text: 'Enqueue all', cls: 'crucible-ingestion-enqueue-intake' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					const rows = this.computeYoutubeNoMetadataRows();
+					if (rows.length === 0) {
+						new Notice('No captures awaiting metadata.');
+						return;
+					}
+					const inFlight = await this.youtubeMetadataInFlight();
+					let enqueued = 0;
+					for (const row of rows) {
+						if (inFlight.has(row.file.path)) continue;
+						const job = await this.plugin.orchestrator.enqueue('youtube_metadata_fetch', {
+							targetPath: row.file.path,
+							videoId: row.videoId,
+						});
+						if (job) enqueued++;
+					}
+					new Notice(enqueued > 0 ? `Enqueued ${enqueued} metadata fetch${enqueued === 1 ? '' : 'es'}.` : 'Nothing to enqueue.');
+				} finally {
+					btn.disabled = false;
+					void this.refresh('youtubeWithoutMetadata');
+				}
+			})();
+		});
+	}
+
 	// --- Section: Orphaned Attachments ---
 	private renderOrphanedAttachments(body: HTMLElement, ctx: SectionContext): void {
 		body.empty();
@@ -1053,6 +1186,14 @@ function parseMarkdownLink(raw: string): { label: string; url: string } | null {
 
 function displayLabel(raw: string): string {
 	return parseMarkdownLink(raw)?.label ?? raw;
+}
+
+// True when `yt-metadata` already carries a link (a non-empty string, or an array
+// with at least one non-empty entry). Such notes are excluded from the backlog.
+function isYtMetadataLinked(value: unknown): boolean {
+	if (typeof value === 'string') return value.trim().length > 0;
+	if (Array.isArray(value)) return value.some(v => typeof v === 'string' && v.trim().length > 0);
+	return false;
 }
 
 function formatDate(epochMs: number): string {
