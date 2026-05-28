@@ -25,6 +25,7 @@ import {
 	loadConfiguredBlogs,
 	scanBlogsTrackerRuns,
 } from '../utils/blogsIntake';
+import { loadIgnoredBlogIds } from '../utils/ignoredIds';
 
 const FEED_FETCH_CONCURRENCY = 4;
 const FEED_FETCH_MIN_INTERVAL_MS = 250;
@@ -61,7 +62,7 @@ export class BlogsTrackerWorkflow implements Workflow {
 		await this.canonicalizeDetectedIds(plugin);
 
 		const diffMode = plugin.settings.orchestrationBlogsTrackerDiffMode !== false;
-		const seen = buildBlogsSeenIdSet(app, diffMode);
+		const seen = buildBlogsSeenIdSet(app, diffMode, await loadIgnoredBlogIds(app));
 
 		const fetchSettled = await rateLimitedAllSettled(
 			blogs,
@@ -249,7 +250,7 @@ export class BlogsTrackerConsolidateWorkflow extends BlogsTrackerWorkflow {
 		const app = plugin.app;
 
 		await this.canonicalizeDetectedIds(plugin);
-		const seenInVault = buildBlogsSeenIdSet(app, false);
+		const seenInVault = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app));
 		const configuredBlogs = await loadConfiguredBlogs(app, plugin);
 		const scan = await scanBlogsTrackerRuns(app, seenInVault, configuredBlogs);
 		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newPosts.length, 0);
