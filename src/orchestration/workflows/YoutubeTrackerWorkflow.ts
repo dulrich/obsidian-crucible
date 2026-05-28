@@ -23,6 +23,7 @@ import {
 	loadConfiguredChannels,
 	scanYoutubeTrackerRuns,
 } from '../utils/youtubeIntake';
+import { loadIgnoredVideoIds } from '../utils/ignoredIds';
 
 const FEED_FETCH_CONCURRENCY = 4;
 const FEED_FETCH_MIN_INTERVAL_MS = 250;
@@ -59,7 +60,7 @@ export class YoutubeTrackerWorkflow implements Workflow {
 		await this.canonicalizeDetectedIds(plugin);
 
 		const diffMode = plugin.settings.orchestrationYoutubeTrackerDiffMode !== false;
-		const seen = buildYoutubeSeenIdSet(app, diffMode);
+		const seen = buildYoutubeSeenIdSet(app, diffMode, await loadIgnoredVideoIds(app));
 
 		const fetchSettled = await rateLimitedAllSettled(
 			channels,
@@ -236,7 +237,7 @@ export class YoutubeTrackerConsolidateWorkflow extends YoutubeTrackerWorkflow {
 		const app = plugin.app;
 
 		await this.canonicalizeDetectedIds(plugin);
-		const seenInVault = buildYoutubeSeenIdSet(app, false);
+		const seenInVault = buildYoutubeSeenIdSet(app, false, await loadIgnoredVideoIds(app));
 		const configuredChannels = await loadConfiguredChannels(app, plugin);
 		const scan = await scanYoutubeTrackerRuns(app, seenInVault, configuredChannels);
 		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newVideos.length, 0);

@@ -39,8 +39,8 @@ export interface YoutubeIntakeRunStat {
 	generatedBy: string;
 }
 
-export function buildYoutubeSeenIdSet(app: App, diffMode: boolean): Set<string> {
-	const seen = new Set<string>();
+export function buildYoutubeSeenIdSet(app: App, diffMode: boolean, seedIds?: Iterable<string>): Set<string> {
+	const seen = new Set<string>(seedIds ?? []);
 	const intakePrefix = `${INTAKE_ROOT_YOUTUBE}/`;
 	for (const file of app.vault.getMarkdownFiles()) {
 		const inIntake = file.path.startsWith(intakePrefix);
