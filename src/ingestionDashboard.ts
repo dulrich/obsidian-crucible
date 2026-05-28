@@ -23,6 +23,15 @@ import {
 	scanYoutubeTrackerRuns,
 } from './orchestration/utils/youtubeIntake';
 import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from './orchestration/utils/youtubeApi';
+import {
+	IGNORED_IDS_NOTE,
+	addIgnoredBlogId,
+	addIgnoredVideoId,
+	loadIgnoredBlogIds,
+	loadIgnoredVideoIds,
+	removeIgnoredBlogId,
+	removeIgnoredVideoId,
+} from './orchestration/utils/ignoredIds';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueService';
@@ -35,8 +44,10 @@ type SectionId =
 	| 'youtubeIntake'
 	| 'orchestrationQueue'
 	| 'uncapturedPosts'
+	| 'ignoredPosts'
 	| 'enrichmentQueue'
 	| 'uncapturedVideos'
+	| 'ignoredVideos'
 	| 'youtubeWithoutMetadata'
 	| 'orphanedAttachments';
 
@@ -137,8 +148,10 @@ export class IngestionDashboardUI {
 		this.buildSection('youtubeIntake', 'YouTube intake', 'YouTube tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'youtube'), true);
 		this.buildOrchestrationQueueSection();
 		this.buildSection('uncapturedPosts', 'Uncaptured posts', 'Blog posts seen in tracker runs but not yet captured as a vault note.');
+		this.buildSection('ignoredPosts', 'Ignored blogs', 'Blog post IDs you chose to ignore. They are skipped by the tracker and the uncaptured list.', undefined, true);
 		this.buildEnrichmentQueueSection();
 		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.');
+		this.buildSection('ignoredVideos', 'Ignored videos', 'YouTube video IDs you chose to ignore. They are skipped by the tracker, the uncaptured list, and auto-enrich.', undefined, true);
 		this.buildSection(
 			'youtubeWithoutMetadata',
 			'YouTube captures without metadata',
@@ -181,6 +194,8 @@ export class IngestionDashboardUI {
 		const debouncedYoutubeIntake = debounce(() => void this.refresh('youtubeIntake'), DEBOUNCE_MS, true);
 		const debouncedUncapturedPosts = debounce(() => void this.refresh('uncapturedPosts'), DEBOUNCE_MS, true);
 		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), DEBOUNCE_MS, true);
+		const debouncedIgnoredPosts = debounce(() => void this.refresh('ignoredPosts'), DEBOUNCE_MS, true);
+		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
 		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), DEBOUNCE_MS, true);
 		const debouncedQueue = debounce(() => void this.refresh('enrichmentQueue'), DEBOUNCE_MS, true);
 		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), DEBOUNCE_MS, true);
@@ -191,6 +206,12 @@ export class IngestionDashboardUI {
 		}, DEBOUNCE_MS, true);
 
 		const route = (path: string) => {
+			if (path === IGNORED_IDS_NOTE) {
+				debouncedIgnoredPosts();
+				debouncedIgnoredVideos();
+				debouncedUncapturedPosts();
+				debouncedUncapturedVideos();
+			}
 			const clipperRoot = this.plugin.settings.ingestionClipperInboxFolder;
 			const dailyRoot = this.plugin.settings.dailyFolder;
 			if (clipperRoot && path.startsWith(`${clipperRoot}/`)) debouncedClippings();
@@ -512,8 +533,10 @@ export class IngestionDashboardUI {
 			'youtubeIntake',
 			'orchestrationQueue',
 			'uncapturedPosts',
+			'ignoredPosts',
 			'enrichmentQueue',
 			'uncapturedVideos',
+			'ignoredVideos',
 			'youtubeWithoutMetadata',
 			'orphanedAttachments',
 		];
@@ -534,7 +557,9 @@ export class IngestionDashboardUI {
 			case 'youtubeIntake': return this.renderYoutubeIntake(body, ctx);
 			case 'orchestrationQueue': return this.renderOrchestrationQueue(body, ctx);
 			case 'uncapturedPosts': return this.renderUncapturedPosts(body, ctx);
+			case 'ignoredPosts': return this.renderIgnoredPosts(body, ctx);
 			case 'uncapturedVideos': return this.renderUncapturedVideos(body, ctx);
+			case 'ignoredVideos': return this.renderIgnoredVideos(body, ctx);
 			case 'youtubeWithoutMetadata': return this.renderYoutubeNoMetadata(body, ctx);
 			case 'orphanedAttachments': return this.renderOrphanedAttachments(body, ctx);
 			case 'enrichmentQueue': this.renderEnrichmentQueue(body); return;
@@ -696,7 +721,7 @@ export class IngestionDashboardUI {
 	private async renderUncapturedPosts(body: HTMLElement, ctx: SectionContext): Promise<void> {
 		body.empty();
 		const placeholder = body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
-		const seen = buildBlogsSeenIdSet(this.app, false);
+		const seen = buildBlogsSeenIdSet(this.app, false, await loadIgnoredBlogIds(this.app));
 		const configured = await loadConfiguredBlogs(this.app, this.plugin);
 		const scan = await scanBlogsTrackerRuns(this.app, seen, configured);
 
@@ -727,6 +752,7 @@ export class IngestionDashboardUI {
 			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
 			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
 			{ key: 'read', label: '', render: (r, td) => this.renderExternalLink(td, r.url, 'read') },
+			{ key: 'ignore', label: '', render: (r, td) => this.renderIgnoreButton(td, 'blog', r.postId, ctx, 'ignoredPosts') },
 		], rows, ctx);
 	}
 
@@ -751,6 +777,7 @@ export class IngestionDashboardUI {
 			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
 			{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
 			{ key: 'watch', label: '', render: (r, td) => this.renderExternalLink(td, r.url, 'watch') },
+			{ key: 'ignore', label: '', render: (r, td) => this.renderIgnoreButton(td, 'youtube', r.videoId, ctx, 'ignoredVideos') },
 			{ key: 'enriched', label: 'Enriched?', render: (r, td) => this.renderEnrichedCell(td, r) },
 		], rows, ctx);
 
@@ -761,7 +788,7 @@ export class IngestionDashboardUI {
 	}
 
 	private async computeUncapturedVideoRows(): Promise<UncapturedVideoRow[]> {
-		const seen = buildYoutubeSeenIdSet(this.app, false);
+		const seen = buildYoutubeSeenIdSet(this.app, false, await loadIgnoredVideoIds(this.app));
 		const configured = await loadConfiguredChannels(this.app, this.plugin);
 		const scan = await scanYoutubeTrackerRuns(this.app, seen, configured);
 		const root = this.plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata';
@@ -1170,6 +1197,90 @@ export class IngestionDashboardUI {
 			if (!ok) new Notice('Already queued or in progress.');
 		});
 	}
+
+	// --- Section: Ignored blogs ---
+	private async renderIgnoredPosts(body: HTMLElement, ctx: SectionContext): Promise<void> {
+		body.empty();
+		const rows = Array.from(await loadIgnoredBlogIds(this.app)).map(id => ({ id }));
+		this.setSectionCount('ignoredPosts', rows.length);
+		if (rows.length === 0) {
+			body.createDiv({ cls: 'crucible-empty-state', text: 'No ignored blogs.' });
+			return;
+		}
+		if (!ctx.sort) ctx.sort = { column: 'id', direction: 'asc' };
+		this.renderSortableTable<{ id: string }>(body, [
+			{ key: 'id', label: 'Blog ID', sortable: true, sortKey: r => r.id.toLowerCase(), render: (r, td) => this.renderIgnoredIdCell(td, r.id, blogIgnoreUrl(r.id)) },
+			{ key: 'unignore', label: '', render: (r, td) => this.renderUnignoreButton(td, 'blog', r.id, ctx, 'uncapturedPosts') },
+		], rows, ctx);
+	}
+
+	// --- Section: Ignored videos ---
+	private async renderIgnoredVideos(body: HTMLElement, ctx: SectionContext): Promise<void> {
+		body.empty();
+		const rows = Array.from(await loadIgnoredVideoIds(this.app)).map(id => ({ id }));
+		this.setSectionCount('ignoredVideos', rows.length);
+		if (rows.length === 0) {
+			body.createDiv({ cls: 'crucible-empty-state', text: 'No ignored videos.' });
+			return;
+		}
+		if (!ctx.sort) ctx.sort = { column: 'id', direction: 'asc' };
+		this.renderSortableTable<{ id: string }>(body, [
+			{ key: 'id', label: 'Video ID', sortable: true, sortKey: r => r.id.toLowerCase(), render: (r, td) => this.renderIgnoredIdCell(td, r.id, `https://www.youtube.com/watch?v=${r.id}`) },
+			{ key: 'unignore', label: '', render: (r, td) => this.renderUnignoreButton(td, 'youtube', r.id, ctx, 'uncapturedVideos') },
+		], rows, ctx);
+	}
+
+	private renderIgnoredIdCell(td: HTMLElement, id: string, href: string | null): void {
+		if (href) {
+			const a = td.createEl('a', { text: id, href });
+			a.setAttr('target', '_blank');
+			a.setAttr('rel', 'noopener');
+		} else {
+			td.setText(id);
+		}
+	}
+
+	// Adds the id to the ignored note, then refreshes the source list (the row
+	// drops out as it is now "seen") and the matching ignored section.
+	private renderIgnoreButton(td: HTMLElement, kind: IntakeKind, id: string, ctx: SectionContext, ignoredSection: SectionId): void {
+		const btn = td.createEl('button', { text: 'Ignore' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					if (kind === 'youtube') await addIgnoredVideoId(this.app, id);
+					else await addIgnoredBlogId(this.app, id);
+				} catch (e) {
+					new Notice(`Failed to ignore: ${e instanceof Error ? e.message : String(e)}`);
+					btn.disabled = false;
+					return;
+				}
+				void ctx.refresh();
+				void this.refresh(ignoredSection);
+			})();
+		});
+	}
+
+	// Removes the id from the ignored note, then refreshes this section and the
+	// matching uncaptured section (where the item may reappear).
+	private renderUnignoreButton(td: HTMLElement, kind: IntakeKind, id: string, ctx: SectionContext, uncapturedSection: SectionId): void {
+		const btn = td.createEl('button', { text: 'Un-ignore' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					if (kind === 'youtube') await removeIgnoredVideoId(this.app, id);
+					else await removeIgnoredBlogId(this.app, id);
+				} catch (e) {
+					new Notice(`Failed to un-ignore: ${e instanceof Error ? e.message : String(e)}`);
+					btn.disabled = false;
+					return;
+				}
+				void ctx.refresh();
+				void this.refresh(uncapturedSection);
+			})();
+		});
+	}
 }
 
 const MD_LINK_RE = /^\s*\[([^\]]+)\]\(\s*<?([^)\s<>]+)>?\s*(?:"[^"]*"|'[^']*')?\s*\)\s*$/;
@@ -1186,6 +1297,12 @@ function parseMarkdownLink(raw: string): { label: string; url: string } | null {
 
 function displayLabel(raw: string): string {
 	return parseMarkdownLink(raw)?.label ?? raw;
+}
+
+// Ignored blog IDs are canonical URLs (postIdFromUrl), so link them directly;
+// any non-URL value renders as plain text.
+function blogIgnoreUrl(id: string): string | null {
+	return /^https?:\/\//i.test(id) ? id : null;
 }
 
 // True when `yt-metadata` already carries a link (a non-empty string, or an array
