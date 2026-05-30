@@ -2715,6 +2715,8 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		new Setting(store).setName('Attachment name template').setDesc('Tokens: {{md5}}, {{ext}}, {{original}}, {{name}}, {{slug}}.').addText(t => t.setPlaceholder('{{md5}}_MD5.{{ext}}').setValue(s.localizeAttachmentsNameTemplate).onChange(async (v) => { s.localizeAttachmentsNameTemplate = v; await this.plugin.saveSettings(); }).inputEl.addClass('pi-width-wide'));
 		store.createEl('hr', { cls: 'crucible-row-divider' });
 		new Setting(store).setName('Follow note lifecycle').setDesc('Rename, move, or delete the attachment folder when the note is renamed, moved, or deleted.').addToggle(t => t.setValue(s.localizeAttachmentsFollowNoteLifecycle).onChange(async (v) => { s.localizeAttachmentsFollowNoteLifecycle = v; await this.plugin.saveSettings(); }));
+		store.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(store).setName('Debug mode').setDesc('Log each note\'s attachment matches and per-image decisions to _crucible/debug.md (shared with Chain debug).').addToggle(t => t.setValue(s.localizeAttachmentsDebugMode).onChange(async (v) => { s.localizeAttachmentsDebugMode = v; await this.plugin.saveSettings(); }));
 
 		const actions = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		new Setting(actions).setName('Run now').addButton(bt => bt.setButtonText('Localize this note').onClick(async () => { const f = this.app.workspace.getActiveFile(); if (f && f.extension === 'md') await this.plugin.attachmentLocalizer.localizeNote(f); else new (await import('obsidian')).Notice('Open a Markdown note first'); })).addButton(bt => bt.setButtonText('Localize vault').setWarning().onClick(async () => { await this.plugin.attachmentLocalizer.localizeVault(); }));

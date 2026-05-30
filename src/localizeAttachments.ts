@@ -5,11 +5,16 @@ import {
 	LocalizeMediaType,
 } from './types';
 import { Linter } from './lint';
-import { applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
+import { appendDebugLog, applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
 import { withMaterializing } from './frontmatter';
 
 export const MD5_NAME_RE = /_MD5\.[A-Za-z0-9]+$/;
 const REMOTE_MD_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
+// Lazy-load placeholder images injected by web clippers: tiny inline `data:image/...`
+// embeds (often a 1x1 transparent gif) sit immediately before the real image. They are
+// never useful and, when glued onto the same inline run as a real embed, prevent Obsidian
+// from rendering that embed. Strip them (plus any trailing inline whitespace) on localize.
+const DATA_URI_IMAGE_RE = /!\[[^\]]*\]\(\s*data:image\/[^)]*\)[ \t]*/g;
 
 interface AttachmentMatch {
 	original: string;
@@ -183,6 +188,15 @@ export class AttachmentLocalizer {
 		return this.getWhitelist(type).includes(ext.toLowerCase());
 	}
 
+	private async debug(note: TFile, entry: string): Promise<void> {
+		if (!this.settings.localizeAttachmentsDebugMode) return;
+		try {
+			await appendDebugLog(this.app, `Localize: ${note.path}`, entry);
+		} catch (e) {
+			console.warn('Localize debug log failed', e);
+		}
+	}
+
 	async localizeNote(file: TFile, silent: boolean = false): Promise<boolean> {
 		if (this.linter.isPathIgnored(file.path)) return true;
 		if (file.extension !== 'md') return true;
@@ -193,7 +207,12 @@ export class AttachmentLocalizer {
 			return await withMaterializing(this.setMaterializing, async () => {
 				const original = await this.app.vault.read(file);
 				const matches = this.parseAttachmentRefs(original, file);
-				if (matches.length === 0) {
+				// Placeholder stripping is part of image localization; only when that's enabled.
+				const placeholderCount = this.settings.localizeAttachmentsImagesProcessAttached
+					? (original.match(DATA_URI_IMAGE_RE) || []).length
+					: 0;
+				await this.debug(file, `matched ${matches.length} ref(s), ${placeholderCount} data-uri placeholder(s)${matches.length ? '\n' + matches.map(m => `- ${m.syntax}${m.isRemote ? '/remote' : '/local'}: ${m.original} -> link=${m.link}`).join('\n') : ''}`);
+				if (matches.length === 0 && placeholderCount === 0) {
 					spinner?.hide();
 					if (!silent) new Notice('No attachments to localize');
 					return true;
@@ -209,22 +228,25 @@ export class AttachmentLocalizer {
 					}
 				}
 
-				if (replacements.length > 0) {
+				if (replacements.length > 0 || placeholderCount > 0) {
 					const fresh = await this.app.vault.read(file);
 					let updated = fresh;
 					for (const r of replacements) updated = updated.split(r.from).join(r.to);
+					if (placeholderCount > 0) updated = updated.replace(DATA_URI_IMAGE_RE, '');
 					if (updated !== fresh) {
 						await this.app.vault.modify(file, updated);
 					}
 				}
 
+				await this.debug(file, `replacements: ${replacements.length} of ${matches.length}, stripped ${placeholderCount} placeholder(s)${replacements.length ? '\n' + replacements.map(r => `- ${r.from} -> ${r.to}`).join('\n') : ''}`);
 				spinner?.hide();
-				if (!silent) new Notice(`Localized ${replacements.length} of ${matches.length} attachments`);
+				if (!silent) new Notice(`Localized ${replacements.length} of ${matches.length} attachments${placeholderCount ? `, stripped ${placeholderCount} placeholder${placeholderCount > 1 ? 's' : ''}` : ''}`);
 				return true;
 			});
 		} catch (e) {
 			spinner?.hide();
 			console.error(`Localize attachments failed (${file.path}):`, e);
+			await this.debug(file, `ERROR: ${(e as Error).message}`);
 			if (!silent) new Notice(`Localize failed: ${(e as Error).message}`);
 			return false;
 		}
@@ -306,8 +328,14 @@ export class AttachmentLocalizer {
 	private async processRemote(match: AttachmentMatch, note: TFile): Promise<string | null> {
 		try {
 			const download = await this.downloadRemote(match.link);
-			if (!download) return null;
-			if (!this.isEligibleAttached(download.ext)) return null;
+			if (!download) {
+				await this.debug(note, `remote ${match.link}: download failed (left as-is)`);
+				return null;
+			}
+			if (!this.isEligibleAttached(download.ext)) {
+				await this.debug(note, `remote ${match.link}: ext .${download.ext} not eligible (left as-is)`);
+				return null;
+			}
 
 			const isImage = this.classifyExtension(download.ext) === 'images';
 			let bytes = download.bytes;
@@ -325,18 +353,26 @@ export class AttachmentLocalizer {
 
 			const originalName = this.guessRemoteOriginalName(match.link);
 			const targetPath = await this.writeAttachment(note, bytes, ext, originalName);
-			return this.formatEmbed(match.syntax, targetPath, originalName);
+			await this.debug(note, `remote ${match.link}: downloaded .${download.ext} -> ${targetPath}`);
+			return this.formatEmbed(match.syntax, targetPath);
 		} catch (e) {
 			console.warn(`Localize remote failed: ${match.link}`, e);
+			await this.debug(note, `remote ${match.link}: ERROR ${(e as Error).message} (left as-is)`);
 			return null;
 		}
 	}
 
 	private async processLocal(match: AttachmentMatch, note: TFile): Promise<string | null> {
 		const resolved = this.app.metadataCache.getFirstLinkpathDest(match.link, note.path);
-		if (!(resolved instanceof TFile)) return null;
+		if (!(resolved instanceof TFile)) {
+			await this.debug(note, `local ${match.link}: UNRESOLVED (left as-is)`);
+			return null;
+		}
 		const ext = resolved.extension.toLowerCase();
-		if (!this.isEligibleAttached(ext)) return null;
+		if (!this.isEligibleAttached(ext)) {
+			await this.debug(note, `local ${match.link}: resolved=${resolved.path} but ext .${ext} not eligible (left as-is)`);
+			return null;
+		}
 
 		// Idempotence: if already in target folder + already _MD5-named, skip
 		const expectedFolder = normalizePath(applyAttachmentTemplate(this.settings.localizeAttachmentsFolderTemplate, {
@@ -346,6 +382,7 @@ export class AttachmentLocalizer {
 			ext,
 		}));
 		if (MD5_NAME_RE.test(resolved.name) && resolved.parent?.path === expectedFolder) {
+			await this.debug(note, `local ${match.link}: resolved=${resolved.path} already localized in ${expectedFolder} (skip)`);
 			return null;
 		}
 
@@ -370,7 +407,8 @@ export class AttachmentLocalizer {
 		if (resolved.path !== newPath) {
 			try { await this.app.fileManager.trashFile(resolved); } catch (e) { console.warn('Localize: could not delete old', resolved.path, e); }
 		}
-		return this.formatEmbed(match.syntax, newPath, resolved.basename);
+		await this.debug(note, `local ${match.link}: resolved=${resolved.path} -> ${newPath}`);
+		return this.formatEmbed(match.syntax, newPath);
 	}
 
 	private async writeAttachment(note: TFile, bytes: ArrayBuffer, ext: string, originalName: string): Promise<string> {
@@ -402,9 +440,13 @@ export class AttachmentLocalizer {
 		return targetPath;
 	}
 
-	private formatEmbed(syntax: 'wiki' | 'md', targetPath: string, alt: string): string {
+	private formatEmbed(syntax: 'wiki' | 'md', targetPath: string): string {
 		if (syntax === 'wiki') return `![[${targetPath}]]`;
-		return `![${alt}](${targetPath.replace(/ /g, '%20')})`;
+		// Empty alt is deliberate: Obsidian interprets a markdown image's alt text as a
+		// display size when it parses as a number (e.g. `![1](img.png)` renders at 1px wide,
+		// effectively invisible). The localize "alt" is only a guessed filename anyway, so
+		// dropping it avoids accidentally collapsing the image.
+		return `![](${targetPath.replace(/ /g, '%20')})`;
 	}
 
 	private guessRemoteOriginalName(url: string): string {
@@ -551,7 +593,7 @@ export class AttachmentLocalizer {
 			}
 			const originalName = file.name.replace(/\.[^.]+$/, '') || 'pasted';
 			const targetPath = await this.writeAttachment(noteFile, bytes, outExt, originalName);
-			inserts.push(this.formatEmbed('wiki', targetPath, originalName));
+			inserts.push(this.formatEmbed('wiki', targetPath));
 		}
 
 		editor.replaceSelection(inserts.join('\n'));

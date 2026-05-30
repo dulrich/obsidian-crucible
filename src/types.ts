@@ -277,6 +277,7 @@ export interface CrucibleSettings {
 	localizeAttachmentsFolderTemplate: string;
 	localizeAttachmentsNameTemplate: string;
 	localizeAttachmentsFollowNoteLifecycle: boolean;
+	localizeAttachmentsDebugMode: boolean;
 	// Shortcuts
 	shortcuts: Shortcut[];
 	// Captures
@@ -389,6 +390,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	localizeAttachmentsFolderTemplate: '{{folder}}/_attachments/{{slug}}',
 	localizeAttachmentsNameTemplate: '{{md5}}_MD5.{{ext}}',
 	localizeAttachmentsFollowNoteLifecycle: true,
+	localizeAttachmentsDebugMode: false,
 	shortcuts: [],
 	captures: [],
 	chains: [],
