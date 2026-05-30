@@ -23,12 +23,73 @@ interface AttachmentMatch {
 	isRemote: boolean;
 }
 
+export interface AttachmentReplacement {
+	from: string;
+	to: string;
+}
+
+const MARKDOWN_ATTACHMENT_REF_RE = /!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\n]+\)/g;
+const DEFAULT_IMAGE_QUALITY = 85;
+const MAX_MD5_WORDS = 0x3fffffff;
+
+export function clampImageQuality(quality: number | undefined): number {
+	const value = typeof quality === 'number' && Number.isFinite(quality) ? quality : DEFAULT_IMAGE_QUALITY;
+	return Math.min(100, Math.max(30, value)) / 100;
+}
+
+export function rewriteLocalizedAttachmentRefs(content: string, replacements: AttachmentReplacement[]): string {
+	if (replacements.length === 0) return content;
+	const byOriginal = new Map<string, string>();
+	for (const replacement of replacements) {
+		if (!byOriginal.has(replacement.from)) byOriginal.set(replacement.from, replacement.to);
+	}
+
+	MARKDOWN_ATTACHMENT_REF_RE.lastIndex = 0;
+	let updated = '';
+	let cursor = 0;
+	let match: RegExpExecArray | null;
+	while ((match = MARKDOWN_ATTACHMENT_REF_RE.exec(content)) !== null) {
+		const original = match[0];
+		const replacement = byOriginal.get(original);
+		if (!replacement) continue;
+		updated += content.slice(cursor, match.index);
+		updated += replacement;
+		cursor = match.index + original.length;
+	}
+
+	if (cursor === 0) return content;
+	return updated + content.slice(cursor);
+}
+
+export function stripDataUriImagePlaceholders(content: string): { content: string; count: number } {
+	DATA_URI_IMAGE_RE.lastIndex = 0;
+	let count = 0;
+	const stripped = content.replace(DATA_URI_IMAGE_RE, () => {
+		count++;
+		return '';
+	});
+	return { content: stripped, count };
+}
+
+export function md5HexForBytes(bytes: Uint8Array): string {
+	return md5(bytes);
+}
+
 function md5(bytes: Uint8Array): string {
 	const n = bytes.length;
 	const fullLen = (((n + 8) >> 6) + 1) * 16;
+	if (fullLen > MAX_MD5_WORDS) {
+		throw new Error(`Input too large to hash safely (${n} bytes)`);
+	}
 	const words = new Int32Array(fullLen);
-	for (let i = 0; i < n; i++) words[i >> 2] = (words[i >> 2] ?? 0) | ((bytes[i] ?? 0) << ((i % 4) * 8));
-	words[n >> 2] = (words[n >> 2] ?? 0) | (0x80 << ((n % 4) * 8));
+	for (let i = 0; i < n; i++) {
+		const wordIndex = i >> 2;
+		if (wordIndex >= words.length) throw new Error(`MD5 word index out of bounds (${wordIndex})`);
+		words[wordIndex] = (words[wordIndex] ?? 0) | ((bytes[i] ?? 0) << ((i % 4) * 8));
+	}
+	const terminatorIndex = n >> 2;
+	if (terminatorIndex >= words.length) throw new Error(`MD5 terminator index out of bounds (${terminatorIndex})`);
+	words[terminatorIndex] = (words[terminatorIndex] ?? 0) | (0x80 << ((n % 4) * 8));
 	const bitLen = n * 8;
 	words[fullLen - 2] = bitLen | 0;
 	words[fullLen - 1] = Math.floor(bitLen / 0x100000000);
@@ -209,7 +270,7 @@ export class AttachmentLocalizer {
 				const matches = this.parseAttachmentRefs(original, file);
 				// Placeholder stripping is part of image localization; only when that's enabled.
 				const placeholderCount = this.settings.localizeAttachmentsImagesProcessAttached
-					? (original.match(DATA_URI_IMAGE_RE) || []).length
+					? stripDataUriImagePlaceholders(original).count
 					: 0;
 				await this.debug(file, `matched ${matches.length} ref(s), ${placeholderCount} data-uri placeholder(s)${matches.length ? '\n' + matches.map(m => `- ${m.syntax}${m.isRemote ? '/remote' : '/local'}: ${m.original} -> link=${m.link}`).join('\n') : ''}`);
 				if (matches.length === 0 && placeholderCount === 0) {
@@ -218,7 +279,7 @@ export class AttachmentLocalizer {
 					return true;
 				}
 
-				const replacements: Array<{ from: string; to: string }> = [];
+				const replacements: AttachmentReplacement[] = [];
 				let i = 0;
 				for (const match of matches) {
 					spinner?.setMessage(`Localizing attachment ${++i}/${matches.length} in "${file.basename}"...`);
@@ -230,9 +291,8 @@ export class AttachmentLocalizer {
 
 				if (replacements.length > 0 || placeholderCount > 0) {
 					const fresh = await this.app.vault.read(file);
-					let updated = fresh;
-					for (const r of replacements) updated = updated.split(r.from).join(r.to);
-					if (placeholderCount > 0) updated = updated.replace(DATA_URI_IMAGE_RE, '');
+					let updated = rewriteLocalizedAttachmentRefs(fresh, replacements);
+					if (placeholderCount > 0) updated = stripDataUriImagePlaceholders(updated).content;
 					if (updated !== fresh) {
 						await this.app.vault.modify(file, updated);
 					}
@@ -514,7 +574,7 @@ export class AttachmentLocalizer {
 	async convertImage(bytes: ArrayBuffer, srcExt: string, target: ImageConvertFormat, quality: number): Promise<{ bytes: ArrayBuffer; ext: string }> {
 		const targetMime = target === 'webp' ? 'image/webp' : 'image/jpeg';
 		const targetExt = target === 'webp' ? 'webp' : 'jpg';
-		const q = Math.min(100, Math.max(30, quality)) / 100;
+		const q = clampImageQuality(quality);
 		try {
 			const sourceMime = this.extFromMime(`image/${srcExt}`) ? `image/${srcExt === 'jpg' ? 'jpeg' : srcExt}` : 'application/octet-stream';
 			const blob = new Blob([bytes], { type: sourceMime });
