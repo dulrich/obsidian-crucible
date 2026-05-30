@@ -5,14 +5,12 @@ import {
 	BlogOutcome,
 	BlogsIntakeRunStat,
 	INTAKE_ROOT_BLOGS,
-	listBlogsIntakeRuns,
-} from './orchestration/utils/blogsIntake';
-import {
 	INTAKE_ROOT_YOUTUBE,
 	YoutubeChannelOutcome,
 	YoutubeIntakeRunStat,
 	listYoutubeIntakeRuns,
-} from './orchestration/utils/youtubeIntake';
+	listBlogsIntakeRuns,
+} from './orchestration/utils/feedIntake';
 import {
 	IGNORED_IDS_NOTE,
 	addIgnoredBlogId,
