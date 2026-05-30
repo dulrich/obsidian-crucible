@@ -1,9 +1,9 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { App, PluginSettingTab, Setting, setIcon, Command, ExtraButtonComponent, TextComponent } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, Command, ExtraButtonComponent, TextComponent, Notice } from "obsidian";
 import CruciblePlugin, { CrucibleCommandGroup } from "./main";
 import { getCommandHotkeyLabel } from "./utils";
-import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, CrucibleCommandPaletteFilterMode, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "./types";
+import { FileSuggest, FolderSuggest, CommandSuggest, CurrencySuggest, LocationSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "./suggesters";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, ToCPosition, ToCCollapseBehavior, Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelRef, providerModality, Chain, CrucibleSettings, CrucibleCommandPaletteFilterMode, ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS, CurrencyCache, GeocodeCacheEntry } from "./types";
 import { agentCommandId } from "./agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS } from "./providers";
 import { isValidTimezone } from "./orchestration/utils/dates";
@@ -2251,7 +2251,13 @@ export class CrucibleSettingTab extends PluginSettingTab {
 
 		// Currency pairs
 		new Setting(containerEl).setName('Currency pairs').setHeading();
-		containerEl.createEl('p', { text: 'FX rates to fetch from open.er-api.com. Base and quote are ISO codes (e.g. USD, MXN). Label is shown in the brief.' });
+		containerEl.createEl('p', { text: 'FX rates to fetch from api.frankfurter.app. Base and quote are ISO codes (e.g. USD, MXN); start typing to pick from the supported list. Label is shown in the brief.' });
+
+		const loadCurrencyCache = () => this.plugin.settings.orchestrationDailyBriefCurrencyCache;
+		const saveCurrencyCache = async (cache: CurrencyCache) => {
+			this.plugin.settings.orchestrationDailyBriefCurrencyCache = cache;
+			await this.plugin.saveSettings();
+		};
 
 		const fxGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		const fxPairs = this.plugin.settings.orchestrationDailyBriefFxPairs;
@@ -2261,21 +2267,48 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			fxPairs.forEach((pair, index) => {
 				if (index > 0) fxGroup.createEl('hr', { cls: 'crucible-row-divider' });
 				const row = new Setting(fxGroup);
-				row.addText(t => t
-					.setPlaceholder('base (USD)')
-					.setValue(pair.base)
-					.onChange(async (v) => { pair.base = v.trim().toUpperCase(); await this.plugin.saveSettings(); })
-					.inputEl.addClass('pi-width-small'));
-				row.addText(t => t
-					.setPlaceholder('quote (MXN)')
-					.setValue(pair.quote)
-					.onChange(async (v) => { pair.quote = v.trim().toUpperCase(); await this.plugin.saveSettings(); })
-					.inputEl.addClass('pi-width-small'));
-				row.addText(t => t
-					.setPlaceholder('label (USD → MXN)')
-					.setValue(pair.label)
-					.onChange(async (v) => { pair.label = v; await this.plugin.saveSettings(); })
-					.inputEl.addClass('pi-width-normal'));
+				let labelText: TextComponent;
+				const maybeAutoTitle = () => {
+					if (!pair.label && pair.base && pair.quote) {
+						pair.label = `${pair.base} → ${pair.quote}`;
+						labelText.setValue(pair.label);
+					}
+				};
+				let baseText: TextComponent;
+				row.addText(t => {
+					baseText = t;
+					t.setPlaceholder('base (USD)')
+						.setValue(pair.base)
+						.onChange(async (v) => { pair.base = v.trim().toUpperCase(); maybeAutoTitle(); await this.plugin.saveSettings(); });
+					t.inputEl.addClass('pi-width-small');
+					new CurrencySuggest(this.app, t.inputEl, loadCurrencyCache, saveCurrencyCache, async (c) => {
+						pair.base = c.code;
+						baseText.setValue(c.code);
+						maybeAutoTitle();
+						await this.plugin.saveSettings();
+					});
+				});
+				let quoteText: TextComponent;
+				row.addText(t => {
+					quoteText = t;
+					t.setPlaceholder('quote (MXN)')
+						.setValue(pair.quote)
+						.onChange(async (v) => { pair.quote = v.trim().toUpperCase(); maybeAutoTitle(); await this.plugin.saveSettings(); });
+					t.inputEl.addClass('pi-width-small');
+					new CurrencySuggest(this.app, t.inputEl, loadCurrencyCache, saveCurrencyCache, async (c) => {
+						pair.quote = c.code;
+						quoteText.setValue(c.code);
+						maybeAutoTitle();
+						await this.plugin.saveSettings();
+					});
+				});
+				row.addText(t => {
+					labelText = t;
+					t.setPlaceholder('label (USD → MXN)')
+						.setValue(pair.label)
+						.onChange(async (v) => { pair.label = v; await this.plugin.saveSettings(); });
+					t.inputEl.addClass('pi-width-normal');
+				});
 				row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove pair').onClick(async () => {
 					fxPairs.splice(index, 1);
 					await this.plugin.saveSettings();
@@ -2284,15 +2317,28 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			});
 		}
 
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add currency pair').onClick(async () => {
-			fxPairs.push({ base: '', quote: '', label: '' });
-			await this.plugin.saveSettings();
-			this.display();
-		}));
+		new Setting(containerEl)
+			.addButton(bt => bt.setButtonText('Add currency pair').onClick(async () => {
+				fxPairs.push({ base: '', quote: '', label: '' });
+				await this.plugin.saveSettings();
+				this.display();
+			}))
+			.addButton(bt => bt.setButtonText('Clear cache').setWarning().onClick(async () => {
+				this.plugin.settings.orchestrationDailyBriefCurrencyCache = undefined;
+				await this.plugin.saveSettings();
+				new Notice('Currency list cache cleared');
+			}));
 
 		// Weather locations
 		new Setting(containerEl).setName('Weather locations').setHeading();
-		containerEl.createEl('p', { text: 'Locations to fetch daily forecasts from open-meteo.com. Latitude and longitude are decimal degrees.' });
+		containerEl.createEl('p', { text: 'Locations to fetch daily forecasts from open-meteo.com. Type a city name in the label field to look it up and auto-fill coordinates. Latitude and longitude are decimal degrees.' });
+
+		const geocodeCache = this.plugin.settings.orchestrationDailyBriefGeocodeCache;
+		const loadGeocodeCache = (query: string) => geocodeCache[query];
+		const saveGeocodeCache = async (query: string, entry: GeocodeCacheEntry) => {
+			geocodeCache[query] = entry;
+			await this.plugin.saveSettings();
+		};
 
 		const wxGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 		const locations = this.plugin.settings.orchestrationDailyBriefWeatherLocations;
@@ -2302,12 +2348,25 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			locations.forEach((loc, index) => {
 				if (index > 0) wxGroup.createEl('hr', { cls: 'crucible-row-divider' });
 				const row = new Setting(wxGroup);
-				row.addText(t => t
-					.setPlaceholder('label (Guadalajara, MX)')
-					.setValue(loc.label)
-					.onChange(async (v) => { loc.label = v; await this.plugin.saveSettings(); })
-					.inputEl.addClass('pi-width-normal'));
+				let latText: TextComponent;
+				let lonText: TextComponent;
 				row.addText(t => {
+					t.setPlaceholder('label (Guadalajara, MX)')
+						.setValue(loc.label)
+						.onChange(async (v) => { loc.label = v; await this.plugin.saveSettings(); });
+					t.inputEl.addClass('pi-width-normal');
+					new LocationSuggest(this.app, t.inputEl, loadGeocodeCache, saveGeocodeCache, async (g) => {
+						loc.label = g.label;
+						loc.lat = g.lat;
+						loc.lon = g.lon;
+						t.setValue(g.label);
+						latText.setValue(String(g.lat));
+						lonText.setValue(String(g.lon));
+						await this.plugin.saveSettings();
+					});
+				});
+				row.addText(t => {
+					latText = t;
 					t.setPlaceholder('lat')
 						.setValue(loc.lat.toString())
 						.onChange(async (v) => {
@@ -2318,6 +2377,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 					t.inputEl.addClass('pi-width-small');
 				});
 				row.addText(t => {
+					lonText = t;
 					t.setPlaceholder('lon')
 						.setValue(loc.lon.toString())
 						.onChange(async (v) => {
@@ -2335,11 +2395,17 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			});
 		}
 
-		new Setting(containerEl).addButton(bt => bt.setButtonText('Add location').onClick(async () => {
-			locations.push({ label: '', lat: 0, lon: 0 });
-			await this.plugin.saveSettings();
-			this.display();
-		}));
+		new Setting(containerEl)
+			.addButton(bt => bt.setButtonText('Add location').onClick(async () => {
+				locations.push({ label: '', lat: 0, lon: 0 });
+				await this.plugin.saveSettings();
+				this.display();
+			}))
+			.addButton(bt => bt.setButtonText('Clear cache').setWarning().onClick(async () => {
+				this.plugin.settings.orchestrationDailyBriefGeocodeCache = {};
+				await this.plugin.saveSettings();
+				new Notice('Location cache cleared');
+			}));
 	}
 
 	private renderEditTranscriptRefineWorkflow(containerEl: HTMLElement) {

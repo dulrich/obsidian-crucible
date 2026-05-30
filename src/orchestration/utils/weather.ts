@@ -51,6 +51,43 @@ interface OpenMeteoResponse {
 	};
 }
 
+export interface GeoResult {
+	label: string;        // "City, CC"
+	name: string;
+	countryCode: string;
+	admin1?: string;
+	lat: number;
+	lon: number;
+}
+
+interface OpenMeteoGeoResponse {
+	results?: Array<{
+		name: string;
+		country_code?: string;
+		admin1?: string;
+		latitude: number;
+		longitude: number;
+	}>;
+}
+
+export async function geocodeLocation(query: string): Promise<GeoResult[]> {
+	const q = query.trim();
+	if (!q) return [];
+	const params = new URLSearchParams({ name: q, count: '10', language: 'en', format: 'json' });
+	const url = `https://geocoding-api.open-meteo.com/v1/search?${params.toString()}`;
+	const res = await requestUrl({ url, method: 'GET', throw: false });
+	if (res.status !== 200) return [];
+	const body = res.json as OpenMeteoGeoResponse;
+	return (body.results ?? []).map(r => ({
+		name: r.name,
+		countryCode: r.country_code ?? '',
+		admin1: r.admin1,
+		lat: r.latitude,
+		lon: r.longitude,
+		label: r.country_code ? `${r.name}, ${r.country_code}` : r.name,
+	}));
+}
+
 export async function fetchWeather(coords: Coords, timezone: string): Promise<WeatherSnapshot> {
 	const params = new URLSearchParams({
 		latitude: coords.lat.toString(),

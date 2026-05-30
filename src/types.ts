@@ -40,6 +40,8 @@ export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 export type CrucibleCommandPaletteFilterMode = 'whitelist' | 'blacklist';
 
 import { Hotkey, Command } from 'obsidian';
+import { Currency } from './orchestration/utils/fx';
+import { GeoResult } from './orchestration/utils/weather';
 
 declare module 'obsidian' {
 	interface App {
@@ -183,6 +185,16 @@ export interface WeatherLocation {
 	lon: number;
 }
 
+export interface CurrencyCache {
+	fetchedAt: string;
+	currencies: Currency[];
+}
+
+export interface GeocodeCacheEntry {
+	fetchedAt: string;
+	results: GeoResult[];
+}
+
 export type AgentPromptSource = 'text' | 'file';
 
 export type AgentBindingMode = 'pinned' | 'constrained' | 'runtime';
@@ -300,6 +312,8 @@ export interface CrucibleSettings {
 	orchestrationDailyBriefTargetSection: string;
 	orchestrationDailyBriefFxPairs: FxPair[];
 	orchestrationDailyBriefWeatherLocations: WeatherLocation[];
+	orchestrationDailyBriefCurrencyCache?: CurrencyCache;
+	orchestrationDailyBriefGeocodeCache: Record<string, GeocodeCacheEntry>;
 	// Workflow: youtube_tracker
 	orchestrationYoutubeTrackerEnabled: boolean;
 	orchestrationYoutubeChannelsNote: string;
@@ -407,6 +421,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 		{ label: 'Mt Vernon, WA', lat: 48.4201, lon: -122.3346 },
 		{ label: 'Bolzano, IT', lat: 46.4983, lon: 11.3548 },
 	],
+	orchestrationDailyBriefGeocodeCache: {},
 	orchestrationYoutubeTrackerEnabled: true,
 	orchestrationYoutubeChannelsNote: '_system/youtube/Channels.md',
 	orchestrationYoutubeTrackerDiffMode: true,
