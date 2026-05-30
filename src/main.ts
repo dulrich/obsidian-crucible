@@ -17,9 +17,13 @@ import { JobStore } from './orchestration/JobStore';
 import { Orchestrator } from './orchestration/Orchestrator';
 import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
 import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
-import { YoutubeTrackerConsolidateWorkflow, YoutubeTrackerWorkflow } from './orchestration/workflows/YoutubeTrackerWorkflow';
+import {
+	BlogsTrackerConsolidateWorkflow,
+	BlogsTrackerWorkflow,
+	YoutubeTrackerConsolidateWorkflow,
+	YoutubeTrackerWorkflow,
+} from './orchestration/workflows/FeedTrackerWorkflow';
 import { ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
-import { BlogsTrackerConsolidateWorkflow, BlogsTrackerWorkflow } from './orchestration/workflows/BlogsTrackerWorkflow';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { FilePickerModal } from './orchestration/FilePickerModal';

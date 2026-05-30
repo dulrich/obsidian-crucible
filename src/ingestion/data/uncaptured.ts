@@ -2,14 +2,12 @@ import { App, TFile } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import {
 	buildBlogsSeenIdSet,
-	loadConfiguredBlogs,
-	scanBlogsTrackerRuns,
-} from '../../orchestration/utils/blogsIntake';
-import {
 	buildYoutubeSeenIdSet,
+	loadConfiguredBlogs,
 	loadConfiguredChannels,
+	scanBlogsTrackerRuns,
 	scanYoutubeTrackerRuns,
-} from '../../orchestration/utils/youtubeIntake';
+} from '../../orchestration/utils/feedIntake';
 import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from '../render/types';
