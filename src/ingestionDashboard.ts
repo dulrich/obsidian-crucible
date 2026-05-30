@@ -22,6 +22,7 @@ import {
 } from './orchestration/utils/ignoredIds';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
+import { logWarn } from './log';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueService';
 import type { JobType, OrchestrationJob } from './orchestration/types';
 import { renderSortableTable } from './ingestion/render/sortableTable';
@@ -822,7 +823,7 @@ export class IngestionDashboardUI {
 						await this.app.fileManager.trashFile(row.file);
 					} catch (e) {
 						failed++;
-						console.warn('Cleanup: could not trash', row.file.path, e);
+						logWarn('cleanup: could not trash', row.file.path, e);
 					}
 				}
 				const ok = rows.length - failed;

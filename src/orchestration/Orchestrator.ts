@@ -2,6 +2,7 @@ import { App, Notice, TFile } from 'obsidian';
 import { JobStore } from './JobStore';
 import { JobType, OrchestrationJob, ScanReport, WorkflowResult } from './types';
 import { Workflow } from './workflows/Workflow';
+import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
 const STALE_RUNNING_MS = 60 * 60 * 1000;
@@ -172,7 +173,7 @@ export class Orchestrator {
 			]);
 			bus.emit('orchestration-queue-updated', { queued: queued.length, running: running.length });
 		} catch (err) {
-			console.error('[crucible] failed to emit orchestration-queue-updated:', err);
+			logError('failed to emit orchestration-queue-updated', err);
 		}
 	}
 

@@ -1,4 +1,5 @@
 import type { TFile } from 'obsidian';
+import { logError } from '../log';
 
 export type IngestionEventName =
 	| 'clipping-captured'
@@ -46,7 +47,7 @@ export class IngestionEventBus {
 			try {
 				(listener as Listener<E>)(payload);
 			} catch (err) {
-				console.error(`[crucible] ingestion event listener for "${event}" threw:`, err);
+				logError(`ingestion event listener for "${event}" threw`, err);
 			}
 		}
 	}
