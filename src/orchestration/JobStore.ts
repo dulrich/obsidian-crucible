@@ -3,6 +3,7 @@ import { ensureFolder } from '../utils';
 import { updateFrontmatter } from '../frontmatter';
 import { JobStatus, JobType, OrchestrationJob, JobPriority } from './types';
 import { newJobId, nowIso } from './utils/dates';
+import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
 const STATUS_FOLDER: Record<JobStatus, string> = {
@@ -133,6 +134,7 @@ export class JobStore {
 	async move(file: TFile, job: OrchestrationJob, toStatus: JobStatus): Promise<{ file: TFile; job: OrchestrationJob }> {
 		const targetFolder = this.folderForStatus(toStatus);
 		await ensureFolder(this.app, targetFolder);
+		const fromPath = file.path;
 		const targetPath = `${targetFolder}/${file.name}`;
 		await this.app.fileManager.renameFile(file, targetPath);
 
@@ -142,10 +144,23 @@ export class JobStore {
 		}
 
 		const updated = nowIso();
-		await updateFrontmatter(this.app, moved, (fm) => {
-			fm.status = toStatus;
-			fm.updated = updated;
-		});
+		try {
+			await updateFrontmatter(this.app, moved, (fm) => {
+				fm.status = toStatus;
+				fm.updated = updated;
+			});
+		} catch (err) {
+			// The folder is the source of truth for which queue bucket a job is in, so a
+			// moved file whose frontmatter still claims the old status is an inconsistent
+			// state. Roll the rename back so the job stays fully in its prior bucket, then
+			// surface the failure to the caller rather than leaving it moved-but-un-updated.
+			try {
+				await this.app.fileManager.renameFile(moved, fromPath);
+			} catch (rollbackErr) {
+				logError(`JobStore.move: rollback to ${fromPath} failed after frontmatter write error`, rollbackErr);
+			}
+			throw err;
+		}
 
 		return {
 			file: moved,

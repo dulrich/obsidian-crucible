@@ -4,6 +4,7 @@ import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing } from './frontmatter';
 import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
 import { postIdFromUrl } from './orchestration/utils/blogs';
+import { logError } from './log';
 
 const YT_EMBED_RE = /^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n/;
 const TRANSCRIPT_HEADER_RE = /^([ \t]*\r?\n)*[ \t]*##[ \t]+Transcript[ \t]*\r?\n/;
@@ -235,7 +236,7 @@ export class Linter {
 			});
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
-			console.error(`Error during lint (${file.path}):`, e);
+			logError(`lint failed (${file.path})`, e);
 			return false;
 		}
 
@@ -292,7 +293,7 @@ export class Linter {
 						if (didRename) renamed++;
 					} catch (e) {
 						failed++;
-						console.error(`Property rename failed (${file.path}):`, e);
+						logError(`property rename failed (${file.path})`, e);
 					}
 					scanned++;
 					if (scanned % 25 === 0) {
@@ -342,7 +343,7 @@ export class Linter {
 						if (didRemove) removed++;
 					} catch (e) {
 						failed++;
-						console.error(`Property remove failed (${file.path}):`, e);
+						logError(`property remove failed (${file.path})`, e);
 					}
 					scanned++;
 					if (scanned % 25 === 0) {
@@ -387,7 +388,7 @@ export class Linter {
 			return true;
 		} catch (e) {
 			if (!silent) new Notice(`Transcript cleanup failed (${file.path}): ${(e as Error).message}`);
-			console.error(`Transcript cleanup failed (${file.path}):`, e);
+			logError(`transcript cleanup failed (${file.path})`, e);
 			return false;
 		}
 	}

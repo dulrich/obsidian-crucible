@@ -1,6 +1,7 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import { enrichYoutubeMetadataStandalone, ingestYoutubeVideoMetadata, loadYoutubeApiKey } from './utils/youtubeApi';
+import { MinIntervalGate } from './utils/rateLimit';
 
 export type EnrichmentItemStatus = 'pending' | 'running' | 'done' | 'failed';
 
@@ -29,14 +30,13 @@ export class EnrichmentQueueService {
 	private readonly entries = new Map<string, EnrichmentInternalEntry>();
 	private autoSource: AutoSourceFn | null = null;
 	private autoEnabled = false;
-	private rateLimitMs = 2_000;
+	private readonly rateGate: MinIntervalGate;
 	private draining = false;
 	private disposed = false;
-	private lastRequestAt = 0;
 
 	constructor(private readonly plugin: CruciblePlugin) {
 		this.autoEnabled = plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
-		this.rateLimitMs = Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000;
+		this.rateGate = new MinIntervalGate(Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000);
 	}
 
 	dispose(): void {
@@ -46,7 +46,7 @@ export class EnrichmentQueueService {
 	}
 
 	setRateLimitSeconds(seconds: number): void {
-		this.rateLimitMs = Math.max(0, seconds) * 1000;
+		this.rateGate.setIntervalMs(Math.max(0, seconds) * 1000);
 	}
 
 	setAutoSource(fn: AutoSourceFn | null): void {
@@ -143,7 +143,7 @@ export class EnrichmentQueueService {
 				}
 				const item = next ?? this.pickNextPending();
 				if (!item) break;
-				await this.respectRateLimit();
+				await this.rateGate.wait();
 				await this.runOne(item);
 				this.scheduleTerminalCleanup();
 			}
@@ -159,17 +159,9 @@ export class EnrichmentQueueService {
 		return null;
 	}
 
-	private async respectRateLimit(): Promise<void> {
-		if (this.rateLimitMs <= 0) return;
-		const elapsed = Date.now() - this.lastRequestAt;
-		const wait = this.rateLimitMs - elapsed;
-		if (wait > 0) await sleep(wait);
-	}
-
 	private async runOne(item: EnrichmentInternalEntry): Promise<void> {
 		item.status = 'running';
 		this.emitUpdate();
-		this.lastRequestAt = Date.now();
 
 		try {
 			const apiKey = await loadYoutubeApiKey(this.plugin.app);
@@ -230,8 +222,4 @@ function statusRank(status: EnrichmentItemStatus): number {
 		case 'failed': return 2;
 		case 'done': return 3;
 	}
-}
-
-function sleep(ms: number): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, ms));
 }

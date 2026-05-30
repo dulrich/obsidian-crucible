@@ -26,13 +26,12 @@ import {
 import { ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
-import { FilePickerModal } from './orchestration/FilePickerModal';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
-import { CrucibleCommandPaletteModal } from './commandPalette';
 import { IngestionDashboardView, INGESTION_DASHBOARD_VIEW_TYPE } from './ingestionDashboardView';
 import { IngestionEventBus } from './orchestration/events';
 import { EnrichmentQueueService } from './orchestration/EnrichmentQueueService';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
+import { registerStaticCommands } from './commands';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -107,234 +106,7 @@ export default class CruciblePlugin extends Plugin {
 		});
 
 		// --- Commands ---
-		const prefix = this.manifest.id;
-
-		this.registerCrucibleCommand({
-			id: 'materialize-day-today',
-			name: 'Materialize day: today',
-			group: 'Materialize',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:materialize-day-today`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'materialize-day-picker',
-			name: 'Materialize day: pick date',
-			group: 'Materialize',
-			run: () => this.openDayPicker(),
-		});
-		this.registerCrucibleCommand({
-			id: 'materialize-week-today',
-			name: 'Materialize week: current',
-			group: 'Materialize',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:materialize-week-today`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'materialize-week-picker',
-			name: 'Materialize week: pick week',
-			group: 'Materialize',
-			run: () => this.openWeekPicker(),
-		});
-		this.registerCrucibleCommand({
-			id: 'materialize-month-today',
-			name: 'Materialize month: current',
-			group: 'Materialize',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:materialize-month-today`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'materialize-month-picker',
-			name: 'Materialize month: pick month',
-			group: 'Materialize',
-			run: () => this.openMonthPicker(),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'word-count',
-			name: 'Lint: word count',
-			group: 'Lint',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:word-count`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-note',
-			name: 'Lint: all',
-			group: 'Lint',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-note`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-vault',
-			name: 'Lint: vault',
-			group: 'Lint',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-vault`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-cleanup-transcript',
-			name: 'Lint: cleanup transcript',
-			group: 'Lint',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-cleanup-transcript`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-localize-attachments',
-			name: 'Lint: localize attachments',
-			group: 'Lint',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-localize-attachments`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-localize-attachments-vault',
-			name: 'Lint: localize attachments (vault)',
-			group: 'Lint',
-			run: () => this.chainManager.executeInternalCommand(`${prefix}:lint-localize-attachments-vault`, {}),
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-rename-property',
-			name: 'Lint: update property in vault',
-			group: 'Lint',
-			run: async () => {
-				const oldKey = await this.promptForText('Old property name');
-				if (oldKey === null || oldKey.trim() === '') return;
-				const newKey = await this.promptForText('New property name');
-				if (newKey === null || newKey.trim() === '') return;
-				await this.chainManager.executeInternalCommand(`${prefix}:lint-rename-property`, {
-					oldKey: oldKey.trim(),
-					newKey: newKey.trim(),
-				});
-			},
-		});
-		this.registerCrucibleCommand({
-			id: 'lint-remove-property',
-			name: 'Lint: remove property from vault',
-			group: 'Lint',
-			run: async () => {
-				const key = await this.promptForText('Property name to remove');
-				if (key === null || key.trim() === '') return;
-				await this.chainManager.executeInternalCommand(`${prefix}:lint-remove-property`, {
-					key: key.trim(),
-				});
-			},
-		});
-
-		this.registerCrucibleCommand({
-			id: 'mark-as-forwarded',
-			name: 'Mark as forwarded',
-			group: 'Other',
-			available: () => this.activeEditor() !== undefined,
-			run: () => {
-				const editor = this.activeEditor();
-				if (!editor) {
-					new Notice('Switch to edit mode to use this command');
-					return;
-				}
-				void this.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
-			},
-		});
-
-		this.registerCrucibleCommand({
-			id: 'reload-plugin',
-			name: 'Reload plugin',
-			group: 'Other',
-			run: async () => {
-				if (this.app.plugins) {
-					await this.app.plugins.disablePlugin(this.manifest.id);
-					await this.app.plugins.enablePlugin(this.manifest.id);
-					new Notice('Plugin reloaded');
-				}
-			},
-		});
-
-		this.registerCrucibleCommand({
-			id: 'open-settings-tab',
-			name: 'Open settings in a tab',
-			group: 'Other',
-			run: () => this.activateSettingsView(),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'open-ingestion-dashboard',
-			name: 'Open ingestion dashboard',
-			group: 'Ingestion',
-			run: () => this.activateIngestionDashboardView(),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'open-crucible-command-palette',
-			name: 'Open Crucible command palette',
-			group: 'Other',
-			available: () => this.settings.crucibleCommandPaletteEnabled,
-			run: () => new CrucibleCommandPaletteModal(this.app, this).open(),
-		});
-
-		this.registerMoveFileCommands(prefix);
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-scan',
-			name: 'Orchestrate: scan',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.scan(),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-run-next',
-			name: 'Orchestrate: run next',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.runNext(),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-daily-brief-lite',
-			name: 'Orchestrate: enqueue daily brief lite',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.enqueue('daily_brief_lite'),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-transcript-refine',
-			name: 'Orchestrate: enqueue transcript refine',
-			group: 'Orchestrations',
-			run: () => {
-				new FilePickerModal(this.app, 'Pick a transcript note', (file) => {
-					void this.orchestrator.enqueue('transcript_refine', { targetPath: file.path });
-				}).open();
-			},
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-youtube-tracker',
-			name: 'Orchestrate: enqueue YouTube tracker',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.enqueue('youtube_tracker'),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-youtube-tracker-consolidation',
-			name: 'Orchestrate: enqueue YouTube tracker consolidation',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.enqueue('youtube_tracker_consolidate'),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'youtube-fetch-video-metadata',
-			name: 'YouTube: fetch video metadata for active note',
-			group: 'Orchestrations',
-			run: () => this.fetchYoutubeMetadataForActiveNote(),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-blogs-tracker',
-			name: 'Orchestrate: enqueue Blogs tracker',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.enqueue('blogs_tracker'),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-blogs-tracker-consolidation',
-			name: 'Orchestrate: enqueue Blogs tracker consolidation',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.enqueue('blogs_tracker_consolidate'),
-		});
-
-		this.registerCrucibleCommand({
-			id: 'orchestrator-enqueue-link-scan',
-			name: 'Orchestrate: enqueue link scan',
-			group: 'Orchestrations',
-			run: () => this.orchestrator.enqueue('link_scan'),
-		});
+		registerStaticCommands(this);
 
 		// --- Events ---
 		this.registerEvent(this.app.vault.on('create', (file) => { void this.handleFileCreate(file); }));
@@ -417,7 +189,7 @@ export default class CruciblePlugin extends Plugin {
 		this.ingestionEvents?.dispose();
 	}
 
-	private activeEditor(): Editor | undefined {
+	activeEditor(): Editor | undefined {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
@@ -529,7 +301,7 @@ export default class CruciblePlugin extends Plugin {
 		});
 	}
 
-	private registerMoveFileCommands(prefix: string): void {
+	registerMoveFileCommands(prefix: string): void {
 		const moveDailyId = 'move-current-file-to-daily-folder';
 		const moveFolderId = 'move-current-file-to-folder';
 
@@ -734,7 +506,7 @@ export default class CruciblePlugin extends Plugin {
 		};
 	}
 
-	private async promptForText(title: string): Promise<string | null> {
+	async promptForText(title: string): Promise<string | null> {
 		return new Promise((resolve) => {
 			let submitted = false;
 			new TextInputModal(
@@ -964,7 +736,7 @@ export default class CruciblePlugin extends Plugin {
 		return true;
 	}
 
-	private async fetchYoutubeMetadataForActiveNote(): Promise<void> {
+	async fetchYoutubeMetadataForActiveNote(): Promise<void> {
 		const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
 		if (!file) {
 			new Notice('No active note');

@@ -6,6 +6,7 @@ import {
 } from './types';
 import { Linter } from './lint';
 import { appendDebugLog, applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
+import { logError, logWarn } from './log';
 import { withMaterializing } from './frontmatter';
 
 export const MD5_NAME_RE = /_MD5\.[A-Za-z0-9]+$/;
@@ -254,7 +255,7 @@ export class AttachmentLocalizer {
 		try {
 			await appendDebugLog(this.app, `Localize: ${note.path}`, entry);
 		} catch (e) {
-			console.warn('Localize debug log failed', e);
+			logWarn('localize debug log failed', e);
 		}
 	}
 
@@ -305,7 +306,7 @@ export class AttachmentLocalizer {
 			});
 		} catch (e) {
 			spinner?.hide();
-			console.error(`Localize attachments failed (${file.path}):`, e);
+			logError(`localize attachments failed (${file.path})`, e);
 			await this.debug(file, `ERROR: ${(e as Error).message}`);
 			if (!silent) new Notice(`Localize failed: ${(e as Error).message}`);
 			return false;
@@ -416,7 +417,7 @@ export class AttachmentLocalizer {
 			await this.debug(note, `remote ${match.link}: downloaded .${download.ext} -> ${targetPath}`);
 			return this.formatEmbed(match.syntax, targetPath);
 		} catch (e) {
-			console.warn(`Localize remote failed: ${match.link}`, e);
+			logWarn(`localize remote failed: ${match.link}`, e);
 			await this.debug(note, `remote ${match.link}: ERROR ${(e as Error).message} (left as-is)`);
 			return null;
 		}
@@ -465,7 +466,7 @@ export class AttachmentLocalizer {
 		const newPath = await this.writeAttachment(note, bytes, outExt, resolved.basename);
 		// Delete the old file if it moved to a different path
 		if (resolved.path !== newPath) {
-			try { await this.app.fileManager.trashFile(resolved); } catch (e) { console.warn('Localize: could not delete old', resolved.path, e); }
+			try { await this.app.fileManager.trashFile(resolved); } catch (e) { logWarn('localize: could not delete old', resolved.path, e); }
 		}
 		await this.debug(note, `local ${match.link}: resolved=${resolved.path} -> ${newPath}`);
 		return this.formatEmbed(match.syntax, newPath);
@@ -526,7 +527,7 @@ export class AttachmentLocalizer {
 			const ext = this.extFromMime(contentType) ?? this.extFromUrl(url) ?? 'bin';
 			return { bytes: res.arrayBuffer, ext };
 		} catch (e) {
-			console.warn(`Download failed: ${url}`, e);
+			logWarn(`download failed: ${url}`, e);
 			return null;
 		}
 	}
@@ -596,7 +597,7 @@ export class AttachmentLocalizer {
 				URL.revokeObjectURL(url);
 			}
 		} catch (e) {
-			console.warn('Image conversion failed; keeping source', e);
+			logWarn('image conversion failed; keeping source', e);
 			return { bytes, ext: srcExt };
 		}
 	}
@@ -692,7 +693,7 @@ export class AttachmentLocalizer {
 			await ensureFolder(this.app, newFolder.replace(/\/[^/]+$/, ''));
 			await this.app.fileManager.renameFile(existing, newFolder);
 		} catch (e) {
-			console.warn('Localize: rename attachment folder failed', e);
+			logWarn('localize: rename attachment folder failed', e);
 		}
 	}
 
@@ -705,7 +706,7 @@ export class AttachmentLocalizer {
 		try {
 			await this.app.fileManager.trashFile(existing);
 		} catch (e) {
-			console.warn('Localize: delete attachment folder failed', e);
+			logWarn('localize: delete attachment folder failed', e);
 		}
 	}
 }
