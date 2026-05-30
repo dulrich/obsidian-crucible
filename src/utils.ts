@@ -41,6 +41,30 @@ export async function ensureFolder(app: App, path: string): Promise<void> {
 	}
 }
 
+/**
+ * Append a timestamped entry to a shared debug note (default `_crucible/debug.md`).
+ * Used by both Crucible:Chain debug mode and Localize debug mode so all debug output
+ * lands in the same file. Creates the file/folder on first write.
+ */
+export async function appendDebugLog(
+	app: App,
+	source: string,
+	entry: string,
+	path: string = '_crucible/debug.md',
+): Promise<void> {
+	const timestamp = new Date().toISOString();
+	const line = `\n## ${timestamp} — ${source}\n${entry}\n---\n`;
+	const existing = app.vault.getFileByPath(path);
+	if (existing) {
+		const content = await app.vault.read(existing);
+		await app.vault.modify(existing, content + line);
+	} else {
+		const folderPath = path.substring(0, path.lastIndexOf('/'));
+		if (folderPath) await ensureFolder(app, folderPath);
+		await app.vault.create(path, line);
+	}
+}
+
 export async function applyTemplateString(
 	template: string,
 	date: moment.Moment,

@@ -1,5 +1,6 @@
 import { App, Modal, Notice, Editor, TFile } from 'obsidian';
 import { AgentResult, Chain, ChainStep, CommandArgSchema } from './types';
+import { appendDebugLog } from './utils';
 
 export type ChainCommandFn = (args: Record<string, string>, previousResponse: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>;
 
@@ -89,20 +90,7 @@ export class ChainManager {
 	}
 
 	private async appendDebugLog(chain: Chain, entry: string) {
-		const path = chain.debugLogPath || '_crucible/debug.md';
-		const timestamp = new Date().toISOString();
-		const line = `\n## ${timestamp} — ${chain.name}\n${entry}\n---\n`;
-		const existing = this.app.vault.getFileByPath(path);
-		if (existing) {
-			const content = await this.app.vault.read(existing);
-			await this.app.vault.modify(existing, content + line);
-		} else {
-			const folderPath = path.substring(0, path.lastIndexOf('/'));
-			if (folderPath && !this.app.vault.getFolderByPath(folderPath)) {
-				await this.app.vault.createFolder(folderPath);
-			}
-			await this.app.vault.create(path, line);
-		}
+		await appendDebugLog(this.app, chain.name, entry, chain.debugLogPath || '_crucible/debug.md');
 	}
 
 	private async writeIntermediateCapture(stepName: string, content: string) {
