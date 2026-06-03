@@ -29,6 +29,8 @@ import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeM
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 import { IngestionDashboardView, INGESTION_DASHBOARD_VIEW_TYPE } from './ingestionDashboardView';
 import { IngestionEventBus } from './orchestration/events';
+import { NoteLockManager } from './orchestration/NoteLockManager';
+import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueService } from './orchestration/EnrichmentQueueService';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { registerStaticCommands } from './commands';
@@ -65,6 +67,8 @@ export default class CruciblePlugin extends Plugin {
 	jobStore: JobStore;
 	orchestrator: Orchestrator;
 	ingestionEvents: IngestionEventBus;
+	noteLocks: NoteLockManager;
+	private noteLockOverlay: NoteLockOverlay;
 	enrichmentQueue: EnrichmentQueueService;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	private tocComponent: TableOfContentsUI | null = null;
@@ -72,16 +76,17 @@ export default class CruciblePlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
+		this.ingestionEvents = new IngestionEventBus();
+		this.noteLocks = new NoteLockManager(this.ingestionEvents);
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
-		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
-		this.attachmentLocalizer = new AttachmentLocalizer(this.app, this.settings, this.linter, (state: boolean) => { this.isMaterializing = state; });
+		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; }, this.noteLocks);
+		this.attachmentLocalizer = new AttachmentLocalizer(this.app, this.settings, this.linter, (state: boolean) => { this.isMaterializing = state; }, this.noteLocks);
 		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
-		this.chainManager = new ChainManager(this.app);
+		this.chainManager = new ChainManager(this.app, this.noteLocks);
 		this.providerManager = new ProviderManager(this.app);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 		this.jobStore = new JobStore(this);
 		this.orchestrator = new Orchestrator(this, this.jobStore);
-		this.ingestionEvents = new IngestionEventBus();
 		this.enrichmentQueue = new EnrichmentQueueService(this);
 		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
 		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow());
@@ -178,12 +183,15 @@ export default class CruciblePlugin extends Plugin {
 		this.registerShortcuts();
 		this.registerCaptures();
 		this.addSettingTab(new CrucibleSettingTab(this.app, this));
-		
+
+		this.noteLockOverlay = new NoteLockOverlay(this);
+
 		this.refreshToC();
 	}
 
 	onunload() {
 		if (this.tocComponent) this.tocComponent.unload();
+		this.noteLockOverlay?.dispose();
 		this.orchestrationAutoRunner?.dispose();
 		this.enrichmentQueue?.dispose();
 		this.ingestionEvents?.dispose();
