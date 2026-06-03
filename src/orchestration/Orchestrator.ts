@@ -82,10 +82,40 @@ export class Orchestrator {
 			new Notice(`Orchestrate: workflow "${type}" is disabled in settings.`);
 			return null;
 		}
+		if (config.dedupeKey) {
+			const key = config.dedupeKey(params ?? {});
+			if (key) {
+				const existing = await this.findActiveFileJob(type, key, config.dedupeKey);
+				if (existing) {
+					new Notice(`Orchestrate: ${type} already queued for this target (${existing.id}).`);
+					return existing;
+				}
+			}
+		}
 		const job = await this.store.enqueue(type, { params });
 		new Notice(`Orchestrate: queued ${type} (${job.id})`);
 		void this.emitQueueUpdate();
 		return job;
+	}
+
+	// Finds a queued or running file-backed job of `type` whose params resolve to
+	// the same dedupe key, so callers can collapse repeat enqueues (e.g. rapid
+	// transcript-refine requests for the same note) onto one job.
+	private async findActiveFileJob(
+		type: JobType,
+		key: string,
+		dedupeKey: (params: Record<string, unknown>) => string,
+	): Promise<OrchestrationJob | null> {
+		await this.store.ensureFolders();
+		const [queued, running] = await Promise.all([
+			this.store.listFolder('queued'),
+			this.store.listFolder('running'),
+		]);
+		for (const entry of [...queued, ...running]) {
+			if (entry.job.type !== type) continue;
+			if (dedupeKey(entry.job.params ?? {}) === key) return entry.job;
+		}
+		return null;
 	}
 
 	// Memory-type enqueue: idempotent on the configured key, silent (no Notice), and
