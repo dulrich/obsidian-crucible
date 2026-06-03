@@ -129,16 +129,26 @@ function renderChainListSection(tab: CrucibleSettingTab, containerEl: HTMLElemen
 	new Setting(containerEl).setName('Chains').setHeading();
 	containerEl.createEl('p', { text: 'Define a sequence of commands to run in order. Chains can pass arguments and responses between steps.' });
 
-	const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	const group = containerEl.createDiv({ cls: 'crucible-settings-group crucible-chain-list' });
 
 	if (tab.plugin.settings.chains.length === 0) {
 		group.createDiv({ text: 'No chains defined.', cls: 'crucible-empty-state' });
 	} else {
+		const header = group.createDiv({ cls: 'crucible-chain-flags-header' });
+		header.createSpan({ text: 'Mutates?' });
+		header.createSpan({ text: 'Debug?' });
 		sortByNameWithEmptyLast(tab.plugin.settings.chains, c => c.name).forEach(({ item: chain, index }, displayIdx) => {
 			if (displayIdx > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(group)
+			const setting = new Setting(group)
 				.setName(chain.name || '(unnamed)')
-				.setDesc(`${chain.steps.length} steps`)
+				.setDesc(`${chain.steps.length} steps`);
+			const mutates = setting.controlEl.createSpan({ cls: 'crucible-chain-flag', text: chain.mutating !== false ? '✓' : '' });
+			mutates.setAttr('aria-label', 'Mutates the note');
+			mutates.setAttr('title', 'Mutates the note');
+			const debug = setting.controlEl.createSpan({ cls: 'crucible-chain-flag', text: chain.debugMode === true ? '✓' : '' });
+			debug.setAttr('aria-label', 'Debug mode');
+			debug.setAttr('title', 'Debug mode');
+			setting
 				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate chain').onClick(async () => {
 					const copy = JSON.parse(JSON.stringify(chain)) as Chain;
 					copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
@@ -185,6 +195,14 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	}, save);
 
 	group.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(group, {
+		name: 'Mutates the note',
+		desc: 'When off, the chain runs read-only and does not lock its target note. Turn off for chains that only open views/dashboards or otherwise never write the note.',
+		get: () => chain.mutating !== false,
+		set: (v) => { chain.mutating = v; },
+		after: () => tab.plugin.registerChains(),
+	}, save);
+
 	bindToggle(group, {
 		name: 'Debug mode',
 		desc: 'Log each step\'s input and output to a debug note in _crucible/debug.md.',

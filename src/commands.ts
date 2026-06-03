@@ -135,6 +135,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'reload-plugin',
 		name: 'Reload plugin',
 		group: 'Other',
+		mutating: false,
 		run: async () => {
 			if (plugin.app.plugins) {
 				await plugin.app.plugins.disablePlugin(plugin.manifest.id);
@@ -148,6 +149,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'open-settings-tab',
 		name: 'Open settings in a tab',
 		group: 'Other',
+		mutating: false,
 		run: () => plugin.activateSettingsView(),
 	});
 
@@ -155,6 +157,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'open-ingestion-dashboard',
 		name: 'Open ingestion dashboard',
 		group: 'Ingestion',
+		mutating: false,
 		run: () => plugin.activateIngestionDashboardView(),
 	});
 
@@ -162,6 +165,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'open-crucible-command-palette',
 		name: 'Open Crucible command palette',
 		group: 'Other',
+		mutating: false,
 		available: () => plugin.settings.crucibleCommandPaletteEnabled,
 		run: () => new CrucibleCommandPaletteModal(plugin.app, plugin).open(),
 	});
@@ -172,6 +176,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-scan',
 		name: 'Orchestrate: scan',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.scan(),
 	});
 
@@ -179,6 +184,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-run-next',
 		name: 'Orchestrate: run next',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.runNext(),
 	});
 
@@ -186,6 +192,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-daily-brief-lite',
 		name: 'Orchestrate: enqueue daily brief lite',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.enqueue('daily_brief_lite'),
 	});
 
@@ -193,6 +200,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-transcript-refine',
 		name: 'Orchestrate: enqueue transcript refine',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => {
 			new FilePickerModal(plugin.app, 'Pick a transcript note', (file) => {
 				void plugin.orchestrator.enqueue('transcript_refine', { targetPath: file.path });
@@ -204,6 +212,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-youtube-tracker',
 		name: 'Orchestrate: enqueue YouTube tracker',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.enqueue('youtube_tracker'),
 	});
 
@@ -211,6 +220,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-youtube-tracker-consolidation',
 		name: 'Orchestrate: enqueue YouTube tracker consolidation',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.enqueue('youtube_tracker_consolidate'),
 	});
 
@@ -225,6 +235,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-blogs-tracker',
 		name: 'Orchestrate: enqueue Blogs tracker',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.enqueue('blogs_tracker'),
 	});
 
@@ -232,6 +243,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-blogs-tracker-consolidation',
 		name: 'Orchestrate: enqueue Blogs tracker consolidation',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.enqueue('blogs_tracker_consolidate'),
 	});
 
@@ -239,6 +251,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		id: 'orchestrator-enqueue-link-scan',
 		name: 'Orchestrate: enqueue link scan',
 		group: 'Orchestrations',
+		mutating: false,
 		run: () => plugin.orchestrator.enqueue('link_scan'),
 	});
 }

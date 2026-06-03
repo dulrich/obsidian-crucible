@@ -390,8 +390,12 @@ export class IngestionDashboardUI {
 		};
 		this.sections.set('enrichmentQueue', ctx);
 
-		// Push the initial auto-source if toggle is on.
+		// Enable + push the initial auto-source if the toggle is on. Both are required:
+		// MemoryJobQueue.refill() no-ops unless autoEnabled AND autoSource are set, and
+		// nothing else enables the queue on load — without this the box reads ON but
+		// enrichment stays idle until the toggle is cycled off/on.
 		if (toggle.checked) {
+			this.plugin.enrichmentQueue?.setAutoEnabled(true);
 			this.plugin.enrichmentQueue?.setAutoSource(() => this.uncapturedQueueItems());
 		}
 	}
