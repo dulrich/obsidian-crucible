@@ -18,6 +18,8 @@ export interface JobTypeConfig {
 	display?: (params: Record<string, unknown>) => Record<string, unknown>;
 	/** Memory cleanup window for terminal (done/failed) entries; default 60_000. */
 	terminalRetentionMs?: number;
+	/** Per-type execution timeout override (ms). Falls back to the global setting; 0 disables. */
+	timeoutMs?: number;
 }
 
 export const DEFAULT_JOB_TYPE_CONFIG: JobTypeConfig = {

@@ -107,6 +107,16 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	}, save);
 
 	globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(globalGroup, {
+		name: 'Autorun job timeout (seconds)',
+		desc: 'A running job that exceeds this is marked failed so the drain keeps moving. 0 disables (relies on the hourly stale-job recovery).',
+		placeholder: '600',
+		get: () => String(s.orchestrationAutorunTimeoutSeconds),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationAutorunTimeoutSeconds = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 600; },
+		min: 0,
+	}, save);
+
+	globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindText(globalGroup, {
 		name: 'Queue folder root',
 		desc: 'Vault folder containing inbox/, running/, done/, failed/ subfolders.',
