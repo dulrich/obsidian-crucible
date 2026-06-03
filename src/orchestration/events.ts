@@ -7,7 +7,8 @@ export type IngestionEventName =
 	| 'tracker-run'
 	| 'metadata-enriched'
 	| 'enrichment-queue-updated'
-	| 'orchestration-queue-updated';
+	| 'orchestration-queue-updated'
+	| 'note-lock-changed';
 
 export interface IngestionEventPayloads {
 	'clipping-captured': { file: TFile };
@@ -16,6 +17,7 @@ export interface IngestionEventPayloads {
 	'metadata-enriched': { videoId: string; metadataFile: TFile; sourceFile?: TFile };
 	'enrichment-queue-updated': { size: number };
 	'orchestration-queue-updated': { queued: number; running: number };
+	'note-lock-changed': { path: string; locked: boolean; label: string };
 }
 
 type Listener<E extends IngestionEventName> = (payload: IngestionEventPayloads[E]) => void;

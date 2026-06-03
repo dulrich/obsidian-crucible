@@ -1,6 +1,7 @@
 import { App, Modal, Notice, Editor, TFile } from 'obsidian';
 import { AgentResult, Chain, ChainStep, CommandArgSchema } from './types';
 import { appendDebugLog } from './utils';
+import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
 
 export type ChainCommandFn = (args: Record<string, string>, previousResponse: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>;
 
@@ -9,7 +10,7 @@ export class ChainManager {
 	private registry: Map<string, ChainCommandFn> = new Map();
 	private schemas: Map<string, CommandArgSchema[]> = new Map();
 
-	constructor(app: App) {
+	constructor(app: App, private noteLocks?: NoteLockManager) {
 		this.app = app;
 	}
 
@@ -45,6 +46,7 @@ export class ChainManager {
 		if (targetFile) chainVars.target_path = targetFile.path;
 		new Notice(`Starting chain: ${chain.name}`);
 
+		const runSteps = async (): Promise<void> => {
 		for (const step of chain.steps) {
 			const stepLabel = step.stepType === 'guard' ? 'guard' : step.commandId;
 			try {
@@ -87,6 +89,14 @@ export class ChainManager {
 		}
 
 		new Notice(`Chain "${chain.name}" completed`);
+		};
+
+		// Serialize the chain against other Crucible commands on the same note.
+		if (targetFile) {
+			await withOptionalNoteLock(this.noteLocks, targetFile.path, `chain:${chain.name}`, runSteps);
+		} else {
+			await runSteps();
+		}
 	}
 
 	private async appendDebugLog(chain: Chain, entry: string) {
