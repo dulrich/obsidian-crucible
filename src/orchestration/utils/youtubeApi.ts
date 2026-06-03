@@ -42,8 +42,8 @@ export interface YoutubeVideoMetadata {
 }
 
 export type IngestResult =
-	| { status: 'created';     metadataPath: string; createdNew: true;  linkUpdated: boolean }
-	| { status: 'exists';      metadataPath: string; createdNew: false; linkUpdated: boolean }
+	| { status: 'created';     metadataPath: string; createdNew: true;  linkUpdated: boolean; linkedNotes: number }
+	| { status: 'exists';      metadataPath: string; createdNew: false; linkUpdated: boolean; linkedNotes: number }
 	| { status: 'no-video-id'; metadataPath: null }
 	| { status: 'no-api-key';  metadataPath: null };
 
@@ -210,7 +210,7 @@ export async function enrichYoutubeMetadataStandalone(
 
 	const existing = await findExistingMetadataNote(app, root, trimmedId);
 	if (existing) {
-		return { status: 'exists', metadataPath: existing.path, createdNew: false, linkUpdated: false };
+		return { status: 'exists', metadataPath: existing.path, createdNew: false, linkUpdated: false, linkedNotes: 0 };
 	}
 
 	const apiKey = await loadYoutubeApiKey(app);
@@ -222,11 +222,11 @@ export async function enrichYoutubeMetadataStandalone(
 
 	const collision = app.vault.getAbstractFileByPath(path);
 	if (collision instanceof TFile) {
-		return { status: 'exists', metadataPath: path, createdNew: false, linkUpdated: false };
+		return { status: 'exists', metadataPath: path, createdNew: false, linkUpdated: false, linkedNotes: 0 };
 	}
 
 	await writeYoutubeMetadataNote(app, path, meta);
-	return { status: 'created', metadataPath: path, createdNew: true, linkUpdated: false };
+	return { status: 'created', metadataPath: path, createdNew: true, linkUpdated: false, linkedNotes: 0 };
 }
 
 export async function ingestYoutubeVideoMetadata(
@@ -242,8 +242,8 @@ export async function ingestYoutubeVideoMetadata(
 
 	const existing = await findExistingMetadataNote(app, root, trimmedId);
 	if (existing) {
-		await setYtMetadataLink(plugin, sourceFile, existing.path);
-		return { status: 'exists', metadataPath: existing.path, createdNew: false, linkUpdated: true };
+		const linkedNotes = await linkAllNotesForVideoId(plugin, trimmedId, existing.path, sourceFile);
+		return { status: 'exists', metadataPath: existing.path, createdNew: false, linkUpdated: true, linkedNotes };
 	}
 
 	const apiKey = await loadYoutubeApiKey(app);
@@ -255,13 +255,13 @@ export async function ingestYoutubeVideoMetadata(
 
 	const collision = app.vault.getAbstractFileByPath(path);
 	if (collision instanceof TFile) {
-		await setYtMetadataLink(plugin, sourceFile, path);
-		return { status: 'exists', metadataPath: path, createdNew: false, linkUpdated: true };
+		const linkedNotes = await linkAllNotesForVideoId(plugin, trimmedId, path, sourceFile);
+		return { status: 'exists', metadataPath: path, createdNew: false, linkUpdated: true, linkedNotes };
 	}
 
 	await writeYoutubeMetadataNote(app, path, meta);
-	await setYtMetadataLink(plugin, sourceFile, path);
-	return { status: 'created', metadataPath: path, createdNew: true, linkUpdated: true };
+	const linkedNotes = await linkAllNotesForVideoId(plugin, trimmedId, path, sourceFile);
+	return { status: 'created', metadataPath: path, createdNew: true, linkUpdated: true, linkedNotes };
 }
 
 // Coerces a frontmatter `yt-video-id` value into a trimmed string. Accepts a
@@ -276,6 +276,44 @@ export function coerceVideoId(value: unknown): string {
 		}
 	}
 	return '';
+}
+
+// Links `yt-metadata` onto every vault note carrying this video id (not just the
+// note that triggered the fetch). Several captures can share one yt-video-id; the
+// metadata queue dedupes on that id, so without this fan-out only the first note
+// would ever get linked and the rest would stay stuck in the "without metadata"
+// backlog. `sourceFile` is always linked first (preserving the single-note path's
+// behavior); other matching notes are linked only if not already linked. Returns
+// the number of notes whose link was set.
+async function linkAllNotesForVideoId(
+	plugin: CruciblePlugin,
+	videoId: string,
+	metadataPath: string,
+	sourceFile: TFile,
+): Promise<number> {
+	const app = plugin.app;
+	const seen = new Set<string>([sourceFile.path]);
+	await setYtMetadataLink(plugin, sourceFile, metadataPath);
+	let linked = 1;
+	for (const file of app.vault.getMarkdownFiles()) {
+		if (seen.has(file.path)) continue;
+		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
+		if (!fm) continue;
+		if (coerceVideoId(fm['yt-video-id']) !== videoId) continue;
+		if (isYtMetadataLinked(fm['yt-metadata'])) continue;
+		await setYtMetadataLink(plugin, file, metadataPath);
+		seen.add(file.path);
+		linked++;
+	}
+	return linked;
+}
+
+// True when `yt-metadata` already carries a link (a non-empty string, or an array
+// with at least one non-empty entry).
+function isYtMetadataLinked(value: unknown): boolean {
+	if (typeof value === 'string') return value.trim().length > 0;
+	if (Array.isArray(value)) return value.some(v => typeof v === 'string' && v.trim().length > 0);
+	return false;
 }
 
 async function setYtMetadataLink(plugin: CruciblePlugin, sourceFile: TFile, metadataPath: string): Promise<void> {

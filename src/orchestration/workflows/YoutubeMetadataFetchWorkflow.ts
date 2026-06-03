@@ -45,13 +45,19 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 	): WorkflowResult {
 		switch (result.status) {
 			case 'created':
-				return { status: 'done', outputPaths: [result.metadataPath], notes: `Created metadata for ${label}` };
+				return { status: 'done', outputPaths: [result.metadataPath], notes: `Created metadata for ${label}${this.fanout(result.linkedNotes)}` };
 			case 'exists':
-				return { status: 'done', outputPaths: [result.metadataPath], notes: `Linked existing metadata for ${label}` };
+				return { status: 'done', outputPaths: [result.metadataPath], notes: `Linked existing metadata for ${label}${this.fanout(result.linkedNotes)}` };
 			case 'no-video-id':
 				return { status: 'failed', error: `No video id for ${label}` };
 			case 'no-api-key':
 				return { status: 'failed', error: 'YouTube Data API key not configured.' };
 		}
+	}
+
+	// Notes when the single fetch linked more than just the triggering note (other
+	// captures sharing the same yt-video-id were linked in the same pass).
+	private fanout(linkedNotes: number): string {
+		return linkedNotes > 1 ? ` (+${linkedNotes - 1} duplicate note${linkedNotes - 1 === 1 ? '' : 's'})` : '';
 	}
 }

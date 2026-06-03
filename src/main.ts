@@ -73,6 +73,10 @@ export default class CruciblePlugin extends Plugin {
 	enrichmentQueue: EnrichmentQueueAdapter;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	private tocComponent: TableOfContentsUI | null = null;
+	// Chain-internal command ids registered for each "Chain: X" command, so a chain
+	// can be used as an (awaited, target-file-aware) step inside another chain.
+	// Cleared and rebuilt on every registerChains() so renames/deletes don't leak.
+	private registeredChainInternalIds = new Set<string>();
 
 	async onload() {
 		await this.loadSettings();
@@ -586,6 +590,8 @@ export default class CruciblePlugin extends Plugin {
 		register('lint-remove-property', async (args) => await this.linter.removePropertyFromVault(
 			typeof args['key'] === 'string' ? args['key'] : '',
 		));
+		register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await this.fetchYoutubeMetadataForActiveNote(tf));
+
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
 		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
@@ -745,11 +751,16 @@ export default class CruciblePlugin extends Plugin {
 		return true;
 	}
 
-	async fetchYoutubeMetadataForActiveNote(): Promise<void> {
-		const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+	// Fetches + links YouTube metadata for `targetFile` (defaults to the active
+	// note). Returns whether the link was set. Used both by the standalone command
+	// and as an awaited chain step — passing the chain's target file is what makes
+	// it run on the right note, in order, and inside the chain's note-lock context
+	// (reentrant), instead of fire-and-forget on the active note via executeCommandById.
+	async fetchYoutubeMetadataForActiveNote(targetFile?: TFile): Promise<boolean> {
+		const file = targetFile ?? this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
 		if (!file) {
 			new Notice('No active note');
-			return;
+			return false;
 		}
 		const fm: Record<string, unknown> | undefined = this.app.metadataCache.getFileCache(file)?.frontmatter;
 		const raw: unknown = fm ? fm['yt-video-id'] : undefined;
@@ -757,7 +768,7 @@ export default class CruciblePlugin extends Plugin {
 		if (!videoId) {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			new Notice('Active note has no yt-video-id in frontmatter');
-			return;
+			return false;
 		}
 
 		try {
@@ -766,29 +777,35 @@ export default class CruciblePlugin extends Plugin {
 			);
 			switch (result.status) {
 				case 'created':
-					new Notice(`YouTube metadata saved: ${result.metadataPath}`);
+					new Notice(`YouTube metadata saved: ${result.metadataPath}${result.linkedNotes > 1 ? ` (+${result.linkedNotes - 1} duplicate note${result.linkedNotes - 1 === 1 ? '' : 's'})` : ''}`);
 					this.emitMetadataEnriched(videoId, result.metadataPath, file);
-					break;
+					return true;
 				case 'exists':
-					new Notice(`YouTube metadata already exists; linked.`);
+					new Notice(`YouTube metadata already exists; linked.${result.linkedNotes > 1 ? ` (+${result.linkedNotes - 1} duplicate note${result.linkedNotes - 1 === 1 ? '' : 's'})` : ''}`);
 					this.emitMetadataEnriched(videoId, result.metadataPath, file);
-					break;
+					return true;
 				case 'no-video-id':
 					// eslint-disable-next-line obsidianmd/ui/sentence-case
 					new Notice('Active note has no yt-video-id in frontmatter');
-					break;
+					return false;
 				case 'no-api-key':
 					new Notice('YouTube data API key not set — configure it in settings → orchestrator → YouTube tracker');
-					break;
+					return false;
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			new Notice(`YouTube fetch failed: ${message}`);
+			return false;
 		}
 	}
 
 	registerChains() {
 		this.clearCommandRegistryGroup('Chains');
+		// Drop the previous chain-internal registrations so reordered/deleted chains
+		// don't leave stale ids resolving to the wrong chain.
+		const prefix = this.manifest.id;
+		for (const id of this.registeredChainInternalIds) this.chainManager.unregisterInternalCommand(id);
+		this.registeredChainInternalIds.clear();
 		this.settings.chains.forEach((chain, index) => {
 			if (!chain.name) return;
 			const id = `chain-${index}`;
@@ -804,6 +821,18 @@ export default class CruciblePlugin extends Plugin {
 					void this.chainManager.executeChain(chain, editor, spawnFile);
 				},
 			});
+			// Also expose the chain as a chain-internal command so a nested chain step
+			// runs awaited, on the parent's target note, inside the (reentrant) note
+			// lock — instead of fire-and-forget on the active note via executeCommandById.
+			const runNested = async (_a: Record<string, string>, _p: unknown, editor?: Editor, targetFile?: TFile) => {
+				const file = targetFile ?? this.app.workspace.getActiveFile() ?? undefined;
+				await this.chainManager.executeChain(chain, editor, file);
+				return true;
+			};
+			for (const fullId of [`${prefix}:${id}`, `crucible:${id}`]) {
+				this.chainManager.registerInternalCommand(fullId, runNested);
+				this.registeredChainInternalIds.add(fullId);
+			}
 		});
 	}
 

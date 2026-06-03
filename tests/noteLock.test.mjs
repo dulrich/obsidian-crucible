@@ -118,6 +118,54 @@ test('double release is a no-op', async () => {
 	assert.equal(locks.isLocked('a.md'), false);
 });
 
+test('withLock re-enters the same path within one context (no self-deadlock)', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	// Outer holds a.md, then an inner op (e.g. a chain step calling lint) takes
+	// the same lock. Without reentrancy this would deadlock forever.
+	const result = await locks.withLock('a.md', 'chain', async () => {
+		order.push('outer-start');
+		assert.equal(locks.isLocked('a.md'), true);
+		const inner = await locks.withLock('a.md', 'lint', async () => {
+			order.push('inner');
+			return 'inner-done';
+		});
+		order.push('outer-end');
+		return inner;
+	});
+	assert.equal(result, 'inner-done');
+	assert.deepEqual(order, ['outer-start', 'inner', 'outer-end']);
+	assert.equal(locks.isLocked('a.md'), false, 'lock fully released after reentrant run');
+});
+
+test('withLock reentrancy does not leak to a different path', async () => {
+	const locks = new NoteLockManager();
+	let bRanWhileAHeld = false;
+	await locks.withLock('a.md', 'outer', async () => {
+		// A different path is unrelated; it should acquire its own lock, not
+		// be treated as already-held by this context.
+		await locks.withLock('b.md', 'inner', async () => {
+			bRanWhileAHeld = true;
+			assert.equal(locks.isLocked('b.md'), true);
+		});
+		assert.equal(locks.isLocked('b.md'), false, 'b.md released independently');
+	});
+	assert.equal(bRanWhileAHeld, true);
+});
+
+test('a foreign waiter on a held path still queues (reentrancy is context-scoped)', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	const release = await locks.acquire('a.md', 'holder');
+	// This withLock is NOT inside the holder's context, so it must wait.
+	const waiting = locks.withLock('a.md', 'foreign', async () => { order.push('foreign'); });
+	await Promise.resolve();
+	assert.deepEqual(order, [], 'foreign waiter must not run while lock is held');
+	release();
+	await waiting;
+	assert.deepEqual(order, ['foreign']);
+});
+
 test('withOptionalNoteLock runs without a manager', async () => {
 	let ran = false;
 	const result = await withOptionalNoteLock(undefined, 'a.md', 'x', async () => { ran = true; return 42; });
