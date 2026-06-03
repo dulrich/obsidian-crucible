@@ -23,7 +23,7 @@ import {
 	YoutubeTrackerConsolidateWorkflow,
 	YoutubeTrackerWorkflow,
 } from './orchestration/workflows/FeedTrackerWorkflow';
-import { coerceVideoId as coerceYtVideoId, ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
+import { ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
@@ -32,7 +32,7 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { JobTypeConfig } from './orchestration/jobTypeConfig';
+import { transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { registerStaticCommands } from './commands';
 
@@ -964,34 +964,6 @@ export default class CruciblePlugin extends Plugin {
 		else if (period === 'weekly') this.openWeekPicker();
 		else this.openMonthPicker();
 	}
-}
-
-// Memory-persistence config for the folded enrichment queue. maxParallel and the
-// cooloff are read live from settings (getters) so dashboard/settings changes take
-// effect without re-registering. Idempotent on videoId; display fields feed the UI.
-// File-backed, but collapses repeat requests for the same transcript onto one
-// active job so rapid re-enqueues don't pile up duplicate runs on a note.
-function transcriptRefineJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => (typeof p.targetPath === 'string' ? p.targetPath : ''),
-	};
-}
-
-function youtubeMetadataJobConfig(plugin: CruciblePlugin): JobTypeConfig {
-	return {
-		persistence: 'memory',
-		get maxParallel() { return Math.max(1, plugin.settings.orchestrationYoutubeMetadataMaxParallel || 1); },
-		get minIntervalMs() { return Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000; },
-		idempotentKey: (p) => coerceYtVideoId(p.videoId),
-		display: (p) => ({
-			title: typeof p.title === 'string' ? p.title : '',
-			channelName: typeof p.channelName === 'string' ? p.channelName : '',
-		}),
-		terminalRetentionMs: 60_000,
-	};
 }
 
 function periodFileNameRegex(period: PeriodId): RegExp {
