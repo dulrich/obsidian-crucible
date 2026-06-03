@@ -575,6 +575,38 @@ If your plugin does not need CSS, delete this file.
   to { transform: rotate(360deg); }
 }
 
+.crucible-note-locked-host {
+  position: relative;
+}
+
+.crucible-note-locked {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgb(0 0 0 / 25%);
+  cursor: progress;
+}
+
+.crucible-note-locked-box {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.6em 1em;
+  border-radius: 8px;
+  background-color: var(--background-secondary);
+  color: var(--text-normal);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 30%);
+  font-size: 0.9em;
+}
+
+.crucible-note-locked .crucible-spinner {
+  width: 1.1em;
+  height: 1.1em;
+}
+
 .crucible-ingestion-section-body {
   padding: 0 0.75rem 0.75rem;
 }

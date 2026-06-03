@@ -8,6 +8,7 @@ import { Linter } from './lint';
 import { appendDebugLog, applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
 import { logError, logWarn } from './log';
 import { withMaterializing } from './frontmatter';
+import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
 
 export const MD5_NAME_RE = /_MD5\.[A-Za-z0-9]+$/;
 const REMOTE_MD_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
@@ -197,12 +198,14 @@ export class AttachmentLocalizer {
 	private settings: CrucibleSettings;
 	private linter: Linter;
 	private setMaterializing: (state: boolean) => void;
+	private noteLocks?: NoteLockManager;
 
-	constructor(app: App, settings: CrucibleSettings, linter: Linter, setMaterializing: (state: boolean) => void) {
+	constructor(app: App, settings: CrucibleSettings, linter: Linter, setMaterializing: (state: boolean) => void, noteLocks?: NoteLockManager) {
 		this.app = app;
 		this.settings = settings;
 		this.linter = linter;
 		this.setMaterializing = setMaterializing;
+		this.noteLocks = noteLocks;
 	}
 
 	classifyExtension(extRaw: string): LocalizeMediaType | null {
@@ -266,7 +269,7 @@ export class AttachmentLocalizer {
 		const spinner = silent ? null : new Notice(`Localizing attachments in "${file.basename}"...`, 0);
 
 		try {
-			return await withMaterializing(this.setMaterializing, async () => {
+			return await withOptionalNoteLock(this.noteLocks, file.path, 'localize', () => withMaterializing(this.setMaterializing, async () => {
 				const original = await this.app.vault.read(file);
 				const matches = this.parseAttachmentRefs(original, file);
 				// Placeholder stripping is part of image localization; only when that's enabled.
@@ -303,7 +306,7 @@ export class AttachmentLocalizer {
 				spinner?.hide();
 				if (!silent) new Notice(`Localized ${replacements.length} of ${matches.length} attachments${placeholderCount ? `, stripped ${placeholderCount} placeholder${placeholderCount > 1 ? 's' : ''}` : ''}`);
 				return true;
-			});
+			}));
 		} catch (e) {
 			spinner?.hide();
 			logError(`localize attachments failed (${file.path})`, e);
