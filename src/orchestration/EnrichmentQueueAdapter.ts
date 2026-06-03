@@ -37,11 +37,6 @@ export class EnrichmentQueueAdapter {
 		this.queue?.setAutoSource(null);
 	}
 
-	// Rate limit is read live from settings by the type's gate; nothing to push here.
-	setRateLimitSeconds(_seconds: number): void {
-		/* gate reads ingestionYoutubeEnrichRateLimitSeconds live */
-	}
-
 	setAutoSource(fn: AutoSourceFn | null): void {
 		this.queue?.setAutoSource(fn ? () => fn().map(itemToSeed) : null);
 	}

@@ -1,3 +1,7 @@
+// Intentional Node builtin: AsyncLocalStorage powers withLock's context-scoped
+// reentrancy. esbuild.config.mjs externalizes `node:` builtins and Electron's
+// renderer resolves it at runtime. See the note-lock quirk in AGENTS.md.
+// eslint-disable-next-line import/no-nodejs-modules
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IngestionEventBus } from './events';
 

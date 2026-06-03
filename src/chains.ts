@@ -47,14 +47,33 @@ export class ChainManager {
 			new Notice(`Chain "${chain.name}" is already running; skipping nested call to avoid a cycle.`);
 			return;
 		}
-		let previousResponse: unknown = null;
 		const chainVars: Record<string, string> = { ...(chain.variables ?? {}) };
 		// Use the file captured at invocation time; fall back to current only if not provided.
 		const targetFile = spawnFile ?? this.app.workspace.getActiveFile() ?? undefined;
 		if (targetFile) chainVars.target_path = targetFile.path;
 		new Notice(`Starting chain: ${chain.name}`);
 
-		const runSteps = async (): Promise<void> => {
+		// Serialize the chain against other Crucible commands on the same note.
+		this.executingChains.add(chain);
+		try {
+			const run = () => this.runChainSteps(chain, chainVars, editor, targetFile);
+			if (targetFile) {
+				await withOptionalNoteLock(this.noteLocks, targetFile.path, `chain:${chain.name}`, run);
+			} else {
+				await run();
+			}
+		} finally {
+			this.executingChains.delete(chain);
+		}
+	}
+
+	private async runChainSteps(
+		chain: Chain,
+		chainVars: Record<string, string>,
+		editor?: Editor,
+		targetFile?: TFile,
+	): Promise<void> {
+		let previousResponse: unknown = null;
 		for (const step of chain.steps) {
 			const stepLabel = step.stepType === 'guard' ? 'guard' : step.commandId;
 			try {
@@ -97,19 +116,6 @@ export class ChainManager {
 		}
 
 		new Notice(`Chain "${chain.name}" completed`);
-		};
-
-		// Serialize the chain against other Crucible commands on the same note.
-		this.executingChains.add(chain);
-		try {
-			if (targetFile) {
-				await withOptionalNoteLock(this.noteLocks, targetFile.path, `chain:${chain.name}`, runSteps);
-			} else {
-				await runSteps();
-			}
-		} finally {
-			this.executingChains.delete(chain);
-		}
 	}
 
 	private async appendDebugLog(chain: Chain, entry: string) {
