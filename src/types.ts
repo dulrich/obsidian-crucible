@@ -308,6 +308,8 @@ export interface CrucibleSettings {
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
 	orchestrationQueueAutorunEnabled: boolean;
+	// Global cap on total in-flight jobs across all types when draining.
+	orchestrationMaxConcurrent: number;
 	// Workflow: daily_brief_lite
 	orchestrationDailyBriefEnabled: boolean;
 	orchestrationDailyBriefTargetSection: string;
@@ -338,6 +340,8 @@ export interface CrucibleSettings {
 	ingestionClipperInboxFolder: string;
 	ingestionYoutubeEnrichRateLimitSeconds: number;
 	ingestionYoutubeAutoEnrichEnabled: boolean;
+	// Per-type worker count for the youtube_metadata_fetch memory queue.
+	orchestrationYoutubeMetadataMaxParallel: number;
 	ingestionReadingWpm: number;
 }
 
@@ -412,6 +416,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
 	orchestrationQueueAutorunEnabled: false,
+	orchestrationMaxConcurrent: 3,
 	orchestrationDailyBriefEnabled: true,
 	orchestrationDailyBriefTargetSection: 'Daily Brief: External Context',
 	orchestrationDailyBriefFxPairs: [
@@ -442,5 +447,6 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	ingestionClipperInboxFolder: '_clippings/inbox',
 	ingestionYoutubeEnrichRateLimitSeconds: 2,
 	ingestionYoutubeAutoEnrichEnabled: false,
+	orchestrationYoutubeMetadataMaxParallel: 1,
 	ingestionReadingWpm: 250,
 }

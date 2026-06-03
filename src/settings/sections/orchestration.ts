@@ -97,6 +97,16 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	}, save);
 
 	globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(globalGroup, {
+		name: 'Max concurrent jobs',
+		desc: 'Upper bound on total jobs running at once across all types when the queue drains.',
+		placeholder: '3',
+		get: () => String(s.orchestrationMaxConcurrent),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationMaxConcurrent = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 3; },
+		min: 1,
+	}, save);
+
+	globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindText(globalGroup, {
 		name: 'Queue folder root',
 		desc: 'Vault folder containing inbox/, running/, done/, failed/ subfolders.',
@@ -209,6 +219,16 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		placeholder: '2',
 		get: () => String(s.ingestionYoutubeEnrichRateLimitSeconds),
 		set: (v) => { const n = Number(v.trim()); s.ingestionYoutubeEnrichRateLimitSeconds = Number.isFinite(n) && n >= 0 ? n : 2; },
+	}, save);
+
+	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(ingestionGroup, {
+		name: 'Enrichment parallelism',
+		desc: 'How many YouTube metadata fetches run at once (still bounded by the rate limit and the global max concurrent jobs).',
+		placeholder: '1',
+		get: () => String(s.orchestrationYoutubeMetadataMaxParallel),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationYoutubeMetadataMaxParallel = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1; },
+		min: 1,
 	}, save);
 }
 
