@@ -12,6 +12,11 @@ export interface JobTypeConfig {
 	minIntervalMs: number;
 	/** Memory types dedupe on this key (e.g. videoId). Required for memory types. */
 	idempotentKey?: (params: Record<string, unknown>) => string;
+	/**
+	 * File types collapse to one active job per key: enqueue is skipped when a
+	 * queued/running job of this type already has the same key (e.g. targetPath).
+	 */
+	dedupeKey?: (params: Record<string, unknown>) => string;
 	/** Memory types refill from this source when the queue drains empty. */
 	autoSource?: () => MemoryJobSeed[];
 	/** Display fields surfaced in the dashboard for a memory entry. */
