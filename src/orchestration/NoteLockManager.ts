@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IngestionEventBus } from './events';
 
 interface Waiter {
@@ -19,6 +20,15 @@ interface LockState {
  */
 export class NoteLockManager {
 	private readonly locks = new Map<string, LockState>();
+	/**
+	 * Paths already held by the current async execution context. Lets `withLock`
+	 * re-enter: a command that runs *inside* another command already holding the
+	 * same note's lock (e.g. a chain step that invokes lint/localize/yt-metadata
+	 * on the chain's target note) runs inline instead of deadlocking on a lock its
+	 * own caller owns. Reentrancy is scoped to `withLock`; raw `acquire` is
+	 * unchanged for low-level callers.
+	 */
+	private readonly heldByContext = new AsyncLocalStorage<Set<string>>();
 
 	constructor(private readonly bus?: IngestionEventBus) {}
 
@@ -50,9 +60,17 @@ export class NoteLockManager {
 
 	/** Run `action` while holding the lock for `path`; always releases. */
 	async withLock<T>(path: string, label: string, action: () => Promise<T>): Promise<T> {
+		const held = this.heldByContext.getStore();
+		if (held?.has(path)) {
+			// Re-entrant: this async context already holds the lock for `path`,
+			// so acquiring again would wait on ourselves forever. Run inline.
+			return action();
+		}
 		const release = await this.acquire(path, label);
+		const nextHeld = new Set(held ?? []);
+		nextHeld.add(path);
 		try {
-			return await action();
+			return await this.heldByContext.run(nextHeld, action);
 		} finally {
 			release();
 		}

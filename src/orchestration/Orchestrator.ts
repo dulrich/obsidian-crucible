@@ -315,9 +315,29 @@ export class Orchestrator {
 		const done = await this.store.listFolder('done');
 		const failed = await this.store.listFolder('failed');
 
+		// Re-home file-backed jobs whose type has since become memory-persistence
+		// (e.g. youtube_metadata_fetch after it folded into the unified in-memory
+		// queue). The file path can never drain them — runNextOfType routes memory
+		// types to the in-memory queue and never claims their folders, and stale
+		// recovery only bounces running→queued, so such a job would sit forever.
+		// Push its params into the memory queue (which drains immediately) and
+		// archive the markdown file under done/.
+		const migratedPaths = new Set<string>();
+		let migrated = 0;
+		for (const entry of [...queued, ...running]) {
+			const config = this.getConfig(entry.job.type);
+			if (config.persistence !== 'memory') continue;
+			this.enqueueMemory(entry.job.type, config, entry.job.params ?? {});
+			await this.store.appendNotes(entry.file, 'Re-homed to the in-memory queue (type is now memory-persistence).');
+			await this.store.move(entry.file, entry.job, 'done');
+			migratedPaths.add(entry.file.path);
+			migrated++;
+		}
+
 		let recovered = 0;
 		const cutoff = Date.now() - STALE_RUNNING_MS;
 		for (const entry of running) {
+			if (migratedPaths.has(entry.file.path)) continue;
 			const updatedRaw = entry.job.updated ?? entry.job.created;
 			const updatedAt = Date.parse(updatedRaw);
 			if (Number.isFinite(updatedAt) && updatedAt < cutoff) {
@@ -329,17 +349,20 @@ export class Orchestrator {
 
 		await this.ensureQueueIgnored();
 
+		const queuedMigrated = queued.filter(e => migratedPaths.has(e.file.path)).length;
+		const runningMigrated = running.filter(e => migratedPaths.has(e.file.path)).length;
 		const report: ScanReport = {
-			inbox: queued.length,
-			running: running.length - recovered,
-			done: done.length,
+			inbox: queued.length - queuedMigrated,
+			running: running.length - recovered - runningMigrated,
+			done: done.length + migrated,
 			failed: failed.length,
 			recovered,
 		};
 
 		const summary =
 			`Orchestrate: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
-			(recovered > 0 ? `, recovered ${recovered}` : '');
+			(recovered > 0 ? `, recovered ${recovered}` : '') +
+			(migrated > 0 ? `, re-homed ${migrated}` : '');
 		new Notice(summary);
 		return report;
 	}
