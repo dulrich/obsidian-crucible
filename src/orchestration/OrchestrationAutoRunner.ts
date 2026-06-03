@@ -13,6 +13,10 @@ export class OrchestrationAutoRunner {
 	private disposed = false;
 	private unsubscribe: (() => void) | null = null;
 	private readonly drainingTypes = new Set<JobType>();
+	// A kick that arrives while a type is mid-drain is recorded here instead of being
+	// dropped, then replayed once the drain winds down — closes the lost-wakeup race
+	// where a job enqueued during wind-down would wait for the next event.
+	private readonly redrainRequested = new Set<JobType>();
 	private readonly globalSem: Semaphore;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly orchestrator: Orchestrator) {
@@ -52,21 +56,32 @@ export class OrchestrationAutoRunner {
 
 	kickDrainType(type: JobType): void {
 		if (this.disposed) return;
-		const config = this.orchestrator.getConfig(type);
-		// File types only drain under autorun; memory types always drain.
-		if (config.persistence === 'file' && !this.enabled) return;
-		if (this.drainingTypes.has(type)) return;
+		if (!this.shouldDrain(type)) return;
+		// Already draining: record the kick so it replays after the current drain ends.
+		if (this.drainingTypes.has(type)) {
+			this.redrainRequested.add(type);
+			return;
+		}
 		void this.drainType(type);
+	}
+
+	// File types only drain under autorun; memory types always drain.
+	private shouldDrain(type: JobType): boolean {
+		return this.orchestrator.drainsWithoutAutorun(type) || this.enabled;
 	}
 
 	private async drainType(type: JobType): Promise<void> {
 		this.drainingTypes.add(type);
 		try {
-			const config = this.orchestrator.getConfig(type);
-			const workerCount = Math.max(1, config.maxParallel);
+			const workerCount = Math.max(1, this.orchestrator.getConfig(type).maxParallel);
 			await Promise.all(Array.from({ length: workerCount }, () => this.typeWorker(type)));
 		} finally {
 			this.drainingTypes.delete(type);
+		}
+		// Replay a kick that landed mid-drain so work enqueued during the wind-down
+		// window isn't stranded until the next event.
+		if (this.redrainRequested.delete(type) && !this.disposed && this.shouldDrain(type)) {
+			this.kickDrainType(type);
 		}
 	}
 
@@ -74,12 +89,13 @@ export class OrchestrationAutoRunner {
 		const gate = this.orchestrator.getGate(type);
 		for (;;) {
 			if (this.disposed) return;
+			if (!this.shouldDrain(type)) return;
 			const config = this.orchestrator.getConfig(type);
-			if (config.persistence === 'file' && !this.enabled) return;
 
 			// Memory types know precisely when they are empty (and can refill); file
-			// types report "maybe", so the actual emptiness check is the claim below.
-			if (config.persistence === 'memory' && !this.orchestrator.hasPending(type)) {
+			// types report "maybe" (hasPending === true), so this block is a no-op for
+			// them and the actual emptiness check is the claim inside runNextOfType.
+			if (!this.orchestrator.hasPending(type)) {
 				this.orchestrator.refillMemory(type);
 				if (!this.orchestrator.hasPending(type)) return;
 			}
