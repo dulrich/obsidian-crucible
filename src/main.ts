@@ -52,6 +52,9 @@ export interface CrucibleCommandEntry {
 	id: string;
 	name: string;
 	group: CrucibleCommandGroup;
+	// Whether running the command mutates the active/target note. Governs whether it
+	// acquires the per-note lock. Defaults to true (safe); read-only commands set false.
+	mutating: boolean;
 }
 
 export default class CruciblePlugin extends Plugin {
@@ -122,6 +125,9 @@ export default class CruciblePlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('create', (file) => { void this.handleFileCreate(file); }));
 
 		const debouncedLint = debounce(async (file: TFile) => {
+			// Skip while a mutating command/chain holds the note's lock: it is the sole
+			// mutator until it releases, and auto-linting underneath it races its writes.
+			if (this.noteLocks.isLocked(file.path)) return;
 			if (this.settings.lintOnSave && !this.isMaterializing) {
 				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (activeView && activeView.file?.path === file.path) {
@@ -131,6 +137,10 @@ export default class CruciblePlugin extends Plugin {
 		}, 2000, true);
 
 		const debouncedLocalize = debounce(async (file: TFile) => {
+			// Skip while the note is locked — otherwise an "Ingest as …" chain's mid-flight
+			// writes trigger a concurrent localize that downloads an attachment whose
+			// landing ref never lands, leaving an orphan.
+			if (this.noteLocks.isLocked(file.path)) return;
 			if (this.settings.localizeAttachmentsTriggerOnEdit && !this.isMaterializing) {
 				await this.attachmentLocalizer.localizeNote(file, true);
 			}
@@ -212,8 +222,9 @@ export default class CruciblePlugin extends Plugin {
 		group: CrucibleCommandGroup;
 		run: () => unknown;
 		available?: () => boolean;
+		mutating?: boolean;
 	}): void {
-		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group });
+		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group, mutating: opts.mutating ?? true });
 		this.addCommand({
 			id: opts.id,
 			name: opts.name,
@@ -279,6 +290,7 @@ export default class CruciblePlugin extends Plugin {
 				id: agentCommandId(agent.id),
 				name: `Agent: ${agent.name || '(unnamed)'}`,
 				group: 'Agents',
+				mutating: true,
 			});
 		}
 	}
@@ -813,6 +825,7 @@ export default class CruciblePlugin extends Plugin {
 				id,
 				name: `Chain: ${chain.name}`,
 				group: 'Chains',
+				mutating: chain.mutating !== false,
 				run: () => {
 					const editor = this.activeEditor();
 					// Capture the active file at invocation time so async steps never
