@@ -310,6 +310,9 @@ export interface CrucibleSettings {
 	orchestrationQueueAutorunEnabled: boolean;
 	// Global cap on total in-flight jobs across all types when draining.
 	orchestrationMaxConcurrent: number;
+	// Per-job execution timeout for the autorun drain; 0 disables. A hung workflow
+	// fails fast instead of waiting for the hour-long stale-running backstop.
+	orchestrationAutorunTimeoutSeconds: number;
 	// Workflow: daily_brief_lite
 	orchestrationDailyBriefEnabled: boolean;
 	orchestrationDailyBriefTargetSection: string;
@@ -417,6 +420,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationTimezone: 'America/Mexico_City',
 	orchestrationQueueAutorunEnabled: false,
 	orchestrationMaxConcurrent: 3,
+	orchestrationAutorunTimeoutSeconds: 600,
 	orchestrationDailyBriefEnabled: true,
 	orchestrationDailyBriefTargetSection: 'Daily Brief: External Context',
 	orchestrationDailyBriefFxPairs: [

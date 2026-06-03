@@ -8,6 +8,10 @@ import { MinIntervalGate } from './utils/rateLimit';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
+// Backstop for jobs that slipped the per-job timeout entirely — e.g. a plugin
+// reload mid-run leaves a job stranded in the running folder. `scan()` re-queues
+// these. The autorun timeout (orchestrationAutorunTimeoutSeconds) is the primary
+// mechanism; this only catches what no live timer could.
 const STALE_RUNNING_MS = 60 * 60 * 1000;
 
 export type RunOutcome = 'ran' | 'empty' | 'disabled';
@@ -174,7 +178,7 @@ export class Orchestrator {
 		}
 
 		try {
-			const result: WorkflowResult = await workflow.run(moved.job, { plugin: this.plugin });
+			const result: WorkflowResult = await this.runWorkflowWithTimeout(workflow, moved.job);
 			if (result.outputPaths && result.outputPaths.length > 0) {
 				await this.store.setOutputPaths(moved.file, result.outputPaths);
 			}
@@ -217,7 +221,7 @@ export class Orchestrator {
 		if (!entry) return 'empty';
 		const job = this.synthMemoryJob(type, entry.key, entry.params);
 		try {
-			const result = await workflow.run(job, { plugin: this.plugin });
+			const result = await this.runWorkflowWithTimeout(workflow, job);
 			if (result.status === 'failed') {
 				const error = result.error ?? 'Workflow returned failed status';
 				queue.markFailed(entry.key, error);
@@ -233,6 +237,31 @@ export class Orchestrator {
 		}
 		queue.sweepTerminal();
 		return 'ran';
+	}
+
+	// Bounds a workflow run by the per-type (or global) timeout. On timeout the
+	// race rejects and the caller's catch marks the job failed; the abandoned
+	// workflow promise keeps running in the background (no AbortController), but
+	// any note-lock it holds is scoped to a leaf operation and releases when that
+	// operation settles.
+	private async runWorkflowWithTimeout(workflow: Workflow, job: OrchestrationJob): Promise<WorkflowResult> {
+		const timeoutMs = this.resolveTimeoutMs(job.type);
+		if (timeoutMs <= 0) return workflow.run(job, { plugin: this.plugin });
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>((_resolve, reject) => {
+			timer = setTimeout(() => reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+		});
+		try {
+			return await Promise.race([workflow.run(job, { plugin: this.plugin }), timeout]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	}
+
+	private resolveTimeoutMs(type: JobType): number {
+		const config = this.getConfig(type);
+		if (typeof config.timeoutMs === 'number') return Math.max(0, config.timeoutMs);
+		return Math.max(0, this.plugin.settings.orchestrationAutorunTimeoutSeconds) * 1000;
 	}
 
 	private synthMemoryJob(type: JobType, key: string, params: Record<string, unknown>): OrchestrationJob {
