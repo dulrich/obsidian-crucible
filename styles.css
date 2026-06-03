@@ -148,6 +148,47 @@ If your plugin does not need CSS, delete this file.
   align-items: center;
 }
 
+/* Make the chain-row control area deterministic so the flag columns line up
+   under their headers identically in the settings tab and the settings modal:
+   no inter-item gap, and three fixed-width action buttons (3 x 32px = 96px). */
+.crucible-chain-list .setting-item-control {
+  gap: 0;
+}
+
+.crucible-chain-list .setting-item-control .clickable-icon {
+  width: 32px;
+  margin: 0;
+  justify-content: center;
+}
+
+.crucible-chain-flag {
+  flex: 0 0 auto;
+  width: 80px;
+  text-align: center;
+  color: var(--text-accent);
+}
+
+.crucible-chain-flags-header {
+  display: flex;
+  justify-content: flex-end;
+
+  /* Reserve the action-button area (3 x 32px) so labels sit over the flag cells. */
+  padding-right: 96px;
+  margin-bottom: 4px;
+}
+
+.crucible-chain-flags-header > span {
+  flex: 0 0 auto;
+  width: 80px;
+  text-align: center;
+
+  /* Fixed (non-em) size + nowrap so the label fits its column identically in the
+     settings tab and the settings modal, where inherited em sizes differ. */
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
 .crucible-checkbox-grid-item {
   display: inline-flex;
   align-items: center;

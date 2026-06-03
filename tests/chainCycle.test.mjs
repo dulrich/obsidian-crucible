@@ -102,3 +102,72 @@ test('the same chain can run again after it finishes (guard is stack-scoped, not
 
 	assert.equal(runs, 2);
 });
+
+test('the same chain runs on a different note instead of being skipped as a cycle', async () => {
+	globalThis.__notices = [];
+	const cm = new ChainManager(stubApp);
+
+	const chain = { name: 'Refine', steps: [{ commandId: 'crucible:maybe-nest' }] };
+	let runs = 0;
+	let nested = false;
+	cm.registerInternalCommand('crucible:maybe-nest', async () => {
+		runs++;
+		// Re-enter the same chain on a *different* note — the cycle guard is keyed by
+		// chain + note, so this is not a cycle and must run.
+		if (!nested) { nested = true; await cm.executeChain(chain, undefined, { path: 'b.md' }); }
+		return true;
+	});
+
+	await cm.executeChain(chain, undefined, { path: 'a.md' });
+
+	assert.equal(runs, 2);
+});
+
+test('re-entering the same chain on the same note is still skipped', async () => {
+	globalThis.__notices = [];
+	const cm = new ChainManager(stubApp);
+
+	const chain = { name: 'Self', steps: [{ commandId: 'crucible:maybe-nest' }] };
+	let runs = 0;
+	let nested = false;
+	cm.registerInternalCommand('crucible:maybe-nest', async () => {
+		runs++;
+		if (!nested) { nested = true; await cm.executeChain(chain, undefined, { path: 'a.md' }); }
+		return true;
+	});
+
+	await cm.executeChain(chain, undefined, { path: 'a.md' });
+
+	// Nested re-entry on the same note is a true cycle and short-circuits.
+	assert.equal(runs, 1);
+});
+
+test('a non-mutating chain does not acquire the note lock', async () => {
+	globalThis.__notices = [];
+	let lockCalls = 0;
+	const fakeLocks = { withLock: (_p, _l, action) => { lockCalls++; return action(); } };
+	const cm = new ChainManager(stubApp, fakeLocks);
+
+	const chain = { name: 'View', mutating: false, steps: [{ commandId: 'crucible:noop' }] };
+	let runs = 0;
+	cm.registerInternalCommand('crucible:noop', async () => { runs++; return true; });
+
+	await cm.executeChain(chain, undefined, { path: 'a.md' });
+
+	assert.equal(runs, 1);
+	assert.equal(lockCalls, 0);
+});
+
+test('a mutating chain (default) acquires the note lock', async () => {
+	globalThis.__notices = [];
+	let lockCalls = 0;
+	const fakeLocks = { withLock: (_p, _l, action) => { lockCalls++; return action(); } };
+	const cm = new ChainManager(stubApp, fakeLocks);
+
+	const chain = { name: 'Edit', steps: [{ commandId: 'crucible:noop' }] };
+	cm.registerInternalCommand('crucible:noop', async () => true);
+
+	await cm.executeChain(chain, undefined, { path: 'a.md' });
+
+	assert.equal(lockCalls, 1);
+});

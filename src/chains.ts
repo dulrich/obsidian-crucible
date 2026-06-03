@@ -9,10 +9,13 @@ export class ChainManager {
 	app: App;
 	private registry: Map<string, ChainCommandFn> = new Map();
 	private schemas: Map<string, CommandArgSchema[]> = new Map();
-	// Chains currently on the execution stack. A nested chain step that re-enters a
-	// chain already running (self-reference, or an indirect cycle A→B→A) is detected
-	// here and skipped, so an awaited nested invocation can't recurse without bound.
-	private executingChains = new Set<Chain>();
+	// Chains currently on the execution stack, keyed by chain → set of target note
+	// paths. A nested chain step that re-enters a chain already running *on the same
+	// note* (self-reference, or an indirect cycle A→B→A) is detected here and skipped,
+	// so an awaited nested invocation can't recurse without bound. Keying by note (not
+	// the chain alone) lets the same chain run concurrently on different notes — e.g. a
+	// queued transcript_refine on note A and a manual run on note B.
+	private executing = new Map<Chain, Set<string>>();
 
 	constructor(app: App, private noteLocks?: NoteLockManager) {
 		this.app = app;
@@ -43,27 +46,37 @@ export class ChainManager {
 	}
 
 	async executeChain(chain: Chain, editor?: Editor, spawnFile?: TFile) {
-		if (this.executingChains.has(chain)) {
-			new Notice(`Chain "${chain.name}" is already running; skipping nested call to avoid a cycle.`);
-			return;
-		}
 		const chainVars: Record<string, string> = { ...(chain.variables ?? {}) };
 		// Use the file captured at invocation time; fall back to current only if not provided.
 		const targetFile = spawnFile ?? this.app.workspace.getActiveFile() ?? undefined;
 		if (targetFile) chainVars.target_path = targetFile.path;
+
+		// Cycle guard keyed by chain + target note: re-entering the same chain on the
+		// same note (a true cycle) is skipped, but the same chain on a different note runs.
+		const noteKey = targetFile?.path ?? '';
+		const activePaths = this.executing.get(chain);
+		if (activePaths?.has(noteKey)) {
+			new Notice(`Chain "${chain.name}" is already running; skipping nested call to avoid a cycle.`);
+			return;
+		}
+
 		new Notice(`Starting chain: ${chain.name}`);
 
-		// Serialize the chain against other Crucible commands on the same note.
-		this.executingChains.add(chain);
+		const paths = activePaths ?? new Set<string>();
+		paths.add(noteKey);
+		this.executing.set(chain, paths);
 		try {
 			const run = () => this.runChainSteps(chain, chainVars, editor, targetFile);
-			if (targetFile) {
+			// Read-only chains (mutating === false) just run; mutating chains serialize
+			// against other Crucible commands on the same note via the note lock.
+			if (targetFile && chain.mutating !== false) {
 				await withOptionalNoteLock(this.noteLocks, targetFile.path, `chain:${chain.name}`, run);
 			} else {
 				await run();
 			}
 		} finally {
-			this.executingChains.delete(chain);
+			paths.delete(noteKey);
+			if (paths.size === 0) this.executing.delete(chain);
 		}
 	}
 
