@@ -5,6 +5,7 @@ import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty
 import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
 import { postIdFromUrl } from './orchestration/utils/blogs';
 import { logError } from './log';
+import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
 
 const YT_EMBED_RE = /^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n/;
 const TRANSCRIPT_HEADER_RE = /^([ \t]*\r?\n)*[ \t]*##[ \t]+Transcript[ \t]*\r?\n/;
@@ -93,11 +94,13 @@ export class Linter {
 	app: App;
 	settings: CrucibleSettings;
 	setMaterializing: (state: boolean) => void;
+	private noteLocks?: NoteLockManager;
 
-	constructor(app: App, settings: CrucibleSettings, setMaterializing: (state: boolean) => void) {
+	constructor(app: App, settings: CrucibleSettings, setMaterializing: (state: boolean) => void, noteLocks?: NoteLockManager) {
 		this.app = app;
 		this.settings = settings;
 		this.setMaterializing = setMaterializing;
+		this.noteLocks = noteLocks;
 	}
 
 	isPathIgnored(path: string): boolean {
@@ -202,7 +205,7 @@ export class Linter {
 		const createdStr = moment(file.stat.ctime).format('YYYY-MM-DD');
 
 		try {
-			await withMaterializing(this.setMaterializing, async () => {
+			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
 				await updateFrontmatter(this.app, file, (fm) => {
 					for (const [key, value] of Object.entries(insertYaml)) {
 						upsertFrontmatterPropertyIfEmpty(fm, key, value);
@@ -233,7 +236,7 @@ export class Linter {
 						}
 					}
 				}
-			});
+			}));
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
 			logError(`lint failed (${file.path})`, e);
@@ -381,9 +384,9 @@ export class Linter {
 				if (!silent) new Notice('Transcript cleanup: no changes');
 				return true;
 			}
-			await withMaterializing(this.setMaterializing, async () => {
+			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
 				await this.app.vault.modify(file, cleaned);
-			});
+			}));
 			if (!silent) new Notice('Transcript cleaned');
 			return true;
 		} catch (e) {

@@ -280,9 +280,13 @@ export function coerceVideoId(value: unknown): string {
 
 async function setYtMetadataLink(plugin: CruciblePlugin, sourceFile: TFile, metadataPath: string): Promise<void> {
 	const link = `[[${stripMdExt(metadataPath)}]]`;
-	await updateFrontmatter(plugin.app, sourceFile, fm => {
-		insertFrontmatterPropertyAfter(fm, 'yt-video-id', 'yt-metadata', link);
-	});
+	// Hold the source note's lock so the frontmatter write can't interleave with a
+	// chain step or localize touching the same note (the YT-in-chains race).
+	await plugin.noteLocks.withLock(sourceFile.path, 'yt-metadata', () =>
+		updateFrontmatter(plugin.app, sourceFile, fm => {
+			insertFrontmatterPropertyAfter(fm, 'yt-video-id', 'yt-metadata', link);
+		}),
+	);
 }
 
 function stripMdExt(path: string): string {
