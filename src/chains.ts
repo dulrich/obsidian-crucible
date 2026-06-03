@@ -9,6 +9,10 @@ export class ChainManager {
 	app: App;
 	private registry: Map<string, ChainCommandFn> = new Map();
 	private schemas: Map<string, CommandArgSchema[]> = new Map();
+	// Chains currently on the execution stack. A nested chain step that re-enters a
+	// chain already running (self-reference, or an indirect cycle A→B→A) is detected
+	// here and skipped, so an awaited nested invocation can't recurse without bound.
+	private executingChains = new Set<Chain>();
 
 	constructor(app: App, private noteLocks?: NoteLockManager) {
 		this.app = app;
@@ -39,6 +43,10 @@ export class ChainManager {
 	}
 
 	async executeChain(chain: Chain, editor?: Editor, spawnFile?: TFile) {
+		if (this.executingChains.has(chain)) {
+			new Notice(`Chain "${chain.name}" is already running; skipping nested call to avoid a cycle.`);
+			return;
+		}
 		let previousResponse: unknown = null;
 		const chainVars: Record<string, string> = { ...(chain.variables ?? {}) };
 		// Use the file captured at invocation time; fall back to current only if not provided.
@@ -92,10 +100,15 @@ export class ChainManager {
 		};
 
 		// Serialize the chain against other Crucible commands on the same note.
-		if (targetFile) {
-			await withOptionalNoteLock(this.noteLocks, targetFile.path, `chain:${chain.name}`, runSteps);
-		} else {
-			await runSteps();
+		this.executingChains.add(chain);
+		try {
+			if (targetFile) {
+				await withOptionalNoteLock(this.noteLocks, targetFile.path, `chain:${chain.name}`, runSteps);
+			} else {
+				await runSteps();
+			}
+		} finally {
+			this.executingChains.delete(chain);
 		}
 	}
 
