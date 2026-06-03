@@ -89,7 +89,7 @@ export default class CruciblePlugin extends Plugin {
 		this.jobStore = new JobStore(this);
 		this.orchestrator = new Orchestrator(this, this.jobStore);
 		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
-		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow());
+		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow(), transcriptRefineJobConfig());
 		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow());
 		this.orchestrator.register('youtube_tracker_consolidate', new YoutubeTrackerConsolidateWorkflow());
 		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
@@ -940,6 +940,17 @@ export default class CruciblePlugin extends Plugin {
 // Memory-persistence config for the folded enrichment queue. maxParallel and the
 // cooloff are read live from settings (getters) so dashboard/settings changes take
 // effect without re-registering. Idempotent on videoId; display fields feed the UI.
+// File-backed, but collapses repeat requests for the same transcript onto one
+// active job so rapid re-enqueues don't pile up duplicate runs on a note.
+function transcriptRefineJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: (p) => (typeof p.targetPath === 'string' ? p.targetPath : ''),
+	};
+}
+
 function youtubeMetadataJobConfig(plugin: CruciblePlugin): JobTypeConfig {
 	return {
 		persistence: 'memory',
