@@ -107,6 +107,10 @@ export interface Chain {
 	variables?: Record<string, string>;
 	debugMode?: boolean;
 	debugLogPath?: string;
+	// Whether running the chain mutates its target note. Defaults to true (omitted ===
+	// mutating). A non-mutating chain (e.g. one that only opens a view/dashboard) skips
+	// the per-note lock so it doesn't gray out / serialize against the note.
+	mutating?: boolean;
 }
 
 export interface AgentResult {
