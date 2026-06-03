@@ -370,7 +370,8 @@ export class IngestionDashboardUI {
 				const next = Number.isFinite(n) && n >= 0 ? n : 2;
 				this.plugin.settings.ingestionYoutubeEnrichRateLimitSeconds = next;
 				await this.plugin.saveSettings();
-				this.plugin.enrichmentQueue?.setRateLimitSeconds(next);
+				// The metadata queue's gate reads ingestionYoutubeEnrichRateLimitSeconds
+				// live, so saving the setting is all that's needed.
 			})();
 		});
 
