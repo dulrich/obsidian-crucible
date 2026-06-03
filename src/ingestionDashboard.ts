@@ -68,6 +68,9 @@ const INTAKE_JOB_TYPE: Record<IntakeKind, JobType> = {
 };
 
 const DEBOUNCE_MS = 150;
+// Vault-scan sections (uncaptured lists, no-metadata, orphans) recompute the
+// whole vault, so they get a longer debounce than the cheap, event-driven ones.
+const SCAN_DEBOUNCE_MS = 1000;
 
 export class IngestionDashboardUI {
 	private readonly app: App;
@@ -77,6 +80,11 @@ export class IngestionDashboardUI {
 	private uncapturedVideosCache: UncapturedVideoRow[] = [];
 	private orphanedAttachmentsCache: OrphanRow[] = [];
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
+	// Last-seen signature of the frontmatter/links that actually drive the
+	// vault-scan sections, keyed by path. Lets a metadataCache 'changed' event
+	// (which fires on every keystroke) skip those refreshes when nothing relevant
+	// to them changed — the source of the "dashboard flashes while typing" bug.
+	private readonly relevantSignatures = new Map<string, { fm: string; links: string }>();
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly container: HTMLElement) {
 		this.app = plugin.app;
@@ -134,6 +142,7 @@ export class IngestionDashboardUI {
 		this.plugin.enrichmentQueue?.setAutoSource(null);
 		this.intakeButtons.clear();
 		this.sections.clear();
+		this.relevantSignatures.clear();
 		this.container.empty();
 	}
 
@@ -142,20 +151,22 @@ export class IngestionDashboardUI {
 		const debouncedTranscripts = debounce(() => void this.refresh('unrefinedTranscripts'), DEBOUNCE_MS, true);
 		const debouncedBlogIntake = debounce(() => void this.refresh('blogIntake'), DEBOUNCE_MS, true);
 		const debouncedYoutubeIntake = debounce(() => void this.refresh('youtubeIntake'), DEBOUNCE_MS, true);
-		const debouncedUncapturedPosts = debounce(() => void this.refresh('uncapturedPosts'), DEBOUNCE_MS, true);
-		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), DEBOUNCE_MS, true);
+		const debouncedUncapturedPosts = debounce(() => void this.refresh('uncapturedPosts'), SCAN_DEBOUNCE_MS, true);
+		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), SCAN_DEBOUNCE_MS, true);
 		const debouncedIgnoredPosts = debounce(() => void this.refresh('ignoredPosts'), DEBOUNCE_MS, true);
 		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
-		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), DEBOUNCE_MS, true);
+		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), SCAN_DEBOUNCE_MS, true);
 		const debouncedQueue = debounce(() => void this.refresh('enrichmentQueue'), DEBOUNCE_MS, true);
-		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), DEBOUNCE_MS, true);
+		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), SCAN_DEBOUNCE_MS, true);
 		const debouncedOrchestrationQueue = debounce(() => {
 			void this.refresh('orchestrationQueue');
 			void this.refreshIntakeButton('blog');
 			void this.refreshIntakeButton('youtube');
 		}, DEBOUNCE_MS, true);
 
-		const route = (path: string) => {
+		// reason 'structural' = vault create/delete/rename (can change everything);
+		// 'meta' = metadataCache 'changed' (fires per keystroke — gated below).
+		const route = (path: string, reason: 'meta' | 'structural') => {
 			if (path === IGNORED_IDS_NOTE) {
 				debouncedIgnoredPosts();
 				debouncedIgnoredVideos();
@@ -176,19 +187,40 @@ export class IngestionDashboardUI {
 			}
 			const ytRoot = this.plugin.settings.orchestrationYoutubeMetadataRoot;
 			if (ytRoot && path.startsWith(`${ytRoot}/`)) debouncedUncapturedVideos();
-			// Source/post-id/yt-video-id frontmatter on arbitrary notes affects uncaptured lists.
-			debouncedUncapturedPosts();
-			debouncedUncapturedVideos();
-			// yt-video-id added or yt-metadata linked changes the "without metadata" list.
-			debouncedYoutubeNoMetadata();
-			// Any note edit, or any attachment created/deleted/renamed, can change orphan status.
-			debouncedOrphans();
+
+			if (reason === 'structural') {
+				// A note/attachment appeared, vanished, or moved — recompute the
+				// scan sections and drop any stale signature for the path.
+				this.relevantSignatures.delete(path);
+				debouncedUncapturedPosts();
+				debouncedUncapturedVideos();
+				debouncedYoutubeNoMetadata();
+				debouncedOrphans();
+				return;
+			}
+
+			// metadataCache 'changed': only refresh a scan section when the data it
+			// depends on actually changed since we last saw this path. Body keystrokes
+			// leave both signatures untouched, so nothing re-renders.
+			const next = this.relevantSignature(path);
+			const prev = this.relevantSignatures.get(path);
+			this.relevantSignatures.set(path, next);
+			if (!prev || prev.fm !== next.fm) {
+				// source/post-id/yt-video-id/yt-metadata drive the uncaptured + no-metadata lists.
+				debouncedUncapturedPosts();
+				debouncedUncapturedVideos();
+				debouncedYoutubeNoMetadata();
+			}
+			if (!prev || prev.links !== next.links) {
+				// The set of referenced attachments drives orphan status.
+				debouncedOrphans();
+			}
 		};
 
-		this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path)));
-		this.eventRefs.push(this.app.vault.on('create', file => route(file.path)));
-		this.eventRefs.push(this.app.vault.on('delete', file => route(file.path)));
-		this.eventRefs.push(this.app.vault.on('rename', (file, oldPath) => { route(file.path); route(oldPath); }));
+		this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path, 'meta')));
+		this.eventRefs.push(this.app.vault.on('create', file => route(file.path, 'structural')));
+		this.eventRefs.push(this.app.vault.on('delete', file => route(file.path, 'structural')));
+		this.eventRefs.push(this.app.vault.on('rename', (file, oldPath) => { route(file.path, 'structural'); route(oldPath, 'structural'); }));
 
 		const bus = this.plugin.ingestionEvents;
 		if (bus) {
@@ -210,6 +242,22 @@ export class IngestionDashboardUI {
 			this.disposers.push(bus.on('clipping-captured', () => debouncedClippings()));
 			this.disposers.push(bus.on('transcript-refined', () => debouncedTranscripts()));
 		}
+	}
+
+	// Compact signature of the frontmatter and link targets the vault-scan sections
+	// depend on. Two 'changed' events with the same signature mean nothing those
+	// sections care about changed (e.g. a body keystroke), so they can be skipped.
+	private relevantSignature(path: string): { fm: string; links: string } {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return { fm: '', links: '' };
+		const cache = this.app.metadataCache.getFileCache(file);
+		const fm = cache?.frontmatter ?? {};
+		const fmSig = JSON.stringify([fm.source, fm['post-id'], fm['yt-video-id'], fm['yt-metadata']]);
+		const links = [
+			...(cache?.embeds ?? []).map(e => e.link),
+			...(cache?.links ?? []).map(l => l.link),
+		].sort().join(',');
+		return { fm: fmSig, links };
 	}
 
 	// Builds the callout-style collapsible header shared by every section: a
