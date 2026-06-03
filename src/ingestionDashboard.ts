@@ -23,7 +23,7 @@ import {
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import { logWarn } from './log';
-import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueService';
+import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueAdapter';
 import type { JobType, OrchestrationJob } from './orchestration/types';
 import { renderSortableTable } from './ingestion/render/sortableTable';
 import { renderTableSection } from './ingestion/render/section';
@@ -197,7 +197,12 @@ export class IngestionDashboardUI {
 				else { debouncedYoutubeIntake(); debouncedUncapturedVideos(); }
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => debouncedUncapturedVideos()));
-			this.disposers.push(bus.on('enrichment-queue-updated', () => debouncedQueue()));
+			this.disposers.push(bus.on('enrichment-queue-updated', () => {
+				debouncedQueue();
+				// Metadata-fetch jobs live in the enrichment (memory) queue now, so the
+				// "captures without metadata" badges track this event, not the file queue.
+				debouncedYoutubeNoMetadata();
+			}));
 			this.disposers.push(bus.on('orchestration-queue-updated', () => {
 				debouncedOrchestrationQueue();
 				debouncedYoutubeNoMetadata();
@@ -673,7 +678,7 @@ export class IngestionDashboardUI {
 	// --- Section: YouTube captures without metadata ---
 	private async renderYoutubeNoMetadata(body: HTMLElement, ctx: SectionContext): Promise<void> {
 		const rows = computeYoutubeNoMetadataRows(this.app);
-		const inFlight = await this.youtubeMetadataInFlight();
+		const inFlight = this.youtubeMetadataInFlight();
 
 		renderTableSection<YoutubeNoMetadataRow>({
 			body, ctx, rows,
@@ -688,27 +693,11 @@ export class IngestionDashboardUI {
 		});
 	}
 
-	// Reads queued + running orchestrator jobs once and maps each
-	// youtube_metadata_fetch job's target note path to its status, so rows show
-	// in-flight state instead of an enqueue button.
-	private async youtubeMetadataInFlight(): Promise<Map<string, 'queued' | 'running'>> {
-		const map = new Map<string, 'queued' | 'running'>();
-		const store = this.plugin.jobStore;
-		if (!store) return map;
-		try {
-			const [running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
-			for (const e of running) this.recordMetadataJob(map, e.job, 'running');
-			for (const e of queued) this.recordMetadataJob(map, e.job, 'queued');
-		} catch {
-			/* leave map empty on read failure */
-		}
-		return map;
-	}
-
-	private recordMetadataJob(map: Map<string, 'queued' | 'running'>, job: OrchestrationJob, status: 'queued' | 'running'): void {
-		if (job.type !== 'youtube_metadata_fetch') return;
-		const path = typeof job.params?.targetPath === 'string' ? job.params.targetPath : '';
-		if (path && !map.has(path)) map.set(path, status);
+	// youtube_metadata_fetch now runs in the unified queue's in-memory path, so
+	// in-flight state comes from the enrichment adapter (target note path → status)
+	// rather than scanning the file-backed job folders.
+	private youtubeMetadataInFlight(): Map<string, 'queued' | 'running'> {
+		return this.plugin.enrichmentQueue?.metadataInFlightByPath() ?? new Map();
 	}
 
 	private renderEnqueueMetadataCell(td: HTMLElement, row: YoutubeNoMetadataRow, inFlight: Map<string, 'queued' | 'running'>): void {
@@ -724,6 +713,7 @@ export class IngestionDashboardUI {
 				const job = await this.plugin.orchestrator.enqueue('youtube_metadata_fetch', {
 					targetPath: row.file.path,
 					videoId: row.videoId,
+					title: row.title,
 				});
 				if (job) btn.setText('Queued');
 				else btn.disabled = false;
@@ -742,13 +732,14 @@ export class IngestionDashboardUI {
 						new Notice('No captures awaiting metadata.');
 						return;
 					}
-					const inFlight = await this.youtubeMetadataInFlight();
+					const inFlight = this.youtubeMetadataInFlight();
 					let enqueued = 0;
 					for (const row of rows) {
 						if (inFlight.has(row.file.path)) continue;
 						const job = await this.plugin.orchestrator.enqueue('youtube_metadata_fetch', {
 							targetPath: row.file.path,
 							videoId: row.videoId,
+							title: row.title,
 						});
 						if (job) enqueued++;
 					}
