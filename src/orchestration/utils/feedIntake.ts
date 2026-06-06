@@ -1,6 +1,6 @@
 import { App, TFile, normalizePath } from 'obsidian';
 import type CruciblePlugin from '../../main';
-import type { BlogEntry, RemotePost } from './blogs';
+import type { BlogEntry, CanonMethod, RemotePost } from './blogs';
 import type { ChannelEntry, RemoteVideo } from './youtube';
 import {
 	BLOGS_FEED_SOURCE,
@@ -98,6 +98,7 @@ export function buildFeedSeenIdSet<Entry, Item>(
 	source: FeedSource<Entry, Item>,
 	diffMode: boolean,
 	seedIds?: Iterable<string>,
+	hostRules?: Map<string, CanonMethod>,
 ): Set<string> {
 	const seen = new Set<string>(seedIds ?? []);
 	const intakePrefix = `${source.intakeRoot}/`;
@@ -107,7 +108,7 @@ export function buildFeedSeenIdSet<Entry, Item>(
 		if (inSkip && !(diffMode && inIntake)) continue;
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 		if (!fm) continue;
-		source.ingestFrontmatterIds(fm, seen, diffMode, inIntake);
+		source.ingestFrontmatterIds(fm, seen, diffMode, inIntake, hostRules);
 	}
 	return seen;
 }
@@ -278,8 +279,13 @@ export function parseIntakeVideos(content: string): YoutubeIntakeVideoEntry[] {
 	}));
 }
 
-export function buildBlogsSeenIdSet(app: App, diffMode: boolean, seedIds?: Iterable<string>): Set<string> {
-	return buildFeedSeenIdSet(app, BLOGS_FEED_SOURCE, diffMode, seedIds);
+export function buildBlogsSeenIdSet(
+	app: App,
+	diffMode: boolean,
+	seedIds?: Iterable<string>,
+	hostRules?: Map<string, CanonMethod>,
+): Set<string> {
+	return buildFeedSeenIdSet(app, BLOGS_FEED_SOURCE, diffMode, seedIds, hostRules);
 }
 
 export async function loadConfiguredBlogs(

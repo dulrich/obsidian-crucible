@@ -477,7 +477,7 @@ function renderEditBlogsTrackerWorkflow(tab: CrucibleSettingTab, containerEl: HT
 
 	bindSearch(containerEl, {
 		name: 'Blogs note',
-		desc: 'Markdown note containing the blogs registry table (Name | Link | Method | Tags | Priority).',
+		desc: 'Markdown note containing the blogs registry table (Name | Link | Method | Tags | Priority | Canon). Canon is optional: auto (default) | substack | strip-params | keep-params.',
 		placeholder: '_system/blogs/Blogs.md',
 		get: () => s.orchestrationBlogsNote,
 		set: (v) => { s.orchestrationBlogsNote = v.trim() || '_system/blogs/Blogs.md'; },

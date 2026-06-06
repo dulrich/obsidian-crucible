@@ -9,8 +9,10 @@ import {
 } from './youtube';
 import {
 	BlogEntry,
+	CanonMethod,
 	EXAMPLE_BLOGS_TABLE,
 	RemotePost,
+	buildBlogCanonHostMap,
 	fetchBlogFeed,
 	parseBlogsTable,
 	postIdFromUrl,
@@ -52,7 +54,16 @@ export interface FeedSource<Entry, Item> {
 	itemPublishedAt(item: Item): string;
 	itemFromBullet(line: string, entryName: string): Item | null;
 	isSeen(item: Item, seen: Set<string>): boolean;
-	ingestFrontmatterIds(fm: Record<string, unknown>, seen: Set<string>, diffMode: boolean, inIntake: boolean): void;
+	ingestFrontmatterIds(
+		fm: Record<string, unknown>,
+		seen: Set<string>,
+		diffMode: boolean,
+		inIntake: boolean,
+		hostRules?: Map<string, CanonMethod>,
+	): void;
+	// Per-host canonicalization overrides derived from the registry (blogs only). Lets the seen-set
+	// scan canonicalize captured-note source URLs the same way as their feed.
+	buildHostRules?(entries: Entry[]): Map<string, CanonMethod>;
 	detectSourceId(value: unknown): string | null;
 	fmIdKey: string;
 	fmIdsKey: string;
@@ -164,11 +175,12 @@ export const BLOGS_FEED_SOURCE: FeedSource<BlogEntry, RemotePost> = {
 	itemPublishedAt: item => item.publishedAt,
 	itemFromBullet: parsePostBullet,
 	isSeen: isSeenPost,
-	ingestFrontmatterIds: (fm, seen, diffMode, inIntake) => {
+	ingestFrontmatterIds: (fm, seen, diffMode, inIntake, hostRules) => {
 		ingestStringProperty(fm['post-id'], seen);
-		ingestSourceProperty(fm['source'], seen);
+		ingestSourceProperty(fm['source'], seen, hostRules);
 		if (diffMode && inIntake) ingestStringProperty(fm['post-ids'], seen);
 	},
+	buildHostRules: buildBlogCanonHostMap,
 	detectSourceId: firstBlogUrlId,
 	fmIdKey: 'post-id',
 	fmIdsKey: 'post-ids',
@@ -272,7 +284,7 @@ function parseBlogHeading(line: string): BlogEntry | null {
 	const name = match?.[1]?.trim();
 	const link = match?.[2]?.trim();
 	if (!name || !link) return null;
-	return { name, link, method: 'rss', tags: [], priority: 'normal' };
+	return { name, link, method: 'rss', tags: [], priority: 'normal', canon: 'auto' };
 }
 
 function parsePostBullet(line: string, blogName: string): RemotePost | null {
@@ -328,21 +340,21 @@ function ingestStringProperty(value: unknown, seen: Set<string>): void {
 	}
 }
 
-function ingestSourceProperty(value: unknown, seen: Set<string>): void {
+function ingestSourceProperty(value: unknown, seen: Set<string>, hostRules?: Map<string, CanonMethod>): void {
 	if (typeof value === 'string') {
-		addSourceUrl(value, seen);
+		addSourceUrl(value, seen, hostRules);
 	} else if (Array.isArray(value)) {
 		for (const item of value) {
-			if (typeof item === 'string') addSourceUrl(item, seen);
+			if (typeof item === 'string') addSourceUrl(item, seen, hostRules);
 		}
 	}
 }
 
-function addSourceUrl(value: string, seen: Set<string>): void {
+function addSourceUrl(value: string, seen: Set<string>, hostRules?: Map<string, CanonMethod>): void {
 	const trimmed = value.trim();
 	if (!trimmed || !/^https?:\/\//i.test(trimmed)) return;
 	seen.add(trimmed);
-	seen.add(postIdFromUrl(trimmed));
+	seen.add(postIdFromUrl(trimmed, { hostRules }));
 }
 
 function firstYoutubeUrlId(value: unknown): string | null {
