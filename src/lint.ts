@@ -90,6 +90,50 @@ interface IntlWithSegmenter {
 	Segmenter: new (locale?: string, options?: { granularity: string }) => Segmenter;
 }
 
+const FENCED_CODE_RE = /(`{3,}|~{3,})[\s\S]*?\1/g;
+const INLINE_CODE_RE = /`[^`]*`/g;
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const HTML_BLOCK_RE = /<(svg|script|style)\b[\s\S]*?<\/\1>/gi;
+const MD_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/g;
+const WIKI_EMBED_RE = /!\[\[[^\]]*\]\]/g;
+const MD_LINK_RE = /\[([^\]]*)\]\([^)]*\)/g;
+const WIKILINK_RE = /\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g;
+const HTML_TAG_RE = /<\/?[a-zA-Z][^>]*>/g;
+
+// Reduce note body markup to readable prose so word counts reflect what a reader sees.
+// Embedded charts (inline <svg>), code, and embed/link plumbing would otherwise spam the
+// segmenter with tokens. Order matters: outer/greedy constructs are removed before the
+// inner markup they contain. See the word-count quirk in AGENTS.md before changing.
+export function stripNonProseContent(body: string): string {
+	return body
+		.replace(FENCED_CODE_RE, ' ')
+		.replace(INLINE_CODE_RE, ' ')
+		.replace(HTML_COMMENT_RE, ' ')
+		.replace(HTML_BLOCK_RE, ' ')
+		.replace(MD_IMAGE_RE, ' ')
+		.replace(WIKI_EMBED_RE, ' ')
+		.replace(MD_LINK_RE, '$1')
+		.replace(WIKILINK_RE, (_m, target: string, alias?: string) => alias ?? target)
+		.replace(HTML_TAG_RE, ' ');
+}
+
+export function calculateWordCount(content: string): number {
+	const body = stripNonProseContent(content.replace(FRONTMATTER_REGEX, ''));
+
+	const intl = Intl as unknown as IntlWithSegmenter;
+	if (typeof intl.Segmenter === 'function') {
+		const segmenter = new intl.Segmenter(undefined, { granularity: 'word' });
+		const segments = segmenter.segment(body);
+		let count = 0;
+		for (const segment of segments) {
+			if (segment.isWordLike) count++;
+		}
+		return count;
+	} else {
+		return body.split(/\s+/).filter(word => word.length > 0).length;
+	}
+}
+
 export class Linter {
 	app: App;
 	settings: CrucibleSettings;
@@ -111,20 +155,7 @@ export class Linter {
 	}
 
 	calculateWordCount(content: string): number {
-		const body = content.replace(FRONTMATTER_REGEX, '');
-		
-		const intl = Intl as unknown as IntlWithSegmenter;
-		if (typeof intl.Segmenter === 'function') {
-			const segmenter = new intl.Segmenter(undefined, { granularity: 'word' });
-			const segments = segmenter.segment(body);
-			let count = 0;
-			for (const segment of segments) {
-				if (segment.isWordLike) count++;
-			}
-			return count;
-		} else {
-			return body.split(/\s+/).filter(word => word.length > 0).length;
-		}
+		return calculateWordCount(content);
 	}
 
 	async lintNote(viewOrFile?: MarkdownView | TFile): Promise<boolean> {
