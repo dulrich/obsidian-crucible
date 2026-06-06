@@ -8,14 +8,16 @@ import {
 	scanBlogsTrackerRuns,
 	scanYoutubeTrackerRuns,
 } from '../../orchestration/utils/feedIntake';
+import { buildBlogCanonHostMap } from '../../orchestration/utils/blogs';
 import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from '../render/types';
 
 // Blog posts seen in tracker runs but not yet captured as a vault note.
 export async function computeUncapturedPostRows(app: App, plugin: CruciblePlugin): Promise<UncapturedPostRow[]> {
-	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app));
 	const configured = await loadConfiguredBlogs(app, plugin);
+	const hostRules = buildBlogCanonHostMap(Array.from(configured.values(), v => v.blog));
+	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app), hostRules);
 	const scan = await scanBlogsTrackerRuns(app, seen, configured);
 
 	const rows: UncapturedPostRow[] = [];

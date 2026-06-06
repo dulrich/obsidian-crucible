@@ -61,7 +61,8 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 		await this.canonicalizeDetectedIds(plugin);
 
 		const diffMode = this.diffMode(plugin);
-		const seen = buildFeedSeenIdSet(plugin.app, this.source, diffMode, await this.loadIgnoredIds(plugin));
+		const hostRules = this.source.buildHostRules?.(entries);
+		const seen = buildFeedSeenIdSet(plugin.app, this.source, diffMode, await this.loadIgnoredIds(plugin), hostRules);
 
 		const fetchSettled = await rateLimitedAllSettled(
 			entries,
@@ -273,8 +274,11 @@ export class FeedTrackerConsolidateWorkflow<Entry, Item> extends FeedTrackerWork
 		const app = plugin.app;
 
 		await this.canonicalizeDetectedIds(plugin);
-		const seenInVault = buildFeedSeenIdSet(app, this.source, false, await this.loadIgnoredIds(plugin));
 		const configuredEntries = await loadConfiguredFeedEntries(app, plugin, this.source);
+		const hostRules = this.source.buildHostRules?.(
+			Array.from(configuredEntries.values(), v => v.entry),
+		);
+		const seenInVault = buildFeedSeenIdSet(app, this.source, false, await this.loadIgnoredIds(plugin), hostRules);
 		const scan = await scanFeedTrackerRuns(app, this.source, seenInVault, configuredEntries);
 		const totalNew = scan.outcomes.reduce((sum, o) => sum + o.newItems.length, 0);
 
