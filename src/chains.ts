@@ -35,6 +35,12 @@ export class ChainManager {
 		return Array.from(this.registry.keys());
 	}
 
+	// True when `id` resolves to an awaited, target-file-aware internal command —
+	// the requirement for a command to be queueable (see CommandRunWorkflow).
+	hasInternalCommand(id: string): boolean {
+		return this.registry.has(id);
+	}
+
 	getCommandSchema(id: string): CommandArgSchema[] | undefined {
 		return this.schemas.get(id);
 	}

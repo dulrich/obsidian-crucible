@@ -46,18 +46,46 @@ export function transcriptRefineJobConfig(): JobTypeConfig {
 	};
 }
 
+// One queue entry per NOTE, not per video: a per-note job (params.targetPath set)
+// keys on the note path so duplicate captures sharing a yt-video-id each get their
+// own job (each links its own note; only the first fetches — see ensureMetadataNote).
+// Standalone enrichment (no vault note yet) keys on the video id. Exported so the
+// EnrichmentQueueAdapter computes the exact same keys as the orchestrator path.
+export function youtubeMetadataDedupeKey(p: Record<string, unknown>): string {
+	if (typeof p.targetPath === 'string' && p.targetPath) return `note:${p.targetPath}`;
+	const videoId = coerceVideoId(p.videoId);
+	return videoId ? `video:${videoId}` : '';
+}
+
+// File-backed so triggered command runs survive restarts. Dedupes on
+// commandId+target so repeat trigger fires collapse onto one active job.
+export function commandRunJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: (p) => {
+			const commandId = typeof p.commandId === 'string' ? p.commandId.trim() : '';
+			if (!commandId) return '';
+			const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
+			return `${commandId}|${targetPath}`;
+		},
+	};
+}
+
 // Memory-persistence config for the folded enrichment queue. maxParallel and the
 // cooloff are read live from settings (getters) so dashboard/settings changes take
-// effect without re-registering. Dedupes on videoId; display fields feed the UI.
+// effect without re-registering. Display fields feed the UI.
 export function youtubeMetadataJobConfig(plugin: CruciblePlugin): JobTypeConfig {
 	return {
 		persistence: 'memory',
 		get maxParallel() { return Math.max(1, plugin.settings.orchestrationYoutubeMetadataMaxParallel || 1); },
 		get minIntervalMs() { return Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000; },
-		dedupeKey: (p) => coerceVideoId(p.videoId),
+		dedupeKey: youtubeMetadataDedupeKey,
 		display: (p) => ({
 			title: typeof p.title === 'string' ? p.title : '',
 			channelName: typeof p.channelName === 'string' ? p.channelName : '',
+			target: typeof p.targetPath === 'string' ? (p.targetPath.split('/').pop() ?? '').replace(/\.md$/, '') : '',
 		}),
 		terminalRetentionMs: 60_000,
 	};

@@ -173,6 +173,42 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		if (warning) addWarningIcon(setting.nameEl, warning);
 	});
 
+	// --- Triggers ---
+	new Setting(containerEl).setName('Triggers').setHeading();
+	containerEl.createEl('p', { text: 'Code-defined rules that enqueue jobs automatically on note lifecycle events or schedules. Triggered work runs through the queue (dedupe, pacing, timeouts, note locks).' });
+
+	const triggersGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	const triggers = tab.plugin.triggers?.list() ?? [];
+	triggers.forEach((trigger, index) => {
+		if (index > 0) triggersGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		bindToggle(triggersGroup, {
+			name: trigger.id,
+			desc: trigger.description,
+			tooltip: 'Enabled',
+			get: () => s.orchestrationTriggersEnabled[trigger.id] ?? true,
+			set: (v) => { s.orchestrationTriggersEnabled = { ...s.orchestrationTriggersEnabled, [trigger.id]: v }; },
+		}, save);
+	});
+
+	triggersGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(triggersGroup, {
+		name: 'YouTube tracker interval (minutes)',
+		desc: 'Schedule for youtube-tracker-schedule. 0 disables the schedule.',
+		placeholder: '0',
+		get: () => String(s.orchestrationYoutubeTrackerIntervalMinutes),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationYoutubeTrackerIntervalMinutes = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0; },
+		min: 0,
+	}, save);
+	triggersGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(triggersGroup, {
+		name: 'Blog tracker interval (minutes)',
+		desc: 'Schedule for blogs-tracker-schedule. 0 disables the schedule.',
+		placeholder: '0',
+		get: () => String(s.orchestrationBlogsTrackerIntervalMinutes),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationBlogsTrackerIntervalMinutes = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0; },
+		min: 0,
+	}, save);
+
 	// --- Actions ---
 	new Setting(containerEl).setName('Actions').setHeading();
 	const actions = containerEl.createDiv({ cls: 'crucible-settings-group' });

@@ -8,7 +8,8 @@ export type JobType =
 	| 'blogs_tracker_consolidate'
 	| 'transcript_refine'
 	| 'link_scan'
-	| 'youtube_metadata_fetch';
+	| 'youtube_metadata_fetch'
+	| 'command_run';
 
 export type JobPriority = 'low' | 'normal' | 'high';
 
