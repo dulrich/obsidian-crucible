@@ -2,6 +2,7 @@ import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { MemoryJobEntry, MemoryJobQueue, MemoryJobSeed } from './MemoryJobQueue';
 import type { JobType } from './types';
+import { youtubeMetadataDedupeKey } from './jobTypeConfig';
 
 // The YouTube-metadata job type runs in the unified queue's in-memory path. This
 // adapter is the thin, video-shaped surface the ingestion dashboard talks to; it
@@ -19,6 +20,9 @@ export interface EnrichmentQueueItem {
 }
 
 export interface EnrichmentQueueEntry extends EnrichmentQueueItem {
+	/** Queue key (`note:<path>` for per-note jobs, `video:<id>` standalone) — use for cancel. */
+	key: string;
+	targetPath?: string;
 	status: EnrichmentItemStatus;
 	error?: string;
 	addedAt: number;
@@ -52,15 +56,18 @@ export class EnrichmentQueueAdapter {
 	enqueue(item: EnrichmentQueueItem): boolean {
 		const queue = this.queue;
 		if (!queue || !item.videoId) return false;
-		return queue.enqueue(item.videoId, itemToParams(item), { title: item.title, channelName: item.channelName });
+		const params = itemToParams(item);
+		return queue.enqueue(youtubeMetadataDedupeKey(params), params, { title: item.title, channelName: item.channelName });
 	}
 
-	dequeueIfPending(videoId: string): boolean {
-		return this.queue?.dequeueIfPending(videoId) ?? false;
+	/** Cancel by queue key (EnrichmentQueueEntry.key), not videoId — per-note entries key on the path. */
+	dequeueIfPending(key: string): boolean {
+		return this.queue?.dequeueIfPending(key) ?? false;
 	}
 
+	/** Looks up the STANDALONE entry for a video (uncaptured list); per-note entries key on the path. */
 	getEntry(videoId: string): EnrichmentQueueEntry | null {
-		const entry = this.queue?.getEntry(videoId);
+		const entry = this.queue?.getEntry(`video:${videoId}`);
 		return entry ? toEnrichmentEntry(entry) : null;
 	}
 
@@ -100,16 +107,19 @@ function itemToParams(item: EnrichmentQueueItem): Record<string, unknown> {
 }
 
 function itemToSeed(item: EnrichmentQueueItem): MemoryJobSeed {
+	const params = itemToParams(item);
 	return {
-		key: item.videoId,
-		params: itemToParams(item),
+		key: youtubeMetadataDedupeKey(params),
+		params,
 		display: { title: item.title, channelName: item.channelName },
 	};
 }
 
 function toEnrichmentEntry(entry: MemoryJobEntry): EnrichmentQueueEntry {
 	return {
-		videoId: entry.key,
+		key: entry.key,
+		videoId: typeof entry.params.videoId === 'string' ? entry.params.videoId : '',
+		targetPath: typeof entry.params.targetPath === 'string' ? entry.params.targetPath : undefined,
 		title: typeof entry.display.title === 'string' ? entry.display.title : '',
 		channelName: typeof entry.display.channelName === 'string' ? entry.display.channelName : '',
 		status: entry.status,

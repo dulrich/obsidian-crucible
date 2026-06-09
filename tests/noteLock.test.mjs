@@ -20,7 +20,7 @@ await esbuild.build({
 	outfile,
 });
 
-const { NoteLockManager, withOptionalNoteLock } = await import(pathToFileURL(outfile).href);
+const { NoteLockManager, withOptionalNoteLock, resourceLockKey } = await import(pathToFileURL(outfile).href);
 
 // Minimal event bus capturing emitted events.
 function makeBus() {
@@ -171,4 +171,119 @@ test('withOptionalNoteLock runs without a manager', async () => {
 	const result = await withOptionalNoteLock(undefined, 'a.md', 'x', async () => { ran = true; return 42; });
 	assert.equal(ran, true);
 	assert.equal(result, 42);
+});
+
+// ── FIFO ordering regression ────────────────────────────────────────────────
+
+test('withLock: three contenders run strictly in submission order, none rejected', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	// Kick off all three concurrently; they race to enqueue but the queue must
+	// honour arrival order (FIFO).
+	const p1 = locks.withLock('x.md', 'first',  async () => { order.push('first'); });
+	const p2 = locks.withLock('x.md', 'second', async () => { order.push('second'); });
+	const p3 = locks.withLock('x.md', 'third',  async () => { order.push('third'); });
+	// All three must settle without rejection.
+	await Promise.all([p1, p2, p3]);
+	assert.deepEqual(order, ['first', 'second', 'third'], 'strict FIFO ordering');
+});
+
+// ── withResourceLock ────────────────────────────────────────────────────────
+
+test('resourceLockKey produces kind::id shape', () => {
+	assert.equal(resourceLockKey('yt-video', 'abc'), 'yt-video::abc');
+});
+
+test('withResourceLock: same kind+id serializes', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	const p1 = locks.withResourceLock('yt-video', 'abc', 'job1', async () => { order.push('job1'); });
+	const p2 = locks.withResourceLock('yt-video', 'abc', 'job2', async () => { order.push('job2'); });
+	await Promise.all([p1, p2]);
+	assert.deepEqual(order, ['job1', 'job2'], 'same resource id serializes in FIFO order');
+});
+
+test('withResourceLock: different ids run concurrently', async () => {
+	const locks = new NoteLockManager();
+	let secondStarted = false;
+	// Hold 'id-A' open while we check that 'id-B' is not blocked.
+	let releaseA;
+	const holdA = new Promise(resolve => { releaseA = resolve; });
+	const pA = locks.withResourceLock('yt-video', 'id-A', 'A', () => holdA);
+	const pB = locks.withResourceLock('yt-video', 'id-B', 'B', async () => { secondStarted = true; });
+	// pB should resolve immediately even while A is still held.
+	await pB;
+	assert.equal(secondStarted, true, 'different resource id is not blocked by A');
+	releaseA();
+	await pA;
+});
+
+test('resource key never collides with a plain path lock', async () => {
+	const locks = new NoteLockManager();
+	// A file path that looks like a resource key does not exist in practice
+	// because `:` is invalid in vault names, but prove the key shapes are distinct.
+	const resourceKey = resourceLockKey('yt-video', 'abc');
+	assert.equal(resourceKey.includes('::'), true);
+	// Acquire on path 'yt-video::abc' (the file-path code path).
+	const relPath = await locks.acquire('yt-video::abc', 'path-lock');
+	// A resource lock for the same text must also wait — they share the same
+	// underlying mutex key, which is correct (same string = same lock).
+	let resourceRan = false;
+	const pRes = locks.withResourceLock('yt-video', 'abc', 'res-lock', async () => { resourceRan = true; });
+	await tick(); // let the event loop settle; pRes must still be queued.
+	assert.equal(resourceRan, false, 'resource lock waits while plain acquire holds same key');
+	relPath();
+	await pRes;
+	assert.equal(resourceRan, true);
+});
+
+// ── Nesting + reentrancy ────────────────────────────────────────────────────
+
+test('withLock outer + withResourceLock inner completes without deadlock', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	await locks.withLock('note.md', 'outer', async () => {
+		order.push('note-start');
+		await locks.withResourceLock('yt-video', 'abc', 'inner', async () => {
+			order.push('resource');
+		});
+		order.push('note-end');
+	});
+	assert.deepEqual(order, ['note-start', 'resource', 'note-end']);
+});
+
+test('reentrant withLock inside nested resource lock runs inline (no self-deadlock)', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	await locks.withLock('note.md', 'outer', async () => {
+		order.push('outer-start');
+		await locks.withResourceLock('yt-video', 'abc', 'resource', async () => {
+			order.push('resource');
+			// Re-entering the same note lock (already held by outer context).
+			await locks.withLock('note.md', 'reentrant', async () => {
+				order.push('reentrant');
+			});
+		});
+		order.push('outer-end');
+	});
+	assert.deepEqual(order, ['outer-start', 'resource', 'reentrant', 'outer-end']);
+});
+
+// ── Resource keys do not emit note-lock-changed ──────────────────────────────
+
+test('withResourceLock does not emit note-lock-changed', async () => {
+	const bus = makeBus();
+	const locks = new NoteLockManager(bus);
+	await locks.withResourceLock('yt-video', 'vid1', 'job', async () => {});
+	assert.deepEqual(bus.events, [], 'no events emitted for resource lock');
+});
+
+test('plain path locks still emit note-lock-changed when a bus is present', async () => {
+	const bus = makeBus();
+	const locks = new NoteLockManager(bus);
+	const rel = await locks.acquire('note.md', 'work');
+	rel();
+	assert.equal(bus.events.length, 2, 'acquire + release each emit');
+	assert.equal(bus.events[0].name, 'note-lock-changed');
+	assert.equal(bus.events[1].name, 'note-lock-changed');
 });
