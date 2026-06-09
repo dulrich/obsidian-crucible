@@ -23,7 +23,7 @@ import {
 	YoutubeTrackerConsolidateWorkflow,
 	YoutubeTrackerWorkflow,
 } from './orchestration/workflows/FeedTrackerWorkflow';
-import { ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
+import { ingestYoutubeVideoMetadata, isYtMetadataLinked } from './orchestration/utils/youtubeApi';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
@@ -32,8 +32,10 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { commandRunJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
+import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 
 export type CrucibleCommandGroup =
@@ -55,6 +57,11 @@ export interface CrucibleCommandEntry {
 	// Whether running the command mutates the active/target note. Governs whether it
 	// acquires the per-note lock. Defaults to true (safe); read-only commands set false.
 	mutating: boolean;
+	// Whether the command may be enqueued as a `command_run` job (by a trigger or an
+	// orchestration workflow). Requires a chain-internal twin — the awaited,
+	// target-file-aware registration — so the queued run targets the job's note
+	// instead of fire-and-forget on the active one. Defaults to "twin exists".
+	queueable: boolean;
 }
 
 export default class CruciblePlugin extends Plugin {
@@ -75,6 +82,7 @@ export default class CruciblePlugin extends Plugin {
 	private noteLockOverlay: NoteLockOverlay;
 	enrichmentQueue: EnrichmentQueueAdapter;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
+	triggers: TriggerRegistry;
 	private tocComponent: TableOfContentsUI | null = null;
 	// Chain-internal command ids registered for each "Chain: X" command, so a chain
 	// can be used as an (awaited, target-file-aware) step inside another chain.
@@ -103,8 +111,12 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
+		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
 		this.enrichmentQueue = new EnrichmentQueueAdapter(this);
 		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
+		this.triggers = new TriggerRegistry(this, () => this.isMaterializing);
+		this.registerFoundingTriggers();
+		this.triggers.start();
 
 		this.registerInternalCommands();
 		this.registerAgents();
@@ -207,6 +219,7 @@ export default class CruciblePlugin extends Plugin {
 	onunload() {
 		if (this.tocComponent) this.tocComponent.unload();
 		this.noteLockOverlay?.dispose();
+		this.triggers?.dispose();
 		this.orchestrationAutoRunner?.dispose();
 		this.enrichmentQueue?.dispose();
 		this.ingestionEvents?.dispose();
@@ -216,6 +229,40 @@ export default class CruciblePlugin extends Plugin {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
+	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so
+	// triggered work inherits queue semantics — dedupe, pacing, timeout, note locks.
+	// Settings → Orchestrate → Triggers exposes per-trigger enable toggles.
+	private registerFoundingTriggers(): void {
+		this.triggers.register({
+			id: 'yt-metadata-on-capture',
+			description: 'When a note gains a yt-video-id without a yt-metadata link, enqueue a per-note metadata fetch.',
+			on: { event: 'metadata-changed' },
+			enabled: () => this.settings.ingestionYoutubeAutoEnrichEnabled,
+			guard: (_file, fm) => {
+				if (!fm) return false;
+				return coerceVideoId(fm['yt-video-id']) !== '' && !isYtMetadataLinked(fm['yt-metadata']);
+			},
+			jobs: (file) => file ? [{
+				type: 'youtube_metadata_fetch',
+				params: { targetPath: file.path, videoId: coerceVideoId(this.app.metadataCache.getFileCache(file)?.frontmatter?.['yt-video-id']), title: file.basename },
+			}] : [],
+		});
+		this.triggers.register({
+			id: 'youtube-tracker-schedule',
+			description: 'Enqueue a YouTube tracker run on a fixed interval (0 minutes = off).',
+			on: { everyMs: () => Math.max(0, this.settings.orchestrationYoutubeTrackerIntervalMinutes) * 60_000 },
+			enabled: () => this.settings.orchestrationYoutubeTrackerEnabled,
+			jobs: () => [{ type: 'youtube_tracker' }],
+		});
+		this.triggers.register({
+			id: 'blogs-tracker-schedule',
+			description: 'Enqueue a blog tracker run on a fixed interval (0 minutes = off).',
+			on: { everyMs: () => Math.max(0, this.settings.orchestrationBlogsTrackerIntervalMinutes) * 60_000 },
+			enabled: () => this.settings.orchestrationBlogsTrackerEnabled,
+			jobs: () => [{ type: 'blogs_tracker' }],
+		});
+	}
+
 	registerCrucibleCommand(opts: {
 		id: string;
 		name: string;
@@ -223,8 +270,15 @@ export default class CruciblePlugin extends Plugin {
 		run: () => unknown;
 		available?: () => boolean;
 		mutating?: boolean;
+		queueable?: boolean;
 	}): void {
-		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group, mutating: opts.mutating ?? true });
+		// A command is queueable when a chain-internal twin exists at registration
+		// time (built-ins register internals first in onload; captures/chains register
+		// theirs immediately before this call).
+		const queueable = opts.queueable
+			?? (this.chainManager.hasInternalCommand(`${this.manifest.id}:${opts.id}`)
+				|| this.chainManager.hasInternalCommand(`crucible:${opts.id}`));
+		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group, mutating: opts.mutating ?? true, queueable });
 		this.addCommand({
 			id: opts.id,
 			name: opts.name,
@@ -291,6 +345,8 @@ export default class CruciblePlugin extends Plugin {
 				name: `Agent: ${agent.name || '(unnamed)'}`,
 				group: 'Agents',
 				mutating: true,
+				// Agents self-register a chain-internal command under this exact id.
+				queueable: true,
 			});
 		}
 	}
@@ -789,11 +845,11 @@ export default class CruciblePlugin extends Plugin {
 			);
 			switch (result.status) {
 				case 'created':
-					new Notice(`YouTube metadata saved: ${result.metadataPath}${result.linkedNotes > 1 ? ` (+${result.linkedNotes - 1} duplicate note${result.linkedNotes - 1 === 1 ? '' : 's'})` : ''}`);
+					new Notice(`YouTube metadata saved: ${result.metadataPath}`);
 					this.emitMetadataEnriched(videoId, result.metadataPath, file);
 					return true;
 				case 'exists':
-					new Notice(`YouTube metadata already exists; linked.${result.linkedNotes > 1 ? ` (+${result.linkedNotes - 1} duplicate note${result.linkedNotes - 1 === 1 ? '' : 's'})` : ''}`);
+					new Notice('YouTube metadata already exists; linked.');
 					this.emitMetadataEnriched(videoId, result.metadataPath, file);
 					return true;
 				case 'no-video-id':

@@ -343,6 +343,11 @@ export interface CrucibleSettings {
 	// Workflow: transcript_refine
 	orchestrationTranscriptRefineEnabled: boolean;
 	orchestrationTranscriptRefineChainName: string;
+	// Triggers (TriggerRegistry): per-trigger enable overrides keyed by trigger id.
+	// Absent key = the trigger's registered default. Schedule intervals: 0 = off.
+	orchestrationTriggersEnabled: Record<string, boolean>;
+	orchestrationYoutubeTrackerIntervalMinutes: number;
+	orchestrationBlogsTrackerIntervalMinutes: number;
 	// Ingestion Dashboard
 	ingestionClipperInboxFolder: string;
 	ingestionYoutubeEnrichRateLimitSeconds: number;
@@ -452,6 +457,9 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationTrackedSourcesNote: 'Sources/Tracked Sources.md',
 	orchestrationTranscriptRefineEnabled: true,
 	orchestrationTranscriptRefineChainName: 'Refine Transcript',
+	orchestrationTriggersEnabled: {},
+	orchestrationYoutubeTrackerIntervalMinutes: 0,
+	orchestrationBlogsTrackerIntervalMinutes: 0,
 	ingestionClipperInboxFolder: '_clippings/inbox',
 	ingestionYoutubeEnrichRateLimitSeconds: 2,
 	ingestionYoutubeAutoEnrichEnabled: false,

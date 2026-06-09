@@ -16,11 +16,29 @@ interface LockState {
 }
 
 /**
- * Per-note (path-keyed) async mutex. Commands that mutate the same note acquire
+ * Builds the lock key for a non-note resource (e.g. a yt-video-id). `:` is
+ * illegal in vault filenames, so `kind::id` can never collide with a note path.
+ */
+export function resourceLockKey(kind: string, id: string): string {
+	return `${kind}::${id}`;
+}
+
+function isResourceKey(key: string): boolean {
+	return key.includes('::');
+}
+
+/**
+ * Per-note (path-keyed) async mutex, extended to arbitrary resource keys
+ * (`kind::id`, see `resourceLockKey`). Commands that mutate the same note acquire
  * its lock and run one at a time, in FIFO order; commands on different notes run
  * concurrently. Acquiring emits `note-lock-changed` so the UI can gray out the
- * active note while it is busy. This is a separate concern from `isMaterializing`,
- * which suppresses the plugin's own writes from re-triggering auto-lint/localize.
+ * active note while it is busy (resource keys do not emit — they have no editor
+ * overlay). This is a separate concern from `isMaterializing`, which suppresses
+ * the plugin's own writes from re-triggering auto-lint/localize.
+ *
+ * Ordering rule (deadlock prevention): acquire the note lock BEFORE any resource
+ * lock; a holder of a resource lock must never acquire a note lock. See the
+ * note-lock quirk in AGENTS.md.
  */
 export class NoteLockManager {
 	private readonly locks = new Map<string, LockState>();
@@ -62,6 +80,16 @@ export class NoteLockManager {
 		});
 	}
 
+	/**
+	 * Run `action` while holding the lock for the resource `kind::id` — e.g.
+	 * `withResourceLock('yt-video', videoId, …)` serializes the check-then-create
+	 * of a video's metadata note across jobs/commands targeting different notes.
+	 * Must be acquired INSIDE any note lock, never the other way around.
+	 */
+	withResourceLock<T>(kind: string, id: string, label: string, action: () => Promise<T>): Promise<T> {
+		return this.withLock(resourceLockKey(kind, id), label, action);
+	}
+
 	/** Run `action` while holding the lock for `path`; always releases. */
 	async withLock<T>(path: string, label: string, action: () => Promise<T>): Promise<T> {
 		const held = this.heldByContext.getStore();
@@ -100,6 +128,9 @@ export class NoteLockManager {
 	}
 
 	private emit(path: string, locked: boolean, label: string): void {
+		// Resource keys (kind::id) drive no editor overlay/dashboard badge; emitting
+		// them would only add noise for note-lock listeners keyed by vault path.
+		if (isResourceKey(path)) return;
 		this.bus?.emit('note-lock-changed', { path, locked, label });
 	}
 }
