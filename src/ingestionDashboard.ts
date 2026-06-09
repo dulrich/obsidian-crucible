@@ -24,7 +24,7 @@ import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import { logWarn } from './log';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueAdapter';
-import type { JobType, OrchestrationJob } from './orchestration/types';
+import type { JobType } from './orchestration/types';
 import { renderSortableTable } from './ingestion/render/sortableTable';
 import { renderTableSection } from './ingestion/render/section';
 import type {
@@ -104,10 +104,9 @@ export class IngestionDashboardUI {
 		this.buildSection('unrefinedTranscripts', 'Unrefined transcripts', 'Notes tagged #transcript that are not yet tagged #refined.');
 		this.buildSection('blogIntake', 'Blog intake', 'Blog tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'blog'), true);
 		this.buildSection('youtubeIntake', 'YouTube intake', 'YouTube tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'youtube'), true);
-		this.buildOrchestrationQueueSection();
+		this.buildQueueMonitorSection();
 		this.buildSection('uncapturedPosts', 'Uncaptured posts', 'Blog posts seen in tracker runs but not yet captured as a vault note.', undefined, true);
 		this.buildSection('ignoredPosts', 'Ignored blogs', 'Blog post IDs you chose to ignore. They are skipped by the tracker and the uncaptured list.', undefined, true);
-		this.buildEnrichmentQueueSection();
 		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.', undefined, true);
 		this.buildSection('ignoredVideos', 'Ignored videos', 'YouTube video IDs you chose to ignore. They are skipped by the tracker, the uncaptured list, and auto-enrich.', undefined, true);
 		this.buildSection(
@@ -156,13 +155,12 @@ export class IngestionDashboardUI {
 		const debouncedIgnoredPosts = debounce(() => void this.refresh('ignoredPosts'), DEBOUNCE_MS, true);
 		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
 		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), SCAN_DEBOUNCE_MS, true);
-		const debouncedQueue = debounce(() => void this.refresh('enrichmentQueue'), DEBOUNCE_MS, true);
-		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), SCAN_DEBOUNCE_MS, true);
-		const debouncedOrchestrationQueue = debounce(() => {
-			void this.refresh('orchestrationQueue');
+		const debouncedQueueMonitor = debounce(() => {
+			void this.refresh('queueMonitor');
 			void this.refreshIntakeButton('blog');
 			void this.refreshIntakeButton('youtube');
 		}, DEBOUNCE_MS, true);
+		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), SCAN_DEBOUNCE_MS, true);
 
 		// reason 'structural' = vault create/delete/rename (can change everything);
 		// 'meta' = metadataCache 'changed' (fires per keystroke — gated below).
@@ -230,13 +228,13 @@ export class IngestionDashboardUI {
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => debouncedUncapturedVideos()));
 			this.disposers.push(bus.on('enrichment-queue-updated', () => {
-				debouncedQueue();
+				debouncedQueueMonitor();
 				// Metadata-fetch jobs live in the enrichment (memory) queue now, so the
 				// "captures without metadata" badges track this event, not the file queue.
 				debouncedYoutubeNoMetadata();
 			}));
 			this.disposers.push(bus.on('orchestration-queue-updated', () => {
-				debouncedOrchestrationQueue();
+				debouncedQueueMonitor();
 				debouncedYoutubeNoMetadata();
 			}));
 			this.disposers.push(bus.on('clipping-captured', () => debouncedClippings()));
@@ -332,27 +330,46 @@ export class IngestionDashboardUI {
 		ctx.metaEl.setText(text);
 	}
 
-	private buildEnrichmentQueueSection(): void {
+	private buildQueueMonitorSection(): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
 		const { countEl, metaEl } = this.createSectionHeader(
 			card,
-			'Video enrichment queue',
-			'Drains pending videos through the YouTube data API at the configured rate.',
+			'Queue monitor',
+			'All queued and running jobs across the file-backed and in-memory queues.',
 			false,
 		);
 
 		const controls = card.createDiv({ cls: 'crucible-ingestion-queue-controls' });
 
-		const toggleLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-toggle' });
-		const toggle = toggleLabel.createEl('input', { type: 'checkbox' });
-		toggle.checked = this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
-		toggleLabel.appendText(' Auto enrich from Uncaptured Videos');
-		toggle.addEventListener('change', () => {
+		// --- Orchestrator controls ---
+		const autorunLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-toggle' });
+		const autorunToggle = autorunLabel.createEl('input', { type: 'checkbox' });
+		autorunToggle.checked = this.plugin.settings.orchestrationQueueAutorunEnabled === true;
+		autorunLabel.appendText(' Autorun');
+		autorunToggle.addEventListener('change', () => {
 			void (async () => {
-				this.plugin.settings.ingestionYoutubeAutoEnrichEnabled = toggle.checked;
+				this.plugin.settings.orchestrationQueueAutorunEnabled = autorunToggle.checked;
 				await this.plugin.saveSettings();
-				this.plugin.enrichmentQueue?.setAutoEnabled(toggle.checked);
-				if (toggle.checked) {
+				this.plugin.orchestrationAutoRunner?.setEnabled(autorunToggle.checked);
+			})();
+		});
+
+		const runNextBtn = controls.createEl('button', { text: 'Run next', cls: 'crucible-ingestion-run-next' });
+		runNextBtn.addEventListener('click', () => {
+			void this.plugin.orchestrationAutoRunner?.runOnce();
+		});
+
+		// --- Enrichment queue controls ---
+		const enrichToggleLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-toggle' });
+		const enrichToggle = enrichToggleLabel.createEl('input', { type: 'checkbox' });
+		enrichToggle.checked = this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
+		enrichToggleLabel.appendText(' Auto enrich from Uncaptured Videos');
+		enrichToggle.addEventListener('change', () => {
+			void (async () => {
+				this.plugin.settings.ingestionYoutubeAutoEnrichEnabled = enrichToggle.checked;
+				await this.plugin.saveSettings();
+				this.plugin.enrichmentQueue?.setAutoEnabled(enrichToggle.checked);
+				if (enrichToggle.checked) {
 					this.plugin.enrichmentQueue?.setAutoSource(() => this.uncapturedQueueItems());
 				}
 			})();
@@ -379,69 +396,25 @@ export class IngestionDashboardUI {
 		body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 
 		const ctx: SectionContext = {
-			id: 'enrichmentQueue',
-			title: 'Video Enrichment Queue',
+			id: 'queueMonitor',
+			title: 'Queue monitor',
 			description: '',
 			body,
 			countEl,
 			metaEl,
 			sort: null,
-			refresh: () => this.renderEnrichmentQueue(body),
+			refresh: () => this.renderQueueMonitor(body, ctx),
 		};
-		this.sections.set('enrichmentQueue', ctx);
+		this.sections.set('queueMonitor', ctx);
 
 		// Enable + push the initial auto-source if the toggle is on. Both are required:
 		// MemoryJobQueue.refill() no-ops unless autoEnabled AND autoSource are set, and
 		// nothing else enables the queue on load — without this the box reads ON but
 		// enrichment stays idle until the toggle is cycled off/on.
-		if (toggle.checked) {
+		if (enrichToggle.checked) {
 			this.plugin.enrichmentQueue?.setAutoEnabled(true);
 			this.plugin.enrichmentQueue?.setAutoSource(() => this.uncapturedQueueItems());
 		}
-	}
-
-	private buildOrchestrationQueueSection(): void {
-		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
-		const { countEl, metaEl } = this.createSectionHeader(
-			card,
-			'Orchestration queue',
-			'Jobs queued for the orchestrator. Run next executes one job; autorun drains as they arrive.',
-			false,
-		);
-
-		const controls = card.createDiv({ cls: 'crucible-ingestion-queue-controls' });
-
-		const toggleLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-toggle' });
-		const toggle = toggleLabel.createEl('input', { type: 'checkbox' });
-		toggle.checked = this.plugin.settings.orchestrationQueueAutorunEnabled === true;
-		toggleLabel.appendText(' Autorun');
-		toggle.addEventListener('change', () => {
-			void (async () => {
-				this.plugin.settings.orchestrationQueueAutorunEnabled = toggle.checked;
-				await this.plugin.saveSettings();
-				this.plugin.orchestrationAutoRunner?.setEnabled(toggle.checked);
-			})();
-		});
-
-		const runNextBtn = controls.createEl('button', { text: 'Run next', cls: 'crucible-ingestion-run-next' });
-		runNextBtn.addEventListener('click', () => {
-			void this.plugin.orchestrationAutoRunner?.runOnce();
-		});
-
-		const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
-		body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
-
-		const ctx: SectionContext = {
-			id: 'orchestrationQueue',
-			title: 'Orchestration queue',
-			description: '',
-			body,
-			countEl,
-			metaEl,
-			sort: null,
-			refresh: () => this.renderOrchestrationQueue(body, ctx),
-		};
-		this.sections.set('orchestrationQueue', ctx);
 	}
 
 	private renderEnqueueIntakeButton(heading: HTMLElement, kind: IntakeKind): void {
@@ -497,39 +470,139 @@ export class IngestionDashboardUI {
 		}
 	}
 
-	private async renderOrchestrationQueue(body: HTMLElement, ctx: SectionContext): Promise<void> {
+	private async renderQueueMonitor(body: HTMLElement, ctx: SectionContext): Promise<void> {
 		body.empty();
+
+		// --- File-backed jobs (orchestrator job store) ---
+		type QueueRow = {
+			// 'file' rows come from jobStore; 'memory' rows come from enrichmentQueue
+			source: 'file' | 'memory';
+			status: 'queued' | 'running';
+			type: string;
+			// file rows: job id; memory rows: key used for Cancel
+			key: string;
+			// memory rows: videoId for dequeue calls
+			videoId?: string;
+			// memory rows: targetPath note link when available
+			targetPath?: string;
+			// memory rows: display title / channel fallback
+			title?: string;
+			created: string;
+			error?: string;
+		};
+
 		const store = this.plugin.jobStore;
-		if (!store) {
-			this.setSectionCount('orchestrationQueue', 0);
-			body.createDiv({ cls: 'crucible-empty-state', text: 'Orchestrator not available.' });
-			return;
+		let fileRows: QueueRow[] = [];
+		if (store) {
+			try {
+				const [running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
+				fileRows = [
+					...running.map(e => ({ source: 'file' as const, status: 'running' as const, type: e.job.type, key: e.job.id, created: e.job.created ?? '', error: undefined })),
+					...queued.map(e => ({ source: 'file' as const, status: 'queued' as const, type: e.job.type, key: e.job.id, created: e.job.created ?? '', error: undefined })),
+				];
+			} catch (e) {
+				body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read file queue: ${e instanceof Error ? e.message : String(e)}` });
+				this.setSectionCount('queueMonitor', 0);
+				return;
+			}
 		}
-		let queued: Array<{ job: OrchestrationJob }> = [];
-		let running: Array<{ job: OrchestrationJob }> = [];
-		try {
-			[running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
-		} catch (e) {
-			this.setSectionCount('orchestrationQueue', 0);
-			body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read queue: ${e instanceof Error ? e.message : String(e)}` });
-			return;
-		}
-		type Row = { id: string; type: string; status: 'queued' | 'running'; created: string };
-		const rows: Row[] = [
-			...running.map(e => ({ id: e.job.id, type: e.job.type, status: 'running' as const, created: e.job.created ?? '' })),
-			...queued.map(e => ({ id: e.job.id, type: e.job.type, status: 'queued' as const, created: e.job.created ?? '' })),
-		];
-		this.setSectionCount('orchestrationQueue', rows.length);
+
+		// --- In-memory jobs (enrichment queue snapshot) ---
+		const memoryRows: QueueRow[] = (this.plugin.enrichmentQueue?.getSnapshot() ?? [])
+			.filter(e => e.status === 'pending' || e.status === 'running')
+			.map(e => ({
+				source: 'memory' as const,
+				// Map enrichment queue status to display status: pending → queued
+				status: e.status === 'pending' ? ('queued' as const) : ('running' as const),
+				type: 'youtube_metadata_fetch',
+				key: e.key,
+				videoId: e.videoId,
+				targetPath: e.targetPath,
+				title: e.title || e.videoId,
+				created: e.addedAt ? formatDateTime(e.addedAt) : '',
+				error: e.error,
+			}));
+
+		const rows: QueueRow[] = [...fileRows, ...memoryRows];
+
+		// Per-type pending counts for section meta line
+		const typeCounts = new Map<string, number>();
+		for (const r of rows) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1);
+		const metaText = Array.from(typeCounts.entries()).map(([t, n]) => `${t} ${n}`).join(' · ');
+		this.setSectionMeta('queueMonitor', metaText);
+		this.setSectionCount('queueMonitor', rows.length);
+
 		if (rows.length === 0) {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 			return;
 		}
+
 		if (!ctx.sort) ctx.sort = { column: 'status', direction: 'asc' };
-		renderSortableTable<Row>(body, [
-			{ key: 'status', label: 'Status', sortable: true, sortKey: r => (r.status === 'running' ? 0 : 1), render: (r, td) => td.setText(r.status) },
-			{ key: 'type', label: 'Type', sortable: true, sortKey: r => r.type, render: (r, td) => td.setText(r.type) },
-			{ key: 'id', label: 'ID', sortable: true, sortKey: r => r.id, render: (r, td) => td.setText(r.id) },
-			{ key: 'created', label: 'Created', sortable: true, sortKey: r => r.created, render: (r, td) => td.setText(r.created) },
+
+		renderSortableTable<QueueRow>(body, [
+			{
+				key: 'status',
+				label: 'Status',
+				sortable: true,
+				// Running rows sort before queued rows
+				sortKey: r => (r.status === 'running' ? 0 : 1),
+				render: (r, td) => td.setText(r.status),
+			},
+			{
+				key: 'type',
+				label: 'Type',
+				sortable: true,
+				sortKey: r => r.type,
+				render: (r, td) => td.setText(r.type),
+			},
+			{
+				key: 'target',
+				label: 'Target',
+				sortable: true,
+				sortKey: r => r.targetPath ?? r.title ?? r.key,
+				render: (r, td) => {
+					if (r.source === 'memory') {
+						if (r.targetPath) {
+							// Resolve note TFile and render a clickable vault link
+							const file = this.app.vault.getAbstractFileByPath(r.targetPath);
+							if (file instanceof TFile) {
+								this.renderFileLink(td, file);
+								return;
+							}
+						}
+						// Fallback: title or videoId
+						td.setText(r.title ?? r.videoId ?? r.key);
+					} else {
+						// File-backed job: show the job id as target
+						td.setText(r.key);
+					}
+				},
+			},
+			{
+				key: 'created',
+				label: 'Created',
+				sortable: true,
+				sortKey: r => r.created,
+				render: (r, td) => td.setText(r.created),
+			},
+			{
+				key: 'error',
+				label: 'Error',
+				render: (r, td) => td.setText(r.error ?? ''),
+			},
+			{
+				key: 'action',
+				label: 'Action',
+				render: (r, td) => {
+					// Only memory-queue pending entries have a Cancel action
+					if (r.source === 'memory' && r.status === 'queued') {
+						const cancel = td.createEl('button', { text: 'Cancel' });
+						cancel.addEventListener('click', () => {
+							this.plugin.enrichmentQueue?.dequeueIfPending(r.key);
+						});
+					}
+				},
+			},
 		], rows, ctx);
 	}
 
@@ -539,10 +612,9 @@ export class IngestionDashboardUI {
 			'unrefinedTranscripts',
 			'blogIntake',
 			'youtubeIntake',
-			'orchestrationQueue',
+			'queueMonitor',
 			'uncapturedPosts',
 			'ignoredPosts',
-			'enrichmentQueue',
 			'uncapturedVideos',
 			'ignoredVideos',
 			'youtubeWithoutMetadata',
@@ -563,14 +635,13 @@ export class IngestionDashboardUI {
 			case 'unrefinedTranscripts': return this.renderUnrefinedTranscripts(body, ctx);
 			case 'blogIntake': return this.renderBlogIntake(body, ctx);
 			case 'youtubeIntake': return this.renderYoutubeIntake(body, ctx);
-			case 'orchestrationQueue': return this.renderOrchestrationQueue(body, ctx);
+			case 'queueMonitor': return this.renderQueueMonitor(body, ctx);
 			case 'uncapturedPosts': return this.renderUncapturedPosts(body, ctx);
 			case 'ignoredPosts': return this.renderIgnoredPosts(body, ctx);
 			case 'uncapturedVideos': return this.renderUncapturedVideos(body, ctx);
 			case 'ignoredVideos': return this.renderIgnoredVideos(body, ctx);
 			case 'youtubeWithoutMetadata': return this.renderYoutubeNoMetadata(body, ctx);
 			case 'orphanedAttachments': return this.renderOrphanedAttachments(body, ctx);
-			case 'enrichmentQueue': this.renderEnrichmentQueue(body); return;
 		}
 	}
 
@@ -875,44 +946,6 @@ export class IngestionDashboardUI {
 				void this.refresh('orphanedAttachments');
 			})();
 		});
-	}
-
-	// --- Section: Enrichment Queue ---
-	private renderEnrichmentQueue(body: HTMLElement): void {
-		body.empty();
-		const queue = this.plugin.enrichmentQueue;
-		if (!queue) {
-			this.setSectionCount('enrichmentQueue', 0);
-			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue service not available.' });
-			return;
-		}
-		const entries = queue.getSnapshot();
-		this.setSectionCount('enrichmentQueue', entries.length);
-		if (entries.length === 0) {
-			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
-			return;
-		}
-
-		const table = body.createEl('table', { cls: 'crucible-ingestion-table' });
-		const thead = table.createEl('thead');
-		const headerRow = thead.createEl('tr');
-		for (const label of ['Title', 'Channel', 'Status', '']) headerRow.createEl('th', { text: label });
-		const tbody = table.createEl('tbody');
-		for (const e of entries) {
-			const tr = tbody.createEl('tr');
-			tr.createEl('td', { text: e.title });
-			tr.createEl('td', { text: e.channelName });
-			const statusTd = tr.createEl('td');
-			statusTd.setText(e.error ? `${e.status} (${e.error})` : e.status);
-			statusTd.addClass(`crucible-queue-status-${e.status}`);
-			const actionTd = tr.createEl('td');
-			if (e.status === 'pending') {
-				const cancel = actionTd.createEl('button', { text: 'Cancel' });
-				cancel.addEventListener('click', () => {
-					queue.dequeueIfPending(e.videoId);
-				});
-			}
-		}
 	}
 
 	// --- DOM helpers ---

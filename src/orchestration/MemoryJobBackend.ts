@@ -99,8 +99,11 @@ export class MemoryJobBackend implements JobBackend {
 		if (!(metadataFile instanceof TFile)) return;
 		const targetPath = typeof params.targetPath === 'string' ? params.targetPath : '';
 		const sourceFile = targetPath ? this.plugin.app.vault.getAbstractFileByPath(targetPath) : null;
+		// Keys are no longer bare video ids (per-note jobs key on `note:<path>`), so
+		// the id must come from params.
+		const videoId = typeof params.videoId === 'string' ? params.videoId : key;
 		bus.emit('metadata-enriched', {
-			videoId: key,
+			videoId,
 			metadataFile,
 			sourceFile: sourceFile instanceof TFile ? sourceFile : undefined,
 		});
