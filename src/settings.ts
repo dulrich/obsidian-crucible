@@ -72,6 +72,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		];
 		if (includeValue) {
 			variables.push({ token: 'value', description: 'Runtime input', example: 'My thought' });
+			variables.push({ token: 'value:oneline', description: 'Runtime input collapsed to one line', example: 'Para one. Para two.' });
 		}
 		variables.push({ token: 'datetime:FORMAT', description: 'Custom format', example: '{{datetime:MMMM YYYY}}' });
 		return variables;
