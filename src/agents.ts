@@ -77,8 +77,9 @@ export class AgentManager {
 		const fileName = (targetFile ?? this.app.workspace.getActiveFile())?.basename || '';
 
 		const systemTemplate = await this.resolvePrompt(agent, 'system');
-		// {{value}} and {{input}} both resolve to the runtime input.
-		const userTemplate = (await this.resolvePrompt(agent, 'user') || '{{input}}').replace(/{{input}}/g, '{{value}}');
+		// {{value}} and {{input}} both resolve to the runtime input, including modifier
+		// suffixes like {{input:oneline}}.
+		const userTemplate = (await this.resolvePrompt(agent, 'user') || '{{input}}').replace(/{{input(:[^}]*)?}}/g, '{{value$1}}');
 
 		const system = await applyTemplateString(systemTemplate, now, fileName, input);
 		const user = await applyTemplateString(userTemplate, now, fileName, input);

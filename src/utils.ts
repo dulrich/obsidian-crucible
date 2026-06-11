@@ -82,6 +82,7 @@ export async function applyTemplateString(
 		result = result.replace(/{{time}}/g, date.format('HH:mm'));
 		result = result.replace(/{{today}}/g, now.format('YYYY-MM-DD'));
 		result = result.replace(/{{now}}/g, now.format('YYYY-MM-DDTHH:mm:ss'));
+		result = result.replace(/{{value:oneline}}/g, collapseWhitespace(value));
 		result = result.replace(/{{value}}/g, value);
 		return result;
 	};
@@ -96,6 +97,10 @@ export async function applyTemplateString(
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function collapseWhitespace(text: string): string {
+	return text.replace(/\s+/g, ' ').trim();
 }
 
 export function slugify(value: string): string {
