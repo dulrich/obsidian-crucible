@@ -38,6 +38,7 @@ export type ToCPosition = 'bottom-right' | 'bottom-left' | 'top-left' | 'top-rig
 export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
 export type CrucibleCommandPaletteFilterMode = 'whitelist' | 'blacklist';
+export type CrucibleCommandPaletteHintCharsetMode = 'all-ascii' | 'alphanumeric-whitelist';
 
 import { Hotkey, Command } from 'obsidian';
 import { Currency } from './orchestration/utils/fx';
@@ -307,6 +308,13 @@ export interface CrucibleSettings {
 	crucibleCommandPaletteBlacklist: string[];
 	crucibleCommandPaletteShowHotkeys: boolean;
 	crucibleCommandPaletteShowUniqueString: boolean;
+	// Fuzzy-hint tuning (charset, fallback, weighting)
+	crucibleCommandPaletteHintCharsetMode: CrucibleCommandPaletteHintCharsetMode;
+	crucibleCommandPaletteHintWhitelist: string;
+	crucibleCommandPaletteHintFallbackTopMatch: boolean;
+	crucibleCommandPaletteHintMaxLen: number;
+	crucibleCommandPaletteHintPrefixPenalty: number;
+	crucibleCommandPaletteHintPositionBias: number;
 	// Orchestrator
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
@@ -424,6 +432,12 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	crucibleCommandPaletteBlacklist: [],
 	crucibleCommandPaletteShowHotkeys: true,
 	crucibleCommandPaletteShowUniqueString: false,
+	crucibleCommandPaletteHintCharsetMode: 'alphanumeric-whitelist',
+	crucibleCommandPaletteHintWhitelist: '.',
+	crucibleCommandPaletteHintFallbackTopMatch: true,
+	crucibleCommandPaletteHintMaxLen: 6,
+	crucibleCommandPaletteHintPrefixPenalty: 1,
+	crucibleCommandPaletteHintPositionBias: 0,
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',

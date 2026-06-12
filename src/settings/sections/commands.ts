@@ -4,9 +4,9 @@ import type { CrucibleSettingTab } from "../../settings";
 import type { CrucibleCommandGroup } from "../../main";
 import { getCommandHotkeyLabel } from "../../utils";
 import { CommandSuggest, getCommandSuggestDisplayName } from "../../suggesters";
-import { CrucibleCommandPaletteFilterMode } from "../../types";
+import { CrucibleCommandPaletteFilterMode, CrucibleCommandPaletteHintCharsetMode } from "../../types";
 import { SearchWithContainer } from "../shared";
-import { bindToggle } from "../bind";
+import { bindToggle, bindDropdown, bindText, bindNumber } from "../bind";
 
 function getChainOnlyCommandList(): { id: string, name: string }[] {
 	return [
@@ -161,13 +161,78 @@ function renderCrucibleCommandPaletteSettings(tab: CrucibleSettingTab, container
 		desc: 'Display the shortest text you could type to surface each command on its own, as a pill.',
 		get: () => s.crucibleCommandPaletteShowUniqueString,
 		set: (v) => { s.crucibleCommandPaletteShowUniqueString = v; },
+		after: () => tab.refreshDisplay(),
 	}, save);
+
+	if (s.crucibleCommandPaletteShowUniqueString) renderHintTuningSettings(tab, group);
 
 	group.createEl('hr', { cls: 'crucible-row-divider' });
 	renderPinnedCommandList(tab, group);
 
 	group.createEl('hr', { cls: 'crucible-row-divider' });
 	renderPaletteFilterSection(tab, group);
+}
+
+function renderHintTuningSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
+	const s = tab.plugin.settings;
+	const save = () => tab.plugin.saveSettings();
+
+	const parseNum = (raw: string, fallback: number, min: number): number => {
+		const n = Number(raw);
+		return Number.isFinite(n) && n >= min ? n : fallback;
+	};
+
+	bindDropdown(containerEl, {
+		name: 'Hint character set',
+		desc: 'Which characters a hint may use. "Alphanumeric plus whitelist" avoids spaces and odd punctuation.',
+		options: { 'alphanumeric-whitelist': 'Alphanumeric plus whitelist', 'all-ascii': 'All ASCII' },
+		get: () => s.crucibleCommandPaletteHintCharsetMode,
+		set: (v) => { s.crucibleCommandPaletteHintCharsetMode = v as CrucibleCommandPaletteHintCharsetMode; },
+		after: () => tab.refreshDisplay(),
+	}, save);
+
+	if (s.crucibleCommandPaletteHintCharsetMode === 'alphanumeric-whitelist') {
+		bindText(containerEl, {
+			name: 'Whitelisted extra characters',
+			desc: 'Non-alphanumeric characters allowed in hints, in addition to a-z and 0-9.',
+			placeholder: '.',
+			get: () => s.crucibleCommandPaletteHintWhitelist,
+			set: (v) => { s.crucibleCommandPaletteHintWhitelist = v; },
+		}, save);
+	}
+
+	bindToggle(containerEl, {
+		name: 'Fall back to shortest top match',
+		desc: 'When no unique string exists within the length cap, show the shortest string that ranks this command first. These hints appear in a distinct color.',
+		get: () => s.crucibleCommandPaletteHintFallbackTopMatch,
+		set: (v) => { s.crucibleCommandPaletteHintFallbackTopMatch = v; },
+	}, save);
+
+	bindNumber(containerEl, {
+		name: 'Maximum hint length',
+		desc: 'Longest hint to search for, in characters.',
+		min: 1,
+		get: () => String(s.crucibleCommandPaletteHintMaxLen),
+		set: (raw) => { s.crucibleCommandPaletteHintMaxLen = parseNum(raw, 6, 1); },
+	}, save);
+
+	bindNumber(containerEl, {
+		name: 'Prefix penalty',
+		desc: 'Tie weight per character drawn from a prefix segment ("Crucible:", "Chain:"). Higher favors the leaf of the command name.',
+		min: 0,
+		step: 0.1,
+		get: () => String(s.crucibleCommandPaletteHintPrefixPenalty),
+		set: (raw) => { s.crucibleCommandPaletteHintPrefixPenalty = parseNum(raw, 1, 0); },
+	}, save);
+
+	bindNumber(containerEl, {
+		name: 'Position bias',
+		desc: 'Tie weight per character, scaled by its offset from the start of its word. Higher favors letters at word starts.',
+		min: 0,
+		step: 0.1,
+		get: () => String(s.crucibleCommandPaletteHintPositionBias),
+		set: (raw) => { s.crucibleCommandPaletteHintPositionBias = parseNum(raw, 0, 0); },
+	}, save);
 }
 
 function renderPinnedCommandList(tab: CrucibleSettingTab, containerEl: HTMLElement) {
