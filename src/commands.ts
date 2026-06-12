@@ -1,5 +1,7 @@
 import { Notice } from 'obsidian';
-import { CrucibleCommandPaletteModal } from './commandPalette';
+import { CrucibleCommandPaletteModal, buildHintOptions, buildScoreText, computeHint, getPaletteItems } from './commandPalette';
+import { shortestUniqueFuzzyString, shortestTopMatchFuzzyString } from './commandPaletteHints';
+import { appendDebugLog } from './utils';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import type CruciblePlugin from './main';
 
@@ -170,6 +172,15 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => new CrucibleCommandPaletteModal(plugin.app, plugin).open(),
 	});
 
+	plugin.registerCrucibleCommand({
+		id: 'command-palette-hint-debug',
+		name: 'Debug command palette hints',
+		group: 'Other',
+		mutating: false,
+		available: () => plugin.settings.crucibleCommandPaletteEnabled,
+		run: () => void writeHintDebugReport(plugin),
+	});
+
 	plugin.registerMoveFileCommands(prefix);
 
 	plugin.registerCrucibleCommand({
@@ -254,4 +265,44 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: () => plugin.orchestrator.enqueue('link_scan'),
 	});
+}
+
+/** Escape a cell for a Markdown table. */
+function mdCell(s: string): string {
+	return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+/**
+ * Compute the unique and top-match hint for every palette command and append a
+ * Markdown table to the shared debug note (`_crucible/debug.md`). A tuning aid
+ * for the charset/weighting knobs — uses the same options the live palette does.
+ */
+async function writeHintDebugReport(plugin: CruciblePlugin): Promise<void> {
+	const settings = plugin.settings;
+	const opts = buildHintOptions(settings);
+	const scoreText = buildScoreText();
+	const items = getPaletteItems(plugin.app, plugin);
+	const names = items.map(c => c.name);
+
+	const rows = items.map(cmd => {
+		const competitors = names.filter(n => n !== cmd.name);
+		const unique = shortestUniqueFuzzyString(cmd.name, competitors, opts);
+		const top = shortestTopMatchFuzzyString(cmd.name, competitors, opts, scoreText);
+		const used = computeHint(cmd.name, competitors, settings, opts, scoreText);
+		const fmt = (h: string | null) => h === null ? '—' : `\`${mdCell(h)}\` (${h.length})`;
+		const usedLabel = used === null ? 'none' : used.kind;
+		return `| ${mdCell(cmd.name)} | ${fmt(unique)} | ${fmt(top)} | ${usedLabel} |`;
+	});
+
+	const header = [
+		`Charset: ${settings.crucibleCommandPaletteHintCharsetMode}, maxLen: ${opts.maxLen}, ` +
+			`prefixPenalty: ${opts.prefixPenalty}, positionBias: ${opts.positionBias}, ` +
+			`fallback: ${settings.crucibleCommandPaletteHintFallbackTopMatch}`,
+		'',
+		'| Command | Unique (len) | Top match (len) | Used |',
+		'| --- | --- | --- | --- |',
+	];
+	const table = [...header, ...rows].join('\n');
+	await appendDebugLog(plugin.app, 'Command palette hints', table);
+	new Notice(`Command palette hint debug written for ${items.length} commands (_crucible/debug.md).`);
 }
