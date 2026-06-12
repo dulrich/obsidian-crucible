@@ -238,6 +238,10 @@ If your plugin does not need CSS, delete this file.
   color: var(--text-accent);
 }
 
+.crucible-palette-pills .crucible-palette-fuzzy-hint-fallback {
+  color: var(--text-warning);
+}
+
 .crucible-settings-group input[type="text"],
 .crucible-settings-group .crucible-search-container,
 .crucible-settings-group .setting-item-control select,
