@@ -63,6 +63,42 @@ export function rewriteLocalizedAttachmentRefs(content: string, replacements: At
 	return updated + content.slice(cursor);
 }
 
+// Swap an attachment folder's path prefix inside embed refs only (never touching prose that
+// happens to mention the path). Used when a note moves and its attachment folder moves with it:
+// Obsidian's automatic link rewrite on the folder rename misses the moving note (its cache entry
+// hasn't reindexed at the new path yet), so we repoint its embeds deterministically. Handles both
+// raw (wiki) and %20-encoded (markdown) forms of the prefix; idempotent on already-updated refs.
+export function repointAttachmentFolderPrefix(content: string, oldFolder: string, newFolder: string): string {
+	if (!oldFolder || oldFolder === newFolder) return content;
+	const rawOld = `${oldFolder}/`;
+	const rawNew = `${newFolder}/`;
+	const encOld = rawOld.replace(/ /g, '%20');
+	const encNew = rawNew.replace(/ /g, '%20');
+	MARKDOWN_ATTACHMENT_REF_RE.lastIndex = 0;
+	return content.replace(MARKDOWN_ATTACHMENT_REF_RE, (ref) => {
+		let out = ref;
+		if (out.includes(rawOld)) out = out.split(rawOld).join(rawNew);
+		if (encOld !== rawOld && out.includes(encOld)) out = out.split(encOld).join(encNew);
+		return out;
+	});
+}
+
+// Decide where a broken local attachment embed should now point. `brokenLink` is the embed's
+// (possibly %20-encoded) target that no longer resolves; we recover the file by basename — the
+// `<contenthash>_MD5.ext` name is content-derived. Prefer the note's expected attachment folder
+// (the exact inverse of the move-without-rewrite bug); otherwise accept a unique vault-wide match.
+// Returns the new vault path, or null when nothing safe can be chosen.
+export function planLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): string | null {
+	let decoded = brokenLink.replace(/^<|>$/g, '');
+	try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is on malformed escapes */ }
+	const base = decoded.split('/').pop() ?? '';
+	if (!base) return null;
+	const expected = expectedFolder ? `${expectedFolder}/${base}` : base;
+	if (vaultPaths.includes(expected)) return expected;
+	const byName = vaultPaths.filter(p => (p.split('/').pop() ?? p) === base);
+	return byName.length === 1 ? (byName[0] ?? null) : null;
+}
+
 export function stripDataUriImagePlaceholders(content: string): { content: string; count: number } {
 	DATA_URI_IMAGE_RE.lastIndex = 0;
 	let count = 0;
@@ -320,7 +356,7 @@ export class AttachmentLocalizer {
 		return await this.localizeFolder(this.app.vault.getRoot());
 	}
 
-	async localizeFolder(folder: TFolder): Promise<boolean> {
+	private collectMarkdownFiles(folder: TFolder): TFile[] {
 		const files: TFile[] = [];
 		const collect = (current: TFolder) => {
 			if (this.linter.isPathIgnored(current.path)) return;
@@ -333,6 +369,11 @@ export class AttachmentLocalizer {
 			}
 		};
 		collect(folder);
+		return files;
+	}
+
+	async localizeFolder(folder: TFolder): Promise<boolean> {
+		const files = this.collectMarkdownFiles(folder);
 
 		if (files.length === 0) {
 			new Notice('No Markdown files to scan for attachments');
@@ -350,6 +391,89 @@ export class AttachmentLocalizer {
 		}
 		notice.hide();
 		new Notice(`Localize attachments: scanned ${files.length} notes`);
+		return allOk;
+	}
+
+	// Make every attachment embed in `file` resolve again. For each broken ref: re-download if it
+	// still points at a remote URL, otherwise recover the already-localized file by basename
+	// (preferring the note's expected attachment folder — the inverse of the move-without-rewrite
+	// bug). Refs that already resolve are left untouched; unrecoverable ones are reported.
+	async repairNote(file: TFile, silent: boolean = false): Promise<{ repaired: number; unrepairable: number } | null> {
+		if (this.linter.isPathIgnored(file.path)) return { repaired: 0, unrepairable: 0 };
+		if (file.extension !== 'md') return { repaired: 0, unrepairable: 0 };
+
+		const spinner = silent ? null : new Notice(`Repairing attachment links in "${file.basename}"...`, 0);
+		try {
+			return await withOptionalNoteLock(this.noteLocks, file.path, 'localize', () => withMaterializing(this.setMaterializing, async () => {
+				const original = await this.app.vault.read(file);
+				const matches = this.parseAttachmentRefs(original, file);
+				const expectedFolder = this.attachmentFolderForNote(file);
+				const vaultPaths = this.app.vault.getFiles().map(f => f.path);
+
+				const replacements: AttachmentReplacement[] = [];
+				let repaired = 0;
+				let unrepairable = 0;
+				for (const match of matches) {
+					if (this.app.metadataCache.getFirstLinkpathDest(match.link, file.path) instanceof TFile) continue;
+					let newRef: string | null = null;
+					if (match.isRemote) {
+						newRef = await this.processRemote(match, file);
+					} else {
+						const target = planLocalAttachmentRepair(match.link, expectedFolder, vaultPaths);
+						if (target) newRef = this.formatEmbed(match.syntax, target);
+					}
+					if (newRef) {
+						if (newRef !== match.original) replacements.push({ from: match.original, to: newRef });
+						repaired++;
+					} else {
+						unrepairable++;
+						await this.debug(file, `repair: ${match.original} -> UNREPAIRABLE`);
+					}
+				}
+
+				if (replacements.length > 0) {
+					const fresh = await this.app.vault.read(file);
+					const updated = rewriteLocalizedAttachmentRefs(fresh, replacements);
+					if (updated !== fresh) await this.app.vault.modify(file, updated);
+				}
+
+				spinner?.hide();
+				if (!silent) new Notice(`Repaired ${repaired} attachment link${repaired === 1 ? '' : 's'}${unrepairable ? `, ${unrepairable} unrepairable` : ''}`);
+				return { repaired, unrepairable };
+			}));
+		} catch (e) {
+			spinner?.hide();
+			logError(`repair attachments failed (${file.path})`, e);
+			if (!silent) new Notice(`Repair failed: ${(e as Error).message}`);
+			return null;
+		}
+	}
+
+	async repairVault(): Promise<boolean> {
+		return await this.repairFolder(this.app.vault.getRoot());
+	}
+
+	async repairFolder(folder: TFolder): Promise<boolean> {
+		const files = this.collectMarkdownFiles(folder);
+		if (files.length === 0) {
+			new Notice('No Markdown files to scan for attachments');
+			return true;
+		}
+
+		const notice = new Notice(`Repairing attachment links in ${files.length} notes...`, 0);
+		let allOk = true;
+		let totalRepaired = 0;
+		let totalUnrepairable = 0;
+		let i = 0;
+		for (const file of files) {
+			const result = await this.repairNote(file, true);
+			if (!result) allOk = false;
+			else { totalRepaired += result.repaired; totalUnrepairable += result.unrepairable; }
+			i++;
+			if (i % 5 === 0) notice.setMessage(`Repairing... (${i}/${files.length})`);
+		}
+		notice.hide();
+		new Notice(`Repair attachments: ${totalRepaired} fixed across ${files.length} notes${totalUnrepairable ? `, ${totalUnrepairable} unrepairable` : ''}`);
 		return allOk;
 	}
 
@@ -695,6 +819,15 @@ export class AttachmentLocalizer {
 		try {
 			await ensureFolder(this.app, newFolder.replace(/\/[^/]+$/, ''));
 			await this.app.fileManager.renameFile(existing, newFolder);
+			// Obsidian's link rewrite on the folder rename can't see this note as a referrer —
+			// its metadata cache entry hasn't reindexed at the new path in the tick the rename
+			// event fires — so it silently skips the moving note's own embeds. Repoint them
+			// deterministically; harmlessly no-ops any ref Obsidian did manage to update.
+			await withOptionalNoteLock(this.noteLocks, file.path, 'localize', () => withMaterializing(this.setMaterializing, async () => {
+				const content = await this.app.vault.read(file);
+				const updated = repointAttachmentFolderPrefix(content, oldFolder, newFolder);
+				if (updated !== content) await this.app.vault.modify(file, updated);
+			}));
 		} catch (e) {
 			logWarn('localize: rename attachment folder failed', e);
 		}

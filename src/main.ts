@@ -651,6 +651,15 @@ export default class CruciblePlugin extends Plugin {
 			return await this.attachmentLocalizer.localizeNote(file);
 		});
 		register('lint-localize-attachments-vault', async () => await this.attachmentLocalizer.localizeVault());
+		register('lint-repair-attachments', async (_a, _p, _e, tf) => {
+			const file = tf ?? this.app.workspace.getActiveFile();
+			if (!file || file.extension !== 'md') {
+				new Notice('Open a Markdown note to repair attachment links');
+				return false;
+			}
+			return (await this.attachmentLocalizer.repairNote(file)) !== null;
+		});
+		register('lint-repair-attachments-vault', async () => await this.attachmentLocalizer.repairVault());
 		register('lint-rename-property', async (args) => await this.linter.renamePropertyInVault(
 			typeof args['oldKey'] === 'string' ? args['oldKey'] : '',
 			typeof args['newKey'] === 'string' ? args['newKey'] : '',
