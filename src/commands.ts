@@ -91,6 +91,18 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:lint-localize-attachments-vault`, {}),
 	});
 	plugin.registerCrucibleCommand({
+		id: 'lint-repair-attachments',
+		name: 'Lint: repair attachment links',
+		group: 'Lint',
+		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:lint-repair-attachments`, {}),
+	});
+	plugin.registerCrucibleCommand({
+		id: 'lint-repair-attachments-vault',
+		name: 'Lint: repair attachment links (vault)',
+		group: 'Lint',
+		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:lint-repair-attachments-vault`, {}),
+	});
+	plugin.registerCrucibleCommand({
 		id: 'lint-rename-property',
 		name: 'Lint: update property in vault',
 		group: 'Lint',

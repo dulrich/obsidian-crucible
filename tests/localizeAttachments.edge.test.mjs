@@ -46,6 +46,8 @@ const {
 	md5HexForBytes,
 	rewriteLocalizedAttachmentRefs,
 	stripDataUriImagePlaceholders,
+	repointAttachmentFolderPrefix,
+	planLocalAttachmentRepair,
 } = await import(pathToFileURL(outfile));
 
 test('rewriteLocalizedAttachmentRefs only replaces full markdown image ranges', () => {
@@ -100,4 +102,64 @@ test('clampImageQuality handles NaN, undefined, and bounds', () => {
 test('md5HexForBytes handles empty and numeric bytes deterministically', () => {
 	assert.equal(md5HexForBytes(new Uint8Array()), 'd41d8cd98f00b204e9800998ecf8427e');
 	assert.equal(md5HexForBytes(new Uint8Array([1, 2, 3, 4, 5])), '7cfdd07889b3295d6a550914ab35e068');
+});
+
+test('repointAttachmentFolderPrefix rewrites moved embed prefixes (md + wiki, encoded + raw)', () => {
+	const oldFolder = '_resources/Clippings/elon-musk';
+	const newFolder = '_resources/daily/day/2026-06-13/elon-musk';
+	const content = [
+		'![](_resources/Clippings/elon-musk/3ff_MD5.webp)',
+		'![[_resources/Clippings/elon-musk/abc_MD5.png]]',
+		'Prose mentioning _resources/Clippings/elon-musk/ stays untouched.',
+	].join('\n');
+
+	const updated = repointAttachmentFolderPrefix(content, oldFolder, newFolder);
+
+	assert.equal(updated, [
+		'![](_resources/daily/day/2026-06-13/elon-musk/3ff_MD5.webp)',
+		'![[_resources/daily/day/2026-06-13/elon-musk/abc_MD5.png]]',
+		'Prose mentioning _resources/Clippings/elon-musk/ stays untouched.',
+	].join('\n'));
+});
+
+test('repointAttachmentFolderPrefix handles %20-encoded markdown prefixes and is idempotent', () => {
+	const oldFolder = '_resources/My Clips/post';
+	const newFolder = '_resources/daily/post';
+	const md = '![](_resources/My%20Clips/post/x_MD5.webp)';
+	const once = repointAttachmentFolderPrefix(md, oldFolder, newFolder);
+	assert.equal(once, '![](_resources/daily/post/x_MD5.webp)');
+	// Already-updated content has no old prefix left -> no-op.
+	assert.equal(repointAttachmentFolderPrefix(once, oldFolder, newFolder), once);
+	// No-op when folders are equal.
+	assert.equal(repointAttachmentFolderPrefix(md, oldFolder, oldFolder), md);
+});
+
+test('planLocalAttachmentRepair prefers the expected folder, then a unique name match', () => {
+	const expected = '_resources/daily/day/2026-06-13/elon-musk';
+	const vaultPaths = [
+		'_resources/daily/day/2026-06-13/elon-musk/3ff_MD5.webp',
+		'_resources/other/elsewhere/3ff_MD5.webp',
+	];
+	// Expected-folder candidate wins even when a same-named file exists elsewhere.
+	assert.equal(
+		planLocalAttachmentRepair('_resources/Clippings/elon-musk/3ff_MD5.webp', expected, vaultPaths),
+		'_resources/daily/day/2026-06-13/elon-musk/3ff_MD5.webp',
+	);
+	// Falls back to a unique vault-wide match when not in the expected folder.
+	assert.equal(
+		planLocalAttachmentRepair('_resources/Clippings/x/uniq_MD5.png', expected, ['_resources/wherever/uniq_MD5.png']),
+		'_resources/wherever/uniq_MD5.png',
+	);
+	// Ambiguous (multiple same-named, none in expected folder) -> null.
+	assert.equal(
+		planLocalAttachmentRepair('_resources/Clippings/x/dup_MD5.png', expected, ['a/dup_MD5.png', 'b/dup_MD5.png']),
+		null,
+	);
+	// Missing entirely -> null.
+	assert.equal(planLocalAttachmentRepair('_resources/Clippings/x/gone_MD5.png', expected, vaultPaths), null);
+	// Decodes %20 before matching the basename.
+	assert.equal(
+		planLocalAttachmentRepair('_resources/Clippings/x/a%20b_MD5.png', expected, ['_resources/keep/a b_MD5.png']),
+		'_resources/keep/a b_MD5.png',
+	);
 });
