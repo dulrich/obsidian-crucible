@@ -116,6 +116,13 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 		this.triggers = new TriggerRegistry(this, () => this.isMaterializing);
 		this.registerFoundingTriggers();
+		// Migrate a held note-lock when its note is moved/renamed mid-operation, so
+		// path-keyed gates stay consistent and peers keep serializing. Registered
+		// BEFORE triggers.start() and the rename handler below so it runs first
+		// (vault listeners fire in registration order).
+		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+			if (file instanceof TFile) this.noteLocks.handleRename(oldPath, file.path);
+		}));
 		this.triggers.start();
 
 		this.registerInternalCommands();

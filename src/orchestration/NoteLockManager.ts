@@ -4,6 +4,7 @@
 // eslint-disable-next-line import/no-nodejs-modules
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IngestionEventBus } from './events';
+import { logWarn } from '../log';
 
 interface Waiter {
 	label: string;
@@ -11,6 +12,10 @@ interface Waiter {
 }
 
 interface LockState {
+	// Current path this lock is keyed under. Updated by `handleRename` so a lock
+	// held across a note move stays consistent with path-based gates. Release and
+	// reentrancy track the LockState object, not the path, so they survive a re-key.
+	key: string;
 	label: string;
 	waiters: Waiter[];
 }
@@ -47,10 +52,10 @@ export class NoteLockManager {
 	 * re-enter: a command that runs *inside* another command already holding the
 	 * same note's lock (e.g. a chain step that invokes lint/localize/yt-metadata
 	 * on the chain's target note) runs inline instead of deadlocking on a lock its
-	 * own caller owns. Reentrancy is scoped to `withLock`; raw `acquire` is
-	 * unchanged for low-level callers.
+	 * own caller owns. Held locks are tracked by `LockState` object identity (not
+	 * path) so reentrancy survives a `handleRename` re-key.
 	 */
-	private readonly heldByContext = new AsyncLocalStorage<Set<string>>();
+	private readonly heldByContext = new AsyncLocalStorage<Set<LockState>>();
 
 	constructor(private readonly bus?: IngestionEventBus) {}
 
@@ -71,13 +76,39 @@ export class NoteLockManager {
 	acquire(path: string, label: string): Promise<() => void> {
 		const existing = this.locks.get(path);
 		if (!existing) {
-			this.locks.set(path, { label, waiters: [] });
+			const state: LockState = { key: path, label, waiters: [] };
+			this.locks.set(path, state);
 			this.emit(path, true, label);
-			return Promise.resolve(this.makeRelease(path));
+			return Promise.resolve(this.makeRelease(state));
 		}
 		return new Promise<() => void>(resolve => {
 			existing.waiters.push({ label, resolve });
 		});
+	}
+
+	/**
+	 * Follow a note rename so path-keyed gates (`isLocked`, auto-lint/localize,
+	 * `TriggerRegistry`, `onNoteRename`) stay consistent with the held lock. A
+	 * mutating chain/command keeps holding its lock while a step moves the target
+	 * note; without this the lock strands under the old path and peers see the new
+	 * path as unlocked and write concurrently. Reentrancy/release track the
+	 * `LockState` object, so re-keying the map entry is safe for the holder.
+	 */
+	handleRename(oldPath: string, newPath: string): void {
+		if (oldPath === newPath) return;
+		const state = this.locks.get(oldPath);
+		if (!state) return; // nothing held under the old path
+		if (this.locks.has(newPath)) {
+			// Rare: the target path already has its own lock. The mover checks the
+			// target doesn't exist first, so this is unexpected; leave both as-is.
+			logWarn('note-lock rename collision; leaving lock under old path', oldPath, newPath);
+			return;
+		}
+		this.locks.delete(oldPath);
+		state.key = newPath;
+		this.locks.set(newPath, state);
+		this.emit(oldPath, false, '');
+		this.emit(newPath, true, state.label);
 	}
 
 	/**
@@ -93,14 +124,18 @@ export class NoteLockManager {
 	/** Run `action` while holding the lock for `path`; always releases. */
 	async withLock<T>(path: string, label: string, action: () => Promise<T>): Promise<T> {
 		const held = this.heldByContext.getStore();
-		if (held?.has(path)) {
+		const current = this.locks.get(path);
+		if (current && held?.has(current)) {
 			// Re-entrant: this async context already holds the lock for `path`,
 			// so acquiring again would wait on ourselves forever. Run inline.
 			return action();
 		}
 		const release = await this.acquire(path, label);
+		// We are now the holder; track the LockState by identity so reentrancy and
+		// release survive a `handleRename` that re-keys this lock to a new path.
+		const state = this.locks.get(path);
 		const nextHeld = new Set(held ?? []);
-		nextHeld.add(path);
+		if (state) nextHeld.add(state);
 		try {
 			return await this.heldByContext.run(nextHeld, action);
 		} finally {
@@ -108,21 +143,19 @@ export class NoteLockManager {
 		}
 	}
 
-	private makeRelease(path: string): () => void {
+	private makeRelease(state: LockState): () => void {
 		let released = false;
 		return () => {
 			if (released) return;
 			released = true;
-			const state = this.locks.get(path);
-			if (!state) return;
 			const next = state.waiters.shift();
 			if (next) {
 				state.label = next.label;
-				this.emit(path, true, next.label);
-				next.resolve(this.makeRelease(path));
+				this.emit(state.key, true, next.label);
+				next.resolve(this.makeRelease(state));
 			} else {
-				this.locks.delete(path);
-				this.emit(path, false, '');
+				this.locks.delete(state.key);
+				this.emit(state.key, false, '');
 			}
 		};
 	}
