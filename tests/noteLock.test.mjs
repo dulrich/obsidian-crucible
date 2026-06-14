@@ -269,6 +269,78 @@ test('reentrant withLock inside nested resource lock runs inline (no self-deadlo
 	assert.deepEqual(order, ['outer-start', 'resource', 'reentrant', 'outer-end']);
 });
 
+// ── handleRename: lock follows a note move ───────────────────────────────────
+
+test('handleRename migrates a held lock to the new path', async () => {
+	const bus = makeBus();
+	const locks = new NoteLockManager(bus);
+	const rel = await locks.acquire('old.md', 'chain');
+	locks.handleRename('old.md', 'new.md');
+	assert.equal(locks.isLocked('old.md'), false, 'old path no longer locked');
+	assert.equal(locks.isLocked('new.md'), true, 'new path locked');
+	assert.equal(locks.currentLabel('new.md'), 'chain', 'label preserved across rename');
+	assert.deepEqual(bus.events.slice(-2), [
+		{ name: 'note-lock-changed', payload: { path: 'old.md', locked: false, label: '' } },
+		{ name: 'note-lock-changed', payload: { path: 'new.md', locked: true, label: 'chain' } },
+	]);
+	// Release still cleans up the (re-keyed) lock.
+	rel();
+	assert.equal(locks.isLocked('new.md'), false, 'release frees the migrated lock');
+});
+
+test('handleRename is a no-op when nothing holds the old path', () => {
+	const locks = new NoteLockManager();
+	locks.handleRename('absent.md', 'new.md');
+	assert.equal(locks.isLocked('new.md'), false);
+	assert.equal(locks.isLocked('absent.md'), false);
+});
+
+test('handleRename leaves both locks when the new path is already locked', async () => {
+	const locks = new NoteLockManager();
+	const relOld = await locks.acquire('old.md', 'a');
+	const relNew = await locks.acquire('new.md', 'b');
+	locks.handleRename('old.md', 'new.md'); // collision: must not clobber new.md's holder
+	assert.equal(locks.isLocked('old.md'), true, 'old path untouched on collision');
+	assert.equal(locks.currentLabel('new.md'), 'b', 'new path holder untouched on collision');
+	relOld();
+	relNew();
+});
+
+test('reentrancy survives a rename mid-hold (no deadlock)', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	const result = await locks.withLock('old.md', 'chain', async () => {
+		order.push('outer-start');
+		// A chain step moves the target note; the lock follows.
+		locks.handleRename('old.md', 'new.md');
+		assert.equal(locks.isLocked('new.md'), true, 'lock now keyed under new path');
+		// A later step re-enters the lock via the NEW path — must run inline, not wait.
+		const inner = await locks.withLock('new.md', 'localize', async () => {
+			order.push('inner');
+			return 'inner-done';
+		});
+		order.push('outer-end');
+		return inner;
+	});
+	assert.equal(result, 'inner-done');
+	assert.deepEqual(order, ['outer-start', 'inner', 'outer-end']);
+	assert.equal(locks.isLocked('new.md'), false, 'lock fully released after reentrant run');
+});
+
+test('a foreign waiter on the new path queues behind the renamed holder', async () => {
+	const locks = new NoteLockManager();
+	const order = [];
+	const release = await locks.acquire('old.md', 'chain');
+	locks.handleRename('old.md', 'new.md');
+	// Not in the holder's context, so this must wait for the migrated lock.
+	const waiting = locks.withLock('new.md', 'foreign', async () => { order.push('foreign'); });
+	await tick();
+	assert.deepEqual(order, [], 'foreign waiter blocked while migrated lock is held');
+	release();
+	await waiting;
+	assert.deepEqual(order, ['foreign']);
+});
+
 // ── Resource keys do not emit note-lock-changed ──────────────────────────────
 
 test('withResourceLock does not emit note-lock-changed', async () => {
