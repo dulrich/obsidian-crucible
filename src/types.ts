@@ -389,6 +389,7 @@ export interface CrucibleSettings {
 	searchChunkMaxChars: number;
 	searchChunkOverlapChars: number;
 	searchIndexBatchSize: number;
+	searchIndexDebounceMs: number;
 	searchResultLimit: number;
 }
 
@@ -513,5 +514,6 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	searchChunkMaxChars: 1800,
 	searchChunkOverlapChars: 200,
 	searchIndexBatchSize: 24,
+	searchIndexDebounceMs: 5000,
 	searchResultLimit: 12,
 }

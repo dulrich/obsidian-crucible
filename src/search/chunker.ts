@@ -11,6 +11,7 @@ export interface BuildChunksInput {
 	extension: string;
 	mtime: number;
 	content: string;
+	contentHash?: string;
 	maxChars: number;
 	overlapChars: number;
 }
@@ -24,6 +25,7 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 	const maxChars = Math.max(400, input.maxChars || 1800);
 	const overlapChars = Math.max(0, Math.min(input.overlapChars || 0, Math.floor(maxChars / 3)));
 	const { body, metadata } = parseSearchDocument(input.content, input.basename);
+	const contentHash = input.contentHash ?? hashSearchContent(input.content);
 	const sections = splitSections(body);
 	const chunks: SearchChunk[] = [];
 	let ordinal = 0;
@@ -36,6 +38,7 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 				id: stableChunkId(input.path, ordinal, section.heading),
 				vaultId: input.vaultId,
 				path: input.path,
+				contentHash,
 				title: metadata.title,
 				heading: section.heading,
 				text: trimmed,
@@ -48,6 +51,10 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 	}
 
 	return chunks;
+}
+
+export function hashSearchContent(content: string): string {
+	return hashString(content);
 }
 
 export function parseSearchDocument(content: string, fallbackTitle: string): { body: string; metadata: SearchDocumentMetadata } {

@@ -1,9 +1,9 @@
 import { App, Notice, TFile } from 'obsidian';
 import { CrucibleSettings, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
-import { buildSearchChunks, isSearchIndexablePath } from './chunker';
+import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
 import { SearchServiceClient } from './client';
-import { SearchChunk, SearchHealth, SearchResponse } from './types';
+import { SearchChunk, SearchFileState, SearchHealth, SearchResponse } from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
 
@@ -13,6 +13,12 @@ import { isPathExcluded } from '../exclusions';
 // well under the companion's 20MB request-body cap.
 const SEARCH_UPSERT_FLUSH_CHUNKS = 500;
 const SEARCH_PROGRESS_EVERY_FILES = 10;
+
+interface PreparedSearchFile {
+	file: TFile;
+	content: string;
+	contentHash: string;
+}
 
 export class SearchManager {
 	constructor(
@@ -48,7 +54,9 @@ export class SearchManager {
 		const client = this.client();
 		let buffer: SearchChunk[] = [];
 		let indexedFiles = 0;
+		let processedFiles = 0;
 		let totalChunks = 0;
+		const preparedFiles: PreparedSearchFile[] = [];
 
 		const flush = async (): Promise<void> => {
 			if (buffer.length === 0) return;
@@ -64,12 +72,27 @@ export class SearchManager {
 
 		for (const file of files) {
 			indexedFiles++;
-			const chunks = await this.buildFileChunks(file);
+			const prepared = await this.prepareFile(file);
+			if (prepared) preparedFiles.push(prepared);
+		}
+
+		const fileStates = await this.loadFileStates(client, preparedFiles.map(item => item.file.path));
+
+		for (const prepared of preparedFiles) {
+			processedFiles++;
+			const stored = fileStates.get(prepared.file.path);
+			if (stored?.contentHash === prepared.contentHash) {
+				if (onProgress && (processedFiles === preparedFiles.length || processedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
+					await onProgress(processedFiles, totalChunks);
+				}
+				continue;
+			}
+			const chunks = this.buildPreparedFileChunks(prepared);
 			totalChunks += chunks.length;
 			buffer.push(...chunks);
 			if (buffer.length >= SEARCH_UPSERT_FLUSH_CHUNKS) await flush();
-			if (onProgress && (indexedFiles === files.length || indexedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
-				await onProgress(indexedFiles, totalChunks);
+			if (onProgress && (processedFiles === preparedFiles.length || processedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
+				await onProgress(processedFiles, totalChunks);
 			}
 		}
 		await flush();
@@ -79,8 +102,23 @@ export class SearchManager {
 	// Read + chunk a single file with no embedding or upsert. Returns [] for files that
 	// aren't indexable or are excluded from search.
 	async buildFileChunks(file: TFile): Promise<SearchChunk[]> {
-		if (!isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return [];
+		const prepared = await this.prepareFile(file);
+		if (!prepared) return [];
+		return this.buildPreparedFileChunks(prepared);
+	}
+
+	private async prepareFile(file: TFile): Promise<PreparedSearchFile | null> {
+		if (!isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return null;
 		const content = await this.app.vault.read(file);
+		return {
+			file,
+			content,
+			contentHash: hashSearchContent(content),
+		};
+	}
+
+	private buildPreparedFileChunks(prepared: PreparedSearchFile): SearchChunk[] {
+		const { file, content, contentHash } = prepared;
 		return buildSearchChunks({
 			vaultId: this.settings.searchVaultId,
 			path: file.path,
@@ -88,9 +126,19 @@ export class SearchManager {
 			extension: file.extension,
 			mtime: file.stat.mtime,
 			content,
+			contentHash,
 			maxChars: this.settings.searchChunkMaxChars,
 			overlapChars: this.settings.searchChunkOverlapChars,
 		});
+	}
+
+	private async loadFileStates(client: SearchServiceClient, paths: string[]): Promise<Map<string, SearchFileState>> {
+		try {
+			return await client.fileStates(paths);
+		} catch (e) {
+			logWarn('search', 'file-state lookup failed; indexing search files normally', e);
+			return new Map();
+		}
 	}
 
 	async deletePath(path: string): Promise<void> {

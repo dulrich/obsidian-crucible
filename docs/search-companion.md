@@ -27,6 +27,7 @@ The current script implements SQLite FTS5/BM25. It accepts embedding vectors in 
 - `POST /v1/index/reset`
 - `POST /v1/chunks/upsert`
 - `POST /v1/chunks/delete`
+- `POST /v1/files/state`
 - `POST /v1/search`
 
 All mutation/search requests include `vaultId` so multiple vaults can share one companion database.
