@@ -39,8 +39,10 @@ import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { isSearchIndexablePath } from './search/chunker';
+import { SearchAutoIndexGate } from './search/lifecycleGate';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { isPathExcluded, migrateExcludedFolders } from './exclusions';
+import { logWarn } from './log';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -69,6 +71,8 @@ export interface CrucibleCommandEntry {
 	queueable: boolean;
 }
 
+type SearchIndexSource = 'auto' | 'manual';
+
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
 	linter: Linter;
@@ -89,6 +93,7 @@ export default class CruciblePlugin extends Plugin {
 	searchManager: SearchManager;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	triggers: TriggerRegistry;
+	private searchAutoIndexGate = new SearchAutoIndexGate();
 	private tocComponent: TableOfContentsUI | null = null;
 	// Chain-internal command ids registered for each "Chain: X" command, so a chain
 	// can be used as an (awaited, target-file-aware) step inside another chain.
@@ -143,6 +148,13 @@ export default class CruciblePlugin extends Plugin {
 
 		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
 		this.registerView(INGESTION_DASHBOARD_VIEW_TYPE, (leaf) => new IngestionDashboardView(leaf, this));
+		this.registerEvent(this.app.metadataCache.on('resolved', () => {
+			this.searchAutoIndexGate.markMetadataResolved();
+		}));
+		this.app.workspace.onLayoutReady(() => {
+			this.searchAutoIndexGate.markLayoutReady();
+			void this.orchestrator.scan({ notify: false });
+		});
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
 			this.app.setting.open();
@@ -155,7 +167,7 @@ export default class CruciblePlugin extends Plugin {
 		// --- Events ---
 		this.registerEvent(this.app.vault.on('create', (file) => {
 			void this.handleFileCreate(file);
-			if (file instanceof TFile) this.enqueueSearchUpsert(file);
+			if (file instanceof TFile) this.enqueueSearchUpsert(file, 'low', { source: 'auto' });
 		}));
 
 		const debouncedLint = debounce(async (file: TFile) => {
@@ -182,7 +194,7 @@ export default class CruciblePlugin extends Plugin {
 
 		const debouncedSearchIndex = debounce(async (file: TFile) => {
 			if (this.noteLocks.isLocked(file.path) || this.isMaterializing) return;
-			this.enqueueSearchUpsert(file);
+			this.enqueueSearchUpsert(file, 'low', { source: 'auto' });
 		}, 2500, true);
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
@@ -205,17 +217,13 @@ export default class CruciblePlugin extends Plugin {
 			if (file instanceof TFile && file.extension === 'md') {
 				void this.attachmentLocalizer.onNoteRename(file, oldPath);
 			}
-			if (isSearchIndexablePath(oldPath) && !isPathExcluded(this.settings, oldPath, 'search')) {
-				void this.orchestrator.enqueue('search_delete_path', { path: oldPath }, { priority: 'low' });
-			}
-			if (file instanceof TFile) this.enqueueSearchUpsert(file);
+			this.enqueueSearchDeletePath(oldPath, 'low', { source: 'auto' });
+			if (file instanceof TFile) this.enqueueSearchUpsert(file, 'low', { source: 'auto' });
 		}));
 
 		this.registerEvent(this.app.vault.on('delete', (file) => {
 			void this.attachmentLocalizer.onNoteDelete(file.path);
-			if (isSearchIndexablePath(file.path) && !isPathExcluded(this.settings, file.path, 'search')) {
-				void this.orchestrator.enqueue('search_delete_path', { path: file.path }, { priority: 'low' });
-			}
+			this.enqueueSearchDeletePath(file.path, 'low', { source: 'auto' });
 		}));
 
 		this.registerEvent(
@@ -266,9 +274,38 @@ export default class CruciblePlugin extends Plugin {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
-	enqueueSearchUpsert(file: TFile, priority: 'low' | 'normal' | 'high' = 'low'): void {
+	enqueueSearchUpsert(file: TFile, priority: 'low' | 'normal' | 'high' = 'low', options: { source?: SearchIndexSource } = {}): void {
 		if (!this.settings.searchEnabled || !isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return;
+		if ((options.source ?? 'manual') === 'auto') {
+			void this.enqueueAutomaticSearchJob('search_upsert_file', { path: file.path }, priority, file.path, [file.path]);
+			return;
+		}
 		void this.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority, inputPaths: [file.path] });
+	}
+
+	private enqueueSearchDeletePath(path: string, priority: 'low' | 'normal' | 'high', options: { source?: SearchIndexSource } = {}): void {
+		if (!this.settings.searchEnabled || !isSearchIndexablePath(path) || isPathExcluded(this.settings, path, 'search')) return;
+		if ((options.source ?? 'manual') === 'auto') {
+			void this.enqueueAutomaticSearchJob('search_delete_path', { path }, priority, path);
+			return;
+		}
+		void this.orchestrator.enqueue('search_delete_path', { path }, { priority });
+	}
+
+	private async enqueueAutomaticSearchJob(
+		type: 'search_upsert_file' | 'search_delete_path',
+		params: { path: string },
+		priority: 'low' | 'normal' | 'high',
+		path: string,
+		inputPaths?: string[],
+	): Promise<void> {
+		if (!this.searchAutoIndexGate.isReady()) return;
+		const companionAvailable = await this.searchAutoIndexGate.companionAvailable(() => this.searchManager.health());
+		if (!companionAvailable) {
+			logWarn('search', `Skipped automatic ${type}; search companion unavailable`, path);
+			return;
+		}
+		void this.orchestrator.enqueue(type, params, { priority, inputPaths });
 	}
 
 	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so
