@@ -127,8 +127,9 @@ export class JobStore {
 			? (fm.params as Record<string, unknown>)
 			: undefined;
 		const error = typeof fm.error === 'string' ? fm.error : undefined;
+		const progress = typeof fm.progress === 'string' ? fm.progress : undefined;
 
-		return { id, type, status, priority, created, updated, inputPaths, outputPaths, params, error };
+		return { id, type, status, priority, created, updated, inputPaths, outputPaths, params, error, progress };
 	}
 
 	async move(file: TFile, job: OrchestrationJob, toStatus: JobStatus): Promise<{ file: TFile; job: OrchestrationJob }> {
@@ -185,6 +186,13 @@ export class JobStore {
 	async setPartial(file: TFile, partial: boolean): Promise<void> {
 		await updateFrontmatter(this.app, file, (fm) => {
 			fm.partial = partial;
+			fm.updated = nowIso();
+		});
+	}
+
+	async setProgress(file: TFile, message: string): Promise<void> {
+		await updateFrontmatter(this.app, file, (fm) => {
+			fm.progress = message;
 			fm.updated = nowIso();
 		});
 	}

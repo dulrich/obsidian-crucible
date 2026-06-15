@@ -3,6 +3,14 @@ export interface FolderTemplate {
 	template: string;
 }
 
+export type ExclusionScope = 'lint' | 'search';
+
+export interface ExcludedFolder {
+	folder: string;
+	lint: boolean;
+	search: boolean;
+}
+
 export interface Shortcut {
 	name: string;
 	file: string;
@@ -139,6 +147,11 @@ export interface ProviderCompletionResult {
 	rawFinishReason?: string;
 }
 
+export interface ProviderEmbeddingResult {
+	embeddings: number[][];
+	dimensions?: number;
+}
+
 export type ProviderKind =
 	| 'openai'
 	| 'anthropic'
@@ -160,7 +173,11 @@ export function providerModality(kind: ProviderKind): ProviderModality {
 export interface ProviderModel {
 	id: string;
 	label: string;
+	capabilities?: ProviderModelCapability[];
+	embeddingDimensions?: number;
 }
+
+export type ProviderModelCapability = 'chat' | 'embedding';
 
 export interface Provider {
 	id: string;
@@ -252,7 +269,7 @@ export interface CrucibleSettings {
 	// Lint Settings
 	lintFrontmatterInsert: string;
 	lintYamlKeyPriority: string[];
-	lintIgnoredFolders: string[];
+	excludedFolders: ExcludedFolder[];
 	lintCreatedKey: string;
 	lintModifiedKey: string;
 	lintBlankLineAfterYaml: boolean;
@@ -363,6 +380,16 @@ export interface CrucibleSettings {
 	// Per-type worker count for the youtube_metadata_fetch memory queue.
 	orchestrationYoutubeMetadataMaxParallel: number;
 	ingestionReadingWpm: number;
+	// Search
+	searchEnabled: boolean;
+	searchServiceUrl: string;
+	searchVaultId: string;
+	searchSemanticEnabled: boolean;
+	searchEmbeddingModel?: ProviderModelRef;
+	searchChunkMaxChars: number;
+	searchChunkOverlapChars: number;
+	searchIndexBatchSize: number;
+	searchResultLimit: number;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -385,7 +412,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	folderTemplates: [],
 	lintFrontmatterInsert: '',
 	lintYamlKeyPriority: ['title', 'created', 'updated', 'word-count'],
-	lintIgnoredFolders: [],
+	excludedFolders: [{ folder: '_crucible', lint: false, search: true }],
 	lintCreatedKey: 'created',
 	lintModifiedKey: 'updated',
 	lintBlankLineAfterYaml: true,
@@ -479,4 +506,12 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	ingestionYoutubeAutoEnrichEnabled: false,
 	orchestrationYoutubeMetadataMaxParallel: 1,
 	ingestionReadingWpm: 250,
+	searchEnabled: true,
+	searchServiceUrl: 'http://127.0.0.1:8765',
+	searchVaultId: 'default',
+	searchSemanticEnabled: false,
+	searchChunkMaxChars: 1800,
+	searchChunkOverlapChars: 200,
+	searchIndexBatchSize: 24,
+	searchResultLimit: 12,
 }

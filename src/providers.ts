@@ -1,5 +1,5 @@
 import { App, FileSystemAdapter, normalizePath, requestUrl } from 'obsidian';
-import { AgentExecutionMode, Provider, ProviderCompletionResult, ProviderFinishReason, ProviderKind, providerModality } from './types';
+import { AgentExecutionMode, Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderKind, providerModality } from './types';
 
 // child_process is desktop-only; loaded lazily via require so mobile bundles can still import this module.
 interface ChildEvents {
@@ -98,6 +98,32 @@ export class ProviderManager {
 		}
 	}
 
+	async embed(provider: Provider, modelId: string, inputs: string[]): Promise<ProviderEmbeddingResult> {
+		if (!modelId) {
+			throw new Error(`No embedding model selected for provider "${provider.name || provider.id}"`);
+		}
+		if (inputs.length === 0) return { embeddings: [] };
+		if (providerModality(provider.kind) === 'cli') {
+			throw new Error(`Provider "${provider.name || provider.id}" is a CLI provider and cannot generate embeddings`);
+		}
+
+		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
+		if (!apiKey && provider.kind !== 'ollama') {
+			throw new Error(`API key missing for provider "${provider.name || provider.id}"`);
+		}
+
+		switch (provider.kind) {
+			case 'openai':
+				return await this.callOpenAICompatibleEmbedding(provider.baseUrl || 'https://api.openai.com/v1', modelId, apiKey, inputs, 'OpenAI');
+			case 'openrouter':
+				return await this.callOpenAICompatibleEmbedding(provider.baseUrl || 'https://openrouter.ai/api/v1', modelId, apiKey, inputs, 'OpenRouter');
+			case 'ollama':
+				return await this.callOllamaEmbedding(provider, modelId, inputs);
+			default:
+				throw new Error(`Provider kind "${provider.kind}" does not support embeddings yet`);
+		}
+	}
+
 	private async callOpenAI(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const response = await requestUrl({
 			url: 'https://api.openai.com/v1/chat/completions',
@@ -129,6 +155,63 @@ export class ProviderManager {
 			finishReason: normalizeChatCompletionFinishReason(rawFinishReason),
 			rawFinishReason,
 		};
+	}
+
+	private async callOpenAICompatibleEmbedding(baseUrl: string, modelId: string, apiKey: string, inputs: string[], label: string): Promise<ProviderEmbeddingResult> {
+		const response = await requestUrl({
+			url: `${baseUrl.replace(/\/$/, '')}/embeddings`,
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Authorization': `Bearer ${apiKey}`,
+			},
+			body: JSON.stringify({
+				model: modelId,
+				input: inputs,
+			}),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`${label} embeddings API returned ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json as { data?: { embedding?: number[], index?: number }[] };
+		const rows = (data.data ?? []).slice().sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+		const embeddings = rows.map(row => normalizeEmbedding(row.embedding));
+		if (embeddings.length !== inputs.length) {
+			throw new Error(`${label} embeddings API returned ${embeddings.length} embeddings for ${inputs.length} inputs`);
+		}
+		return { embeddings, dimensions: embeddings[0]?.length };
+	}
+
+	private async callOllamaEmbedding(provider: Provider, modelId: string, inputs: string[]): Promise<ProviderEmbeddingResult> {
+		const baseUrl = (provider.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
+		const response = await requestUrl({
+			url: `${baseUrl}/api/embed`,
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				model: modelId,
+				input: inputs,
+			}),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`Ollama embeddings API returned ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json as { embeddings?: number[][], embedding?: number[] };
+		const embeddings = data.embeddings
+			? data.embeddings.map(normalizeEmbedding)
+			: data.embedding
+				? [normalizeEmbedding(data.embedding)]
+				: [];
+		if (embeddings.length !== inputs.length) {
+			throw new Error(`Ollama embeddings API returned ${embeddings.length} embeddings for ${inputs.length} inputs`);
+		}
+		return { embeddings, dimensions: embeddings[0]?.length };
 	}
 
 	private async callAnthropic(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
@@ -341,6 +424,15 @@ function normalizeRawFinishReason(reason: unknown): string | undefined {
 	if (typeof reason !== 'string') return undefined;
 	const trimmed = reason.trim();
 	return trimmed ? trimmed : undefined;
+}
+
+function normalizeEmbedding(value: unknown): number[] {
+	if (!Array.isArray(value)) throw new Error('Embedding response contained a non-array embedding');
+	const out = value.map(v => Number(v));
+	if (out.length === 0 || out.some(v => !Number.isFinite(v))) {
+		throw new Error('Embedding response contained invalid numeric values');
+	}
+	return out;
 }
 
 function normalizeChatCompletionFinishReason(raw: string | undefined): ProviderFinishReason {

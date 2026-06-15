@@ -9,7 +9,11 @@ export type JobType =
 	| 'transcript_refine'
 	| 'link_scan'
 	| 'youtube_metadata_fetch'
-	| 'command_run';
+	| 'command_run'
+	| 'search_rebuild'
+	| 'search_upsert_file'
+	| 'search_delete_path'
+	| 'search_sweep';
 
 export type JobPriority = 'low' | 'normal' | 'high';
 
@@ -24,6 +28,7 @@ export interface OrchestrationJob {
 	outputPaths: string[];
 	params?: Record<string, unknown>;
 	error?: string;
+	progress?: string;
 }
 
 export interface WorkflowResult {

@@ -6,6 +6,7 @@ import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
 import { postIdFromUrl } from './orchestration/utils/blogs';
 import { logError } from './log';
 import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
+import { isPathExcluded } from './exclusions';
 
 const YT_EMBED_RE = /^([ \t]*\r?\n)*[ \t]*!\[\]\(([^)\s]+)\)[ \t]*\r?\n/;
 const TRANSCRIPT_HEADER_RE = /^([ \t]*\r?\n)*[ \t]*##[ \t]+Transcript[ \t]*\r?\n/;
@@ -148,10 +149,7 @@ export class Linter {
 	}
 
 	isPathIgnored(path: string): boolean {
-		return this.settings.lintIgnoredFolders.some(ignored => {
-			if (!ignored) return false;
-			return path.startsWith(ignored);
-		});
+		return isPathExcluded(this.settings, path, 'lint');
 	}
 
 	calculateWordCount(content: string): number {

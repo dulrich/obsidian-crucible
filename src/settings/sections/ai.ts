@@ -1,7 +1,7 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, providerModality } from "../../types";
+import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelCapability, providerModality } from "../../types";
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS } from "../../providers";
 import { FileSuggest, FolderSuggest } from "../../suggesters";
@@ -247,7 +247,9 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 	} else {
 		models.forEach((model, modelIndex) => {
 			if (modelIndex > 0) list.createEl('hr', { cls: 'crucible-row-divider' });
-			new Setting(list)
+			const modelRow = list.createDiv({ cls: 'crucible-provider-model-row' });
+			new Setting(modelRow)
+				.setName('Model')
 				.addText(t => t
 					.setPlaceholder(modelIdPlaceholder(provider.kind))
 					.setValue(model.id)
@@ -263,14 +265,60 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					await tab.plugin.saveSettings();
 					tab.display();
 				}));
+
+			const capabilities = new Setting(modelRow)
+				.setName('Capabilities');
+			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Chat' });
+			capabilities
+				.addToggle(t => t
+					.setTooltip('Chat model')
+					.setValue(modelHasCapability(model, 'chat'))
+					.onChange(async (v) => { setModelCapability(model, 'chat', v); await tab.plugin.saveSettings(); }));
+			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Embedding' });
+			capabilities
+				.addToggle(t => t
+					.setTooltip('Embedding model')
+					.setValue(modelHasCapability(model, 'embedding'))
+					.onChange(async (v) => { setModelCapability(model, 'embedding', v); await tab.plugin.saveSettings(); }));
+
+			new Setting(modelRow)
+				.setName('Embedding dimensions')
+				.setDesc('Optional. Used as documentation for the selected embedding model.')
+				.addText(t => {
+					t.setPlaceholder('Dims')
+						.setValue(model.embeddingDimensions ? String(model.embeddingDimensions) : '')
+						.onChange(async (v) => {
+							const n = Number(v.trim());
+							if (Number.isFinite(n) && n > 0) model.embeddingDimensions = Math.floor(n);
+							else delete model.embeddingDimensions;
+							await tab.plugin.saveSettings();
+						});
+					t.inputEl.type = 'number';
+					t.inputEl.min = '1';
+					t.inputEl.step = '1';
+					t.inputEl.addClass('pi-width-half');
+				});
 		});
 	}
 
 	new Setting(containerEl).addButton(bt => bt.setButtonText('Add model').onClick(async () => {
-		models.push({ id: '', label: '' });
+		models.push({ id: '', label: '', capabilities: ['chat'] });
 		await tab.plugin.saveSettings();
 		tab.display();
 	}));
+}
+
+function modelHasCapability(model: ProviderModel, capability: ProviderModelCapability): boolean {
+	if (!model.capabilities || model.capabilities.length === 0) return capability === 'chat';
+	return model.capabilities.includes(capability);
+}
+
+function setModelCapability(model: ProviderModel, capability: ProviderModelCapability, enabled: boolean): void {
+	const defaults: ProviderModelCapability[] = ['chat'];
+	const next = new Set<ProviderModelCapability>(model.capabilities && model.capabilities.length > 0 ? model.capabilities : defaults);
+	if (enabled) next.add(capability);
+	else next.delete(capability);
+	model.capabilities = Array.from(next);
 }
 
 function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {

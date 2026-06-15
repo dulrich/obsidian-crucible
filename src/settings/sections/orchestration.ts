@@ -1,12 +1,13 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting, Notice, TextComponent } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { CrucibleSettings, CurrencyCache, GeocodeCacheEntry } from "../../types";
+import { CrucibleSettings, CurrencyCache, GeocodeCacheEntry, ProviderModelRef } from "../../types";
 import { FileSuggest, FolderSuggest, CurrencySuggest, LocationSuggest } from "../../suggesters";
 import { isValidTimezone } from "../../orchestration/utils/dates";
 import { deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "../../orchestration/utils/youtubeApi";
 import { addWarningIcon, mountSecretControl } from "../shared";
 import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea } from "../bind";
+import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 
 interface WorkflowMeta {
 	id: string;
@@ -61,6 +62,27 @@ function getWorkflowWarning(tab: CrucibleSettingTab, workflowId: string): string
 		return 'Daily is disabled; this workflow will fail with a warning until Daily is enabled.';
 	}
 	return null;
+}
+
+function embeddingModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
+	const refs: ProviderModelRef[] = [];
+	for (const provider of tab.plugin.settings.providers) {
+		for (const model of provider.models ?? []) {
+			if (model.capabilities?.includes('embedding')) {
+				refs.push({ providerId: provider.id, modelId: model.id });
+			}
+		}
+	}
+	return refs;
+}
+
+function describeEmbeddingModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
+	if (!ref) return 'No embedding model selected. Search will use FTS/BM25 only.';
+	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
+	const model = provider?.models.find(m => m.id === ref.modelId);
+	if (!provider || !model) return 'Selected embedding model is missing. Search will use FTS/BM25 only.';
+	const providerName = provider.name || provider.kind;
+	return `${providerName} · ${model.label || model.id}`;
 }
 
 export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
@@ -150,6 +172,98 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		text: 'Warning: this timezone is not recognized by Intl.DateTimeFormat.',
 	});
 	setTzWarningVisibility(isValidTimezone(s.orchestrationTimezone));
+
+	// --- Search ---
+	new Setting(containerEl).setName('Search').setHeading();
+	containerEl.createEl('p', { text: 'Vault search indexes Markdown, QMD, and text notes through the orchestration queue. The local SQLite companion service owns storage and ranking.' });
+	const searchGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+	bindToggle(searchGroup, {
+		name: 'Enabled',
+		desc: 'When on, note lifecycle events enqueue search index jobs.',
+		get: () => s.searchEnabled,
+		set: (v) => { s.searchEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindText(searchGroup, {
+		name: 'Service URL',
+		desc: 'URL of the user-run SQLite search companion service.',
+		placeholder: 'http://127.0.0.1:8765',
+		width: 'pi-width-wide',
+		get: () => s.searchServiceUrl,
+		set: (v) => { s.searchServiceUrl = v.trim() || 'http://127.0.0.1:8765'; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindText(searchGroup, {
+		name: 'Vault ID',
+		desc: 'Collection key sent to the companion service. Use a stable value per vault.',
+		placeholder: 'default',
+		get: () => s.searchVaultId,
+		set: (v) => { s.searchVaultId = v.trim() || 'default'; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(searchGroup, {
+		name: 'Semantic indexing',
+		desc: 'Generate embeddings for chunks and query vectors when an embedding model is selected. Search falls back to FTS when unavailable.',
+		get: () => s.searchSemanticEnabled,
+		set: (v) => { s.searchSemanticEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	new Setting(searchGroup)
+		.setName('Embedding model')
+		.setDesc(describeEmbeddingModel(tab, s.searchEmbeddingModel))
+		.addButton(bt => bt.setButtonText('Pick').onClick(() => {
+			const refs = embeddingModelRefs(tab);
+			if (refs.length === 0) {
+				new Notice('No embedding-capable models configured. Mark a provider model as Embedding first.');
+				return;
+			}
+			const options = buildModelPickerOptions(tab.plugin.settings.providers, refs);
+			new ModelPickerModal(tab.app, options, (ref) => {
+				s.searchEmbeddingModel = ref;
+				void save();
+				tab.display();
+			}).open();
+		}))
+		.addButton(bt => bt.setButtonText('Clear').onClick(async () => {
+			delete s.searchEmbeddingModel;
+			await save();
+			tab.display();
+		}));
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Chunk max characters',
+		desc: 'Target maximum chunk size before sending text to the search service.',
+		placeholder: '1800',
+		get: () => String(s.searchChunkMaxChars),
+		set: (v) => { const n = Number(v.trim()); s.searchChunkMaxChars = Number.isFinite(n) && n >= 400 ? Math.floor(n) : 1800; },
+		min: 400,
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Embedding batch size',
+		desc: 'Number of chunks sent to the embedding provider per request.',
+		placeholder: '24',
+		get: () => String(s.searchIndexBatchSize),
+		set: (v) => { const n = Number(v.trim()); s.searchIndexBatchSize = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 24; },
+		min: 1,
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Result limit',
+		desc: 'Default number of results shown in the search modal.',
+		placeholder: '12',
+		get: () => String(s.searchResultLimit),
+		set: (v) => { const n = Number(v.trim()); s.searchResultLimit = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 12; },
+		min: 1,
+	}, save);
 
 	// --- Workflows list ---
 	new Setting(containerEl).setName('Workflows').setHeading();

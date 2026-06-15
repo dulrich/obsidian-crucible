@@ -4,6 +4,8 @@ import { shortestUniqueFuzzyString, shortestTopMatchFuzzyString } from './comman
 import { appendDebugLog } from './utils';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import type CruciblePlugin from './main';
+import { VaultSearchModal } from './search/SearchModal';
+import { isSearchIndexablePath } from './search/chunker';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -276,6 +278,57 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Orchestrations',
 		mutating: false,
 		run: () => plugin.orchestrator.enqueue('link_scan'),
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'search-vault',
+		name: 'Search: vault',
+		group: 'Search',
+		mutating: false,
+		run: () => new VaultSearchModal(plugin.app, plugin).open(),
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'search-sweep-vault',
+		name: 'Search: sweep vault',
+		group: 'Search',
+		mutating: false,
+		run: () => new VaultSearchModal(plugin.app, plugin, true).open(),
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'search-health',
+		name: 'Search: check service health',
+		group: 'Search',
+		mutating: false,
+		run: async () => {
+			const health = await plugin.searchManager.health();
+			new Notice(`Search service: ${health.ok ? 'ok' : 'not ok'}${health.version ? ` (${health.version})` : ''}`);
+		},
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'search-rebuild-index',
+		name: 'Search: rebuild index',
+		group: 'Search',
+		mutating: false,
+		run: () => plugin.orchestrator.enqueue('search_rebuild'),
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'search-reindex-active-note',
+		name: 'Search: reindex active note',
+		group: 'Search',
+		mutating: false,
+		available: () => {
+			const file = plugin.app.workspace.getActiveFile();
+			return file !== null && isSearchIndexablePath(file.path);
+		},
+		run: () => {
+			const file = plugin.app.workspace.getActiveFile();
+			if (!file) return;
+			plugin.enqueueSearchUpsert(file);
+		},
 	});
 }
 
