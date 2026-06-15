@@ -73,6 +73,40 @@ export function commandRunJobConfig(): JobTypeConfig {
 	};
 }
 
+export function searchFileJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: (p) => {
+			const path = typeof p.path === 'string' ? p.path : '';
+			return path ? `search-file:${path}` : '';
+		},
+	};
+}
+
+export function searchRebuildJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: () => 'search-rebuild',
+		timeoutMs: 0,
+	};
+}
+
+export function searchSweepJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: (p) => {
+			const description = typeof p.description === 'string' ? p.description.trim() : '';
+			return description ? `search-sweep:${description}` : '';
+		},
+	};
+}
+
 // Memory-persistence config for the folded enrichment queue. maxParallel and the
 // cooloff are read live from settings (getters) so dashboard/settings changes take
 // effect without re-registering. Display fields feed the UI.

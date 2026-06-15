@@ -44,22 +44,38 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 
 	containerEl.createEl('hr');
 	new Setting(containerEl).setName('Excluded folders').setHeading();
-	containerEl.createEl('p', { text: 'Notes in these folders will be ignored by all lint commands.' });
+	containerEl.createEl('p', { text: 'Notes in these folders can be excluded from linting, search indexing, or both.' });
 
 	const ignoreGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-	s.lintIgnoredFolders.forEach((folder, index) => {
+	s.excludedFolders.forEach((entry, index) => {
 		if (index > 0) ignoreGroup.createEl('hr', { cls: 'crucible-mini-hr' });
 		const row = ignoreGroup.createDiv({ cls: 'crucible-folder-template-row' });
 		const setting = bindSearch(row, {
-			placeholder: 'Folder to ignore',
-			get: () => folder,
-			set: (v) => { s.lintIgnoredFolders[index] = v; },
+			placeholder: 'Folder to exclude',
+			get: () => entry.folder,
+			set: (v) => { entry.folder = v; },
 			suggest: (el) => { el.classList.add('crucible-full-width-search'); new FolderSuggest(tab.app, el); },
 		}, save);
-		setting.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => { s.lintIgnoredFolders.splice(index, 1); await save(); tab.display(); }); });
+		setting.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => { s.excludedFolders.splice(index, 1); await save(); tab.display(); }); });
 		setting.infoEl.remove();
+
+		const scopes = row.createDiv({ cls: 'crucible-exclusion-scopes' });
+		const lintSetting = bindToggle(scopes, {
+			name: 'Lint',
+			tooltip: 'Exclude from lint commands',
+			get: () => entry.lint,
+			set: (v) => { entry.lint = v; },
+		}, save);
+		lintSetting.infoEl.remove();
+		const searchSetting = bindToggle(scopes, {
+			name: 'Search',
+			tooltip: 'Exclude from search indexing',
+			get: () => entry.search,
+			set: (v) => { entry.search = v; },
+		}, save);
+		searchSetting.infoEl.remove();
 	});
-	new Setting(ignoreGroup).addButton(bt => bt.setButtonText('Add ignored folder').setCta().onClick(async () => { s.lintIgnoredFolders.push(''); await save(); tab.display(); }));
+	new Setting(ignoreGroup).addButton(bt => bt.setButtonText('Add excluded folder').setCta().onClick(async () => { s.excludedFolders.push({ folder: '', lint: true, search: false }); await save(); tab.display(); }));
 
 	renderLocalizeAttachmentsSettings(tab, containerEl);
 }
