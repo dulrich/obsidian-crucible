@@ -62,6 +62,8 @@ import {
 
 type IntakeKind = 'blog' | 'youtube';
 
+const QUEUE_MONITOR_RENDER_LIMIT = 100;
+
 const INTAKE_JOB_TYPE: Record<IntakeKind, JobType> = {
 	blog: 'blogs_tracker',
 	youtube: 'youtube_tracker',
@@ -75,9 +77,17 @@ function fileJobTargetPath(job: OrchestrationJob): string | undefined {
 function fileJobTitle(job: OrchestrationJob): string {
 	switch (job.type) {
 		case 'search_rebuild': return 'Vault search index';
+		case 'search_upsert_batch': return searchBatchTitle(job);
 		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';
 		default: return job.id;
 	}
+}
+
+function searchBatchTitle(job: OrchestrationJob): string {
+	const batchIndex = typeof job.params?.batchIndex === 'number' ? job.params.batchIndex : -1;
+	const batchCount = typeof job.params?.batchCount === 'number' ? job.params.batchCount : -1;
+	if (batchIndex >= 0 && batchCount > 0) return `Search batch ${batchIndex + 1} / ${batchCount}`;
+	return 'Search batch';
 }
 
 const DEBOUNCE_MS = 150;
@@ -435,7 +445,7 @@ export class IngestionDashboardUI {
 		btn.setText('Enqueue intake');
 		btn.addEventListener('click', () => {
 			if (btn.disabled) return;
-			void this.plugin.orchestrator.enqueue(INTAKE_JOB_TYPE[kind]);
+			void this.plugin.orchestrator.enqueue(INTAKE_JOB_TYPE[kind], {}, { priority: 'high' });
 		});
 		this.intakeButtons.set(kind, btn);
 	}
@@ -542,7 +552,9 @@ export class IngestionDashboardUI {
 		// Per-type pending counts for section meta line
 		const typeCounts = new Map<string, number>();
 		for (const r of rows) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1);
-		const metaText = Array.from(typeCounts.entries()).map(([t, n]) => `${t} ${n}`).join(' · ');
+		const metaParts = Array.from(typeCounts.entries()).map(([t, n]) => `${t} ${n}`);
+		if (rows.length > QUEUE_MONITOR_RENDER_LIMIT) metaParts.push(`showing ${QUEUE_MONITOR_RENDER_LIMIT} of ${rows.length}`);
+		const metaText = metaParts.join(' · ');
 		this.setSectionMeta('queueMonitor', metaText);
 		this.setSectionCount('queueMonitor', rows.length);
 
@@ -628,7 +640,7 @@ export class IngestionDashboardUI {
 					}
 				},
 			},
-		], rows, ctx);
+		], rows, ctx, { limit: QUEUE_MONITOR_RENDER_LIMIT });
 	}
 
 	private async refreshAll(): Promise<void> {

@@ -1,6 +1,6 @@
 import type CruciblePlugin from '../main';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { OrchestrationJob, WorkflowResult } from './types';
+import type { OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 
 export type RunOutcome = 'ran' | 'empty' | 'disabled';
@@ -15,7 +15,7 @@ export interface JobBackend {
 	/** True when the type drains even with the autorun toggle off (memory types). */
 	readonly drainsWithoutAutorun: boolean;
 	/** Enqueue a job; returns the (real or synthetic) job, or null if rejected. */
-	enqueue(params: Record<string, unknown>): Promise<OrchestrationJob | null>;
+	enqueue(params: Record<string, unknown>, options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null>;
 	/** Claim and run at most one job, reporting the outcome to the drain loop. */
 	runNext(): Promise<RunOutcome>;
 	/** Whether work is (or might be) waiting. File types answer "maybe" (always true). */

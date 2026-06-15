@@ -5,7 +5,17 @@ export type { Column, SortState } from './types';
 // Renders a table whose sortable headers toggle `ctx.sort` and re-render the
 // section. The rows are sorted by the active column's `sortKey`; clicking a
 // header flips direction (or starts ascending on a new column).
-export function renderSortableTable<T>(parent: HTMLElement, columns: Column<T>[], rows: T[], ctx: SectionContext): void {
+export interface SortableTableOptions {
+	limit?: number;
+}
+
+export function renderSortableTable<T>(
+	parent: HTMLElement,
+	columns: Column<T>[],
+	rows: T[],
+	ctx: SectionContext,
+	options: SortableTableOptions = {},
+): void {
 	parent.empty();
 	const sort = ctx.sort;
 	const sorted = sort
@@ -18,6 +28,7 @@ export function renderSortableTable<T>(parent: HTMLElement, columns: Column<T>[]
 			return sort.direction === 'asc' ? cmp : -cmp;
 		})
 		: rows;
+	const visible = options.limit ? sorted.slice(0, options.limit) : sorted;
 
 	const table = parent.createEl('table', { cls: 'crucible-ingestion-table' });
 	const thead = table.createEl('thead');
@@ -42,7 +53,7 @@ export function renderSortableTable<T>(parent: HTMLElement, columns: Column<T>[]
 		}
 	}
 	const tbody = table.createEl('tbody');
-	for (const row of sorted) {
+	for (const row of visible) {
 		const tr = tbody.createEl('tr');
 		for (const col of columns) {
 			const td = tr.createEl('td');

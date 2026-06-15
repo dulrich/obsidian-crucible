@@ -1,6 +1,6 @@
 import { Notice } from 'obsidian';
 import { JobStore } from './JobStore';
-import { JobType, OrchestrationJob, ScanReport } from './types';
+import { JobType, OrchestrationEnqueueOptions, OrchestrationJob, ScanReport } from './types';
 import { Workflow } from './workflows/Workflow';
 import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
@@ -61,9 +61,9 @@ export class Orchestrator {
 		return this.backends.get(type)?.drainsWithoutAutorun ?? false;
 	}
 
-	enqueue(type: JobType, params?: Record<string, unknown>): Promise<OrchestrationJob | null> {
+	enqueue(type: JobType, params?: Record<string, unknown>, options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null> {
 		const backend = this.backends.get(type);
-		return backend ? backend.enqueue(params ?? {}) : Promise.resolve(null);
+		return backend ? backend.enqueue(params ?? {}, options) : Promise.resolve(null);
 	}
 
 	// Manual "Run next": execute a single file-backed job of whichever type has one
