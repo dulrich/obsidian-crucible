@@ -24,7 +24,7 @@ import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import { logWarn } from './log';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueAdapter';
-import type { JobType } from './orchestration/types';
+import type { JobType, OrchestrationJob } from './orchestration/types';
 import { renderSortableTable } from './ingestion/render/sortableTable';
 import { renderTableSection } from './ingestion/render/section';
 import type {
@@ -66,6 +66,19 @@ const INTAKE_JOB_TYPE: Record<IntakeKind, JobType> = {
 	blog: 'blogs_tracker',
 	youtube: 'youtube_tracker',
 };
+
+function fileJobTargetPath(job: OrchestrationJob): string | undefined {
+	const path = job.params?.targetPath ?? job.params?.path;
+	return typeof path === 'string' ? path : undefined;
+}
+
+function fileJobTitle(job: OrchestrationJob): string {
+	switch (job.type) {
+		case 'search_rebuild': return 'Vault search index';
+		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';
+		default: return job.id;
+	}
+}
 
 const DEBOUNCE_MS = 150;
 // Vault-scan sections (uncaptured lists, no-metadata, orphans) recompute the
@@ -489,6 +502,7 @@ export class IngestionDashboardUI {
 			title?: string;
 			created: string;
 			error?: string;
+			progress?: string;
 		};
 
 		const store = this.plugin.jobStore;
@@ -497,8 +511,8 @@ export class IngestionDashboardUI {
 			try {
 				const [running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
 				fileRows = [
-					...running.map(e => ({ source: 'file' as const, status: 'running' as const, type: e.job.type, key: e.job.id, created: e.job.created ?? '', error: undefined })),
-					...queued.map(e => ({ source: 'file' as const, status: 'queued' as const, type: e.job.type, key: e.job.id, created: e.job.created ?? '', error: undefined })),
+					...running.map(e => ({ source: 'file' as const, status: 'running' as const, type: e.job.type, key: e.job.id, targetPath: fileJobTargetPath(e.job), title: fileJobTitle(e.job), created: e.job.created ?? '', error: e.job.error, progress: e.job.progress })),
+					...queued.map(e => ({ source: 'file' as const, status: 'queued' as const, type: e.job.type, key: e.job.id, targetPath: fileJobTargetPath(e.job), title: fileJobTitle(e.job), created: e.job.created ?? '', error: e.job.error, progress: e.job.progress })),
 				];
 			} catch (e) {
 				body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read file queue: ${e instanceof Error ? e.message : String(e)}` });
@@ -573,10 +587,21 @@ export class IngestionDashboardUI {
 						// Fallback: title or videoId
 						td.setText(r.title ?? r.videoId ?? r.key);
 					} else {
-						// File-backed job: show the job id as target
-						td.setText(r.key);
+						if (r.targetPath) {
+							const file = this.app.vault.getAbstractFileByPath(r.targetPath);
+							if (file instanceof TFile) {
+								this.renderFileLink(td, file);
+								return;
+							}
+						}
+						td.setText(r.title ?? r.key);
 					}
 				},
+			},
+			{
+				key: 'progress',
+				label: 'Progress',
+				render: (r, td) => td.setText(r.progress ?? ''),
 			},
 			{
 				key: 'created',

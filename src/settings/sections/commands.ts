@@ -114,6 +114,8 @@ export function renderCommandSettings(tab: CrucibleSettingTab, containerEl: HTML
 		'Agents',
 		'Files',
 		'Orchestrations',
+		'Ingestion',
+		'Search',
 		'Other',
 	];
 
