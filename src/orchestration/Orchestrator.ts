@@ -5,7 +5,7 @@ import { Workflow } from './workflows/Workflow';
 import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
-import { JobBackend, RunOutcome } from './JobBackend';
+import { JobBackend, RunOutcome, resolveTimeoutMs } from './JobBackend';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
 import type CruciblePlugin from '../main';
@@ -15,8 +15,13 @@ import type CruciblePlugin from '../main';
 // these. The autorun timeout (orchestrationAutorunTimeoutSeconds) is the primary
 // mechanism; this only catches what no live timer could.
 const STALE_RUNNING_MS = 60 * 60 * 1000;
+const STALE_RUNNING_TIMEOUT_BUFFER_MS = 30_000;
 
 export type { RunOutcome };
+
+export function staleRunningMsForTimeout(timeoutMs: number): number {
+	return timeoutMs > 0 ? timeoutMs + STALE_RUNNING_TIMEOUT_BUFFER_MS : STALE_RUNNING_MS;
+}
 
 export class Orchestrator {
 	private configs: Map<JobType, JobTypeConfig> = new Map();
@@ -95,7 +100,7 @@ export class Orchestrator {
 		this.backends.get(type)?.refill();
 	}
 
-	async scan(): Promise<ScanReport> {
+	async scan(options: { notify?: boolean } = {}): Promise<ScanReport> {
 		await this.store.ensureFolders();
 
 		const queued = await this.store.listFolder('queued');
@@ -121,11 +126,12 @@ export class Orchestrator {
 		}
 
 		let recovered = 0;
-		const cutoff = Date.now() - STALE_RUNNING_MS;
+		const now = Date.now();
 		for (const entry of running) {
 			if (migratedPaths.has(entry.file.path)) continue;
 			const updatedRaw = entry.job.updated ?? entry.job.created;
 			const updatedAt = Date.parse(updatedRaw);
+			const cutoff = now - staleRunningMsForTimeout(resolveTimeoutMs(this.plugin, this.getConfig(entry.job.type)));
 			if (Number.isFinite(updatedAt) && updatedAt < cutoff) {
 				await this.store.setError(entry.file, `Recovered: stale running job (last updated ${updatedRaw})`);
 				await this.store.move(entry.file, entry.job, 'queued');
@@ -147,7 +153,7 @@ export class Orchestrator {
 			`Orchestrate: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
 			(recovered > 0 ? `, recovered ${recovered}` : '') +
 			(migrated > 0 ? `, re-homed ${migrated}` : '');
-		new Notice(summary);
+		if (options.notify ?? true) new Notice(summary);
 		return report;
 	}
 

@@ -327,9 +327,9 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => {
 			const file = plugin.app.workspace.getActiveFile();
 			if (!file) return;
-				plugin.enqueueSearchUpsert(file, 'high');
-			},
-		});
+			plugin.enqueueSearchUpsert(file, 'high', { source: 'manual' });
+		},
+	});
 }
 
 /** Escape a cell for a Markdown table. */
