@@ -2,7 +2,7 @@ import { Notice, TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobType, OrchestrationJob, WorkflowResult } from './types';
+import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { logError } from '../log';
@@ -18,6 +18,7 @@ export class FileJobBackend implements JobBackend {
 	// between listFolder and move so two workers of this type can't claim the same job
 	// (claim + check happen synchronously, with no await between them).
 	private readonly claimed = new Set<string>();
+	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(
 		private readonly plugin: CruciblePlugin,
@@ -27,7 +28,7 @@ export class FileJobBackend implements JobBackend {
 		private readonly workflow: Workflow,
 	) {}
 
-	async enqueue(params: Record<string, unknown>): Promise<OrchestrationJob | null> {
+	async enqueue(params: Record<string, unknown>, options: OrchestrationEnqueueOptions = {}): Promise<OrchestrationJob | null> {
 		if (!this.plugin.settings.orchestrationEnabled) {
 			new Notice('Orchestrate: disabled in settings.');
 			return null;
@@ -41,12 +42,19 @@ export class FileJobBackend implements JobBackend {
 			if (key) {
 				const existing = await this.findActiveJob(key);
 				if (existing) {
-					new Notice(`Orchestrate: ${this.type} already queued for this target (${existing.id}).`);
-					return existing;
+					const priority = options.priority ?? 'normal';
+					if (existing.job.status === 'queued' && priorityRank(priority) < priorityRank(existing.job.priority)) {
+						await this.store.setPriority(existing.file, priority);
+						void this.emitQueueUpdate();
+						new Notice(`Orchestrate: promoted ${this.type} (${existing.job.id})`);
+						return { ...existing.job, priority };
+					}
+					new Notice(`Orchestrate: ${this.type} already queued for this target (${existing.job.id}).`);
+					return existing.job;
 				}
 			}
 		}
-		const job = await this.store.enqueue(this.type, { params });
+		const job = await this.store.enqueue(this.type, { params, priority: options.priority, inputPaths: options.inputPaths });
 		new Notice(`Orchestrate: queued ${this.type} (${job.id})`);
 		void this.emitQueueUpdate();
 		return job;
@@ -73,7 +81,7 @@ export class FileJobBackend implements JobBackend {
 
 	// Finds a queued or running job of this type whose params resolve to the same
 	// dedupe key, so callers can collapse repeat enqueues onto one job.
-	private async findActiveJob(key: string): Promise<OrchestrationJob | null> {
+	private async findActiveJob(key: string): Promise<{ job: OrchestrationJob; file: TFile } | null> {
 		await this.store.ensureFolders();
 		const [queued, running] = await Promise.all([
 			this.store.listFolder('queued'),
@@ -81,7 +89,7 @@ export class FileJobBackend implements JobBackend {
 		]);
 		for (const entry of [...queued, ...running]) {
 			if (entry.job.type !== this.type) continue;
-			if (this.config.dedupeKey?.(entry.job.params ?? {}) === key) return entry.job;
+			if (this.config.dedupeKey?.(entry.job.params ?? {}) === key) return entry;
 		}
 		return null;
 	}
@@ -89,7 +97,17 @@ export class FileJobBackend implements JobBackend {
 	private async claimNext(): Promise<{ file: TFile; job: OrchestrationJob } | null> {
 		await this.store.ensureFolders();
 		const queued = await this.store.listFolder('queued');
-		const next = queued.find(e => e.job.type === this.type && !this.claimed.has(e.file.path));
+		let nextRetryAt = Number.POSITIVE_INFINITY;
+		const next = queued.find(e => {
+			if (e.job.type !== this.type || this.claimed.has(e.file.path)) return false;
+			const deferUntil = parseDeferredTime(e.job.deferUntil);
+			if (deferUntil !== null && deferUntil > Date.now()) {
+				nextRetryAt = Math.min(nextRetryAt, deferUntil);
+				return false;
+			}
+			return true;
+		});
+		if (!next && Number.isFinite(nextRetryAt)) this.scheduleRetryWake(nextRetryAt - Date.now());
 		if (!next) return null;
 		this.claimed.add(next.file.path);
 		try {
@@ -113,6 +131,10 @@ export class FileJobBackend implements JobBackend {
 			if (result.outputPaths && result.outputPaths.length > 0) {
 				await this.store.setOutputPaths(moved.file, result.outputPaths);
 			}
+			if (result.status === 'deferred') {
+				await this.deferEntry(moved, result);
+				return;
+			}
 			if (result.notes) {
 				await this.store.appendNotes(moved.file, result.notes);
 				if (result.notes.startsWith('Partial:')) await this.store.setPartial(moved.file, true);
@@ -128,6 +150,26 @@ export class FileJobBackend implements JobBackend {
 		} catch (e) {
 			await this.failEntry(moved, e instanceof Error ? e.message : String(e));
 		}
+	}
+
+	private async deferEntry(moved: { file: TFile; job: OrchestrationJob }, result: WorkflowResult): Promise<void> {
+		const retryAfterMs = Math.max(1000, result.retryAfterMs ?? 30_000);
+		const deferUntil = new Date(Date.now() + retryAfterMs).toISOString();
+		const message = result.notes ?? result.error ?? `Deferred; retrying after ${deferUntil}`;
+		await this.store.setDeferred(moved.file, message, deferUntil);
+		await this.store.move(moved.file, { ...moved.job, deferUntil }, 'queued');
+		this.scheduleRetryWake(retryAfterMs);
+		void this.emitQueueUpdate();
+	}
+
+	private scheduleRetryWake(delayMs: number): void {
+		const delay = Math.max(1000, Math.min(delayMs, 24 * 60 * 60 * 1000));
+		if (this.retryTimer) clearTimeout(this.retryTimer);
+		this.retryTimer = setTimeout(() => {
+			this.retryTimer = null;
+			void this.emitQueueUpdate();
+			this.plugin.orchestrationAutoRunner?.kickDrainType(this.type);
+		}, delay);
 	}
 
 	private async failEntry(
@@ -185,4 +227,18 @@ export class FileJobBackend implements JobBackend {
 			status,
 		});
 	}
+}
+
+function priorityRank(priority: JobPriority): number {
+	switch (priority) {
+		case 'high': return 0;
+		case 'normal': return 1;
+		case 'low': return 2;
+	}
+}
+
+function parseDeferredTime(value: string | undefined): number | null {
+	if (!value) return null;
+	const ts = Date.parse(value);
+	return Number.isFinite(ts) ? ts : null;
 }

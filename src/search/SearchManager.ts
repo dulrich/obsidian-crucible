@@ -7,6 +7,13 @@ import { SearchChunk, SearchHealth, SearchResponse } from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
 
+// Flush the upsert buffer once it reaches this many chunks. Each flush is one HTTP
+// request and one SQLite transaction on the companion, so batching across files keeps
+// a full rebuild to a handful of round-trips instead of one per file. ~500 chunks is
+// well under the companion's 20MB request-body cap.
+const SEARCH_UPSERT_FLUSH_CHUNKS = 500;
+const SEARCH_PROGRESS_EVERY_FILES = 10;
+
 export class SearchManager {
 	constructor(
 		private readonly app: App,
@@ -27,9 +34,54 @@ export class SearchManager {
 	}
 
 	async indexFile(file: TFile): Promise<number> {
-		if (!isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return 0;
+		const result = await this.indexFiles([file]);
+		return result.chunks;
+	}
+
+	// Index many files with as few round-trips as possible: build chunks per file, but
+	// buffer them across files and flush in bulk upserts. A full rebuild on a large vault
+	// collapses from one request/transaction per file to one per ~500 chunks.
+	async indexFiles(
+		files: TFile[],
+		onProgress?: (files: number, chunks: number) => Promise<void>,
+	): Promise<{ files: number; chunks: number }> {
+		const client = this.client();
+		let buffer: SearchChunk[] = [];
+		let indexedFiles = 0;
+		let totalChunks = 0;
+
+		const flush = async (): Promise<void> => {
+			if (buffer.length === 0) return;
+			const batch = buffer;
+			buffer = [];
+			try {
+				await this.attachEmbeddings(batch);
+			} catch (e) {
+				logWarn('search', 'embedding generation failed; indexing FTS-only chunks for batch', e);
+			}
+			await client.upsertChunks(batch);
+		};
+
+		for (const file of files) {
+			indexedFiles++;
+			const chunks = await this.buildFileChunks(file);
+			totalChunks += chunks.length;
+			buffer.push(...chunks);
+			if (buffer.length >= SEARCH_UPSERT_FLUSH_CHUNKS) await flush();
+			if (onProgress && (indexedFiles === files.length || indexedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
+				await onProgress(indexedFiles, totalChunks);
+			}
+		}
+		await flush();
+		return { files: indexedFiles, chunks: totalChunks };
+	}
+
+	// Read + chunk a single file with no embedding or upsert. Returns [] for files that
+	// aren't indexable or are excluded from search.
+	async buildFileChunks(file: TFile): Promise<SearchChunk[]> {
+		if (!isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return [];
 		const content = await this.app.vault.read(file);
-		const chunks = buildSearchChunks({
+		return buildSearchChunks({
 			vaultId: this.settings.searchVaultId,
 			path: file.path,
 			basename: file.basename,
@@ -39,13 +91,6 @@ export class SearchManager {
 			maxChars: this.settings.searchChunkMaxChars,
 			overlapChars: this.settings.searchChunkOverlapChars,
 		});
-		try {
-			await this.attachEmbeddings(chunks);
-		} catch (e) {
-			logWarn('search', 'embedding generation failed; indexing FTS-only chunks for', file.path, e);
-		}
-		await this.client().upsertChunks(chunks);
-		return chunks.length;
 	}
 
 	async deletePath(path: string): Promise<void> {
