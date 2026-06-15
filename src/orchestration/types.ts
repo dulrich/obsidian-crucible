@@ -12,10 +12,16 @@ export type JobType =
 	| 'command_run'
 	| 'search_rebuild'
 	| 'search_upsert_file'
+	| 'search_upsert_batch'
 	| 'search_delete_path'
 	| 'search_sweep';
 
 export type JobPriority = 'low' | 'normal' | 'high';
+
+export interface OrchestrationEnqueueOptions {
+	priority?: JobPriority;
+	inputPaths?: string[];
+}
 
 export interface OrchestrationJob {
 	id: string;
@@ -29,13 +35,15 @@ export interface OrchestrationJob {
 	params?: Record<string, unknown>;
 	error?: string;
 	progress?: string;
+	deferUntil?: string;
 }
 
 export interface WorkflowResult {
-	status: 'done' | 'failed';
+	status: 'done' | 'failed' | 'deferred';
 	outputPaths?: string[];
 	error?: string;
 	notes?: string;
+	retryAfterMs?: number;
 }
 
 export interface ScanReport {

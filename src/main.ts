@@ -32,14 +32,14 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { commandRunJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { commandRunJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { isSearchIndexablePath } from './search/chunker';
-import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
+import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { isPathExcluded, migrateExcludedFolders } from './exclusions';
 
 export type CrucibleCommandGroup =
@@ -121,6 +121,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
 		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
 		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
+		this.orchestrator.register('search_upsert_batch', new SearchUpsertBatchWorkflow(), searchBatchJobConfig());
 		this.orchestrator.register('search_delete_path', new SearchDeletePathWorkflow(), searchFileJobConfig());
 		this.orchestrator.register('search_sweep', new SearchSweepWorkflow(), searchSweepJobConfig());
 		this.enrichmentQueue = new EnrichmentQueueAdapter(this);
@@ -205,7 +206,7 @@ export default class CruciblePlugin extends Plugin {
 				void this.attachmentLocalizer.onNoteRename(file, oldPath);
 			}
 			if (isSearchIndexablePath(oldPath) && !isPathExcluded(this.settings, oldPath, 'search')) {
-				void this.orchestrator.enqueue('search_delete_path', { path: oldPath });
+				void this.orchestrator.enqueue('search_delete_path', { path: oldPath }, { priority: 'low' });
 			}
 			if (file instanceof TFile) this.enqueueSearchUpsert(file);
 		}));
@@ -213,7 +214,7 @@ export default class CruciblePlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('delete', (file) => {
 			void this.attachmentLocalizer.onNoteDelete(file.path);
 			if (isSearchIndexablePath(file.path) && !isPathExcluded(this.settings, file.path, 'search')) {
-				void this.orchestrator.enqueue('search_delete_path', { path: file.path });
+				void this.orchestrator.enqueue('search_delete_path', { path: file.path }, { priority: 'low' });
 			}
 		}));
 
@@ -265,9 +266,9 @@ export default class CruciblePlugin extends Plugin {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
-	enqueueSearchUpsert(file: TFile): void {
+	enqueueSearchUpsert(file: TFile, priority: 'low' | 'normal' | 'high' = 'low'): void {
 		if (!this.settings.searchEnabled || !isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return;
-		void this.orchestrator.enqueue('search_upsert_file', { path: file.path });
+		void this.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority, inputPaths: [file.path] });
 	}
 
 	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so

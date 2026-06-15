@@ -1,14 +1,16 @@
 import { requestUrl } from 'obsidian';
 import { SearchChunk, SearchHealth, SearchQueryOptions, SearchResponse } from './types';
 
+const SEARCH_SERVICE_TIMEOUT_MS = 5000;
+
 export class SearchServiceClient {
 	constructor(private readonly baseUrl: string, private readonly vaultId: string) {}
 
 	async health(): Promise<SearchHealth> {
-		const response = await requestUrl({
+		const response = await withTimeout(requestUrl({
 			url: `${this.root()}/health`,
 			method: 'GET',
-		});
+		}), SEARCH_SERVICE_TIMEOUT_MS, 'Search service health check timed out');
 		if (response.status < 200 || response.status >= 300) {
 			throw new Error(`Search service health check returned ${response.status}: ${response.text}`);
 		}
@@ -46,14 +48,14 @@ export class SearchServiceClient {
 	}
 
 	private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
-		const response = await requestUrl({
+		const response = await withTimeout(requestUrl({
 			url: `${this.root()}${path}`,
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify(body),
-		});
+		}), SEARCH_SERVICE_TIMEOUT_MS, `Search service ${path} timed out`);
 		if (response.status < 200 || response.status >= 300) {
 			throw new Error(`Search service ${path} returned ${response.status}: ${response.text}`);
 		}
@@ -62,6 +64,18 @@ export class SearchServiceClient {
 
 	private root(): string {
 		return (this.baseUrl || 'http://127.0.0.1:8765').replace(/\/$/, '');
+	}
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+	});
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 
