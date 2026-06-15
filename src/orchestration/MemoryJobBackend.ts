@@ -1,7 +1,7 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobType, OrchestrationJob, WorkflowResult } from './types';
+import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { MemoryJobQueue } from './MemoryJobQueue';
@@ -35,7 +35,7 @@ export class MemoryJobBackend implements JobBackend {
 		return this.queue;
 	}
 
-	async enqueue(params: Record<string, unknown>): Promise<OrchestrationJob | null> {
+	async enqueue(params: Record<string, unknown>, _options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null> {
 		const key = this.config.dedupeKey ? this.config.dedupeKey(params) : '';
 		if (!key) return null;
 		const display = this.config.display ? this.config.display(params) : {};

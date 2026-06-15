@@ -218,7 +218,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue daily brief lite',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('daily_brief_lite'),
+		run: () => plugin.orchestrator.enqueue('daily_brief_lite', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -228,7 +228,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: () => {
 			new FilePickerModal(plugin.app, 'Pick a transcript note', (file) => {
-				void plugin.orchestrator.enqueue('transcript_refine', { targetPath: file.path });
+					void plugin.orchestrator.enqueue('transcript_refine', { targetPath: file.path }, { priority: 'high', inputPaths: [file.path] });
 			}).open();
 		},
 	});
@@ -238,7 +238,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue YouTube tracker',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('youtube_tracker'),
+		run: () => plugin.orchestrator.enqueue('youtube_tracker', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -246,7 +246,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue YouTube tracker consolidation',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('youtube_tracker_consolidate'),
+		run: () => plugin.orchestrator.enqueue('youtube_tracker_consolidate', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -261,7 +261,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue Blogs tracker',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('blogs_tracker'),
+		run: () => plugin.orchestrator.enqueue('blogs_tracker', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -269,7 +269,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue Blogs tracker consolidation',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('blogs_tracker_consolidate'),
+		run: () => plugin.orchestrator.enqueue('blogs_tracker_consolidate', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -277,7 +277,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue link scan',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('link_scan'),
+		run: () => plugin.orchestrator.enqueue('link_scan', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -312,7 +312,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Search: rebuild index',
 		group: 'Search',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('search_rebuild'),
+		run: () => plugin.orchestrator.enqueue('search_rebuild', {}, { priority: 'high' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -327,9 +327,9 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => {
 			const file = plugin.app.workspace.getActiveFile();
 			if (!file) return;
-			plugin.enqueueSearchUpsert(file);
-		},
-	});
+				plugin.enqueueSearchUpsert(file, 'high');
+			},
+		});
 }
 
 /** Escape a cell for a Markdown table. */

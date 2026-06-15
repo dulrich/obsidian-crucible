@@ -13,6 +13,12 @@ const STATUS_FOLDER: Record<JobStatus, string> = {
 	failed: 'failed',
 };
 
+const PRIORITY_RANK: Record<JobPriority, number> = {
+	high: 0,
+	normal: 1,
+	low: 2,
+};
+
 export interface QueuePaths {
 	root: string;
 	inbox: string;
@@ -105,7 +111,10 @@ export class JobStore {
 			if (job) out.push({ job, file: child });
 		}
 
-		out.sort((a, b) => a.job.id.localeCompare(b.job.id));
+		out.sort((a, b) => {
+			const priority = PRIORITY_RANK[a.job.priority] - PRIORITY_RANK[b.job.priority];
+			return priority !== 0 ? priority : a.job.id.localeCompare(b.job.id);
+		});
 		return out;
 	}
 
@@ -128,8 +137,9 @@ export class JobStore {
 			: undefined;
 		const error = typeof fm.error === 'string' ? fm.error : undefined;
 		const progress = typeof fm.progress === 'string' ? fm.progress : undefined;
+		const deferUntil = typeof fm.deferUntil === 'string' ? fm.deferUntil : undefined;
 
-		return { id, type, status, priority, created, updated, inputPaths, outputPaths, params, error, progress };
+		return { id, type, status, priority, created, updated, inputPaths, outputPaths, params, error, progress, deferUntil };
 	}
 
 	async move(file: TFile, job: OrchestrationJob, toStatus: JobStatus): Promise<{ file: TFile; job: OrchestrationJob }> {
@@ -149,6 +159,7 @@ export class JobStore {
 			await updateFrontmatter(this.app, moved, (fm) => {
 				fm.status = toStatus;
 				fm.updated = updated;
+				if (toStatus !== 'queued') delete fm.deferUntil;
 			});
 		} catch (err) {
 			// The folder is the source of truth for which queue bucket a job is in, so a
@@ -165,8 +176,24 @@ export class JobStore {
 
 		return {
 			file: moved,
-			job: { ...job, status: toStatus, updated },
+			job: { ...job, status: toStatus, updated, deferUntil: toStatus === 'queued' ? job.deferUntil : undefined },
 		};
+	}
+
+	async setPriority(file: TFile, priority: JobPriority): Promise<void> {
+		await updateFrontmatter(this.app, file, (fm) => {
+			fm.priority = priority;
+			fm.updated = nowIso();
+		});
+	}
+
+	async setDeferred(file: TFile, message: string, deferUntil: string): Promise<void> {
+		await updateFrontmatter(this.app, file, (fm) => {
+			fm.progress = message;
+			fm.deferUntil = deferUntil;
+			delete fm.error;
+			fm.updated = nowIso();
+		});
 	}
 
 	async setError(file: TFile, message: string): Promise<void> {

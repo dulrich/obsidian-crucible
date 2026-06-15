@@ -17,6 +17,7 @@ mkdirSync(dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
 db.exec(`
 PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
 CREATE TABLE IF NOT EXISTS chunks (
   id TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,

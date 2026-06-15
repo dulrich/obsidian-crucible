@@ -91,7 +91,19 @@ export function searchRebuildJobConfig(): JobTypeConfig {
 		maxParallel: 1,
 		minIntervalMs: 0,
 		dedupeKey: () => 'search-rebuild',
-		timeoutMs: 0,
+	};
+}
+
+export function searchBatchJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: (p) => {
+			const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';
+			const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
+			return rebuildId && batchIndex >= 0 ? `search-batch:${rebuildId}:${batchIndex}` : '';
+		},
 	};
 }
 

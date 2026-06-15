@@ -3,6 +3,8 @@ import type { Orchestrator } from './Orchestrator';
 import type { JobType } from './types';
 import { Semaphore } from './utils/semaphore';
 
+const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
+
 // Drains the unified queue per job type. Each type runs up to its configured
 // `maxParallel` workers, each spaced by the type's shared MinIntervalGate, with a
 // global Semaphore bounding total in-flight jobs across all types. File-backed
@@ -18,6 +20,7 @@ export class OrchestrationAutoRunner {
 	// where a job enqueued during wind-down would wait for the next event.
 	private readonly redrainRequested = new Set<JobType>();
 	private readonly globalSem: Semaphore;
+	private fileDrainReady = false;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly orchestrator: Orchestrator) {
 		this.enabled = plugin.settings.orchestrationQueueAutorunEnabled === true;
@@ -26,6 +29,13 @@ export class OrchestrationAutoRunner {
 		if (bus) {
 			this.unsubscribe = bus.on('orchestration-queue-updated', () => this.kickAll());
 		}
+		plugin.app.workspace.onLayoutReady(() => {
+			setTimeout(() => {
+				if (this.disposed) return;
+				this.fileDrainReady = true;
+				this.kickAll();
+			}, INITIAL_FILE_DRAIN_DELAY_MS);
+		});
 		this.kickAll();
 	}
 
@@ -41,7 +51,7 @@ export class OrchestrationAutoRunner {
 
 	setEnabled(enabled: boolean): void {
 		this.enabled = enabled;
-		if (enabled) this.kickAll();
+		if (enabled && this.fileDrainReady) this.kickAll();
 	}
 
 	// Manual "Run next": execute a single file-backed job regardless of autorun.
@@ -67,7 +77,7 @@ export class OrchestrationAutoRunner {
 
 	// File types only drain under autorun; memory types always drain.
 	private shouldDrain(type: JobType): boolean {
-		return this.orchestrator.drainsWithoutAutorun(type) || this.enabled;
+		return this.orchestrator.drainsWithoutAutorun(type) || (this.enabled && this.fileDrainReady);
 	}
 
 	private async drainType(type: JobType): Promise<void> {
