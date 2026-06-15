@@ -133,8 +133,6 @@ export class Orchestrator {
 			}
 		}
 
-		await this.ensureQueueIgnored();
-
 		const queuedMigrated = queued.filter(e => migratedPaths.has(e.file.path)).length;
 		const runningMigrated = running.filter(e => migratedPaths.has(e.file.path)).length;
 		const report: ScanReport = {
@@ -153,11 +151,4 @@ export class Orchestrator {
 		return report;
 	}
 
-	private async ensureQueueIgnored(): Promise<void> {
-		const root = this.store.paths().root;
-		if (!this.plugin.settings.lintIgnoredFolders.includes(root)) {
-			this.plugin.settings.lintIgnoredFolders = [...this.plugin.settings.lintIgnoredFolders, root];
-			await this.plugin.saveSettings();
-		}
-	}
 }

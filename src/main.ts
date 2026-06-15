@@ -32,11 +32,15 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { commandRunJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { commandRunJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
+import { SearchManager } from './search/SearchManager';
+import { isSearchIndexablePath } from './search/chunker';
+import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
+import { isPathExcluded, migrateExcludedFolders } from './exclusions';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -48,6 +52,7 @@ export type CrucibleCommandGroup =
 	| 'Agents'
 	| 'Orchestrations'
 	| 'Ingestion'
+	| 'Search'
 	| 'Other';
 
 export interface CrucibleCommandEntry {
@@ -81,6 +86,7 @@ export default class CruciblePlugin extends Plugin {
 	noteLocks: NoteLockManager;
 	private noteLockOverlay: NoteLockOverlay;
 	enrichmentQueue: EnrichmentQueueAdapter;
+	searchManager: SearchManager;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	triggers: TriggerRegistry;
 	private tocComponent: TableOfContentsUI | null = null;
@@ -100,6 +106,7 @@ export default class CruciblePlugin extends Plugin {
 		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.chainManager = new ChainManager(this.app, this.noteLocks);
 		this.providerManager = new ProviderManager(this.app);
+		this.searchManager = new SearchManager(this.app, this.settings, this.providerManager);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 		this.jobStore = new JobStore(this);
 		this.orchestrator = new Orchestrator(this, this.jobStore);
@@ -112,6 +119,10 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
+		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
+		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
+		this.orchestrator.register('search_delete_path', new SearchDeletePathWorkflow(), searchFileJobConfig());
+		this.orchestrator.register('search_sweep', new SearchSweepWorkflow(), searchSweepJobConfig());
 		this.enrichmentQueue = new EnrichmentQueueAdapter(this);
 		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 		this.triggers = new TriggerRegistry(this, () => this.isMaterializing);
@@ -141,7 +152,10 @@ export default class CruciblePlugin extends Plugin {
 		registerStaticCommands(this);
 
 		// --- Events ---
-		this.registerEvent(this.app.vault.on('create', (file) => { void this.handleFileCreate(file); }));
+		this.registerEvent(this.app.vault.on('create', (file) => {
+			void this.handleFileCreate(file);
+			if (file instanceof TFile) this.enqueueSearchUpsert(file);
+		}));
 
 		const debouncedLint = debounce(async (file: TFile) => {
 			// Skip while a mutating command/chain holds the note's lock: it is the sole
@@ -165,10 +179,18 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}, 3000, true);
 
+		const debouncedSearchIndex = debounce(async (file: TFile) => {
+			if (this.noteLocks.isLocked(file.path) || this.isMaterializing) return;
+			this.enqueueSearchUpsert(file);
+		}, 2500, true);
+
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
 				debouncedLint(file);
 				debouncedLocalize(file);
+			}
+			if (file instanceof TFile && isSearchIndexablePath(file.path)) {
+				debouncedSearchIndex(file);
 			}
 		}));
 
@@ -182,10 +204,17 @@ export default class CruciblePlugin extends Plugin {
 			if (file instanceof TFile && file.extension === 'md') {
 				void this.attachmentLocalizer.onNoteRename(file, oldPath);
 			}
+			if (isSearchIndexablePath(oldPath) && !isPathExcluded(this.settings, oldPath, 'search')) {
+				void this.orchestrator.enqueue('search_delete_path', { path: oldPath });
+			}
+			if (file instanceof TFile) this.enqueueSearchUpsert(file);
 		}));
 
 		this.registerEvent(this.app.vault.on('delete', (file) => {
 			void this.attachmentLocalizer.onNoteDelete(file.path);
+			if (isSearchIndexablePath(file.path) && !isPathExcluded(this.settings, file.path, 'search')) {
+				void this.orchestrator.enqueue('search_delete_path', { path: file.path });
+			}
 		}));
 
 		this.registerEvent(
@@ -234,6 +263,11 @@ export default class CruciblePlugin extends Plugin {
 
 	activeEditor(): Editor | undefined {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
+	}
+
+	enqueueSearchUpsert(file: TFile): void {
+		if (!this.settings.searchEnabled || !isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return;
+		void this.orchestrator.enqueue('search_upsert_file', { path: file.path });
 	}
 
 	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so
@@ -309,6 +343,20 @@ export default class CruciblePlugin extends Plugin {
 	
 	private async migrateSettings() {
 		let dirty = false;
+		const legacySettings = this.settings as CrucibleSettings & { lintIgnoredFolders?: unknown };
+		const excludedFolders = Array.isArray(this.settings.excludedFolders) ? this.settings.excludedFolders : [];
+		const legacyLintFolders = Array.isArray(legacySettings.lintIgnoredFolders)
+			? legacySettings.lintIgnoredFolders.filter((v): v is string => typeof v === 'string')
+			: [];
+		const migratedExclusions = migrateExcludedFolders(excludedFolders, legacyLintFolders);
+		if (JSON.stringify(migratedExclusions) !== JSON.stringify(this.settings.excludedFolders)) {
+			this.settings.excludedFolders = migratedExclusions;
+			dirty = true;
+		}
+		if ('lintIgnoredFolders' in legacySettings) {
+			delete legacySettings.lintIgnoredFolders;
+			dirty = true;
+		}
 
 		for (const agent of this.settings.agents) {
 			if (!agent.executionMode) {
