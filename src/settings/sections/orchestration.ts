@@ -257,6 +257,16 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindNumber(searchGroup, {
+		name: 'Automatic edit debounce',
+		desc: 'Milliseconds to wait before indexing ordinary note edits. Active-note edits always wait for 30000 ms of inactivity.',
+		placeholder: '5000',
+		get: () => String(s.searchIndexDebounceMs),
+		set: (v) => { const n = Number(v.trim()); s.searchIndexDebounceMs = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5000; },
+		min: 0,
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
 		name: 'Result limit',
 		desc: 'Default number of results shown in the search modal.',
 		placeholder: '12',

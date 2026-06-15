@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   id TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
+  content_hash TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL,
   heading TEXT NOT NULL,
   text TEXT NOT NULL,
@@ -41,12 +42,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 `);
 
+const chunkColumns = db.prepare('PRAGMA table_info(chunks)').all().map(row => row.name);
+if (!chunkColumns.includes('content_hash')) {
+	db.exec("ALTER TABLE chunks ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''");
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
+
 const upsertChunk = db.prepare(`
-INSERT INTO chunks (id, vault_id, path, title, heading, text, mtime, ordinal, metadata_json, embedding_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   vault_id = excluded.vault_id,
   path = excluded.path,
+  content_hash = excluded.content_hash,
   title = excluded.title,
   heading = excluded.heading,
   text = excluded.text,
@@ -59,6 +67,14 @@ const deleteFtsById = db.prepare('DELETE FROM chunks_fts WHERE id = ?');
 const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
 const deleteByPath = db.prepare('DELETE FROM chunks WHERE vault_id = ? AND path = ?');
 const selectIdsByPath = db.prepare('SELECT id FROM chunks WHERE vault_id = ? AND path = ?');
+const selectStateByPath = db.prepare(`
+SELECT path, content_hash, MAX(mtime) AS mtime, COUNT(*) AS chunk_count
+FROM chunks
+WHERE vault_id = ? AND path = ?
+GROUP BY path, content_hash
+ORDER BY chunk_count DESC
+LIMIT 1
+`);
 const resetChunks = db.prepare('DELETE FROM chunks WHERE vault_id = ?');
 const resetFts = db.prepare('DELETE FROM chunks_fts WHERE vault_id = ?');
 
@@ -99,24 +115,50 @@ const server = createServer(async (req, res) => {
 			}
 			return json(res, 200, { ok: true });
 		}
+		if (req.method === 'POST' && url.pathname === '/v1/files/state') {
+			const body = await readJson(req);
+			const vaultId = requireString(body.vaultId, 'vaultId');
+			const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
+			const files = [];
+			for (const path of paths) {
+				const row = selectStateByPath.get(vaultId, path);
+				if (!row) continue;
+				files.push({
+					path: row.path,
+					contentHash: row.content_hash || undefined,
+					mtime: row.mtime,
+					chunkCount: row.chunk_count,
+				});
+			}
+			return json(res, 200, { ok: true, files });
+		}
 		if (req.method === 'POST' && url.pathname === '/v1/chunks/upsert') {
 			const body = await readJson(req);
 			const chunks = Array.isArray(body.chunks) ? body.chunks : [];
 			db.exec('BEGIN');
 			try {
+				const clearedPaths = new Set();
 				for (const chunk of chunks) {
 					const id = requireString(chunk.id, 'chunk.id');
 					const vaultId = requireString(chunk.vaultId ?? body.vaultId, 'chunk.vaultId');
 					const path = requireString(chunk.path, 'chunk.path');
+					const contentHash = requireString(chunk.contentHash, 'chunk.contentHash');
 					const title = String(chunk.title ?? path);
 					const heading = String(chunk.heading ?? '');
 					const text = requireString(chunk.text, 'chunk.text');
 					const mtime = Number(chunk.mtime ?? 0);
 					const ordinal = Number(chunk.ordinal ?? 0);
+					const pathKey = `${vaultId}\n${path}`;
+					if (!clearedPaths.has(pathKey)) {
+						for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(row.id);
+						deleteByPath.run(vaultId, path);
+						clearedPaths.add(pathKey);
+					}
 					upsertChunk.run(
 						id,
 						vaultId,
 						path,
+						contentHash,
 						title,
 						heading,
 						text,
@@ -152,9 +194,17 @@ WHERE chunks_fts.vault_id = ? AND chunks_fts MATCH ?
 ORDER BY score_text
 LIMIT ?
 `).all(vaultId, match, limit);
+			const totalRow = db.prepare(`
+SELECT COUNT(*) AS total
+FROM chunks_fts
+WHERE chunks_fts.vault_id = ? AND chunks_fts MATCH ?
+`).get(vaultId, match);
+			const total = Number(totalRow?.total ?? rows.length);
 			return json(res, 200, {
 				mode: 'fts',
 				semanticAvailable: false,
+				total,
+				hasMore: total > rows.length,
 				results: rows.map(row => ({
 					chunkId: row.id,
 					path: row.path,

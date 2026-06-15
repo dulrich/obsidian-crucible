@@ -50,7 +50,7 @@ export class VaultSearchModal extends Modal {
 			const response = this.sweepMode
 				? await this.plugin.searchManager.sweep(query)
 				: await this.plugin.searchManager.search(query);
-			this.statusEl.setText(`${response.results.length} results${response.mode ? ` · ${response.mode}` : ''}${response.semanticAvailable === false ? ' · FTS only' : ''}`);
+			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false));
 			this.renderResults(response.results);
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
@@ -97,6 +97,13 @@ export class VaultSearchModal extends Modal {
 		await this.app.workspace.getLeaf(false).openFile(file);
 		this.close();
 	}
+}
+
+function formatSearchStatus(visible: number, total: number | undefined, mode: string | undefined, ftsOnly: boolean): string {
+	const count = typeof total === 'number' && total > visible
+		? `Showing ${visible} of ${total}`
+		: `${visible} results`;
+	return `${count}${mode ? ` · ${mode}` : ''}${ftsOnly ? ' · FTS only' : ''}`;
 }
 
 function formatScore(result: SearchResult): string {

@@ -39,6 +39,7 @@ import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { isSearchIndexablePath } from './search/chunker';
+import { searchIndexDebounceMs } from './search/debounce';
 import { SearchAutoIndexGate } from './search/lifecycleGate';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { isPathExcluded, migrateExcludedFolders } from './exclusions';
@@ -192,10 +193,26 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}, 3000, true);
 
-		const debouncedSearchIndex = debounce(async (file: TFile) => {
-			if (this.noteLocks.isLocked(file.path) || this.isMaterializing) return;
-			this.enqueueSearchUpsert(file, 'low', { source: 'auto' });
-		}, 2500, true);
+		const searchIndexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+		this.register(() => {
+			for (const timer of searchIndexTimers.values()) clearTimeout(timer);
+			searchIndexTimers.clear();
+		});
+		const scheduleSearchIndex = (file: TFile) => {
+			const path = file.path;
+			const existing = searchIndexTimers.get(path);
+			if (existing) clearTimeout(existing);
+			const activePath = this.app.workspace.getActiveFile()?.path;
+			const delay = searchIndexDebounceMs(this.settings, activePath === path);
+			const timer = setTimeout(() => {
+				searchIndexTimers.delete(path);
+				const current = this.app.vault.getAbstractFileByPath(path);
+				if (!(current instanceof TFile) || !isSearchIndexablePath(current.path)) return;
+				if (this.noteLocks.isLocked(current.path) || this.isMaterializing) return;
+				this.enqueueSearchUpsert(current, 'low', { source: 'auto' });
+			}, delay);
+			searchIndexTimers.set(path, timer);
+		};
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
@@ -203,7 +220,7 @@ export default class CruciblePlugin extends Plugin {
 				debouncedLocalize(file);
 			}
 			if (file instanceof TFile && isSearchIndexablePath(file.path)) {
-				debouncedSearchIndex(file);
+				scheduleSearchIndex(file);
 			}
 		}));
 
