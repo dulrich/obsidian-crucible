@@ -151,7 +151,7 @@ export class SearchSweepWorkflow implements Workflow {
 		}
 		return {
 			status: 'done',
-			notes: `Sweep returned ${response.results.length} results (${response.mode ?? 'unknown'}).`,
+			notes: `Sweep returned ${response.total ?? response.results.length} results (${response.mode ?? 'unknown'}).`,
 		};
 	}
 }

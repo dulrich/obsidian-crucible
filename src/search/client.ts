@@ -1,5 +1,5 @@
 import { requestUrl } from 'obsidian';
-import { SearchChunk, SearchHealth, SearchQueryOptions, SearchResponse } from './types';
+import { SearchChunk, SearchFileState, SearchHealth, SearchQueryOptions, SearchResponse } from './types';
 
 const SEARCH_SERVICE_TIMEOUT_MS = 5000;
 
@@ -34,6 +34,16 @@ export class SearchServiceClient {
 			vaultId: this.vaultId,
 			paths: [path],
 		});
+	}
+
+	async fileStates(paths: string[]): Promise<Map<string, SearchFileState>> {
+		const uniquePaths = Array.from(new Set(paths.filter(path => path.trim().length > 0)));
+		if (uniquePaths.length === 0) return new Map();
+		const json = await this.post('/v1/files/state', {
+			vaultId: this.vaultId,
+			paths: uniquePaths,
+		});
+		return normalizeFileStates(json);
 	}
 
 	async search(options: SearchQueryOptions): Promise<SearchResponse> {
@@ -112,10 +122,31 @@ function normalizeSearchResponse(value: unknown): SearchResponse {
 				metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : undefined,
 			};
 		}).filter(row => row.path && row.snippet),
+		total: typeof raw.total === 'number' && Number.isFinite(raw.total) ? raw.total : undefined,
+		hasMore: typeof raw.hasMore === 'boolean' ? raw.hasMore : undefined,
 		mode: raw.mode === 'vector' || raw.mode === 'hybrid' || raw.mode === 'fts' ? raw.mode : undefined,
 		semanticAvailable: typeof raw.semanticAvailable === 'boolean' ? raw.semanticAvailable : undefined,
 		message: typeof raw.message === 'string' ? raw.message : undefined,
 	};
+}
+
+function normalizeFileStates(value: unknown): Map<string, SearchFileState> {
+	const out = new Map<string, SearchFileState>();
+	if (!value || typeof value !== 'object') return out;
+	const raw = value as Record<string, unknown>;
+	const files = Array.isArray(raw.files) ? raw.files : [];
+	for (const item of files) {
+		const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+		const path = stringField(row.path);
+		if (!path) continue;
+		out.set(path, {
+			path,
+			contentHash: typeof row.contentHash === 'string' && row.contentHash ? row.contentHash : undefined,
+			mtime: typeof row.mtime === 'number' && Number.isFinite(row.mtime) ? row.mtime : undefined,
+			chunkCount: typeof row.chunkCount === 'number' && Number.isFinite(row.chunkCount) ? row.chunkCount : undefined,
+		});
+	}
+	return out;
 }
 
 function stringField(value: unknown): string {

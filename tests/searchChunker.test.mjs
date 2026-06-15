@@ -21,7 +21,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { buildSearchChunks, isSearchIndexablePath, parseSearchDocument } = await import(pathToFileURL(outfile));
+const { buildSearchChunks, hashSearchContent, isSearchIndexablePath, parseSearchDocument } = await import(pathToFileURL(outfile));
 
 test('search index accepts markdown, qmd, and text files only', () => {
 	assert.equal(isSearchIndexablePath('daily/note.md'), true);
@@ -77,4 +77,6 @@ test('chunks are stable and retain section headings', () => {
 	assert.ok(first.some(c => c.heading === 'Second'));
 	assert.equal(first[0].vaultId, 'test');
 	assert.equal(first[0].path, 'daily/example.md');
+	assert.equal(first[0].contentHash, hashSearchContent(input.content));
+	assert.notEqual(first[0].contentHash, hashSearchContent(`${input.content}\nChanged`));
 });

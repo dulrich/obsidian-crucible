@@ -11,6 +11,7 @@ export interface SearchChunk {
 	id: string;
 	vaultId: string;
 	path: string;
+	contentHash: string;
 	title: string;
 	heading: string;
 	text: string;
@@ -43,9 +44,18 @@ export interface SearchResult {
 
 export interface SearchResponse {
 	results: SearchResult[];
+	total?: number;
+	hasMore?: boolean;
 	mode?: 'fts' | 'vector' | 'hybrid';
 	semanticAvailable?: boolean;
 	message?: string;
+}
+
+export interface SearchFileState {
+	path: string;
+	contentHash?: string;
+	mtime?: number;
+	chunkCount?: number;
 }
 
 export interface SearchQueryOptions {
