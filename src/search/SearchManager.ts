@@ -3,6 +3,7 @@ import { CrucibleSettings, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
 import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
 import { SearchServiceClient } from './client';
+import { CompanionAvailabilityGate } from './lifecycleGate';
 import { SearchChunk, SearchFileState, SearchHealth, SearchResponse } from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
@@ -14,6 +15,11 @@ import { isPathExcluded } from '../exclusions';
 const SEARCH_UPSERT_FLUSH_CHUNKS = 500;
 const SEARCH_PROGRESS_EVERY_FILES = 10;
 
+// Generic "what's worth surfacing" terms appended to a sweep's free-text description so a short
+// project brief still matches notes about source material, kits, and guides. Hand-tuned; not
+// user-configurable yet.
+const SEARCH_SWEEP_QUERY_EXPANSION = 'articles prompt kits project description relevant source repo guide';
+
 interface PreparedSearchFile {
 	file: TFile;
 	content: string;
@@ -21,6 +27,8 @@ interface PreparedSearchFile {
 }
 
 export class SearchManager {
+	private readonly availability = new CompanionAvailabilityGate();
+
 	constructor(
 		private readonly app: App,
 		private readonly settings: CrucibleSettings,
@@ -33,6 +41,19 @@ export class SearchManager {
 
 	async health(): Promise<SearchHealth> {
 		return await this.client().health();
+	}
+
+	// Single authority on companion availability for both the auto-index path and the
+	// orchestration workflows: caches a health probe per TTL window so a burst of jobs makes
+	// at most one probe, and a known-down companion short-circuits.
+	async companionAvailable(): Promise<boolean> {
+		return await this.availability.available(() => this.health());
+	}
+
+	// Flip the shared cache to offline when an in-flight operation fails with
+	// SearchServiceUnavailableError, so the next call defers without a fresh probe.
+	markCompanionOffline(): void {
+		this.availability.markOffline();
 	}
 
 	async resetIndex(): Promise<void> {
@@ -53,8 +74,8 @@ export class SearchManager {
 	): Promise<{ files: number; chunks: number }> {
 		const client = this.client();
 		let buffer: SearchChunk[] = [];
-		let indexedFiles = 0;
 		let processedFiles = 0;
+		let upsertedFiles = 0;
 		let totalChunks = 0;
 		const preparedFiles: PreparedSearchFile[] = [];
 
@@ -71,7 +92,6 @@ export class SearchManager {
 		};
 
 		for (const file of files) {
-			indexedFiles++;
 			const prepared = await this.prepareFile(file);
 			if (prepared) preparedFiles.push(prepared);
 		}
@@ -88,6 +108,7 @@ export class SearchManager {
 				continue;
 			}
 			const chunks = this.buildPreparedFileChunks(prepared);
+			upsertedFiles++;
 			totalChunks += chunks.length;
 			buffer.push(...chunks);
 			if (buffer.length >= SEARCH_UPSERT_FLUSH_CHUNKS) await flush();
@@ -96,7 +117,9 @@ export class SearchManager {
 			}
 		}
 		await flush();
-		return { files: indexedFiles, chunks: totalChunks };
+		// `files` is the count actually re-indexed (content changed), not the number seen — files
+		// whose content hash matched are skipped above and don't count.
+		return { files: upsertedFiles, chunks: totalChunks };
 	}
 
 	// Read + chunk a single file with no embedding or upsert. Returns [] for files that
@@ -158,7 +181,7 @@ export class SearchManager {
 	async sweep(description: string, limit?: number): Promise<SearchResponse> {
 		const query = [
 			description.trim(),
-			'articles prompt kits project description relevant source repo guide',
+			SEARCH_SWEEP_QUERY_EXPANSION,
 		].filter(Boolean).join('\n');
 		return await this.search(query, limit ?? Math.max(this.settings.searchResultLimit, 24));
 	}

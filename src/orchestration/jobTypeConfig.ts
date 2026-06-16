@@ -30,21 +30,18 @@ export interface JobTypeConfig {
 	timeoutMs?: number;
 }
 
-export const DEFAULT_JOB_TYPE_CONFIG: JobTypeConfig = {
-	persistence: 'file',
-	maxParallel: 1,
-	minIntervalMs: 0,
-};
+// The common shape for single-worker, file-backed job types: they differ only in how repeat
+// enqueues collapse, so each config below is just its dedupeKey.
+export function fileJobConfig(dedupeKey?: (params: Record<string, unknown>) => string): JobTypeConfig {
+	return { persistence: 'file', maxParallel: 1, minIntervalMs: 0, dedupeKey };
+}
+
+export const DEFAULT_JOB_TYPE_CONFIG: JobTypeConfig = fileJobConfig();
 
 // File-backed, but collapses repeat requests for the same transcript onto one active
 // job so rapid re-enqueues don't pile up duplicate runs on a note.
 export function transcriptRefineJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => (typeof p.targetPath === 'string' ? p.targetPath : ''),
-	};
+	return fileJobConfig((p) => (typeof p.targetPath === 'string' ? p.targetPath : ''));
 }
 
 // One queue entry per NOTE, not per video: a per-note job (params.targetPath set)
@@ -61,80 +58,50 @@ export function youtubeMetadataDedupeKey(p: Record<string, unknown>): string {
 // File-backed so triggered command runs survive restarts. Dedupes on
 // commandId+target so repeat trigger fires collapse onto one active job.
 export function commandRunJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => {
-			const commandId = typeof p.commandId === 'string' ? p.commandId.trim() : '';
-			if (!commandId) return '';
-			const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
-			return `${commandId}|${targetPath}`;
-		},
-	};
+	return fileJobConfig((p) => {
+		const commandId = typeof p.commandId === 'string' ? p.commandId.trim() : '';
+		if (!commandId) return '';
+		const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
+		return `${commandId}|${targetPath}`;
+	});
 }
 
 export function imageMetadataJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => {
-			const imagePath = typeof p.imagePath === 'string' ? p.imagePath : '';
-			const image = localizedImageInfo(imagePath);
-			if (!image) return '';
-			const schemaVersion = typeof p.schemaVersion === 'number' && Number.isFinite(p.schemaVersion)
-				? Math.floor(p.schemaVersion)
-				: IMAGE_METADATA_SCHEMA_VERSION;
-			return `image-metadata:${image.md5}:v${schemaVersion}`;
-		},
-	};
+	return fileJobConfig((p) => {
+		const imagePath = typeof p.imagePath === 'string' ? p.imagePath : '';
+		const image = localizedImageInfo(imagePath);
+		if (!image) return '';
+		const schemaVersion = typeof p.schemaVersion === 'number' && Number.isFinite(p.schemaVersion)
+			? Math.floor(p.schemaVersion)
+			: IMAGE_METADATA_SCHEMA_VERSION;
+		return `image-metadata:${image.md5}:v${schemaVersion}`;
+	});
 }
 
 export function searchFileJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => {
-			const path = typeof p.path === 'string' ? p.path : '';
-			return path ? `search-file:${path}` : '';
-		},
-	};
+	return fileJobConfig((p) => {
+		const path = typeof p.path === 'string' ? p.path : '';
+		return path ? `search-file:${path}` : '';
+	});
 }
 
 export function searchRebuildJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: () => 'search-rebuild',
-	};
+	return fileJobConfig(() => 'search-rebuild');
 }
 
 export function searchBatchJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => {
-			const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';
-			const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
-			return rebuildId && batchIndex >= 0 ? `search-batch:${rebuildId}:${batchIndex}` : '';
-		},
-	};
+	return fileJobConfig((p) => {
+		const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';
+		const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
+		return rebuildId && batchIndex >= 0 ? `search-batch:${rebuildId}:${batchIndex}` : '';
+	});
 }
 
 export function searchSweepJobConfig(): JobTypeConfig {
-	return {
-		persistence: 'file',
-		maxParallel: 1,
-		minIntervalMs: 0,
-		dedupeKey: (p) => {
-			const description = typeof p.description === 'string' ? p.description.trim() : '';
-			return description ? `search-sweep:${description}` : '';
-		},
-	};
+	return fileJobConfig((p) => {
+		const description = typeof p.description === 'string' ? p.description.trim() : '';
+		return description ? `search-sweep:${description}` : '';
+	});
 }
 
 // Memory-persistence config for the folded enrichment queue. maxParallel and the

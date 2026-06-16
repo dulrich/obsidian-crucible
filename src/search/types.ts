@@ -1,3 +1,14 @@
+// Thrown by SearchServiceClient when the companion does not respond successfully —
+// timeouts, connection failures, and 5xx. Callers branch on this (instanceof) to defer
+// + retry, instead of sniffing error message text. A 4xx is a real (non-retryable) bug
+// and stays a plain Error.
+export class SearchServiceUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'SearchServiceUnavailableError';
+	}
+}
+
 export interface SearchDocumentMetadata {
 	title: string;
 	created?: string;
