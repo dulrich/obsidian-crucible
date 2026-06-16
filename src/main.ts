@@ -39,12 +39,9 @@ import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner
 import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
-import { isSearchIndexablePath } from './search/chunker';
-import { searchIndexDebounceMs } from './search/debounce';
-import { SearchAutoIndexGate } from './search/lifecycleGate';
+import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
-import { isPathExcluded, migrateExcludedFolders } from './exclusions';
-import { logWarn } from './log';
+import { migrateExcludedFolders } from './exclusions';
 import { localizedImageInfo } from './orchestration/utils/imageMetadata';
 
 export type CrucibleCommandGroup =
@@ -74,8 +71,6 @@ export interface CrucibleCommandEntry {
 	queueable: boolean;
 }
 
-type SearchIndexSource = 'auto' | 'manual';
-
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
 	linter: Linter;
@@ -94,9 +89,9 @@ export default class CruciblePlugin extends Plugin {
 	private noteLockOverlay: NoteLockOverlay;
 	enrichmentQueue: EnrichmentQueueAdapter;
 	searchManager: SearchManager;
+	searchIndexCoordinator: SearchIndexCoordinator;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	triggers: TriggerRegistry;
-	private searchAutoIndexGate = new SearchAutoIndexGate();
 	private tocComponent: TableOfContentsUI | null = null;
 	// Chain-internal command ids registered for each "Chain: X" command, so a chain
 	// can be used as an (awaited, target-file-aware) step inside another chain.
@@ -122,6 +117,7 @@ export default class CruciblePlugin extends Plugin {
 		this.chainManager = new ChainManager(this.app, this.noteLocks);
 		this.providerManager = new ProviderManager(this.app);
 		this.searchManager = new SearchManager(this.app, this.settings, this.providerManager);
+		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 		this.jobStore = new JobStore(this);
 		this.orchestrator = new Orchestrator(this, this.jobStore);
@@ -160,10 +156,10 @@ export default class CruciblePlugin extends Plugin {
 		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
 		this.registerView(INGESTION_DASHBOARD_VIEW_TYPE, (leaf) => new IngestionDashboardView(leaf, this));
 		this.registerEvent(this.app.metadataCache.on('resolved', () => {
-			this.searchAutoIndexGate.markMetadataResolved();
+			this.searchIndexCoordinator.markMetadataResolved();
 		}));
 		this.app.workspace.onLayoutReady(() => {
-			this.searchAutoIndexGate.markLayoutReady();
+			this.searchIndexCoordinator.markLayoutReady();
 			void this.orchestrator.scan({ notify: false });
 		});
 
@@ -178,7 +174,7 @@ export default class CruciblePlugin extends Plugin {
 		// --- Events ---
 		this.registerEvent(this.app.vault.on('create', (file) => {
 			void this.handleFileCreate(file);
-			if (file instanceof TFile) this.enqueueSearchUpsert(file, 'low', { source: 'auto' });
+			this.searchIndexCoordinator.handleCreate(file);
 		}));
 
 		const debouncedLint = debounce(async (file: TFile) => {
@@ -203,35 +199,14 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}, 3000, true);
 
-		const searchIndexTimers = new Map<string, ReturnType<typeof setTimeout>>();
-		this.register(() => {
-			for (const timer of searchIndexTimers.values()) clearTimeout(timer);
-			searchIndexTimers.clear();
-		});
-		const scheduleSearchIndex = (file: TFile) => {
-			const path = file.path;
-			const existing = searchIndexTimers.get(path);
-			if (existing) clearTimeout(existing);
-			const activePath = this.app.workspace.getActiveFile()?.path;
-			const delay = searchIndexDebounceMs(this.settings, activePath === path);
-			const timer = setTimeout(() => {
-				searchIndexTimers.delete(path);
-				const current = this.app.vault.getAbstractFileByPath(path);
-				if (!(current instanceof TFile) || !isSearchIndexablePath(current.path)) return;
-				if (this.noteLocks.isLocked(current.path) || this.isMaterializing) return;
-				this.enqueueSearchUpsert(current, 'low', { source: 'auto' });
-			}, delay);
-			searchIndexTimers.set(path, timer);
-		};
+		this.register(() => this.searchIndexCoordinator.dispose());
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
 				debouncedLint(file);
 				debouncedLocalize(file);
 			}
-			if (file instanceof TFile && isSearchIndexablePath(file.path)) {
-				scheduleSearchIndex(file);
-			}
+			if (file instanceof TFile) this.searchIndexCoordinator.handleModify(file);
 		}));
 
 		this.registerEvent(this.app.workspace.on('editor-paste', (evt, editor, view) => {
@@ -244,13 +219,12 @@ export default class CruciblePlugin extends Plugin {
 			if (file instanceof TFile && file.extension === 'md') {
 				void this.attachmentLocalizer.onNoteRename(file, oldPath);
 			}
-			this.enqueueSearchDeletePath(oldPath, 'low', { source: 'auto' });
-			if (file instanceof TFile) this.enqueueSearchUpsert(file, 'low', { source: 'auto' });
+			this.searchIndexCoordinator.handleRename(file, oldPath);
 		}));
 
 		this.registerEvent(this.app.vault.on('delete', (file) => {
 			void this.attachmentLocalizer.onNoteDelete(file.path);
-			this.enqueueSearchDeletePath(file.path, 'low', { source: 'auto' });
+			this.searchIndexCoordinator.handleDelete(file.path);
 		}));
 
 		this.registerEvent(
@@ -301,24 +275,6 @@ export default class CruciblePlugin extends Plugin {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
-	enqueueSearchUpsert(file: TFile, priority: 'low' | 'normal' | 'high' = 'low', options: { source?: SearchIndexSource } = {}): void {
-		if (!this.settings.searchEnabled || !isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return;
-		if ((options.source ?? 'manual') === 'auto') {
-			void this.enqueueAutomaticSearchJob('search_upsert_file', { path: file.path }, priority, file.path, [file.path]);
-			return;
-		}
-		void this.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority, inputPaths: [file.path] });
-	}
-
-	private enqueueSearchDeletePath(path: string, priority: 'low' | 'normal' | 'high', options: { source?: SearchIndexSource } = {}): void {
-		if (!this.settings.searchEnabled || !isSearchIndexablePath(path) || isPathExcluded(this.settings, path, 'search')) return;
-		if ((options.source ?? 'manual') === 'auto') {
-			void this.enqueueAutomaticSearchJob('search_delete_path', { path }, priority, path);
-			return;
-		}
-		void this.orchestrator.enqueue('search_delete_path', { path }, { priority });
-	}
-
 	enqueueImageMetadataExtraction(imagePath: string, sourceNotePath?: string): void {
 		if (!this.canEnqueueImageMetadataExtraction()) return;
 		if (!localizedImageInfo(imagePath)) return;
@@ -338,22 +294,6 @@ export default class CruciblePlugin extends Plugin {
 		if (!provider || providerModality(provider.kind) === 'cli') return false;
 		const model = provider.models.find(m => m.id === ref.modelId);
 		return model?.capabilities?.includes('image-extraction') === true;
-	}
-
-	private async enqueueAutomaticSearchJob(
-		type: 'search_upsert_file' | 'search_delete_path',
-		params: { path: string },
-		priority: 'low' | 'normal' | 'high',
-		path: string,
-		inputPaths?: string[],
-	): Promise<void> {
-		if (!this.searchAutoIndexGate.isReady()) return;
-		const companionAvailable = await this.searchAutoIndexGate.companionAvailable(() => this.searchManager.health());
-		if (!companionAvailable) {
-			logWarn('search', `Skipped automatic ${type}; search companion unavailable`, path);
-			return;
-		}
-		void this.orchestrator.enqueue(type, params, { priority, inputPaths });
 	}
 
 	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so
