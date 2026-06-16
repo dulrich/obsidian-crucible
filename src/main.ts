@@ -1,6 +1,6 @@
 import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor, normalizePath } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
-import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema, Provider } from "./types";
+import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema, Provider, providerModality } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
@@ -32,8 +32,9 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { commandRunJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
+import { ImageMetadataExtractWorkflow } from './orchestration/workflows/ImageMetadataExtractWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
@@ -44,6 +45,7 @@ import { SearchAutoIndexGate } from './search/lifecycleGate';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { isPathExcluded, migrateExcludedFolders } from './exclusions';
 import { logWarn } from './log';
+import { localizedImageInfo } from './orchestration/utils/imageMetadata';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -108,7 +110,14 @@ export default class CruciblePlugin extends Plugin {
 		this.noteLocks = new NoteLockManager(this.ingestionEvents);
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; }, this.noteLocks);
-		this.attachmentLocalizer = new AttachmentLocalizer(this.app, this.settings, this.linter, (state: boolean) => { this.isMaterializing = state; }, this.noteLocks);
+		this.attachmentLocalizer = new AttachmentLocalizer(
+			this.app,
+			this.settings,
+			this.linter,
+			(state: boolean) => { this.isMaterializing = state; },
+			this.noteLocks,
+			(imagePath, sourceNotePath) => this.enqueueImageMetadataExtraction(imagePath, sourceNotePath),
+		);
 		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.chainManager = new ChainManager(this.app, this.noteLocks);
 		this.providerManager = new ProviderManager(this.app);
@@ -125,6 +134,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
+		this.orchestrator.register('image_metadata_extract', new ImageMetadataExtractWorkflow(), imageMetadataJobConfig());
 		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
 		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
 		this.orchestrator.register('search_upsert_batch', new SearchUpsertBatchWorkflow(), searchBatchJobConfig());
@@ -307,6 +317,27 @@ export default class CruciblePlugin extends Plugin {
 			return;
 		}
 		void this.orchestrator.enqueue('search_delete_path', { path }, { priority });
+	}
+
+	enqueueImageMetadataExtraction(imagePath: string, sourceNotePath?: string): void {
+		if (!this.canEnqueueImageMetadataExtraction()) return;
+		if (!localizedImageInfo(imagePath)) return;
+		const inputPaths = [imagePath, sourceNotePath].filter((p): p is string => typeof p === 'string' && p.length > 0);
+		void this.orchestrator.enqueue('image_metadata_extract', {
+			imagePath,
+			sourceNotePath,
+			schemaVersion: this.settings.imageMetadataExtractionSchemaVersion,
+		}, { priority: 'low', inputPaths });
+	}
+
+	private canEnqueueImageMetadataExtraction(): boolean {
+		if (!this.settings.imageMetadataExtractionEnabled) return false;
+		const ref = this.settings.imageMetadataExtractionModel;
+		if (!ref) return false;
+		const provider = this.settings.providers.find(p => p.id === ref.providerId);
+		if (!provider || providerModality(provider.kind) === 'cli') return false;
+		const model = provider.models.find(m => m.id === ref.modelId);
+		return model?.capabilities?.includes('image-extraction') === true;
 	}
 
 	private async enqueueAutomaticSearchJob(

@@ -10,6 +10,7 @@ export type JobType =
 	| 'link_scan'
 	| 'youtube_metadata_fetch'
 	| 'command_run'
+	| 'image_metadata_extract'
 	| 'search_rebuild'
 	| 'search_upsert_file'
 	| 'search_upsert_batch'
