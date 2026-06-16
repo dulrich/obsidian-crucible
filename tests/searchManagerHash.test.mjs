@@ -103,7 +103,8 @@ test('unchanged content hash skips search chunk upsert', async () => {
 
 	const result = await manager.indexFiles([file]);
 
-	assert.equal(result.files, 1);
+	// Hash matched, so nothing is re-indexed: `files` reports work done, not files seen.
+	assert.equal(result.files, 0);
 	assert.equal(result.chunks, 0);
 	assert.equal(upserted.length, 0);
 });

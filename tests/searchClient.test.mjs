@@ -25,6 +25,7 @@ await esbuild.build({
 				contents: `
 					export async function requestUrl(options) {
 						globalThis.__searchClientRequests.push(options);
+						if (globalThis.__searchClientThrow) throw globalThis.__searchClientThrow;
 						return globalThis.__searchClientResponse;
 					}
 				`,
@@ -36,9 +37,10 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { SearchServiceClient } = await import(pathToFileURL(outfile));
+const { SearchServiceClient, SearchServiceUnavailableError } = await import(pathToFileURL(outfile));
 
 test('SearchServiceClient parses total and hasMore', async () => {
+	globalThis.__searchClientThrow = undefined;
 	globalThis.__searchClientRequests = [];
 	globalThis.__searchClientResponse = {
 		status: 200,
@@ -67,6 +69,7 @@ test('SearchServiceClient parses total and hasMore', async () => {
 });
 
 test('SearchServiceClient parses file states by path', async () => {
+	globalThis.__searchClientThrow = undefined;
 	globalThis.__searchClientRequests = [];
 	globalThis.__searchClientResponse = {
 		status: 200,
@@ -86,4 +89,35 @@ test('SearchServiceClient parses file states by path', async () => {
 	assert.equal(states.get('note.md')?.contentHash, 'abcd1234');
 	assert.equal(states.get('note.md')?.chunkCount, 3);
 	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).paths[0], 'note.md');
+});
+
+test('SearchServiceClient throws SearchServiceUnavailableError on a 5xx', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = { status: 503, text: 'overloaded', json: {} };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await assert.rejects(client.search({ query: 'x', limit: 1 }), SearchServiceUnavailableError);
+});
+
+test('SearchServiceClient throws SearchServiceUnavailableError when the request fails', async () => {
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientThrow = new Error('ECONNREFUSED');
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await assert.rejects(client.health(), SearchServiceUnavailableError);
+	globalThis.__searchClientThrow = undefined;
+});
+
+test('SearchServiceClient keeps a 4xx as a plain (non-retryable) Error', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = { status: 400, text: 'bad request', json: {} };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await assert.rejects(client.search({ query: 'x', limit: 1 }), (err) => {
+		assert.equal(err instanceof SearchServiceUnavailableError, false);
+		assert.match(err.message, /returned 400/);
+		return true;
+	});
 });

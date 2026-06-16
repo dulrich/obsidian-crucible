@@ -1,5 +1,7 @@
-import { requestUrl } from 'obsidian';
-import { SearchChunk, SearchFileState, SearchHealth, SearchQueryOptions, SearchResponse } from './types';
+import { RequestUrlResponse, requestUrl } from 'obsidian';
+import { SearchChunk, SearchFileState, SearchHealth, SearchQueryOptions, SearchResponse, SearchServiceUnavailableError } from './types';
+
+export { SearchServiceUnavailableError } from './types';
 
 const SEARCH_SERVICE_TIMEOUT_MS = 5000;
 
@@ -7,13 +9,7 @@ export class SearchServiceClient {
 	constructor(private readonly baseUrl: string, private readonly vaultId: string) {}
 
 	async health(): Promise<SearchHealth> {
-		const response = await withTimeout(requestUrl({
-			url: `${this.root()}/health`,
-			method: 'GET',
-		}), SEARCH_SERVICE_TIMEOUT_MS, 'Search service health check timed out');
-		if (response.status < 200 || response.status >= 300) {
-			throw new Error(`Search service health check returned ${response.status}: ${response.text}`);
-		}
+		const response = await this.request('/health', 'GET');
 		return normalizeHealth(response.json);
 	}
 
@@ -58,18 +54,33 @@ export class SearchServiceClient {
 	}
 
 	private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
-		const response = await withTimeout(requestUrl({
-			url: `${this.root()}${path}`,
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify(body),
-		}), SEARCH_SERVICE_TIMEOUT_MS, `Search service ${path} timed out`);
+		const response = await this.request(path, 'POST', JSON.stringify(body));
+		return response.json;
+	}
+
+	// Single choke point for companion I/O. Timeouts, connection failures, and 5xx all mean
+	// "the companion isn't answering" → SearchServiceUnavailableError (retryable). A 4xx is a
+	// genuine request bug and stays a plain Error so it surfaces instead of retrying forever.
+	private async request(path: string, method: string, body?: string): Promise<RequestUrlResponse> {
+		let response: RequestUrlResponse;
+		try {
+			response = await withTimeout(requestUrl({
+				url: `${this.root()}${path}`,
+				method,
+				headers: body ? { 'Content-Type': 'application/json' } : undefined,
+				body,
+			}), SEARCH_SERVICE_TIMEOUT_MS, `Search service ${path} timed out`);
+		} catch (e) {
+			if (e instanceof SearchServiceUnavailableError) throw e;
+			throw new SearchServiceUnavailableError(`Search service ${path} unreachable: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		if (response.status >= 500) {
+			throw new SearchServiceUnavailableError(`Search service ${path} returned ${response.status}: ${response.text}`);
+		}
 		if (response.status < 200 || response.status >= 300) {
 			throw new Error(`Search service ${path} returned ${response.status}: ${response.text}`);
 		}
-		return response.json;
+		return response;
 	}
 
 	private root(): string {
@@ -80,7 +91,7 @@ export class SearchServiceClient {
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+		timer = setTimeout(() => reject(new SearchServiceUnavailableError(message)), timeoutMs);
 	});
 	try {
 		return await Promise.race([promise, timeout]);

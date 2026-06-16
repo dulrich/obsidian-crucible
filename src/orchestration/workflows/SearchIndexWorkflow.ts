@@ -2,158 +2,138 @@ import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { isSearchIndexablePath } from '../../search/chunker';
-import type { SearchResponse } from '../../search/types';
+import { SearchServiceUnavailableError, type SearchResponse } from '../../search/types';
 
 const SEARCH_RETRY_AFTER_MS = 30_000;
 const SEARCH_REBUILD_BATCH_FILES = 25;
-const searchOfflineUntilByUrl = new Map<string, number>();
 
 export class SearchRebuildWorkflow implements Workflow {
-	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
-		const unavailable = await searchUnavailableResult(plugin);
-		if (unavailable) return unavailable;
-		try {
+		return runSearchWorkflow(plugin, async () => {
 			await plugin.searchManager.resetIndex();
-		} catch (e) {
-			const deferred = searchErrorDeferredResult(plugin, e);
-			if (deferred) return deferred;
-			throw e;
-		}
-		const indexableFiles = plugin.searchManager.listIndexableFiles();
-		const batches = chunk(indexableFiles.map(file => file.path), SEARCH_REBUILD_BATCH_FILES);
-		for (let i = 0; i < batches.length; i++) {
-			const paths = batches[i] ?? [];
-			await plugin.orchestrator.enqueue('search_upsert_batch', {
-				paths,
-				rebuildId: _job.id,
-				batchIndex: i,
-				batchCount: batches.length,
-			}, { priority: 'low', inputPaths: paths });
-		}
-		return {
-			status: 'done',
-			notes: `Queued search index rebuild: ${indexableFiles.length} files in ${batches.length} batches.`,
-		};
+			const indexableFiles = plugin.searchManager.listIndexableFiles();
+			const batches = chunk(indexableFiles.map(file => file.path), SEARCH_REBUILD_BATCH_FILES);
+			for (let i = 0; i < batches.length; i++) {
+				const paths = batches[i] ?? [];
+				await plugin.orchestrator.enqueue('search_upsert_batch', {
+					paths,
+					rebuildId: job.id,
+					batchIndex: i,
+					batchCount: batches.length,
+				}, { priority: 'low', inputPaths: paths });
+			}
+			return {
+				status: 'done',
+				notes: `Queued search index rebuild: ${indexableFiles.length} files in ${batches.length} batches.`,
+			};
+		});
 	}
 }
 
 export class SearchUpsertFileWorkflow implements Workflow {
-	async run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
 		const path = stringParam(job, 'path') || stringParam(job, 'targetPath');
-		if (!path) return { status: 'failed', error: 'Missing params.path' };
-		if (!isSearchIndexablePath(path)) return { status: 'done', notes: `Skipped non-indexable path: ${path}` };
-		const unavailable = await searchUnavailableResult(plugin);
-		if (unavailable) return unavailable;
-		const file = plugin.app.vault.getAbstractFileByPath(path);
-		if (!(file instanceof TFile)) {
-			try {
+		if (!path) return Promise.resolve({ status: 'failed', error: 'Missing params.path' });
+		if (!isSearchIndexablePath(path)) return Promise.resolve({ status: 'done', notes: `Skipped non-indexable path: ${path}` });
+		return runSearchWorkflow(plugin, async () => {
+			const file = plugin.app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof TFile)) {
 				await plugin.searchManager.deletePath(path);
-			} catch (e) {
-				const deferred = searchErrorDeferredResult(plugin, e);
-				if (deferred) return deferred;
-				throw e;
+				return { status: 'done', notes: `Removed missing file from search index: ${path}` };
 			}
-			return { status: 'done', notes: `Removed missing file from search index: ${path}` };
-		}
-		let chunks: number;
-		try {
-			chunks = await plugin.searchManager.indexFile(file);
-		} catch (e) {
-			const deferred = searchErrorDeferredResult(plugin, e);
-			if (deferred) return deferred;
-			throw e;
-		}
-		return {
-			status: 'done',
-			outputPaths: [file.path],
-			notes: `Indexed ${file.path}: ${chunks} chunks.`,
-		};
+			const chunks = await plugin.searchManager.indexFile(file);
+			return {
+				status: 'done',
+				outputPaths: [file.path],
+				notes: `Indexed ${file.path}: ${chunks} chunks.`,
+			};
+		});
 	}
 }
 
 export class SearchUpsertBatchWorkflow implements Workflow {
-	async run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
-		const unavailable = await searchUnavailableResult(plugin);
-		if (unavailable) return unavailable;
 		const paths = stringArrayParam(job, 'paths');
-		if (paths.length === 0) return { status: 'failed', error: 'Missing params.paths' };
-		const files = paths
-			.map(path => plugin.app.vault.getAbstractFileByPath(path))
-			.filter((file): file is TFile => file instanceof TFile && isSearchIndexablePath(file.path));
-		const batchIndex = numberParam(job, 'batchIndex');
-		const batchCount = numberParam(job, 'batchCount');
-		const progress = new SearchJobProgress(plugin, job);
-		const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
-		let indexed: number;
-		let chunks: number;
-		try {
+		if (paths.length === 0) return Promise.resolve({ status: 'failed', error: 'Missing params.paths' });
+		return runSearchWorkflow(plugin, async () => {
+			const files = paths
+				.map(path => plugin.app.vault.getAbstractFileByPath(path))
+				.filter((file): file is TFile => file instanceof TFile && isSearchIndexablePath(file.path));
+			const batchIndex = numberParam(job, 'batchIndex');
+			const batchCount = numberParam(job, 'batchCount');
+			const progress = new SearchJobProgress(plugin, job);
+			const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
 			const result = await plugin.searchManager.indexFiles(files, (done, chunkCount) =>
 				progress.update(`${label}: ${done} / ${files.length} files indexed, ${chunkCount} chunks`),
 			);
-			indexed = result.files;
-			chunks = result.chunks;
-		} catch (e) {
-			const deferred = searchErrorDeferredResult(plugin, e);
-			if (deferred) return deferred;
-			throw e;
-		}
-		return {
-			status: 'done',
-			outputPaths: files.map(file => file.path),
-			notes: `Indexed search ${label}: ${indexed} files, ${chunks} chunks.`,
-		};
+			return {
+				status: 'done',
+				outputPaths: files.map(file => file.path),
+				notes: `Indexed search ${label}: ${result.files} files, ${result.chunks} chunks.`,
+			};
+		});
 	}
 }
 
 export class SearchDeletePathWorkflow implements Workflow {
-	async run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
 		const path = stringParam(job, 'path') || stringParam(job, 'oldPath');
-		if (!path) return { status: 'failed', error: 'Missing params.path' };
-		const unavailable = await searchUnavailableResult(plugin);
-		if (unavailable) return unavailable;
-		try {
+		if (!path) return Promise.resolve({ status: 'failed', error: 'Missing params.path' });
+		return runSearchWorkflow(plugin, async () => {
 			await plugin.searchManager.deletePath(path);
-		} catch (e) {
-			const deferred = searchErrorDeferredResult(plugin, e);
-			if (deferred) return deferred;
-			throw e;
-		}
-		return {
-			status: 'done',
-			notes: `Removed ${path} from search index.`,
-		};
+			return { status: 'done', notes: `Removed ${path} from search index.` };
+		});
 	}
 }
 
 export class SearchSweepWorkflow implements Workflow {
-	async run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
 		const description = stringParam(job, 'description');
-		if (!description) return { status: 'failed', error: 'Missing params.description' };
-		const unavailable = await searchUnavailableResult(plugin);
-		if (unavailable) return unavailable;
-		let response: SearchResponse;
-		try {
-			response = await plugin.searchManager.sweep(description);
-		} catch (e) {
-			const deferred = searchErrorDeferredResult(plugin, e);
-			if (deferred) return deferred;
-			throw e;
-		}
-		return {
-			status: 'done',
-			notes: `Sweep returned ${response.total ?? response.results.length} results (${response.mode ?? 'unknown'}).`,
-		};
+		if (!description) return Promise.resolve({ status: 'failed', error: 'Missing params.description' });
+		return runSearchWorkflow(plugin, async () => {
+			const response: SearchResponse = await plugin.searchManager.sweep(description);
+			return {
+				status: 'done',
+				notes: `Sweep returned ${response.total ?? response.results.length} results (${response.mode ?? 'unknown'}).`,
+			};
+		});
 	}
+}
+
+// Shared scaffold for every search workflow: enforce the settings toggle, gate on companion
+// availability (one cached probe via SearchManager), run the operation, and translate a
+// mid-flight companion outage into a quiet retryable deferral. Each workflow above is then just
+// its core operation.
+async function runSearchWorkflow(
+	plugin: WorkflowContext['plugin'],
+	run: () => Promise<WorkflowResult>,
+): Promise<WorkflowResult> {
+	if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
+	if (!(await plugin.searchManager.companionAvailable())) return searchDeferredResult(plugin);
+	try {
+		return await run();
+	} catch (e) {
+		if (e instanceof SearchServiceUnavailableError) {
+			plugin.searchManager.markCompanionOffline();
+			return searchDeferredResult(plugin, e.message);
+		}
+		throw e;
+	}
+}
+
+function searchDeferredResult(plugin: WorkflowContext['plugin'], detail?: string): WorkflowResult {
+	const message = `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: npm run search:serve`;
+	return {
+		status: 'deferred',
+		error: detail ? `${message} (${detail})` : message,
+		notes: `${message}. Retrying shortly.`,
+		retryAfterMs: SEARCH_RETRY_AFTER_MS,
+	};
 }
 
 function stringParam(job: OrchestrationJob, key: string): string {
@@ -175,35 +155,6 @@ function chunk<T>(items: T[], size: number): T[][] {
 	const out: T[][] = [];
 	for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
 	return out;
-}
-
-async function searchUnavailableResult(plugin: WorkflowContext['plugin']): Promise<WorkflowResult | null> {
-	const cachedOfflineUntil = searchOfflineUntilByUrl.get(plugin.settings.searchServiceUrl) ?? 0;
-	if (cachedOfflineUntil > Date.now()) return searchDeferredResult(plugin);
-	const health = await plugin.searchManager.health().catch(() => null);
-	if (health?.ok) {
-		searchOfflineUntilByUrl.delete(plugin.settings.searchServiceUrl);
-		return null;
-	}
-	searchOfflineUntilByUrl.set(plugin.settings.searchServiceUrl, Date.now() + SEARCH_RETRY_AFTER_MS);
-	return searchDeferredResult(plugin);
-}
-
-function searchDeferredResult(plugin: WorkflowContext['plugin'], detail?: string): WorkflowResult {
-	const message = `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: npm run search:serve`;
-	return {
-		status: 'deferred',
-		error: detail ? `${message} (${detail})` : message,
-		notes: `${message}. Retrying shortly.`,
-		retryAfterMs: SEARCH_RETRY_AFTER_MS,
-	};
-}
-
-function searchErrorDeferredResult(plugin: WorkflowContext['plugin'], error: unknown): WorkflowResult | null {
-	const message = error instanceof Error ? error.message : String(error);
-	if (!/search service|connection|refused|timed out|network|fetch/i.test(message)) return null;
-	searchOfflineUntilByUrl.set(plugin.settings.searchServiceUrl, Date.now() + SEARCH_RETRY_AFTER_MS);
-	return searchDeferredResult(plugin, message);
 }
 
 class SearchJobProgress {

@@ -42,6 +42,8 @@ function makePlugin(overrides = {}) {
 			searchServiceUrl: 'http://127.0.0.1:8765',
 		},
 		searchManager: {
+			companionAvailable: async () => true,
+			markCompanionOffline: () => {},
 			health: async () => ({ ok: true }),
 			resetIndex: async () => {},
 			listIndexableFiles: () => [],
@@ -82,9 +84,7 @@ test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing
 test('search upsert defers quietly while the companion is offline', async () => {
 	const plugin = makePlugin({
 		searchManager: {
-			health: async () => {
-				throw new Error('connection refused');
-			},
+			companionAvailable: async () => false,
 		},
 	});
 	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-1', params: { path: 'note.md' } }, { plugin });

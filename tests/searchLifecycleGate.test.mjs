@@ -22,13 +22,14 @@ await esbuild.build({
 });
 
 const {
-	SEARCH_AUTO_OFFLINE_CACHE_MS,
-	SEARCH_AUTO_ONLINE_CACHE_MS,
-	SearchAutoIndexGate,
+	SEARCH_OFFLINE_CACHE_MS,
+	SEARCH_ONLINE_CACHE_MS,
+	CompanionAvailabilityGate,
+	SearchReadinessGate,
 } = await import(pathToFileURL(outfile));
 
-test('SearchAutoIndexGate waits for layout and metadata readiness', () => {
-	const gate = new SearchAutoIndexGate();
+test('SearchReadinessGate waits for layout and metadata readiness', () => {
+	const gate = new SearchReadinessGate();
 
 	assert.equal(gate.isReady(), false);
 	gate.markLayoutReady();
@@ -37,28 +38,28 @@ test('SearchAutoIndexGate waits for layout and metadata readiness', () => {
 	assert.equal(gate.isReady(), true);
 });
 
-test('SearchAutoIndexGate caches offline companion checks', async () => {
+test('CompanionAvailabilityGate caches offline companion checks', async () => {
 	let now = 1_000;
 	let checks = 0;
-	const gate = new SearchAutoIndexGate(() => now);
+	const gate = new CompanionAvailabilityGate(() => now);
 	const health = async () => {
 		checks++;
 		throw new Error('connection refused');
 	};
 
-	assert.equal(await gate.companionAvailable(health), false);
-	assert.equal(await gate.companionAvailable(health), false);
+	assert.equal(await gate.available(health), false);
+	assert.equal(await gate.available(health), false);
 	assert.equal(checks, 1);
 
-	now += SEARCH_AUTO_OFFLINE_CACHE_MS + 1;
-	assert.equal(await gate.companionAvailable(async () => ({ ok: true })), true);
+	now += SEARCH_OFFLINE_CACHE_MS + 1;
+	assert.equal(await gate.available(async () => ({ ok: true })), true);
 });
 
-test('SearchAutoIndexGate shares an in-flight health check and caches online status', async () => {
+test('CompanionAvailabilityGate shares an in-flight health check and caches online status', async () => {
 	let now = 1_000;
 	let checks = 0;
 	let release;
-	const gate = new SearchAutoIndexGate(() => now);
+	const gate = new CompanionAvailabilityGate(() => now);
 	const health = () => {
 		checks++;
 		return new Promise(resolve => {
@@ -66,23 +67,38 @@ test('SearchAutoIndexGate shares an in-flight health check and caches online sta
 		});
 	};
 
-	const first = gate.companionAvailable(health);
-	const second = gate.companionAvailable(health);
+	const first = gate.available(health);
+	const second = gate.available(health);
 	release();
 	assert.equal(await first, true);
 	assert.equal(await second, true);
 	assert.equal(checks, 1);
 
-	assert.equal(await gate.companionAvailable(async () => {
+	assert.equal(await gate.available(async () => {
 		checks++;
 		return { ok: false };
 	}), true);
 	assert.equal(checks, 1);
 
-	now += SEARCH_AUTO_ONLINE_CACHE_MS + 1;
-	assert.equal(await gate.companionAvailable(async () => {
+	now += SEARCH_ONLINE_CACHE_MS + 1;
+	assert.equal(await gate.available(async () => {
 		checks++;
 		return { ok: false };
 	}), false);
 	assert.equal(checks, 2);
+});
+
+test('CompanionAvailabilityGate.markOffline short-circuits subsequent checks', async () => {
+	let now = 1_000;
+	let checks = 0;
+	const gate = new CompanionAvailabilityGate(() => now);
+	const health = async () => { checks++; return { ok: true }; };
+
+	gate.markOffline();
+	assert.equal(await gate.available(health), false);
+	assert.equal(checks, 0);
+
+	now += SEARCH_OFFLINE_CACHE_MS + 1;
+	assert.equal(await gate.available(health), true);
+	assert.equal(checks, 1);
 });
