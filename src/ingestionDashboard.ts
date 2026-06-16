@@ -76,6 +76,7 @@ function fileJobTargetPath(job: OrchestrationJob): string | undefined {
 
 function fileJobTitle(job: OrchestrationJob): string {
 	switch (job.type) {
+		case 'image_metadata_extract': return typeof job.params?.imagePath === 'string' ? `Image metadata: ${job.params.imagePath.split('/').pop()}` : 'Image metadata extraction';
 		case 'search_rebuild': return 'Vault search index';
 		case 'search_upsert_batch': return searchBatchTitle(job);
 		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';

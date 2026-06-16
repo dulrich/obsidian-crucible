@@ -1,5 +1,5 @@
 import { App, FileSystemAdapter, normalizePath, requestUrl } from 'obsidian';
-import { AgentExecutionMode, Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderKind, providerModality } from './types';
+import { AgentExecutionMode, Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderKind, providerModality } from './types';
 
 // child_process is desktop-only; loaded lazily via require so mobile bundles can still import this module.
 interface ChildEvents {
@@ -43,6 +43,16 @@ interface ProviderCompletionOptions {
 	executionMode?: AgentExecutionMode;
 	agentLabel?: string;
 }
+
+const IMAGE_EXTRACTION_SYSTEM_PROMPT = [
+	'You extract searchable metadata from an image for a personal knowledge base.',
+	'Return only compact JSON with these keys:',
+	'- description: a precise natural-language description of the image.',
+	'- extractedText: all readable text/OCR content from the image, preserving useful line breaks.',
+	'If there is no readable text, extractedText must be an empty string.',
+].join('\n');
+
+const IMAGE_EXTRACTION_USER_PROMPT = 'Describe this image and extract any visible text, including text in charts, infographics, screenshots, tables, and diagrams.';
 
 export class ProviderManager {
 	app: App;
@@ -124,6 +134,36 @@ export class ProviderManager {
 		}
 	}
 
+	async extractImageMetadata(provider: Provider, modelId: string, imageBytes: ArrayBuffer, mimeType: string): Promise<ProviderImageExtractionResult> {
+		if (!modelId) {
+			throw new Error(`No image extraction model selected for provider "${provider.name || provider.id}"`);
+		}
+		if (providerModality(provider.kind) === 'cli') {
+			throw new Error(`Provider "${provider.name || provider.id}" is a CLI provider and cannot extract image metadata`);
+		}
+
+		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
+		if (!apiKey && provider.kind !== 'ollama') {
+			throw new Error(`API key missing for provider "${provider.name || provider.id}"`);
+		}
+
+		const base64 = arrayBufferToBase64(imageBytes);
+		switch (provider.kind) {
+			case 'openai':
+				return await this.callOpenAIImageExtraction(provider.baseUrl || 'https://api.openai.com/v1', modelId, apiKey, base64, mimeType, 'OpenAI');
+			case 'openrouter':
+				return await this.callOpenAIImageExtraction(provider.baseUrl || 'https://openrouter.ai/api/v1', modelId, apiKey, base64, mimeType, 'OpenRouter');
+			case 'anthropic':
+				return await this.callAnthropicImageExtraction(modelId, apiKey, base64, mimeType);
+			case 'google':
+				return await this.callGoogleImageExtraction(modelId, apiKey, base64, mimeType);
+			case 'ollama':
+				return await this.callOllamaImageExtraction(provider, modelId, base64);
+			default:
+				throw new Error(`Provider kind "${provider.kind}" does not support image extraction yet`);
+		}
+	}
+
 	private async callOpenAI(modelId: string, apiKey: string, system: string, user: string): Promise<ProviderCompletionResult> {
 		const response = await requestUrl({
 			url: 'https://api.openai.com/v1/chat/completions',
@@ -155,6 +195,145 @@ export class ProviderManager {
 			finishReason: normalizeChatCompletionFinishReason(rawFinishReason),
 			rawFinishReason,
 		};
+	}
+
+	private async callOpenAIImageExtraction(baseUrl: string, modelId: string, apiKey: string, base64: string, mimeType: string, label: string): Promise<ProviderImageExtractionResult> {
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/json',
+			'Authorization': `Bearer ${apiKey}`,
+		};
+		if (label === 'OpenRouter') {
+			headers['HTTP-Referer'] = 'https://github.com/dulrich/obsidian-crucible';
+			headers['X-Title'] = 'Crucible Obsidian Plugin';
+		}
+		const response = await requestUrl({
+			url: `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+			method: 'POST',
+			headers,
+			body: JSON.stringify({
+				model: modelId,
+				messages: [
+					{ role: 'system', content: IMAGE_EXTRACTION_SYSTEM_PROMPT },
+					{
+						role: 'user',
+						content: [
+							{ type: 'text', text: IMAGE_EXTRACTION_USER_PROMPT },
+							{ type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } },
+						],
+					},
+				],
+				temperature: 0,
+			}),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`${label} image extraction API returned ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json as { choices?: { message?: { content?: string }, finish_reason?: string | null }[] };
+		const choice = data.choices?.[0];
+		if (!choice) throw new Error(`${label} image extraction API returned no choices`);
+		const rawFinishReason = normalizeRawFinishReason(choice.finish_reason);
+		return parseImageExtractionResult(choice.message?.content ?? '', normalizeChatCompletionFinishReason(rawFinishReason), rawFinishReason);
+	}
+
+	private async callAnthropicImageExtraction(modelId: string, apiKey: string, base64: string, mimeType: string): Promise<ProviderImageExtractionResult> {
+		const response = await requestUrl({
+			url: 'https://api.anthropic.com/v1/messages',
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': apiKey,
+				'anthropic-version': '2023-06-01',
+			},
+			body: JSON.stringify({
+				model: modelId,
+				system: IMAGE_EXTRACTION_SYSTEM_PROMPT,
+				messages: [
+					{
+						role: 'user',
+						content: [
+							{ type: 'text', text: IMAGE_EXTRACTION_USER_PROMPT },
+							{ type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } },
+						],
+					},
+				],
+				max_tokens: 4096,
+				temperature: 0,
+			}),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`Anthropic image extraction API returned ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json as { content?: { text?: string }[], stop_reason?: string | null };
+		const rawFinishReason = normalizeRawFinishReason(data.stop_reason);
+		return parseImageExtractionResult((data.content ?? []).map(block => block.text ?? '').join(''), normalizeAnthropicFinishReason(rawFinishReason), rawFinishReason);
+	}
+
+	private async callGoogleImageExtraction(modelId: string, apiKey: string, base64: string, mimeType: string): Promise<ProviderImageExtractionResult> {
+		const response = await requestUrl({
+			url: `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`,
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				system_instruction: { parts: [{ text: IMAGE_EXTRACTION_SYSTEM_PROMPT }] },
+				contents: [
+					{
+						role: 'user',
+						parts: [
+							{ text: IMAGE_EXTRACTION_USER_PROMPT },
+							{ inline_data: { mime_type: mimeType, data: base64 } },
+						],
+					},
+				],
+				generationConfig: {
+					temperature: 0,
+					maxOutputTokens: 4096,
+				},
+			}),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`Google image extraction API returned ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json as { candidates?: { content?: { parts?: { text?: string }[] }, finishReason?: string }[] };
+		const candidate = data.candidates?.[0];
+		if (!candidate) throw new Error('Google image extraction API returned no candidates');
+		const rawFinishReason = normalizeRawFinishReason(candidate.finishReason);
+		return parseImageExtractionResult((candidate.content?.parts ?? []).map(part => part.text ?? '').join(''), normalizeGoogleFinishReason(rawFinishReason), rawFinishReason);
+	}
+
+	private async callOllamaImageExtraction(provider: Provider, modelId: string, base64: string): Promise<ProviderImageExtractionResult> {
+		const baseUrl = (provider.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
+		const response = await requestUrl({
+			url: `${baseUrl}/api/chat`,
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				model: modelId,
+				messages: [
+					{ role: 'system', content: IMAGE_EXTRACTION_SYSTEM_PROMPT },
+					{ role: 'user', content: IMAGE_EXTRACTION_USER_PROMPT, images: [base64] },
+				],
+				stream: false,
+				options: { temperature: 0 },
+			}),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`Ollama image extraction API returned ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json as { message?: { content?: string }, done_reason?: string | null };
+		const rawFinishReason = normalizeRawFinishReason(data.done_reason);
+		return parseImageExtractionResult(data.message?.content ?? '', normalizeOllamaFinishReason(rawFinishReason), rawFinishReason);
 	}
 
 	private async callOpenAICompatibleEmbedding(baseUrl: string, modelId: string, apiKey: string, inputs: string[], label: string): Promise<ProviderEmbeddingResult> {
@@ -433,6 +612,63 @@ function normalizeEmbedding(value: unknown): number[] {
 		throw new Error('Embedding response contained invalid numeric values');
 	}
 	return out;
+}
+
+function parseImageExtractionResult(rawText: string, finishReason: ProviderFinishReason, rawFinishReason: string | undefined): ProviderImageExtractionResult {
+	const parsed = parseImageExtractionJson(rawText);
+	return {
+		description: parsed.description,
+		extractedText: parsed.extractedText,
+		rawText,
+		finishReason,
+		rawFinishReason,
+	};
+}
+
+function parseImageExtractionJson(rawText: string): { description: string; extractedText: string } {
+	const candidates = [
+		rawText.trim(),
+		extractJsonObject(rawText),
+		extractFencedJson(rawText),
+	].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+	for (const candidate of candidates) {
+		try {
+			const data = JSON.parse(candidate) as { description?: unknown; extractedText?: unknown; extracted_text?: unknown };
+			return {
+				description: typeof data.description === 'string' ? data.description.trim() : '',
+				extractedText: typeof data.extractedText === 'string'
+					? data.extractedText.trim()
+					: typeof data.extracted_text === 'string'
+						? data.extracted_text.trim()
+						: '',
+			};
+		} catch {
+			/* try next candidate */
+		}
+	}
+	return { description: rawText.trim(), extractedText: '' };
+}
+
+function extractJsonObject(rawText: string): string | null {
+	const start = rawText.indexOf('{');
+	const end = rawText.lastIndexOf('}');
+	return start >= 0 && end > start ? rawText.slice(start, end + 1) : null;
+}
+
+function extractFencedJson(rawText: string): string | null {
+	const match = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
+	return match?.[1] ?? null;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	let binary = '';
+	const chunkSize = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunkSize) {
+		const chunk = bytes.subarray(i, i + chunkSize);
+		binary += String.fromCharCode(...chunk);
+	}
+	return btoa(binary);
 }
 
 function normalizeChatCompletionFinishReason(raw: string | undefined): ProviderFinishReason {
