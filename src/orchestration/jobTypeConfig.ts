@@ -1,5 +1,6 @@
 import type CruciblePlugin from '../main';
 import type { MemoryJobSeed } from './MemoryJobQueue';
+import { IMAGE_METADATA_SCHEMA_VERSION, localizedImageInfo } from './utils/imageMetadata';
 import { coerceVideoId } from './utils/youtubeApi';
 
 // Per-type behavior for the unified queue. File types are backed by the markdown
@@ -69,6 +70,23 @@ export function commandRunJobConfig(): JobTypeConfig {
 			if (!commandId) return '';
 			const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
 			return `${commandId}|${targetPath}`;
+		},
+	};
+}
+
+export function imageMetadataJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'file',
+		maxParallel: 1,
+		minIntervalMs: 0,
+		dedupeKey: (p) => {
+			const imagePath = typeof p.imagePath === 'string' ? p.imagePath : '';
+			const image = localizedImageInfo(imagePath);
+			if (!image) return '';
+			const schemaVersion = typeof p.schemaVersion === 'number' && Number.isFinite(p.schemaVersion)
+				? Math.floor(p.schemaVersion)
+				: IMAGE_METADATA_SCHEMA_VERSION;
+			return `image-metadata:${image.md5}:v${schemaVersion}`;
 		},
 	};
 }

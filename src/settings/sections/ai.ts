@@ -280,6 +280,12 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					.setTooltip('Embedding model')
 					.setValue(modelHasCapability(model, 'embedding'))
 					.onChange(async (v) => { setModelCapability(model, 'embedding', v); await tab.plugin.saveSettings(); }));
+			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Image' });
+			capabilities
+				.addToggle(t => t
+					.setTooltip('Image extraction model')
+					.setValue(modelHasCapability(model, 'image-extraction'))
+					.onChange(async (v) => { setModelCapability(model, 'image-extraction', v); await tab.plugin.saveSettings(); }));
 
 			new Setting(modelRow)
 				.setName('Embedding dimensions')

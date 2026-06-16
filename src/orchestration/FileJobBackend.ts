@@ -6,6 +6,7 @@ import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJo
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { logError } from '../log';
+import { routineJobNotice } from './notices';
 
 // Durable, markdown-backed job type: every job is a file under
 // orchestrationQueueRoot/{queued,running,done,failed}. Enqueue collapses repeats by
@@ -46,16 +47,16 @@ export class FileJobBackend implements JobBackend {
 					if (existing.job.status === 'queued' && priorityRank(priority) < priorityRank(existing.job.priority)) {
 						await this.store.setPriority(existing.file, priority);
 						void this.emitQueueUpdate();
-						new Notice(`Orchestrate: promoted ${this.type} (${existing.job.id})`);
+						routineJobNotice(this.plugin, this.type, `Orchestrate: promoted ${this.type} (${existing.job.id})`);
 						return { ...existing.job, priority };
 					}
-					new Notice(`Orchestrate: ${this.type} already queued for this target (${existing.job.id}).`);
+					routineJobNotice(this.plugin, this.type, `Orchestrate: ${this.type} already queued for this target (${existing.job.id}).`);
 					return existing.job;
 				}
 			}
 		}
 		const job = await this.store.enqueue(this.type, { params, priority: options.priority, inputPaths: options.inputPaths });
-		new Notice(`Orchestrate: queued ${this.type} (${job.id})`);
+		routineJobNotice(this.plugin, this.type, `Orchestrate: queued ${this.type} (${job.id})`);
 		void this.emitQueueUpdate();
 		return job;
 	}
@@ -146,7 +147,7 @@ export class FileJobBackend implements JobBackend {
 			await this.store.move(moved.file, moved.job, 'done');
 			void this.emitQueueUpdate();
 			this.emitTrackerEvent(result, 'done');
-			new Notice(`Orchestrate: ${moved.job.id} → done`);
+			routineJobNotice(this.plugin, this.type, `Orchestrate: ${moved.job.id} → done`);
 		} catch (e) {
 			await this.failEntry(moved, e instanceof Error ? e.message : String(e));
 		}
@@ -194,6 +195,7 @@ export class FileJobBackend implements JobBackend {
 			case 'blogs_tracker_consolidate': return s.orchestrationBlogsTrackerEnabled;
 			case 'link_scan': return s.orchestrationLinkScanEnabled;
 			case 'transcript_refine': return s.orchestrationTranscriptRefineEnabled;
+			case 'image_metadata_extract': return s.imageMetadataExtractionEnabled;
 			default: return true;
 		}
 	}
