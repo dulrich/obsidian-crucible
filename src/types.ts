@@ -152,6 +152,14 @@ export interface ProviderEmbeddingResult {
 	dimensions?: number;
 }
 
+export interface ProviderImageExtractionResult {
+	description: string;
+	extractedText: string;
+	rawText: string;
+	finishReason: ProviderFinishReason;
+	rawFinishReason?: string;
+}
+
 export type ProviderKind =
 	| 'openai'
 	| 'anthropic'
@@ -177,7 +185,7 @@ export interface ProviderModel {
 	embeddingDimensions?: number;
 }
 
-export type ProviderModelCapability = 'chat' | 'embedding';
+export type ProviderModelCapability = 'chat' | 'embedding' | 'image-extraction';
 
 export interface Provider {
 	id: string;
@@ -300,6 +308,9 @@ export interface CrucibleSettings {
 	localizeAttachmentsNameTemplate: string;
 	localizeAttachmentsFollowNoteLifecycle: boolean;
 	localizeAttachmentsDebugMode: boolean;
+	imageMetadataExtractionEnabled: boolean;
+	imageMetadataExtractionModel?: ProviderModelRef;
+	imageMetadataExtractionSchemaVersion: number;
 	// Shortcuts
 	shortcuts: Shortcut[];
 	// Captures
@@ -371,6 +382,7 @@ export interface CrucibleSettings {
 	// Triggers (TriggerRegistry): per-trigger enable overrides keyed by trigger id.
 	// Absent key = the trigger's registered default. Schedule intervals: 0 = off.
 	orchestrationTriggersEnabled: Record<string, boolean>;
+	orchestrationRoutineNoticesEnabled: Record<string, boolean>;
 	orchestrationYoutubeTrackerIntervalMinutes: number;
 	orchestrationBlogsTrackerIntervalMinutes: number;
 	// Ingestion Dashboard
@@ -443,6 +455,8 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	localizeAttachmentsNameTemplate: '{{md5}}_MD5.{{ext}}',
 	localizeAttachmentsFollowNoteLifecycle: true,
 	localizeAttachmentsDebugMode: false,
+	imageMetadataExtractionEnabled: false,
+	imageMetadataExtractionSchemaVersion: 1,
 	shortcuts: [],
 	captures: [],
 	chains: [],
@@ -500,6 +514,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationTranscriptRefineEnabled: true,
 	orchestrationTranscriptRefineChainName: 'Refine Transcript',
 	orchestrationTriggersEnabled: {},
+	orchestrationRoutineNoticesEnabled: {},
 	orchestrationYoutubeTrackerIntervalMinutes: 0,
 	orchestrationBlogsTrackerIntervalMinutes: 0,
 	ingestionClipperInboxFolder: '_clippings/inbox',

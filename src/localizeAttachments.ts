@@ -235,13 +235,22 @@ export class AttachmentLocalizer {
 	private linter: Linter;
 	private setMaterializing: (state: boolean) => void;
 	private noteLocks?: NoteLockManager;
+	private enqueueImageMetadata?: (imagePath: string, sourceNotePath: string) => void;
 
-	constructor(app: App, settings: CrucibleSettings, linter: Linter, setMaterializing: (state: boolean) => void, noteLocks?: NoteLockManager) {
+	constructor(
+		app: App,
+		settings: CrucibleSettings,
+		linter: Linter,
+		setMaterializing: (state: boolean) => void,
+		noteLocks?: NoteLockManager,
+		enqueueImageMetadata?: (imagePath: string, sourceNotePath: string) => void,
+	) {
 		this.app = app;
 		this.settings = settings;
 		this.linter = linter;
 		this.setMaterializing = setMaterializing;
 		this.noteLocks = noteLocks;
+		this.enqueueImageMetadata = enqueueImageMetadata;
 	}
 
 	classifyExtension(extRaw: string): LocalizeMediaType | null {
@@ -541,6 +550,7 @@ export class AttachmentLocalizer {
 
 			const originalName = this.guessRemoteOriginalName(match.link);
 			const targetPath = await this.writeAttachment(note, bytes, ext, originalName);
+			if (isImage) this.enqueueImageMetadata?.(targetPath, note.path);
 			await this.debug(note, `remote ${match.link}: downloaded .${download.ext} -> ${targetPath}`);
 			return this.formatEmbed(match.syntax, targetPath);
 		} catch (e) {
@@ -570,6 +580,7 @@ export class AttachmentLocalizer {
 			ext,
 		}));
 		if (MD5_NAME_RE.test(resolved.name) && resolved.parent?.path === expectedFolder) {
+			if (this.classifyExtension(ext) === 'images') this.enqueueImageMetadata?.(resolved.path, note.path);
 			await this.debug(note, `local ${match.link}: resolved=${resolved.path} already localized in ${expectedFolder} (skip)`);
 			return null;
 		}
@@ -595,6 +606,7 @@ export class AttachmentLocalizer {
 		if (resolved.path !== newPath) {
 			try { await this.app.fileManager.trashFile(resolved); } catch (e) { logWarn('localize: could not delete old', resolved.path, e); }
 		}
+		if (isImage) this.enqueueImageMetadata?.(newPath, note.path);
 		await this.debug(note, `local ${match.link}: resolved=${resolved.path} -> ${newPath}`);
 		return this.formatEmbed(match.syntax, newPath);
 	}
@@ -781,6 +793,7 @@ export class AttachmentLocalizer {
 			}
 			const originalName = file.name.replace(/\.[^.]+$/, '') || 'pasted';
 			const targetPath = await this.writeAttachment(noteFile, bytes, outExt, originalName);
+			if (isImage) this.enqueueImageMetadata?.(targetPath, noteFile.path);
 			inserts.push(this.formatEmbed('wiki', targetPath));
 		}
 
@@ -818,11 +831,14 @@ export class AttachmentLocalizer {
 		if (!(existing instanceof TFolder)) return;
 		try {
 			await ensureFolder(this.app, newFolder.replace(/\/[^/]+$/, ''));
-			await this.app.fileManager.renameFile(existing, newFolder);
-			// Obsidian's link rewrite on the folder rename can't see this note as a referrer —
-			// its metadata cache entry hasn't reindexed at the new path in the tick the rename
-			// event fires — so it silently skips the moving note's own embeds. Repoint them
-			// deterministically; harmlessly no-ops any ref Obsidian did manage to update.
+			// Use vault.rename for the attachment folder so Obsidian does not launch a
+			// second, cache-position-based link rewrite while Localize/chain writes are
+			// in flight. The moving note's embeds are repointed deterministically below.
+			await this.app.vault.rename(existing, newFolder);
+			// Obsidian's automatic folder-link rewrite is deliberately bypassed here.
+			// The moving note's metadata cache lags during the rename tick, and a
+			// concurrent Localize pass may also shorten remote image URLs to local refs;
+			// position-based rewrites in that window can splice embeds into prose.
 			await withOptionalNoteLock(this.noteLocks, file.path, 'localize', () => withMaterializing(this.setMaterializing, async () => {
 				const content = await this.app.vault.read(file);
 				const updated = repointAttachmentFolderPrefix(content, oldFolder, newFolder);

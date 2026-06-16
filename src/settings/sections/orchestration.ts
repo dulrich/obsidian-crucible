@@ -8,6 +8,7 @@ import { deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "../.
 import { addWarningIcon, mountSecretControl } from "../shared";
 import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea } from "../bind";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
+import type { JobType } from "../../orchestration/types";
 
 interface WorkflowMeta {
 	id: string;
@@ -76,6 +77,18 @@ function embeddingModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
 	return refs;
 }
 
+function imageExtractionModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
+	const refs: ProviderModelRef[] = [];
+	for (const provider of tab.plugin.settings.providers) {
+		for (const model of provider.models ?? []) {
+			if (model.capabilities?.includes('image-extraction')) {
+				refs.push({ providerId: provider.id, modelId: model.id });
+			}
+		}
+	}
+	return refs;
+}
+
 function describeEmbeddingModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
 	if (!ref) return 'No embedding model selected. Search will use FTS/BM25 only.';
 	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
@@ -84,6 +97,33 @@ function describeEmbeddingModel(tab: CrucibleSettingTab, ref: ProviderModelRef |
 	const providerName = provider.name || provider.kind;
 	return `${providerName} · ${model.label || model.id}`;
 }
+
+function describeImageExtractionModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
+	if (!ref) return 'No image extraction model selected. Localized image metadata will not be generated.';
+	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
+	const model = provider?.models.find(m => m.id === ref.modelId);
+	if (!provider || !model) return 'Selected image extraction model is missing.';
+	const providerName = provider.name || provider.kind;
+	return `${providerName} · ${model.label || model.id}`;
+}
+
+const ROUTINE_NOTICE_JOB_TYPES: JobType[] = [
+	'daily_brief_lite',
+	'youtube_tracker',
+	'youtube_tracker_consolidate',
+	'blogs_tracker',
+	'blogs_tracker_consolidate',
+	'transcript_refine',
+	'link_scan',
+	'youtube_metadata_fetch',
+	'command_run',
+	'image_metadata_extract',
+	'search_rebuild',
+	'search_upsert_file',
+	'search_upsert_batch',
+	'search_delete_path',
+	'search_sweep',
+];
 
 export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	const s = tab.plugin.settings;
@@ -172,6 +212,19 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		text: 'Warning: this timezone is not recognized by Intl.DateTimeFormat.',
 	});
 	setTzWarningVisibility(isValidTimezone(s.orchestrationTimezone));
+
+	new Setting(containerEl).setName('Routine notices').setHeading();
+	containerEl.createEl('p', { text: 'Routine queue notices are quiet by default. Failures and explicit command feedback still show.' });
+	const noticesGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	ROUTINE_NOTICE_JOB_TYPES.forEach((type, index) => {
+		if (index > 0) noticesGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		bindToggle(noticesGroup, {
+			name: type,
+			desc: 'Show routine queued, promoted, duplicate, and completed notices for this job type.',
+			get: () => s.orchestrationRoutineNoticesEnabled[type] === true,
+			set: (v) => { s.orchestrationRoutineNoticesEnabled = { ...s.orchestrationRoutineNoticesEnabled, [type]: v }; },
+		}, save);
+	});
 
 	// --- Search ---
 	new Setting(containerEl).setName('Search').setHeading();
@@ -274,6 +327,37 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		set: (v) => { const n = Number(v.trim()); s.searchResultLimit = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 12; },
 		min: 1,
 	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(searchGroup, {
+		name: 'Image metadata extraction',
+		desc: 'After Localize writes an MD5-named image, enqueue a job that creates a sibling Markdown metadata note for search.',
+		get: () => s.imageMetadataExtractionEnabled,
+		set: (v) => { s.imageMetadataExtractionEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	new Setting(searchGroup)
+		.setName('Image extraction model')
+		.setDesc(describeImageExtractionModel(tab, s.imageMetadataExtractionModel))
+		.addButton(bt => bt.setButtonText('Pick').onClick(() => {
+			const refs = imageExtractionModelRefs(tab);
+			if (refs.length === 0) {
+				new Notice('No image-extraction-capable models configured. Mark a provider model as Image first.');
+				return;
+			}
+			const options = buildModelPickerOptions(tab.plugin.settings.providers, refs);
+			new ModelPickerModal(tab.app, options, (ref) => {
+				s.imageMetadataExtractionModel = ref;
+				void save();
+				tab.display();
+			}).open();
+		}))
+		.addButton(bt => bt.setButtonText('Clear').onClick(async () => {
+			delete s.imageMetadataExtractionModel;
+			await save();
+			tab.display();
+		}));
 
 	// --- Workflows list ---
 	new Setting(containerEl).setName('Workflows').setHeading();
