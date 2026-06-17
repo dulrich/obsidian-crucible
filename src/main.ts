@@ -5,7 +5,7 @@ import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
-import { ChainManager } from "./chains";
+import { ChainManager, chainStepResult } from "./chains";
 import { ProviderManager } from "./providers";
 import { AgentManager, agentCommandId } from "./agents";
 import { TableOfContentsUI } from "./toc";
@@ -71,6 +71,21 @@ export interface CrucibleCommandEntry {
 	queueable: boolean;
 }
 
+type AutoLocalizeSource = 'create' | 'edit';
+
+interface AutoLocalizeState {
+	path: string;
+	sources: Set<AutoLocalizeSource>;
+	firstScheduledAt: number;
+	attempts: number;
+	timer: ReturnType<typeof setTimeout> | null;
+}
+
+const AUTO_LOCALIZE_CREATE_DELAY_MS = 2500;
+const AUTO_LOCALIZE_EDIT_DELAY_MS = 3000;
+const AUTO_LOCALIZE_RETRY_DELAY_MS = 1000;
+const AUTO_LOCALIZE_MAX_AGE_MS = 15000;
+
 export default class CruciblePlugin extends Plugin {
 	settings: CrucibleSettings;
 	linter: Linter;
@@ -97,6 +112,7 @@ export default class CruciblePlugin extends Plugin {
 	// can be used as an (awaited, target-file-aware) step inside another chain.
 	// Cleared and rebuilt on every registerChains() so renames/deletes don't leak.
 	private registeredChainInternalIds = new Set<string>();
+	private autoLocalizeTimers = new Map<string, AutoLocalizeState>();
 
 	async onload() {
 		await this.loadSettings();
@@ -189,22 +205,13 @@ export default class CruciblePlugin extends Plugin {
 			}
 		}, 2000, true);
 
-		const debouncedLocalize = debounce(async (file: TFile) => {
-			// Skip while the note is locked — otherwise an "Ingest as …" chain's mid-flight
-			// writes trigger a concurrent localize that downloads an attachment whose
-			// landing ref never lands, leaving an orphan.
-			if (this.noteLocks.isLocked(file.path)) return;
-			if (this.settings.localizeAttachmentsTriggerOnEdit && !this.isMaterializing) {
-				await this.attachmentLocalizer.localizeNote(file, true);
-			}
-		}, 3000, true);
-
+		this.register(() => this.clearAutoLocalizeTimers());
 		this.register(() => this.searchIndexCoordinator.dispose());
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
 				debouncedLint(file);
-				debouncedLocalize(file);
+				this.scheduleAutoLocalize(file, 'edit');
 			}
 			if (file instanceof TFile) this.searchIndexCoordinator.handleModify(file);
 		}));
@@ -217,12 +224,16 @@ export default class CruciblePlugin extends Plugin {
 
 		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
 			if (file instanceof TFile && file.extension === 'md') {
+				this.moveAutoLocalizeTimer(oldPath, file.path);
 				void this.attachmentLocalizer.onNoteRename(file, oldPath);
 			}
 			this.searchIndexCoordinator.handleRename(file, oldPath);
 		}));
 
 		this.registerEvent(this.app.vault.on('delete', (file) => {
+			const pending = this.autoLocalizeTimers.get(file.path);
+			if (pending?.timer) clearTimeout(pending.timer);
+			this.autoLocalizeTimers.delete(file.path);
 			void this.attachmentLocalizer.onNoteDelete(file.path);
 			this.searchIndexCoordinator.handleDelete(file.path);
 		}));
@@ -273,6 +284,80 @@ export default class CruciblePlugin extends Plugin {
 
 	activeEditor(): Editor | undefined {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
+	}
+
+	private scheduleAutoLocalize(
+		file: TFile,
+		source: AutoLocalizeSource,
+		delayMs: number = source === 'create' ? AUTO_LOCALIZE_CREATE_DELAY_MS : AUTO_LOCALIZE_EDIT_DELAY_MS,
+	): void {
+		if (file.extension !== 'md') return;
+		if (!this.autoLocalizeSourceEnabled(source)) return;
+
+		const existing = this.autoLocalizeTimers.get(file.path);
+		const state: AutoLocalizeState = existing ?? {
+			path: file.path,
+			sources: new Set<AutoLocalizeSource>(),
+			firstScheduledAt: Date.now(),
+			attempts: 0,
+			timer: null,
+		};
+		state.path = file.path;
+		state.sources.add(source);
+		this.scheduleAutoLocalizeState(state, delayMs);
+	}
+
+	private scheduleAutoLocalizeState(state: AutoLocalizeState, delayMs: number): void {
+		if (state.timer) clearTimeout(state.timer);
+		this.autoLocalizeTimers.set(state.path, state);
+		state.timer = setTimeout(() => {
+			state.timer = null;
+			void this.runScheduledAutoLocalize(state);
+		}, delayMs);
+	}
+
+	private async runScheduledAutoLocalize(state: AutoLocalizeState): Promise<void> {
+		this.autoLocalizeTimers.delete(state.path);
+		if (!this.autoLocalizeSourcesEnabled(state)) return;
+
+		const current = this.app.vault.getAbstractFileByPath(state.path);
+		if (!(current instanceof TFile) || current.extension !== 'md') return;
+
+		if (current.stat.size === 0 || this.noteLocks.isLocked(current.path) || this.isMaterializing) {
+			if (Date.now() - state.firstScheduledAt <= AUTO_LOCALIZE_MAX_AGE_MS) {
+				state.path = current.path;
+				state.attempts += 1;
+				this.scheduleAutoLocalizeState(state, AUTO_LOCALIZE_RETRY_DELAY_MS);
+			}
+			return;
+		}
+
+		await this.attachmentLocalizer.localizeNote(current, true);
+	}
+
+	private autoLocalizeSourceEnabled(source: AutoLocalizeSource): boolean {
+		return source === 'create'
+			? this.settings.localizeAttachmentsTriggerOnCreate
+			: this.settings.localizeAttachmentsTriggerOnEdit;
+	}
+
+	private autoLocalizeSourcesEnabled(state: AutoLocalizeState): boolean {
+		return Array.from(state.sources).some(source => this.autoLocalizeSourceEnabled(source));
+	}
+
+	private moveAutoLocalizeTimer(oldPath: string, newPath: string): void {
+		const state = this.autoLocalizeTimers.get(oldPath);
+		if (!state) return;
+		this.autoLocalizeTimers.delete(oldPath);
+		state.path = newPath;
+		this.scheduleAutoLocalizeState(state, AUTO_LOCALIZE_RETRY_DELAY_MS);
+	}
+
+	private clearAutoLocalizeTimers(): void {
+		for (const state of this.autoLocalizeTimers.values()) {
+			if (state.timer) clearTimeout(state.timer);
+		}
+		this.autoLocalizeTimers.clear();
 	}
 
 	enqueueImageMetadataExtraction(imagePath: string, sourceNotePath?: string): void {
@@ -467,33 +552,36 @@ export default class CruciblePlugin extends Plugin {
 		const moveDailyId = 'move-current-file-to-daily-folder';
 		const moveFolderId = 'move-current-file-to-folder';
 
-		this.chainManager.registerInternalCommand(
-			`${prefix}:${moveDailyId}`,
-			async (_args, _prev, _editor, targetFile) => {
-				if (!this.settings.dailyEnabled) {
-					new Notice(periodDisabledMessage('daily'));
-					return false;
-				}
-				return await this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), targetFile);
+		const wrapMoveResult = (moved: TFile | null) => moved ? chainStepResult(true, moved) : false;
+		const moveDaily = async (_args: Record<string, string>, _prev: unknown, _editor?: Editor, targetFile?: TFile) => {
+			if (!this.settings.dailyEnabled) {
+				new Notice(periodDisabledMessage('daily'));
+				return false;
+			}
+			return wrapMoveResult(await this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), targetFile));
+		};
+		const moveFolder = async (args: Record<string, string>, _prev: unknown, _editor?: Editor, targetFile?: TFile) => {
+			const folder = args.folder?.trim();
+			const moved = folder
+				? await this.moveFileToFolder(folder, targetFile)
+				: await this.openMoveFileFolderPicker(targetFile);
+			return wrapMoveResult(moved);
+		};
+		const moveFolderSchema: CommandArgSchema[] = [
+			{
+				id: 'folder',
+				name: 'Destination folder',
+				type: 'folder',
+				description: 'Folder to move the current file into. Leave empty to show the folder picker.',
 			},
-		);
+		];
 
-		this.chainManager.registerInternalCommand(
-			`${prefix}:${moveFolderId}`,
-			async (args, _prev, _editor, targetFile) => {
-				const folder = args.folder?.trim();
-				if (folder) return await this.moveFileToFolder(folder, targetFile);
-				return await this.openMoveFileFolderPicker(targetFile);
-			},
-			[
-				{
-					id: 'folder',
-					name: 'Destination folder',
-					type: 'folder',
-					description: 'Folder to move the current file into. Leave empty to show the folder picker.',
-				},
-			],
-		);
+		for (const id of [`${prefix}:${moveDailyId}`, `crucible:${moveDailyId}`]) {
+			this.chainManager.registerInternalCommand(id, moveDaily);
+		}
+		for (const id of [`${prefix}:${moveFolderId}`, `crucible:${moveFolderId}`]) {
+			this.chainManager.registerInternalCommand(id, moveFolder, moveFolderSchema);
+		}
 
 		this.registerCrucibleCommand({
 			id: moveDailyId,
@@ -523,58 +611,61 @@ export default class CruciblePlugin extends Plugin {
 		});
 	}
 
-	private async openMoveFileFolderPicker(targetFile?: TFile): Promise<boolean> {
+	private async openMoveFileFolderPicker(targetFile?: TFile): Promise<TFile | null> {
 		const file = targetFile ?? this.app.workspace.getActiveFile();
 		if (!file) {
 			new Notice('No active file to move.');
-			return false;
+			return null;
 		}
 
-		return await new Promise<boolean>((resolve) => {
+		return await new Promise<TFile | null>((resolve) => {
 			new MoveFileFolderPickerModal(
 				this.app,
 				this.settings,
 				async (folderPath) => {
 					resolve(await this.moveFileToFolder(folderPath, file));
 				},
-				() => resolve(false),
+				() => resolve(null),
 			).open();
 		});
 	}
 
-	private async moveFileToFolder(folderPath: string, targetFile?: TFile): Promise<boolean> {
+	private async moveFileToFolder(folderPath: string, targetFile?: TFile): Promise<TFile | null> {
 		try {
 			const file = targetFile ?? this.app.workspace.getActiveFile();
 			if (!file) {
 				new Notice('No active file to move.');
-				return false;
+				return null;
 			}
 
 			const normalizedFolder = normalizeFolderPath(folderPath);
 			if (!normalizedFolder) {
 				new Notice('Move target folder is not configured.');
-				return false;
+				return null;
 			}
 
 			await ensureFolder(this.app, normalizedFolder);
 			const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
 			if (targetPath === file.path) {
 				new Notice(`Already in ${normalizedFolder}`);
-				return true;
+				return file;
 			}
 
 			const existing = this.app.vault.getAbstractFileByPath(targetPath);
 			if (existing) {
 				new Notice(`Move target already exists: ${targetPath}`);
-				return false;
+				return null;
 			}
 
+			const oldPath = file.path;
 			await this.app.fileManager.renameFile(file, targetPath);
+			this.noteLocks.handleRename(oldPath, targetPath);
 			new Notice(`Moved to ${normalizedFolder}`);
-			return true;
+			const moved = this.app.vault.getAbstractFileByPath(targetPath);
+			return moved instanceof TFile ? moved : file;
 		} catch (e) {
 			new Notice(`Error moving file: ${(e as Error).message}`);
-			return false;
+			return null;
 		}
 	}
 
@@ -1056,9 +1147,7 @@ export default class CruciblePlugin extends Plugin {
 	async handleFileCreate(file: TAbstractFile) {
 		if (this.isMaterializing || !(file instanceof TFile) || file.extension !== 'md') return;
 
-		if (this.settings.localizeAttachmentsTriggerOnCreate && file.stat.size > 0) {
-			void this.attachmentLocalizer.localizeNote(file, true);
-		}
+		this.scheduleAutoLocalize(file, 'create');
 
 		// CRITICAL: Only proceed if the file is truly empty to avoid overwriting existing notes on startup
 		if (file.stat.size > 0) return;
