@@ -5,6 +5,26 @@ import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockM
 
 export type ChainCommandFn = (args: Record<string, string>, previousResponse: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>;
 
+export interface ChainStepResult {
+	__crucibleChainStepResult: true;
+	value: unknown;
+	targetFile?: TFile;
+}
+
+export function chainStepResult(value: unknown, targetFile?: TFile): ChainStepResult {
+	return {
+		__crucibleChainStepResult: true,
+		value,
+		targetFile,
+	};
+}
+
+function isChainStepResult(value: unknown): value is ChainStepResult {
+	return typeof value === 'object'
+		&& value !== null
+		&& (value as Partial<ChainStepResult>).__crucibleChainStepResult === true;
+}
+
 export class ChainManager {
 	app: App;
 	private registry: Map<string, ChainCommandFn> = new Map();
@@ -93,10 +113,18 @@ export class ChainManager {
 		targetFile?: TFile,
 	): Promise<void> {
 		let previousResponse: unknown = null;
+		let currentTargetFile = targetFile;
 		for (const step of chain.steps) {
 			const stepLabel = step.stepType === 'guard' ? 'guard' : step.commandId;
 			try {
-				const result = await this.executeStep(step, previousResponse, chainVars, editor, targetFile);
+				let result = await this.executeStep(step, previousResponse, chainVars, editor, currentTargetFile);
+				if (isChainStepResult(result)) {
+					if (result.targetFile) {
+						currentTargetFile = result.targetFile;
+						chainVars.target_path = result.targetFile.path;
+					}
+					result = result.value;
+				}
 
 				// Unwrap AgentResult: expose {{response}}, {{agent_model}}, {{agent_provider}} as chain vars
 				if (result !== null && typeof result === 'object' && 'response' in result && 'model' in result) {

@@ -41,7 +41,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { ChainManager } = await import(pathToFileURL(outfile).href);
+const { ChainManager, chainStepResult } = await import(pathToFileURL(outfile).href);
 
 // No active file → executeChain skips the note-lock path and runs steps directly,
 // so the cycle guard is the only thing standing between a self-referential chain
@@ -170,4 +170,36 @@ test('a mutating chain (default) acquires the note lock', async () => {
 	await cm.executeChain(chain, undefined, { path: 'a.md' });
 
 	assert.equal(lockCalls, 1);
+});
+
+test('a move step can retarget later steps to the moved note without debug mode', async () => {
+	globalThis.__notices = [];
+	const fakeLocks = { withLock: (_p, _l, action) => action() };
+	const cm = new ChainManager(stubApp, fakeLocks);
+	const original = { path: 'Clippings/post.md' };
+	const moved = { path: 'daily/day/2026-06-17/post.md' };
+	const seen = [];
+
+	cm.registerInternalCommand('obsidian-crucible:move-current-file-to-daily-folder', async (_args, _prev, _editor, targetFile) => {
+		seen.push(['move', targetFile?.path]);
+		return chainStepResult(true, moved);
+	});
+	cm.registerInternalCommand('obsidian-crucible:lint-note', async (_args, _prev, _editor, targetFile) => {
+		seen.push(['lint', targetFile?.path]);
+		return true;
+	});
+
+	await cm.executeChain({
+		name: 'Ingest as Blog',
+		debugMode: false,
+		steps: [
+			{ commandId: 'obsidian-crucible:move-current-file-to-daily-folder' },
+			{ commandId: 'obsidian-crucible:lint-note' },
+		],
+	}, undefined, original);
+
+	assert.deepEqual(seen, [
+		['move', 'Clippings/post.md'],
+		['lint', 'daily/day/2026-06-17/post.md'],
+	]);
 });
