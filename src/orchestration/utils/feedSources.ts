@@ -14,6 +14,7 @@ import {
 	RemotePost,
 	buildBlogCanonHostMap,
 	fetchBlogFeed,
+	parseBlogBulletMeta,
 	parseBlogsTable,
 	postIdFromUrl,
 } from './blogs';
@@ -284,7 +285,7 @@ function parseBlogHeading(line: string): BlogEntry | null {
 	const name = match?.[1]?.trim();
 	const link = match?.[2]?.trim();
 	if (!name || !link) return null;
-	return { name, link, method: 'rss', tags: [], priority: 'normal', canon: 'auto' };
+	return { name, link, method: 'rss', tags: [], priority: 'normal', canon: 'auto', body: 'auto' };
 }
 
 function parsePostBullet(line: string, blogName: string): RemotePost | null {
@@ -293,12 +294,19 @@ function parsePostBullet(line: string, blogName: string): RemotePost | null {
 	const publishedAt = match?.[2]?.trim();
 	const url = match?.[3]?.trim();
 	if (!rawTitle || !publishedAt || !url) return null;
+	// Restore the enrichment fields from the trailing crucible comment (absent on legacy digests).
+	const meta = parseBlogBulletMeta(line);
 	return {
 		postId: postIdFromUrl(url),
 		title: unescapeBrackets(rawTitle),
 		publishedAt,
 		blogName,
 		url,
+		authors: meta?.authors ?? [],
+		categories: meta?.categories ?? [],
+		wordCount: meta?.wordCount ?? null,
+		kind: meta?.kind ?? 'article',
+		hasBody: meta?.hasBody ?? false,
 	};
 }
 

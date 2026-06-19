@@ -45,6 +45,7 @@ await esbuild.build({
 					'export const Platform = { isDesktopApp: true, isMobileApp: false, isMacOS: false };',
 					'export function debounce(fn) { return fn; }',
 					'export function getAllTags() { return []; }',
+					'export function htmlToMarkdown(html) { return String(html); }',
 					'export function moment() { return { format() { return "2026-06-17"; }, startOf() { return this; }, endOf() { return this; }, add() { return this; }, subtract() { return this; }, clone() { return this; }, isSame() { return false; }, isBefore() { return false; }, toDate() { return new Date(); }, valueOf() { return Date.now(); } }; }',
 					'export function normalizePath(p) { return String(p).replace(/\\/+/g, "/"); }',
 					'export function parseYaml() { return {}; }',
