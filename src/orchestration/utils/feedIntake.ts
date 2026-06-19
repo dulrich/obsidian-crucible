@@ -99,13 +99,18 @@ export function buildFeedSeenIdSet<Entry, Item>(
 	diffMode: boolean,
 	seedIds?: Iterable<string>,
 	hostRules?: Map<string, CanonMethod>,
+	extraSkipPrefixes: string[] = [],
 ): Set<string> {
 	const seen = new Set<string>(seedIds ?? []);
 	const intakePrefix = `${source.intakeRoot}/`;
+	const normalizedExtraSkipPrefixes = extraSkipPrefixes
+		.map(prefix => normalizePath(prefix).replace(/\/+$/, ''))
+		.filter(prefix => prefix.length > 0);
 	for (const file of app.vault.getMarkdownFiles()) {
 		const inIntake = file.path.startsWith(intakePrefix);
 		const inSkip = file.path.startsWith(source.queueScanSkipPrefix);
-		if (inSkip && !(diffMode && inIntake)) continue;
+		const inExtraSkip = normalizedExtraSkipPrefixes.some(prefix => file.path === prefix || file.path.startsWith(`${prefix}/`));
+		if ((inSkip || inExtraSkip) && !(diffMode && inIntake)) continue;
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 		if (!fm) continue;
 		source.ingestFrontmatterIds(fm, seen, diffMode, inIntake, hostRules);
@@ -284,8 +289,9 @@ export function buildBlogsSeenIdSet(
 	diffMode: boolean,
 	seedIds?: Iterable<string>,
 	hostRules?: Map<string, CanonMethod>,
+	extraSkipPrefixes: string[] = [],
 ): Set<string> {
-	return buildFeedSeenIdSet(app, BLOGS_FEED_SOURCE, diffMode, seedIds, hostRules);
+	return buildFeedSeenIdSet(app, BLOGS_FEED_SOURCE, diffMode, seedIds, hostRules, extraSkipPrefixes);
 }
 
 export async function loadConfiguredBlogs(

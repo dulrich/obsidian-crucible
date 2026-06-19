@@ -5,7 +5,9 @@ import { nowTimeInTz, todayInTz } from '../utils/dates';
 import { ensureFolder } from '../../utils';
 import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontmatter';
 import { rateLimitedAllSettled } from '../utils/rateLimit';
+import { buildBlogBulletSuffix } from '../utils/blogs';
 import type { BlogRowError, RemotePost } from '../utils/blogs';
+import { ensureBlogMetadataNote } from '../utils/blogsApi';
 import type { RemoteVideo } from '../utils/youtube';
 import {
 	BLOGS_FEED_SOURCE,
@@ -203,7 +205,16 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 				sections.push(`## ${this.source.entryHeading(o.entry)}`);
 				for (const item of o.newItems) {
 					const published = (this.source.itemPublishedAt(item) || '').slice(0, 10) || 'unknown';
-					sections.push(`- **${escapeBrackets(this.source.itemTitle(item))}** — published ${published} — ${this.source.itemUrl(item)}`);
+					// Blogs: encode enrichment fields in a trailing comment and persist the full
+					// metadata/body note at fetch time. No-op for re-parsed items (consolidate)
+					// whose bodyHtml is absent.
+					let suffix = '';
+					if (this.source.kind === 'blogs') {
+						const post = item as unknown as RemotePost;
+						suffix = buildBlogBulletSuffix(post);
+						await ensureBlogMetadataNote(plugin, { ...post, blogName: this.source.entryName(o.entry) });
+					}
+					sections.push(`- **${escapeBrackets(this.source.itemTitle(item))}** — published ${published} — ${this.source.itemUrl(item)}${suffix}`);
 				}
 				sections.push('');
 			}
