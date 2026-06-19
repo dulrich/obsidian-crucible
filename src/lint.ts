@@ -213,28 +213,27 @@ export class Linter {
 	async lintFile(file: TFile, silent: boolean = false): Promise<boolean> {
 		if (this.isPathIgnored(file.path)) return true;
 
-		const content = await this.app.vault.read(file);
-		const wordCount = this.calculateWordCount(content);
-		const insertYaml: Record<string, string> = {};
-		
-		if (this.settings.lintFrontmatterInsert) {
-			const processedInsert = await applyTemplateString(this.settings.lintFrontmatterInsert, moment(), file.basename);
-			const lines = processedInsert.split('\n');
-			for (const line of lines) {
-				const parts = line.split(':');
-				if (parts.length >= 2) {
-					const key = parts[0]?.trim();
-					const value = parts.slice(1).join(':').trim();
-					if (key) insertYaml[key] = value;
-				}
-			}
-		}
-
-		const todayStr = moment().format('YYYY-MM-DD');
-		const createdStr = moment(file.stat.ctime).format('YYYY-MM-DD');
-
 		try {
 			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
+				const content = await this.app.vault.read(file);
+				const wordCount = this.calculateWordCount(content);
+				const insertYaml: Record<string, string> = {};
+				
+				if (this.settings.lintFrontmatterInsert) {
+					const processedInsert = await applyTemplateString(this.settings.lintFrontmatterInsert, moment(), file.basename);
+					const lines = processedInsert.split('\n');
+					for (const line of lines) {
+						const parts = line.split(':');
+						if (parts.length >= 2) {
+							const key = parts[0]?.trim();
+							const value = parts.slice(1).join(':').trim();
+							if (key) insertYaml[key] = value;
+						}
+					}
+				}
+
+				const todayStr = moment().format('YYYY-MM-DD');
+				const createdStr = moment(file.stat.ctime).format('YYYY-MM-DD');
 				await updateFrontmatter(this.app, file, (fm) => {
 					for (const [key, value] of Object.entries(insertYaml)) {
 						upsertFrontmatterPropertyIfEmpty(fm, key, value);

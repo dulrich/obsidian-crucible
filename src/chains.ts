@@ -2,8 +2,25 @@ import { App, Modal, Notice, Editor, TFile } from 'obsidian';
 import { AgentResult, Chain, ChainStep, CommandArgSchema } from './types';
 import { appendDebugLog } from './utils';
 import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
+import { logWarn } from './log';
 
 export type ChainCommandFn = (args: Record<string, string>, previousResponse: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>;
+export type ChainCommandLockTarget = 'target-file' | 'none';
+
+export interface ChainCommandOptions {
+	schema?: CommandArgSchema[];
+	mutating?: boolean;
+	lockTarget?: ChainCommandLockTarget;
+	label?: string;
+}
+
+interface ChainCommandRegistration {
+	fn: ChainCommandFn;
+	schema?: CommandArgSchema[];
+	mutating: boolean;
+	lockTarget: ChainCommandLockTarget;
+	label?: string;
+}
 
 export interface ChainStepResult {
 	__crucibleChainStepResult: true;
@@ -25,9 +42,13 @@ function isChainStepResult(value: unknown): value is ChainStepResult {
 		&& (value as Partial<ChainStepResult>).__crucibleChainStepResult === true;
 }
 
+function commandLockLabel(id: string): string {
+	return `command:${id.split(':').pop() ?? id}`;
+}
+
 export class ChainManager {
 	app: App;
-	private registry: Map<string, ChainCommandFn> = new Map();
+	private registry: Map<string, ChainCommandRegistration> = new Map();
 	private schemas: Map<string, CommandArgSchema[]> = new Map();
 	// Chains currently on the execution stack, keyed by chain → set of target note
 	// paths. A nested chain step that re-enters a chain already running *on the same
@@ -41,9 +62,16 @@ export class ChainManager {
 		this.app = app;
 	}
 
-	registerInternalCommand(id: string, fn: ChainCommandFn, schema?: CommandArgSchema[]) {
-		this.registry.set(id, fn);
-		if (schema) this.schemas.set(id, schema);
+	registerInternalCommand(id: string, fn: ChainCommandFn, schemaOrOptions?: CommandArgSchema[] | ChainCommandOptions) {
+		const options: ChainCommandOptions = Array.isArray(schemaOrOptions) ? { schema: schemaOrOptions } : (schemaOrOptions ?? {});
+		this.registry.set(id, {
+			fn,
+			schema: options.schema,
+			mutating: options.mutating ?? true,
+			lockTarget: options.lockTarget ?? 'target-file',
+			label: options.label,
+		});
+		if (options.schema) this.schemas.set(id, options.schema);
 	}
 
 	unregisterInternalCommand(id: string) {
@@ -66,8 +94,15 @@ export class ChainManager {
 	}
 
 	async executeInternalCommand(id: string, args: Record<string, string> = {}, prev: unknown = null, editor?: Editor, targetFile?: TFile): Promise<unknown> {
-		const fn = this.registry.get(id);
-		if (fn) return await fn(args, prev, editor, targetFile);
+		const entry = this.registry.get(id);
+		if (entry) {
+			const file = targetFile ?? this.app.workspace.getActiveFile() ?? undefined;
+			const run = (tf?: TFile) => entry.fn(args, prev, editor, tf ?? targetFile);
+			if (entry.mutating && entry.lockTarget === 'target-file' && file) {
+				return await withOptionalNoteLock(this.noteLocks, file.path, entry.label ?? commandLockLabel(id), () => run(file));
+			}
+			return await run(targetFile);
+		}
 		return null;
 	}
 
@@ -166,7 +201,11 @@ export class ChainManager {
 	}
 
 	private async appendDebugLog(chain: Chain, entry: string) {
-		await appendDebugLog(this.app, chain.name, entry, chain.debugLogPath || '_crucible/debug.md');
+		try {
+			await appendDebugLog(this.app, chain.name, entry, chain.debugLogPath || '_crucible/debug.md');
+		} catch (e) {
+			logWarn('chain debug log failed', chain.name, e);
+		}
 	}
 
 	private async writeIntermediateCapture(stepName: string, content: string) {
@@ -188,7 +227,7 @@ export class ChainManager {
 			return this.evaluateGuard(step, chainVars, targetFile);
 		}
 
-		const internalFn = this.registry.get(step.commandId);
+		const hasInternal = this.registry.has(step.commandId);
 
 		// Handle legacy string args or missing args
 		const rawArgs = typeof step.args === 'string' ? { _default: step.args } : (step.args || {});
@@ -209,8 +248,8 @@ export class ChainManager {
 			processedArgs[key] = v;
 		}
 
-		if (internalFn) {
-			return await internalFn(processedArgs, previousResponse, editor, targetFile);
+		if (hasInternal) {
+			return await this.executeInternalCommand(step.commandId, processedArgs, previousResponse, editor, targetFile);
 		} else {
 			// External Obsidian command
 			if (this.app.commands && this.app.commands.listCommands().find(c => c.id === step.commandId)) {

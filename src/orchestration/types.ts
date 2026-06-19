@@ -18,9 +18,11 @@ export type JobType =
 	| 'search_sweep';
 
 export type JobPriority = 'low' | 'normal' | 'high';
+export type JobLane = 'user' | 'background';
 
 export interface OrchestrationEnqueueOptions {
 	priority?: JobPriority;
+	lane?: JobLane;
 	inputPaths?: string[];
 }
 
@@ -29,6 +31,7 @@ export interface OrchestrationJob {
 	type: JobType;
 	status: JobStatus;
 	priority: JobPriority;
+	lane: JobLane;
 	created: string;
 	updated?: string;
 	inputPaths: string[];

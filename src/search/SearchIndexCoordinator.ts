@@ -65,7 +65,7 @@ export class SearchIndexCoordinator {
 	// companion is down.
 	reindex(file: TFile): void {
 		if (!this.indexable(file.path)) return;
-		void this.plugin.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority: 'high', inputPaths: [file.path] });
+		void this.plugin.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority: 'high', lane: 'user', inputPaths: [file.path] });
 	}
 
 	dispose(): void {
@@ -87,6 +87,6 @@ export class SearchIndexCoordinator {
 		// Upserts carry the note as an input path (note-lock + queue display); deletes don't bind to a
 		// file that may no longer exist.
 		const inputPaths = type === 'search_upsert_file' ? [path] : undefined;
-		void this.plugin.orchestrator.enqueue(type, { path }, { priority, inputPaths });
+		void this.plugin.orchestrator.enqueue(type, { path }, { priority, lane: 'background', inputPaths });
 	}
 }
