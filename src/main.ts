@@ -5,7 +5,7 @@ import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
-import { ChainManager, chainStepResult } from "./chains";
+import { ChainCommandOptions, ChainManager, chainStepResult } from "./chains";
 import { ProviderManager } from "./providers";
 import { AgentManager, agentCommandId } from "./agents";
 import { TableOfContentsUI } from "./toc";
@@ -43,6 +43,7 @@ import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
 import { localizedImageInfo } from './orchestration/utils/imageMetadata';
+import { logError } from './log';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -71,6 +72,8 @@ export interface CrucibleCommandEntry {
 	queueable: boolean;
 }
 
+type CrucibleCommandRunner = () => Promise<unknown>;
+
 type AutoLocalizeSource = 'create' | 'edit';
 
 interface AutoLocalizeState {
@@ -91,6 +94,7 @@ export default class CruciblePlugin extends Plugin {
 	linter: Linter;
 	attachmentLocalizer: AttachmentLocalizer;
 	commandRegistry: CrucibleCommandEntry[] = [];
+	private commandRunners = new Map<string, CrucibleCommandRunner>();
 	private isMaterializing = false;
 	private materializer: Materializer;
 	private captureManager: CaptureManager;
@@ -368,7 +372,7 @@ export default class CruciblePlugin extends Plugin {
 			imagePath,
 			sourceNotePath,
 			schemaVersion: this.settings.imageMetadataExtractionSchemaVersion,
-		}, { priority: 'low', inputPaths });
+		}, { priority: 'low', lane: 'background', inputPaths });
 	}
 
 	private canEnqueueImageMetadataExtraction(): boolean {
@@ -431,20 +435,35 @@ export default class CruciblePlugin extends Plugin {
 			?? (this.chainManager.hasInternalCommand(`${this.manifest.id}:${opts.id}`)
 				|| this.chainManager.hasInternalCommand(`crucible:${opts.id}`));
 		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group, mutating: opts.mutating ?? true, queueable });
+		this.commandRunners.set(opts.id, async () => await opts.run());
 		this.addCommand({
 			id: opts.id,
 			name: opts.name,
 			checkCallback: (checking: boolean) => {
 				if (this.settings.hiddenCommands.includes(opts.id)) return false;
 				if (opts.available && !opts.available()) return false;
-				if (!checking) { void opts.run(); }
+				if (!checking) void this.executeCrucibleCommand(opts.id).catch(e => this.reportCommandFailure(opts.name, e));
 				return true;
 			},
 		});
 	}
 
+	async executeCrucibleCommand(id: string): Promise<unknown> {
+		const runner = this.commandRunners.get(id);
+		return runner ? await runner() : null;
+	}
+
 	private clearCommandRegistryGroup(group: CrucibleCommandGroup): void {
+		for (const entry of this.commandRegistry) {
+			if (entry.group === group) this.commandRunners.delete(entry.id);
+		}
 		this.commandRegistry = this.commandRegistry.filter(c => c.group !== group);
+	}
+
+	private reportCommandFailure(name: string, error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		logError(`command failed (${name})`, error);
+		new Notice(`${name} failed: ${message}`);
 	}
 
 	async loadSettings() {
@@ -595,7 +614,7 @@ export default class CruciblePlugin extends Plugin {
 					new Notice(periodDisabledMessage('daily'));
 					return;
 				}
-				void this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), activeFile);
+				return this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), activeFile);
 			},
 		});
 
@@ -606,7 +625,8 @@ export default class CruciblePlugin extends Plugin {
 			available: () => this.app.workspace.getActiveFile() !== null,
 			run: () => {
 				const activeFile = this.app.workspace.getActiveFile();
-				if (activeFile) void this.openMoveFileFolderPicker(activeFile);
+				if (activeFile) return this.openMoveFileFolderPicker(activeFile);
+				return null;
 			},
 		});
 	}
@@ -638,31 +658,33 @@ export default class CruciblePlugin extends Plugin {
 				return null;
 			}
 
-			const normalizedFolder = normalizeFolderPath(folderPath);
-			if (!normalizedFolder) {
-				new Notice('Move target folder is not configured.');
-				return null;
-			}
+			return await this.noteLocks.withLock(file.path, 'move-file', async () => {
+				const normalizedFolder = normalizeFolderPath(folderPath);
+				if (!normalizedFolder) {
+					new Notice('Move target folder is not configured.');
+					return null;
+				}
 
-			await ensureFolder(this.app, normalizedFolder);
-			const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
-			if (targetPath === file.path) {
-				new Notice(`Already in ${normalizedFolder}`);
-				return file;
-			}
+				await ensureFolder(this.app, normalizedFolder);
+				const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
+				if (targetPath === file.path) {
+					new Notice(`Already in ${normalizedFolder}`);
+					return file;
+				}
 
-			const existing = this.app.vault.getAbstractFileByPath(targetPath);
-			if (existing) {
-				new Notice(`Move target already exists: ${targetPath}`);
-				return null;
-			}
+				const existing = this.app.vault.getAbstractFileByPath(targetPath);
+				if (existing) {
+					new Notice(`Move target already exists: ${targetPath}`);
+					return null;
+				}
 
-			const oldPath = file.path;
-			await this.app.fileManager.renameFile(file, targetPath);
-			this.noteLocks.handleRename(oldPath, targetPath);
-			new Notice(`Moved to ${normalizedFolder}`);
-			const moved = this.app.vault.getAbstractFileByPath(targetPath);
-			return moved instanceof TFile ? moved : file;
+				const oldPath = file.path;
+				await this.app.fileManager.renameFile(file, targetPath);
+				this.noteLocks.handleRename(oldPath, targetPath);
+				new Notice(`Moved to ${normalizedFolder}`);
+				const moved = this.app.vault.getAbstractFileByPath(targetPath);
+				return moved instanceof TFile ? moved : file;
+			});
 		} catch (e) {
 			new Notice(`Error moving file: ${(e as Error).message}`);
 			return null;
@@ -805,13 +827,17 @@ export default class CruciblePlugin extends Plugin {
 		const prefix = this.manifest.id;
 
 		// Built-in commands
-		const register = (id: string, fn: (args: Record<string, string>, prev: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>, schema?: CommandArgSchema[]) => {
-			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn, schema);
-			this.chainManager.registerInternalCommand(`crucible:${id}`, fn, schema);
+		const register = (
+			id: string,
+			fn: (args: Record<string, string>, prev: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>,
+			schemaOrOptions?: CommandArgSchema[] | ChainCommandOptions,
+		) => {
+			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn, schemaOrOptions);
+			this.chainManager.registerInternalCommand(`crucible:${id}`, fn, schemaOrOptions);
 		};
 
 		register('lint-note', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
-		register('lint-vault', async () => await this.linter.lintVault());
+		register('lint-vault', async () => await this.linter.lintVault(), { lockTarget: 'none' });
 		register('word-count', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
 		register('lint-cleanup-transcript', async (_a, _p, _e, tf) => await this.linter.cleanupTranscriptInFile(tf));
 		register('lint-localize-attachments', async (_a, _p, _e, tf) => {
@@ -822,7 +848,7 @@ export default class CruciblePlugin extends Plugin {
 			}
 			return await this.attachmentLocalizer.localizeNote(file);
 		});
-		register('lint-localize-attachments-vault', async () => await this.attachmentLocalizer.localizeVault());
+		register('lint-localize-attachments-vault', async () => await this.attachmentLocalizer.localizeVault(), { lockTarget: 'none' });
 		register('lint-repair-attachments', async (_a, _p, _e, tf) => {
 			const file = tf ?? this.app.workspace.getActiveFile();
 			if (!file || file.extension !== 'md') {
@@ -831,19 +857,19 @@ export default class CruciblePlugin extends Plugin {
 			}
 			return (await this.attachmentLocalizer.repairNote(file)) !== null;
 		});
-		register('lint-repair-attachments-vault', async () => await this.attachmentLocalizer.repairVault());
+		register('lint-repair-attachments-vault', async () => await this.attachmentLocalizer.repairVault(), { lockTarget: 'none' });
 		register('lint-rename-property', async (args) => await this.linter.renamePropertyInVault(
 			typeof args['oldKey'] === 'string' ? args['oldKey'] : '',
 			typeof args['newKey'] === 'string' ? args['newKey'] : '',
-		));
+		), { lockTarget: 'none' });
 		register('lint-remove-property', async (args) => await this.linter.removePropertyFromVault(
 			typeof args['key'] === 'string' ? args['key'] : '',
-		));
+		), { lockTarget: 'none' });
 		register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await this.fetchYoutubeMetadataForActiveNote(tf));
 
-		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()));
-		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()));
-		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()));
+		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()), { lockTarget: 'none' });
+		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()), { lockTarget: 'none' });
+		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()), { lockTarget: 'none' });
 
 		// --- Sources: produce content for chain steps via {{response}} ---
 		register('source:active-file', async (_a, _p, _e, tf) => {
@@ -851,7 +877,7 @@ export default class CruciblePlugin extends Plugin {
 			if (!file) throw new Error('No active file');
 			const content = await this.app.vault.read(file);
 			return content.replace(FRONTMATTER_REGEX, '').trim();
-		});
+		}, { mutating: false });
 
 		register('copy-active-file', async (_a, _p, _e, tf) => {
 			const file = tf ?? this.app.workspace.getActiveFile();
@@ -860,14 +886,14 @@ export default class CruciblePlugin extends Plugin {
 			await navigator.clipboard.writeText(content);
 			new Notice('Note copied to clipboard');
 			return true;
-		});
+		}, { mutating: false });
 
 		register('source:selection', async (_args, _prev, editor) => {
 			if (editor) return editor.getSelection();
 			const dom = window.getSelection()?.toString() ?? '';
 			if (!dom) throw new Error('No text selected. Select text in the note first.');
 			return dom;
-		});
+		}, { mutating: false, lockTarget: 'none' });
 
 		register('source:input', async (args) => {
 			const title = args.title || 'Input';
@@ -880,9 +906,11 @@ export default class CruciblePlugin extends Plugin {
 					() => { if (!submitted) resolve(false); }
 				).open();
 			});
-		}, [
-			{ id: 'title', name: 'Title', type: 'text', description: 'Heading shown above the input box.' }
-		]);
+		}, {
+			mutating: false,
+			lockTarget: 'none',
+			schema: [{ id: 'title', name: 'Title', type: 'text', description: 'Heading shown above the input box.' }],
+		});
 		
 		register('mark-as-forwarded', async (_args, _prev, editor) => {
 			if (!editor) throw new Error('mark-as-forwarded requires edit mode');
@@ -1068,7 +1096,7 @@ export default class CruciblePlugin extends Plugin {
 					// Capture the active file at invocation time so async steps never
 					// accidentally target a different note if the user navigates away.
 					const spawnFile = this.app.workspace.getActiveFile() ?? undefined;
-					void this.chainManager.executeChain(chain, editor, spawnFile);
+					return this.chainManager.executeChain(chain, editor, spawnFile);
 				},
 			});
 			// Also expose the chain as a chain-internal command so a nested chain step

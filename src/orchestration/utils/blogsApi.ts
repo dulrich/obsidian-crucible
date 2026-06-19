@@ -1,4 +1,4 @@
-import { App, TFile, TFolder, htmlToMarkdown, normalizePath } from 'obsidian';
+import { App, TFile, TFolder, htmlToMarkdown, normalizePath, parseYaml } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { ensureFolder, slugify } from '../../utils';
 import type { UncapturedPostRow } from '../../ingestion/render/types';
@@ -123,9 +123,28 @@ export async function findExistingBlogMetadataNote(app: App, root: string, postI
 	if (!(rootFolder instanceof TFolder)) return null;
 	for (const file of walkMarkdown(rootFolder)) {
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
-		if (typeof fm?.['post-id'] === 'string' && fm['post-id'].trim() === postId) return file;
+		if (fm) {
+			if (typeof fm['post-id'] === 'string' && fm['post-id'].trim() === postId) return file;
+			continue;
+		}
+		// Cache miss: a just-created file isn't in metadataCache until Obsidian
+		// re-parses it, so read frontmatter from disk to match it immediately.
+		if ((await readPostIdFromDisk(app, file)) === postId) return file;
 	}
 	return null;
+}
+
+async function readPostIdFromDisk(app: App, file: TFile): Promise<string | null> {
+	try {
+		const content = await app.vault.cachedRead(file);
+		const match = /^---\n([\s\S]*?)\n---/.exec(content);
+		if (!match?.[1]) return null;
+		const fm = parseYaml(match[1]) as Record<string, unknown> | null;
+		const postId = fm?.['post-id'];
+		return typeof postId === 'string' && postId.trim() ? postId.trim() : null;
+	} catch {
+		return null;
+	}
 }
 
 function postToMetadata(post: RemotePost, bodyMarkdown: string | null): BlogPostMetadata {

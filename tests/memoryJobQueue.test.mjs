@@ -59,6 +59,29 @@ test('claimNext is FIFO by insertion and flips status atomically', () => {
 	assert.equal(queue.claimNext(), null, 'nothing left to claim');
 });
 
+test('claimNext drains user lane before background without interrupting running jobs', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('background-running', {}, {}, 'background');
+	assert.equal(queue.claimNext().key, 'background-running');
+	queue.enqueue('background-pending', {}, {}, 'background');
+	queue.enqueue('user-pending', {}, {}, 'user');
+
+	assert.equal(queue.claimNext().key, 'user-pending');
+	assert.equal(queue.claimNext().key, 'background-pending');
+});
+
+test('a user enqueue promotes a pending background duplicate but not a running one', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', { source: 'auto' }, {}, 'background');
+	assert.equal(queue.enqueue('a', { source: 'manual' }, {}, 'user'), true);
+	assert.equal(queue.getEntry('a').lane, 'user');
+	assert.equal(queue.getEntry('a').params.source, 'manual');
+
+	queue.claimNext();
+	assert.equal(queue.enqueue('a', { source: 'late-manual' }, {}, 'user'), false);
+	assert.equal(queue.getEntry('a').params.source, 'manual');
+});
+
 test('refill only runs when auto enabled and skips known keys', () => {
 	const { queue } = makeQueue();
 	queue.enqueue('a', {});

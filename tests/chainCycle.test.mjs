@@ -150,7 +150,7 @@ test('a non-mutating chain does not acquire the note lock', async () => {
 
 	const chain = { name: 'View', mutating: false, steps: [{ commandId: 'crucible:noop' }] };
 	let runs = 0;
-	cm.registerInternalCommand('crucible:noop', async () => { runs++; return true; });
+	cm.registerInternalCommand('crucible:noop', async () => { runs++; return true; }, { mutating: false });
 
 	await cm.executeChain(chain, undefined, { path: 'a.md' });
 
@@ -165,11 +165,30 @@ test('a mutating chain (default) acquires the note lock', async () => {
 	const cm = new ChainManager(stubApp, fakeLocks);
 
 	const chain = { name: 'Edit', steps: [{ commandId: 'crucible:noop' }] };
-	cm.registerInternalCommand('crucible:noop', async () => true);
+	cm.registerInternalCommand('crucible:noop', async () => true, { mutating: false });
 
 	await cm.executeChain(chain, undefined, { path: 'a.md' });
 
 	assert.equal(lockCalls, 1);
+});
+
+test('a mutating internal command acquires the target note lock', async () => {
+	globalThis.__notices = [];
+	const lockCalls = [];
+	const fakeLocks = { withLock: (path, label, action) => { lockCalls.push([path, label]); return action(); } };
+	const cm = new ChainManager(stubApp, fakeLocks);
+	const target = { path: 'target.md' };
+	let seenTarget = null;
+
+	cm.registerInternalCommand('crucible:edit', async (_args, _prev, _editor, targetFile) => {
+		seenTarget = targetFile?.path ?? null;
+		return true;
+	});
+
+	await cm.executeInternalCommand('crucible:edit', {}, null, undefined, target);
+
+	assert.deepEqual(lockCalls, [['target.md', 'command:edit']]);
+	assert.equal(seenTarget, 'target.md');
 });
 
 test('a move step can retarget later steps to the moved note without debug mode', async () => {
@@ -202,4 +221,20 @@ test('a move step can retarget later steps to the moved note without debug mode'
 		['move', 'Clippings/post.md'],
 		['lint', 'daily/day/2026-06-17/post.md'],
 	]);
+});
+
+test('debug log failures do not change chain completion', async () => {
+	globalThis.__notices = [];
+	const cm = new ChainManager(stubApp);
+	let runs = 0;
+	cm.registerInternalCommand('crucible:noop', async () => { runs++; return true; });
+
+	await cm.executeChain({
+		name: 'Debug Failure Is Side Effect Only',
+		debugMode: true,
+		debugLogPath: '_missing/debug.md',
+		steps: [{ commandId: 'crucible:noop' }],
+	});
+
+	assert.equal(runs, 1);
 });

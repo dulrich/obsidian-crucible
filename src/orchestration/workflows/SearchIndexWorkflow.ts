@@ -21,7 +21,7 @@ export class SearchRebuildWorkflow implements Workflow {
 					rebuildId: job.id,
 					batchIndex: i,
 					batchCount: batches.length,
-				}, { priority: 'low', inputPaths: paths });
+				}, { priority: 'low', lane: 'background', inputPaths: paths });
 			}
 			return {
 				status: 'done',

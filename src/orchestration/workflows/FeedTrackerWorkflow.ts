@@ -7,7 +7,7 @@ import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontma
 import { rateLimitedAllSettled } from '../utils/rateLimit';
 import { buildBlogBulletSuffix } from '../utils/blogs';
 import type { BlogRowError, RemotePost } from '../utils/blogs';
-import { ensureBlogMetadataNote } from '../utils/blogsApi';
+import { blogMetadataRoot, ensureBlogMetadataNote, findExistingBlogMetadataNote } from '../utils/blogsApi';
 import type { RemoteVideo } from '../utils/youtube';
 import {
 	BLOGS_FEED_SOURCE,
@@ -86,6 +86,20 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 		const failedCount = outcomes.filter(o => o.error).length;
 		const totalNew = outcomes.reduce((sum, o) => sum + o.newItems.length, 0);
 
+		// Persist enriched metadata for every fetched post lacking a file on disk —
+		// not just unseen ones — and do it before the no-new early return below.
+		if (this.source.kind === 'blogs') {
+			for (let i = 0; i < entries.length; i++) {
+				const entry = entries[i];
+				const settled = fetchSettled[i];
+				if (!entry || !settled || settled.status === 'rejected') continue;
+				const blogName = this.source.entryName(entry);
+				for (const item of settled.value) {
+					await this.persistBlogMetadataIfMissing(plugin, item as unknown as RemotePost, blogName);
+				}
+			}
+		}
+
 		if (totalNew === 0 && failedCount === 0 && rowErrors.length === 0 && !this.writeEmptyRuns(plugin)) {
 			return {
 				status: 'done',
@@ -114,6 +128,15 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 			outputPaths: [intakePath],
 			notes,
 		};
+	}
+
+	// Writes a post's enriched-metadata note only when one does not already exist
+	// on disk. Skipping existing files keeps repeat pulls idempotent (the body
+	// stamps a fresh fetched_at, so an unconditional write would churn every run).
+	private async persistBlogMetadataIfMissing(plugin: Plugin, post: RemotePost, blogName: string): Promise<void> {
+		const root = blogMetadataRoot(plugin);
+		if (await findExistingBlogMetadataNote(plugin.app, root, post.postId)) return;
+		await ensureBlogMetadataNote(plugin, { ...post, blogName });
 	}
 
 	private async createExampleRegistry(plugin: Plugin, path: string): Promise<void> {
@@ -212,7 +235,7 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 					if (this.source.kind === 'blogs') {
 						const post = item as unknown as RemotePost;
 						suffix = buildBlogBulletSuffix(post);
-						await ensureBlogMetadataNote(plugin, { ...post, blogName: this.source.entryName(o.entry) });
+						await this.persistBlogMetadataIfMissing(plugin, post, this.source.entryName(o.entry));
 					}
 					sections.push(`- **${escapeBrackets(this.source.itemTitle(item))}** — published ${published} — ${this.source.itemUrl(item)}${suffix}`);
 				}
