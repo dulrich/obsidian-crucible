@@ -83,6 +83,13 @@ export interface UncapturedPostRow {
 	title: string;
 	publishedAt: string;
 	url: string;
+	authors: string[];
+	categories: string[];
+	wordCount: number | null;
+	kind: 'article' | 'podcast';
+	hasBody: boolean;
+	metadataFile: TFile | null;
+	audioUrl?: string;
 }
 
 export interface OrphanRow {

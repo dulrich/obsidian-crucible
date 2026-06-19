@@ -6,7 +6,7 @@ import { FileSuggest, FolderSuggest, CurrencySuggest, LocationSuggest } from "..
 import { isValidTimezone } from "../../orchestration/utils/dates";
 import { deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "../../orchestration/utils/youtubeApi";
 import { addWarningIcon, mountSecretControl } from "../shared";
-import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea } from "../bind";
+import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea, bindDropdown } from "../bind";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 import type { JobType } from "../../orchestration/types";
 
@@ -721,7 +721,7 @@ function renderEditBlogsTrackerWorkflow(tab: CrucibleSettingTab, containerEl: HT
 
 	bindSearch(containerEl, {
 		name: 'Blogs note',
-		desc: 'Markdown note containing the blogs registry table (Name | Link | Method | Tags | Priority | Canon). Canon is optional: auto (default) | substack | strip-params | keep-params.',
+		desc: 'Markdown note containing the blogs registry table (Name | Link | Method | Tags | Priority | Canon | Body). Canon and Body are optional. Canon: auto (default) | substack | strip-params | keep-params. Body: auto (default) | full | snippet — controls whether per-post bodies are ingestable.',
 		placeholder: '_system/blogs/Blogs.md',
 		get: () => s.orchestrationBlogsNote,
 		set: (v) => { s.orchestrationBlogsNote = v.trim() || '_system/blogs/Blogs.md'; },
@@ -741,6 +741,35 @@ function renderEditBlogsTrackerWorkflow(tab: CrucibleSettingTab, containerEl: HT
 		get: () => s.orchestrationBlogsTrackerWriteEmptyRuns === true,
 		set: (v) => { s.orchestrationBlogsTrackerWriteEmptyRuns = v; },
 	}, save);
+
+	bindSearch(containerEl, {
+		name: 'Metadata root folder',
+		desc: 'Folder where per-post blog metadata notes are saved (one subfolder per blog). These notes enrich the dashboard and are not counted as captured posts.',
+		placeholder: '_blog_metadata',
+		get: () => s.orchestrationBlogsMetadataRoot,
+		set: (v) => { s.orchestrationBlogsMetadataRoot = v.trim() || '_blog_metadata'; },
+		suggest: (el) => { new FolderSuggest(tab.app, el); },
+	}, save);
+
+	bindDropdown(containerEl, {
+		name: 'Ingest command',
+		desc: 'Queueable Crucible command or chain to run against a body-bearing blog metadata note when the dashboard Ingest button is clicked.',
+		options: queueableCommandOptions(tab),
+		get: () => s.orchestrationBlogsIngestCommandId,
+		set: (v) => { s.orchestrationBlogsIngestCommandId = v; },
+		width: 'pi-width-wide',
+	}, save);
+}
+
+function queueableCommandOptions(tab: CrucibleSettingTab): Record<string, string> {
+	const options: Record<string, string> = { '': 'Choose command...' };
+	for (const cmd of tab.plugin.commandRegistry) {
+		if (!cmd.queueable) continue;
+		options[cmd.id] = cmd.name;
+	}
+	const current = tab.plugin.settings.orchestrationBlogsIngestCommandId;
+	if (current && !options[current]) options[current] = `${current} (missing)`;
+	return options;
 }
 
 function renderEditLinkScanWorkflow(tab: CrucibleSettingTab, containerEl: HTMLElement) {

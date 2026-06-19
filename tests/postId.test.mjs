@@ -22,7 +22,10 @@ await esbuild.build({
 		setup(build) {
 			build.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian-test-stub', namespace: 'stub' }));
 			build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
-				contents: 'export async function requestUrl() { throw new Error("requestUrl unavailable in tests"); }',
+				contents: [
+					'export async function requestUrl() { throw new Error("requestUrl unavailable in tests"); }',
+					'export function normalizePath(p) { return p.replace(/\\\\/g, "/").replace(/\\/+/g, "/"); }',
+				].join('\n'),
 				loader: 'js',
 			}));
 		},

@@ -22,6 +22,7 @@ import {
 } from './orchestration/utils/ignoredIds';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
+import { runBlogIngestCommand } from './orchestration/utils/blogsApi';
 import { logWarn } from './log';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueAdapter';
 import type { JobType, OrchestrationJob } from './orchestration/types';
@@ -789,12 +790,55 @@ export class IngestionDashboardUI {
 			defaultSort: { column: 'publishedAt', direction: 'desc' },
 			setCount: n => this.setSectionCount('uncapturedPosts', n),
 			columns: [
-				{ key: 'blogName', label: 'Author', sortable: true, sortKey: r => displayLabel(r.blogName).toLowerCase(), render: (r, td) => renderAuthorCell(td, r.blogName) },
+				{ key: 'blogName', label: 'Author', sortable: true, sortKey: r => postAuthorLabel(r).toLowerCase(), render: (r, td) => renderPostAuthorCell(td, r) },
 				{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
+				{ key: 'kind', label: 'Type', sortable: true, sortKey: r => r.kind, render: (r, td) => td.setText(r.kind) },
+				{ key: 'wordCount', label: 'Words', sortable: true, sortKey: r => r.wordCount ?? -1, render: (r, td) => td.setText(r.wordCount == null ? '—' : String(r.wordCount)) },
 				{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
-				{ key: 'read', label: '', render: (r, td) => renderExternalLink(td, r.url, 'read') },
+				{ key: 'action', label: '', render: (r, td) => this.renderPostActionCell(td, r, ctx) },
 				{ key: 'ignore', label: '', render: (r, td) => this.renderIgnoreButton(td, 'blog', r.postId, ctx, 'ignoredPosts') },
 			],
+		});
+	}
+
+	private renderPostActionCell(td: HTMLElement, row: UncapturedPostRow, ctx: SectionContext): void {
+		renderExternalLink(td, row.url, 'read');
+		td.createSpan({ text: '  ' });
+		if (row.metadataFile) {
+			this.renderFileLink(td, row.metadataFile, 'metadata');
+		} else {
+			td.createSpan({ text: 'metadata' }).addClass('crucible-muted');
+		}
+		if (!row.hasBody) return;
+		td.createSpan({ text: '  ' });
+		this.renderIngestButton(td, row, ctx);
+	}
+
+	private renderIngestButton(td: HTMLElement, row: UncapturedPostRow, ctx: SectionContext): void {
+		const btn = td.createEl('button', { text: 'Ingest' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					const res = await runBlogIngestCommand(this.plugin, row);
+					if (res.status === 'ran') {
+						new Notice(`Ran ${res.commandId}`);
+					} else if (res.status === 'missing-command') {
+						new Notice('Choose a queueable blog ingest command in settings.');
+						btn.disabled = false;
+						return;
+					} else {
+						new Notice('No blog metadata note found for this post.');
+						btn.disabled = false;
+						return;
+					}
+				} catch (e) {
+					new Notice(`Ingest failed: ${e instanceof Error ? e.message : String(e)}`);
+					btn.disabled = false;
+					return;
+				}
+				void ctx.refresh();
+			})();
 		});
 	}
 
@@ -1099,6 +1143,16 @@ export class IngestionDashboardUI {
 			})();
 		});
 	}
+}
+
+// Prefer the post's real author(s) (dc:creator / atom author) over the blog name when present.
+function postAuthorLabel(row: UncapturedPostRow): string {
+	return row.authors.length > 0 ? row.authors.join(', ') : displayLabel(row.blogName);
+}
+
+function renderPostAuthorCell(td: HTMLElement, row: UncapturedPostRow): void {
+	if (row.authors.length > 0) td.setText(row.authors.join(', '));
+	else renderAuthorCell(td, row.blogName);
 }
 
 // Re-export for re-use elsewhere if needed.

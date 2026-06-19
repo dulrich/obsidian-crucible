@@ -371,6 +371,8 @@ export interface CrucibleSettings {
 	orchestrationBlogsNote: string;
 	orchestrationBlogsTrackerDiffMode: boolean;
 	orchestrationBlogsTrackerWriteEmptyRuns: boolean;
+	orchestrationBlogsMetadataRoot: string;
+	orchestrationBlogsIngestCommandId: string;
 	// Workflow: link_scan
 	orchestrationLinkScanEnabled: boolean;
 	orchestrationLinkRegistryRoot: string;
@@ -507,6 +509,8 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationBlogsNote: '_system/blogs/Blogs.md',
 	orchestrationBlogsTrackerDiffMode: true,
 	orchestrationBlogsTrackerWriteEmptyRuns: false,
+	orchestrationBlogsMetadataRoot: '_blog_metadata',
+	orchestrationBlogsIngestCommandId: '',
 	orchestrationLinkScanEnabled: true,
 	orchestrationLinkRegistryRoot: '_crucible/link_registry',
 	orchestrationLinkScanExclusions: ['_crucible'],

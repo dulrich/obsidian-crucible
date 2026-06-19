@@ -9,6 +9,7 @@ import {
 	scanYoutubeTrackerRuns,
 } from '../../orchestration/utils/feedIntake';
 import { buildBlogCanonHostMap } from '../../orchestration/utils/blogs';
+import { blogMetadataRoot, findExistingBlogMetadataNote } from '../../orchestration/utils/blogsApi';
 import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from '../render/types';
@@ -17,23 +18,73 @@ import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from
 export async function computeUncapturedPostRows(app: App, plugin: CruciblePlugin): Promise<UncapturedPostRow[]> {
 	const configured = await loadConfiguredBlogs(app, plugin);
 	const hostRules = buildBlogCanonHostMap(Array.from(configured.values(), v => v.blog));
-	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app), hostRules);
+	const metadataRoot = blogMetadataRoot(plugin);
+	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app), hostRules, [metadataRoot, '_crucible']);
 	const scan = await scanBlogsTrackerRuns(app, seen, configured);
 
 	const rows: UncapturedPostRow[] = [];
 	for (const outcome of scan.outcomes) {
 		for (const post of outcome.newPosts) {
+			const metadataFile = await findExistingBlogMetadataNote(app, metadataRoot, post.postId);
+			const metadata = readBlogMetadata(app, metadataFile);
 			rows.push({
 				postId: post.postId,
 				blogName: outcome.blog.name,
 				blogLink: outcome.blog.link,
-				title: post.title,
-				publishedAt: post.publishedAt,
-				url: post.url,
+				title: metadata.title ?? post.title,
+				publishedAt: metadata.publishedAt ?? post.publishedAt,
+				url: metadata.url ?? post.url,
+				authors: metadata.authors ?? post.authors,
+				categories: metadata.categories ?? post.categories,
+				wordCount: metadata.wordCount ?? post.wordCount,
+				kind: metadata.kind ?? post.kind,
+				hasBody: metadata.hasBody ?? post.hasBody,
+				metadataFile,
+				...(metadata.audioUrl || post.audioUrl ? { audioUrl: metadata.audioUrl ?? post.audioUrl } : {}),
 			});
 		}
 	}
 	return rows;
+}
+
+interface BlogMetadataFields {
+	title?: string;
+	url?: string;
+	authors?: string[];
+	categories?: string[];
+	publishedAt?: string;
+	wordCount?: number | null;
+	kind?: 'article' | 'podcast';
+	hasBody?: boolean;
+	audioUrl?: string;
+}
+
+function readBlogMetadata(app: App, file: TFile | null): BlogMetadataFields {
+	if (!file) return {};
+	const fm = app.metadataCache.getFileCache(file)?.frontmatter;
+	if (!fm) return {};
+	const kind = fm.kind === 'podcast' ? 'podcast' : fm.kind === 'article' ? 'article' : undefined;
+	const hasBody = typeof fm['has-body'] === 'boolean' ? fm['has-body'] : undefined;
+	return {
+		title: typeof fm.title === 'string' ? fm.title : undefined,
+		url: typeof fm.source === 'string' ? fm.source : undefined,
+		authors: stringList(fm.authors),
+		categories: stringList(fm.categories),
+		publishedAt: typeof fm.published === 'string' ? fm.published : undefined,
+		wordCount: typeof fm['word-count'] === 'number' ? fm['word-count'] : null,
+		kind,
+		hasBody,
+		audioUrl: typeof fm.audio_url === 'string' ? fm.audio_url : undefined,
+	};
+}
+
+function stringList(value: unknown): string[] | undefined {
+	if (Array.isArray(value)) {
+		const out = value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+		return out.length > 0 ? out : undefined;
+	}
+	if (typeof value === 'string' && value.trim()) return [value.trim()];
+	return undefined;
 }
 
 // YouTube videos seen in tracker runs but not yet captured as a vault note,
