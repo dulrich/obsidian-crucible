@@ -137,13 +137,13 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Mark as forwarded',
 		group: 'Other',
 		available: () => plugin.activeEditor() !== undefined,
-		run: () => {
+		run: async () => {
 			const editor = plugin.activeEditor();
 			if (!editor) {
 				new Notice('Switch to edit mode to use this command');
 				return;
 			}
-			void plugin.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
+			await plugin.chainManager.executeInternalCommand(`${prefix}:mark-as-forwarded`, {}, null, editor);
 		},
 	});
 
@@ -218,7 +218,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue daily brief lite',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('daily_brief_lite', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('daily_brief_lite', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -228,7 +228,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: () => {
 			new FilePickerModal(plugin.app, 'Pick a transcript note', (file) => {
-					void plugin.orchestrator.enqueue('transcript_refine', { targetPath: file.path }, { priority: 'high', inputPaths: [file.path] });
+					void plugin.orchestrator.enqueue('transcript_refine', { targetPath: file.path }, { priority: 'high', lane: 'user', inputPaths: [file.path] });
 			}).open();
 		},
 	});
@@ -238,7 +238,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue YouTube tracker',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('youtube_tracker', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('youtube_tracker', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -246,14 +246,14 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue YouTube tracker consolidation',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('youtube_tracker_consolidate', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('youtube_tracker_consolidate', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({
 		id: 'youtube-fetch-video-metadata',
 		name: 'YouTube: fetch video metadata for active note',
 		group: 'Orchestrations',
-		run: () => plugin.fetchYoutubeMetadataForActiveNote(),
+		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:youtube-fetch-video-metadata`, {}),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -261,7 +261,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue Blogs tracker',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('blogs_tracker', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('blogs_tracker', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -269,7 +269,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue Blogs tracker consolidation',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('blogs_tracker_consolidate', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('blogs_tracker_consolidate', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -277,7 +277,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Orchestrate: enqueue link scan',
 		group: 'Orchestrations',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('link_scan', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('link_scan', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -312,7 +312,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Search: rebuild index',
 		group: 'Search',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('search_rebuild', {}, { priority: 'high' }),
+		run: () => plugin.orchestrator.enqueue('search_rebuild', {}, { priority: 'high', lane: 'user' }),
 	});
 
 	plugin.registerCrucibleCommand({

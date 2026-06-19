@@ -447,7 +447,7 @@ export class IngestionDashboardUI {
 		btn.setText('Enqueue intake');
 		btn.addEventListener('click', () => {
 			if (btn.disabled) return;
-			void this.plugin.orchestrator.enqueue(INTAKE_JOB_TYPE[kind], {}, { priority: 'high' });
+			void this.plugin.orchestrator.enqueue(INTAKE_JOB_TYPE[kind], {}, { priority: 'high', lane: 'user' });
 		});
 		this.intakeButtons.set(kind, btn);
 	}
@@ -920,7 +920,7 @@ export class IngestionDashboardUI {
 					targetPath: row.file.path,
 					videoId: row.videoId,
 					title: row.title,
-				});
+				}, { priority: 'high', lane: 'user', inputPaths: [row.file.path] });
 				if (job) btn.setText('Queued');
 				else btn.disabled = false;
 			})();
@@ -946,7 +946,7 @@ export class IngestionDashboardUI {
 							targetPath: row.file.path,
 							videoId: row.videoId,
 							title: row.title,
-						});
+						}, { priority: 'high', lane: 'user', inputPaths: [row.file.path] });
 						if (job) enqueued++;
 					}
 					new Notice(enqueued > 0 ? `Enqueued ${enqueued} metadata fetch${enqueued === 1 ? '' : 'es'}.` : 'Nothing to enqueue.');

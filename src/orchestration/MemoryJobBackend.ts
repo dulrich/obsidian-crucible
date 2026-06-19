@@ -35,18 +35,19 @@ export class MemoryJobBackend implements JobBackend {
 		return this.queue;
 	}
 
-	async enqueue(params: Record<string, unknown>, _options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null> {
+	async enqueue(params: Record<string, unknown>, options: OrchestrationEnqueueOptions = {}): Promise<OrchestrationJob | null> {
 		const key = this.config.dedupeKey ? this.config.dedupeKey(params) : '';
 		if (!key) return null;
 		const display = this.config.display ? this.config.display(params) : {};
-		if (!this.queue.enqueue(key, params, display)) return null;
-		return this.synthJob(key, params);
+		const lane = options.lane ?? (options.priority === 'high' ? 'user' : 'background');
+		if (!this.queue.enqueue(key, params, display, lane)) return null;
+		return this.synthJob(key, params, lane);
 	}
 
 	async runNext(): Promise<RunOutcome> {
 		const entry = this.queue.claimNext();
 		if (!entry) return 'empty';
-		const job = this.synthJob(entry.key, entry.params);
+		const job = this.synthJob(entry.key, entry.params, entry.lane);
 		try {
 			const result = await runWorkflowWithTimeout(
 				this.plugin, this.workflow, job, resolveTimeoutMs(this.plugin, this.config),
@@ -76,12 +77,13 @@ export class MemoryJobBackend implements JobBackend {
 		this.queue.refill();
 	}
 
-	private synthJob(key: string, params: Record<string, unknown>): OrchestrationJob {
+	private synthJob(key: string, params: Record<string, unknown>, lane = this.queue.getEntry(key)?.lane ?? 'background'): OrchestrationJob {
 		return {
 			id: `mem:${this.type}:${key}`,
 			type: this.type,
 			status: 'running',
 			priority: 'normal',
+			lane,
 			created: new Date().toISOString(),
 			inputPaths: [],
 			outputPaths: [],

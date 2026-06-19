@@ -1,11 +1,12 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
-import type { JobType } from './types';
+import type { JobType, OrchestrationEnqueueOptions } from './types';
 import { logWarn } from '../log';
 
 export interface TriggerJobSeed {
 	type: JobType;
 	params?: Record<string, unknown>;
+	options?: OrchestrationEnqueueOptions;
 }
 
 /**
@@ -143,7 +144,7 @@ export class TriggerRegistry {
 	private enqueueAll(trigger: OrchestrationTrigger, file?: TFile): void {
 		for (const seed of trigger.jobs(file)) {
 			// Dedupe keys absorb repeat fires; a null return just means "already queued".
-			void this.plugin.orchestrator.enqueue(seed.type, seed.params);
+			void this.plugin.orchestrator.enqueue(seed.type, seed.params, { lane: 'background', ...seed.options });
 		}
 	}
 }
