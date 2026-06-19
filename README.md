@@ -1,25 +1,47 @@
 # Crucible
 
-An agentic second brain for Obsidian. Orchestrate your workflows, capture your reading, and synthesize insights.
+Crucible is an Obsidian plugin for turning capture, cleanup, ingestion, and AI-assisted note work into repeatable workflows.
 
-Crucible consolidates features traditionally spread across multiple plugins (Daily Notes, Templater, QuickAdd, Linter) into a single, cohesive engine designed for intellectual digestion and sense-making.
+It consolidates note materialization, templated captures, linting, attachment localization, command shortcuts, AI providers, agents, chains, tracker workflows, and vault search into one plugin.
 
 ## Features
 
-- **Automated Note Materialization:** Seamlessly create daily, weekly, and monthly notes based on templates.
-- **Workflow Captures:** Quickly append or prepend content to notes with custom templates.
-- **Smart Linting:** Keep your properties and frontmatter clean and consistent automatically.
-- **Table of Contents:** A floating, collapsible navigator for your long-form notes.
-- **Command Shortcuts:** Map specific files to commands for instant access.
-- **AI Agents:** Define reusable AI assistants with custom system prompts, user prompt templates, and a configured provider. Agents are registered as commands and can be invoked from the command palette or chained together.
-- **Chains:** Compose multi-step workflows by linking captures, linting, and agent calls into a single command. Each step can pass its output to the next via `{{response}}`.
-- **AI Providers:** Connect to OpenAI, Anthropic, Google (Gemini), OpenRouter, or a local Ollama instance. API keys are stored securely using Obsidian's secret storage.
-- **Settings in a tab:** Open the full settings UI in a workspace tab via the *Open settings in a tab* command, side-by-side with your notes instead of buried in the modal.
+- **Materialize notes:** Create daily, weekly, and monthly notes from templates, with matching asset folders and template variables.
+- **Capture workflows:** Append, prepend, or section-insert templated text into target notes. Captures can prompt for `{{value}}` and can be used inside chains.
+- **Agents and providers:** Configure OpenAI-compatible, Anthropic, Google, OpenRouter, and Ollama providers, then expose reusable agents as commands.
+- **Chains:** Compose captures, linting, agents, file moves, metadata enrichment, and other Crucible commands into ordered workflows.
+- **Lint and localize:** Normalize frontmatter, word counts, transcript formatting, derived IDs, attachment links, and local copies of remote or misplaced attachments.
+- **Orchestration queue:** Run durable file-backed and transient memory-backed jobs for trackers, search indexing, daily brief generation, transcript refinement, link scans, and metadata enrichment.
+- **Ingestion dashboard:** Monitor clippings, transcripts, blog and YouTube intake runs, uncaptured items, missing YouTube metadata, ignored IDs, queue state, and orphaned localized attachments.
+- **Search companion:** Index vault notes through a user-run local search service, with commands for vault search, rebuilds, health checks, and active-note reindexing.
+- **Settings and commands:** Open settings in a workspace tab, hide commands from Obsidian's palette, and optionally use Crucible's own command palette with fuzzy hints.
+
+## Documentation
+
+Start with [docs/index.md](docs/index.md).
+
+- [Command reference](docs/commands.md)
+- [Materialize and templates](docs/materialize-and-templates.md)
+- [Captures, chains, and agents](docs/captures-chains-agents.md)
+- [Lint and localize](docs/lint-and-localize.md)
+- [Orchestration](docs/orchestration.md)
+- [Tracked sources](docs/tracked-sources.md)
+- [Ingestion dashboard](docs/ingestion-dashboard.md)
+- [Search companion](docs/search-companion.md)
 
 ## Installation
 
-1. Search for "Crucible" in the Obsidian community plugins (Pending).
-2. Or, clone this repository into your `.obsidian/plugins` folder and run `npm install && npm run build`.
+Clone this repository into your vault's plugin folder, install dependencies, and build:
+
+```bash
+cd <Vault>/.obsidian/plugins
+git clone <repo-url> obsidian-crucible
+cd obsidian-crucible
+npm install
+npm run build
+```
+
+For local development, link the repository root into the vault plugin folder and run `npm run dev` in a separate terminal. Obsidian loads `main.js`, `manifest.json`, and `styles.css`.
 
 ## License
 
