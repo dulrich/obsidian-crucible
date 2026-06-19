@@ -788,6 +788,10 @@ If your plugin does not need CSS, delete this file.
   white-space: nowrap;
 }
 
+.crucible-muted {
+  color: var(--text-muted);
+}
+
 .crucible-exclusion-scopes {
   display: flex;
   flex-wrap: wrap;
