@@ -4,6 +4,7 @@
 // runner (OrchestrationAutoRunner) owns the actual draining/pacing. Entries are
 // passive: the runner claims pending entries, executes the workflow, and reports
 // the result back here.
+import type { JobLane } from './types';
 
 export type MemoryJobStatus = 'pending' | 'running' | 'done' | 'failed';
 
@@ -12,6 +13,7 @@ export interface MemoryJobEntry {
 	params: Record<string, unknown>;
 	display: Record<string, unknown>;
 	status: MemoryJobStatus;
+	lane: JobLane;
 	error?: string;
 	addedAt: number;
 	finishedAt?: number;
@@ -21,6 +23,7 @@ export interface MemoryJobSeed {
 	key: string;
 	params: Record<string, unknown>;
 	display?: Record<string, unknown>;
+	lane?: JobLane;
 }
 
 export class MemoryJobQueue {
@@ -53,12 +56,23 @@ export class MemoryJobQueue {
 	}
 
 	// Idempotent enqueue: rejects if a job with the same key is already pending or
-	// running. A terminal (done/failed) entry with the same key is replaced.
-	enqueue(key: string, params: Record<string, unknown>, display: Record<string, unknown> = {}): boolean {
+	// running. A pending background entry is promoted by a user enqueue; running
+	// entries are never interrupted. A terminal (done/failed) entry is replaced.
+	enqueue(key: string, params: Record<string, unknown>, display: Record<string, unknown> = {}, lane: JobLane = 'background'): boolean {
 		if (!key) return false;
 		const existing = this.entries.get(key);
-		if (existing && (existing.status === 'pending' || existing.status === 'running')) return false;
-		this.entries.set(key, { key, params, display, status: 'pending', addedAt: Date.now() });
+		if (existing && existing.status === 'pending') {
+			if (existing.lane === 'background' && lane === 'user') {
+				existing.lane = 'user';
+				existing.params = params;
+				existing.display = display;
+				this.onChange(this.entries.size);
+				return true;
+			}
+			return false;
+		}
+		if (existing && existing.status === 'running') return false;
+		this.entries.set(key, { key, params, display, lane, status: 'pending', addedAt: Date.now() });
 		this.onChange(this.entries.size);
 		return true;
 	}
@@ -79,7 +93,7 @@ export class MemoryJobQueue {
 	snapshot(): MemoryJobEntry[] {
 		return Array.from(this.entries.values())
 			.map(e => ({ ...e }))
-			.sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.addedAt - b.addedAt);
+			.sort((a, b) => statusRank(a.status) - statusRank(b.status) || laneRank(a.lane) - laneRank(b.lane) || a.addedAt - b.addedAt);
 	}
 
 	getPendingCount(): number {
@@ -109,6 +123,7 @@ export class MemoryJobQueue {
 				key: seed.key,
 				params: seed.params,
 				display: seed.display ?? {},
+				lane: seed.lane ?? 'background',
 				status: 'pending',
 				addedAt: Date.now(),
 			});
@@ -120,7 +135,10 @@ export class MemoryJobQueue {
 	// Atomically claims the next pending entry (no await before the status flip, so
 	// concurrent workers never claim the same entry). Returns a live reference.
 	claimNext(): MemoryJobEntry | null {
-		for (const entry of this.entries.values()) {
+		const pending = Array.from(this.entries.values())
+			.filter(entry => entry.status === 'pending')
+			.sort((a, b) => laneRank(a.lane) - laneRank(b.lane) || a.addedAt - b.addedAt);
+		for (const entry of pending) {
 			if (entry.status === 'pending') {
 				entry.status = 'running';
 				this.onChange(this.entries.size);
@@ -166,5 +184,12 @@ function statusRank(status: MemoryJobStatus): number {
 		case 'pending': return 1;
 		case 'failed': return 2;
 		case 'done': return 3;
+	}
+}
+
+function laneRank(lane: JobLane): number {
+	switch (lane) {
+		case 'user': return 0;
+		case 'background': return 1;
 	}
 }

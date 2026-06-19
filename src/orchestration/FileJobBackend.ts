@@ -2,7 +2,7 @@ import { Notice, TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
+import type { JobLane, JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { logError } from '../log';
@@ -44,18 +44,24 @@ export class FileJobBackend implements JobBackend {
 				const existing = await this.findActiveJob(key);
 				if (existing) {
 					const priority = options.priority ?? 'normal';
-					if (existing.job.status === 'queued' && priorityRank(priority) < priorityRank(existing.job.priority)) {
-						await this.store.setPriority(existing.file, priority);
+					const lane = options.lane ?? defaultLaneForPriority(options.priority);
+					const promotesLane = existing.job.status === 'queued' && laneRank(lane) < laneRank(existing.job.lane);
+					const promotesPriority = existing.job.status === 'queued'
+						&& lane === existing.job.lane
+						&& priorityRank(priority) < priorityRank(existing.job.priority);
+					if (promotesLane || promotesPriority) {
+						if (promotesLane) await this.store.setLane(existing.file, lane);
+						if (promotesLane || promotesPriority) await this.store.setPriority(existing.file, priority);
 						void this.emitQueueUpdate();
 						routineJobNotice(this.plugin, this.type, `Orchestrate: promoted ${this.type} (${existing.job.id})`);
-						return { ...existing.job, priority };
+						return { ...existing.job, lane, priority };
 					}
 					routineJobNotice(this.plugin, this.type, `Orchestrate: ${this.type} already queued for this target (${existing.job.id}).`);
 					return existing.job;
 				}
 			}
 		}
-		const job = await this.store.enqueue(this.type, { params, priority: options.priority, inputPaths: options.inputPaths });
+		const job = await this.store.enqueue(this.type, { params, priority: options.priority, lane: options.lane, inputPaths: options.inputPaths });
 		routineJobNotice(this.plugin, this.type, `Orchestrate: queued ${this.type} (${job.id})`);
 		void this.emitQueueUpdate();
 		return job;
@@ -237,6 +243,17 @@ function priorityRank(priority: JobPriority): number {
 		case 'normal': return 1;
 		case 'low': return 2;
 	}
+}
+
+function laneRank(lane: JobLane): number {
+	switch (lane) {
+		case 'user': return 0;
+		case 'background': return 1;
+	}
+}
+
+function defaultLaneForPriority(priority: JobPriority | undefined): JobLane {
+	return priority === 'high' ? 'user' : 'background';
 }
 
 function parseDeferredTime(value: string | undefined): number | null {

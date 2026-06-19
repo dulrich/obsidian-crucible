@@ -52,7 +52,7 @@ function makePlugin(overrides = {}) {
 		orchestrator: {
 			enqueue: async (type, params, options) => {
 				enqueued.push({ type, params, options });
-				return { id: `${type}-${enqueued.length}`, type, status: 'queued', priority: options?.priority ?? 'normal' };
+				return { id: `${type}-${enqueued.length}`, type, status: 'queued', priority: options?.priority ?? 'normal', lane: options?.lane ?? 'background' };
 			},
 		},
 		app: {
@@ -79,6 +79,7 @@ test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing
 	assert.deepEqual(plugin.enqueued.map(job => job.type), ['search_upsert_batch', 'search_upsert_batch', 'search_upsert_batch']);
 	assert.deepEqual(plugin.enqueued.map(job => job.params.paths.length), [25, 25, 3]);
 	assert.deepEqual(plugin.enqueued.map(job => job.options.priority), ['low', 'low', 'low']);
+	assert.deepEqual(plugin.enqueued.map(job => job.options.lane), ['background', 'background', 'background']);
 });
 
 test('search upsert defers quietly while the companion is offline', async () => {

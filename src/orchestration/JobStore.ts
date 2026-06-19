@@ -1,7 +1,7 @@
 import { App, Notice, TFile, TFolder, normalizePath, parseYaml } from 'obsidian';
 import { ensureFolder } from '../utils';
 import { updateFrontmatter } from '../frontmatter';
-import { JobStatus, JobType, OrchestrationJob, JobPriority } from './types';
+import { JobStatus, JobType, OrchestrationJob, JobPriority, JobLane } from './types';
 import { newJobId, nowIso } from './utils/dates';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
@@ -19,6 +19,11 @@ const PRIORITY_RANK: Record<JobPriority, number> = {
 	low: 2,
 };
 
+const LANE_RANK: Record<JobLane, number> = {
+	user: 0,
+	background: 1,
+};
+
 export interface QueuePaths {
 	root: string;
 	inbox: string;
@@ -29,6 +34,7 @@ export interface QueuePaths {
 
 export interface EnqueueOptions {
 	priority?: JobPriority;
+	lane?: JobLane;
 	inputPaths?: string[];
 	params?: Record<string, unknown>;
 }
@@ -73,6 +79,7 @@ export class JobStore {
 			type,
 			status: 'queued',
 			priority: options.priority ?? 'normal',
+			lane: options.lane ?? defaultLaneForPriority(options.priority),
 			created,
 			updated: created,
 			inputPaths: options.inputPaths ?? [],
@@ -89,6 +96,7 @@ export class JobStore {
 			fm.type = job.type;
 			fm.status = job.status;
 			fm.priority = job.priority;
+			fm.lane = job.lane;
 			fm.created = job.created;
 			fm.updated = job.updated;
 			fm.inputPaths = job.inputPaths;
@@ -112,6 +120,8 @@ export class JobStore {
 		}
 
 		out.sort((a, b) => {
+			const lane = LANE_RANK[a.job.lane] - LANE_RANK[b.job.lane];
+			if (lane !== 0) return lane;
 			const priority = PRIORITY_RANK[a.job.priority] - PRIORITY_RANK[b.job.priority];
 			return priority !== 0 ? priority : a.job.id.localeCompare(b.job.id);
 		});
@@ -128,6 +138,7 @@ export class JobStore {
 		if (!type) return null;
 		const status = (fm.status as JobStatus | undefined) ?? 'queued';
 		const priority = (fm.priority as JobPriority | undefined) ?? 'normal';
+		const lane = parseLane(fm.lane, priority);
 		const created = typeof fm.created === 'string' ? fm.created : nowIso();
 		const updated = typeof fm.updated === 'string' ? fm.updated : undefined;
 		const inputPaths = Array.isArray(fm.inputPaths) ? (fm.inputPaths as unknown[]).filter((v): v is string => typeof v === 'string') : [];
@@ -139,7 +150,7 @@ export class JobStore {
 		const progress = typeof fm.progress === 'string' ? fm.progress : undefined;
 		const deferUntil = typeof fm.deferUntil === 'string' ? fm.deferUntil : undefined;
 
-		return { id, type, status, priority, created, updated, inputPaths, outputPaths, params, error, progress, deferUntil };
+		return { id, type, status, priority, lane, created, updated, inputPaths, outputPaths, params, error, progress, deferUntil };
 	}
 
 	async move(file: TFile, job: OrchestrationJob, toStatus: JobStatus): Promise<{ file: TFile; job: OrchestrationJob }> {
@@ -178,6 +189,13 @@ export class JobStore {
 			file: moved,
 			job: { ...job, status: toStatus, updated, deferUntil: toStatus === 'queued' ? job.deferUntil : undefined },
 		};
+	}
+
+	async setLane(file: TFile, lane: JobLane): Promise<void> {
+		await updateFrontmatter(this.app, file, (fm) => {
+			fm.lane = lane;
+			fm.updated = nowIso();
+		});
 	}
 
 	async setPriority(file: TFile, priority: JobPriority): Promise<void> {
@@ -263,4 +281,12 @@ export class JobStore {
 			return null;
 		}
 	}
+}
+
+function defaultLaneForPriority(priority: JobPriority | undefined): JobLane {
+	return priority === 'high' ? 'user' : 'background';
+}
+
+function parseLane(value: unknown, priority: JobPriority): JobLane {
+	return value === 'user' || value === 'background' ? value : defaultLaneForPriority(priority);
 }
