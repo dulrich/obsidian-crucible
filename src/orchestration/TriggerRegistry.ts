@@ -1,6 +1,8 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobType, OrchestrationEnqueueOptions } from './types';
+import type { TriggerDef } from '../types';
+import { triggerDefToOrchestrationTrigger } from '../triggers/triggerAdapter';
 import { logWarn } from '../log';
 
 export interface TriggerJobSeed {
@@ -8,6 +10,8 @@ export interface TriggerJobSeed {
 	params?: Record<string, unknown>;
 	options?: OrchestrationEnqueueOptions;
 }
+
+export type TriggerEventName = 'create' | 'modify' | 'metadata-changed' | 'rename';
 
 /**
  * A declarative auto-enqueue rule: a note lifecycle event or a schedule, an
@@ -21,7 +25,7 @@ export interface OrchestrationTrigger {
 	/** Shown next to the settings toggle. */
 	description: string;
 	on:
-		| { event: 'create' | 'metadata-changed' | 'rename' }
+		| { event: TriggerEventName }
 		| { everyMs: () => number }; // schedule; <= 0 disables
 	/** Hard gate (feature flags etc.). Combined with the per-trigger settings override. */
 	enabled: () => boolean;
@@ -31,20 +35,25 @@ export interface OrchestrationTrigger {
 	jobs: (file?: TFile) => TriggerJobSeed[];
 }
 
-// Coalesces the per-keystroke metadataCache 'changed' burst into one evaluation.
-const METADATA_DEBOUNCE_MS = 2000;
+// Coalesces the per-keystroke metadataCache 'changed' / vault 'modify' bursts into one
+// evaluation.
+const EVENT_DEBOUNCE_MS = 2000;
 // Schedule triggers are checked on a heartbeat so `everyMs` getters track live
 // settings without re-registering timers.
 const SCHEDULE_TICK_MS = 60_000;
 
 /**
  * Routes note lifecycle events and interval schedules into orchestrator enqueues.
- * Code-defined registry: triggers are registered in `main.ts onload()`; settings
- * only expose per-trigger enable toggles (`orchestrationTriggersEnabled`).
+ * Holds two slices: code-defined "founding" triggers (registered in `main.ts onload()`,
+ * toggled via `orchestrationTriggersEnabled`) and user-defined triggers rebuilt from
+ * `settings.triggers` via {@link setUserTriggers} (which carry their own `enabled` flag).
  */
 export class TriggerRegistry {
-	private readonly triggers: OrchestrationTrigger[] = [];
-	private readonly pendingPaths = new Map<string, number>();
+	private readonly foundingTriggers: OrchestrationTrigger[] = [];
+	private userTriggers: OrchestrationTrigger[] = [];
+	// Debounce timers per path, separated by event so a 'modify' burst and a
+	// 'metadata-changed' burst on the same note don't clobber each other's timer.
+	private readonly pendingByEvent = new Map<TriggerEventName, Map<string, number>>();
 	private readonly lastScheduledRun = new Map<string, number>();
 	private started = false;
 
@@ -53,13 +62,34 @@ export class TriggerRegistry {
 		private readonly isMaterializing: () => boolean,
 	) {}
 
+	/** Register a code-defined founding trigger. */
 	register(trigger: OrchestrationTrigger): void {
-		this.triggers.push(trigger);
+		this.foundingTriggers.push(trigger);
+	}
+
+	/** Rebuild the user-defined trigger slice from settings. Call on load and after edits. */
+	setUserTriggers(defs: TriggerDef[]): void {
+		this.userTriggers = defs.map(def => triggerDefToOrchestrationTrigger(def, this.plugin));
+		// Anchor any newly-seen schedule triggers so a resave doesn't immediately re-fire
+		// them; leave existing anchors intact so editing one trigger doesn't reset others.
+		const now = Date.now();
+		for (const t of this.userTriggers) {
+			if ('everyMs' in t.on && !this.lastScheduledRun.has(t.id)) this.lastScheduledRun.set(t.id, now);
+		}
+	}
+
+	private allTriggers(): OrchestrationTrigger[] {
+		return [...this.foundingTriggers, ...this.userTriggers];
 	}
 
 	/** Registered triggers, for the settings UI. */
 	list(): readonly OrchestrationTrigger[] {
-		return this.triggers;
+		return this.allTriggers();
+	}
+
+	/** Code-defined founding triggers only (the ones gated by orchestrationTriggersEnabled). */
+	listFounding(): readonly OrchestrationTrigger[] {
+		return this.foundingTriggers;
 	}
 
 	/** Effective on/off including the per-trigger settings override. */
@@ -78,41 +108,52 @@ export class TriggerRegistry {
 		plugin.registerEvent(plugin.app.vault.on('rename', file => {
 			if (file instanceof TFile) this.fireEvent('rename', file);
 		}));
+		plugin.registerEvent(plugin.app.vault.on('modify', file => {
+			if (file instanceof TFile) this.scheduleDebouncedEvaluation('modify', file);
+		}));
 		plugin.registerEvent(plugin.app.metadataCache.on('changed', file => {
-			this.scheduleMetadataEvaluation(file);
+			this.scheduleDebouncedEvaluation('metadata-changed', file);
 		}));
 		// Anchor schedules at startup so a plugin reload doesn't immediately re-fire
 		// every interval trigger; the first run lands one interval after load.
 		const now = Date.now();
-		for (const t of this.triggers) {
+		for (const t of this.allTriggers()) {
 			if ('everyMs' in t.on) this.lastScheduledRun.set(t.id, now);
 		}
 		plugin.registerInterval(window.setInterval(() => this.tickSchedules(), SCHEDULE_TICK_MS));
 	}
 
 	dispose(): void {
-		for (const timer of this.pendingPaths.values()) window.clearTimeout(timer);
-		this.pendingPaths.clear();
+		for (const timers of this.pendingByEvent.values()) {
+			for (const timer of timers.values()) window.clearTimeout(timer);
+			timers.clear();
+		}
 	}
 
-	private scheduleMetadataEvaluation(file: TFile): void {
+	private scheduleDebouncedEvaluation(event: TriggerEventName, file: TFile): void {
 		if (file.extension !== 'md') return;
-		const existing = this.pendingPaths.get(file.path);
+		let timers = this.pendingByEvent.get(event);
+		if (!timers) {
+			timers = new Map<string, number>();
+			this.pendingByEvent.set(event, timers);
+		}
+		const existing = timers.get(file.path);
 		if (existing !== undefined) window.clearTimeout(existing);
-		this.pendingPaths.set(file.path, window.setTimeout(() => {
-			this.pendingPaths.delete(file.path);
+		const eventTimers = timers;
+		eventTimers.set(file.path, window.setTimeout(() => {
+			eventTimers.delete(file.path);
 			const fresh = this.plugin.app.vault.getAbstractFileByPath(file.path);
-			if (fresh instanceof TFile) this.fireEvent('metadata-changed', fresh);
-		}, METADATA_DEBOUNCE_MS));
+			if (fresh instanceof TFile) this.fireEvent(event, fresh);
+		}, EVENT_DEBOUNCE_MS));
 	}
 
-	private fireEvent(event: 'create' | 'metadata-changed' | 'rename', file: TFile): void {
+	private fireEvent(event: TriggerEventName, file: TFile): void {
 		if (file.extension !== 'md') return;
 		// While a command/chain holds the note's lock it is the sole mutator; its
 		// mid-flight writes must not spawn jobs (same gate as the auto edit-triggers).
 		if (this.isMaterializing() || this.plugin.noteLocks.isLocked(file.path)) return;
 		const fm = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-		for (const trigger of this.triggers) {
+		for (const trigger of this.allTriggers()) {
 			if (!('event' in trigger.on) || trigger.on.event !== event) continue;
 			if (!this.isEnabled(trigger)) continue;
 			try {
@@ -126,7 +167,7 @@ export class TriggerRegistry {
 
 	private tickSchedules(): void {
 		const now = Date.now();
-		for (const trigger of this.triggers) {
+		for (const trigger of this.allTriggers()) {
 			if (!('everyMs' in trigger.on)) continue;
 			const interval = trigger.on.everyMs();
 			if (interval <= 0 || !this.isEnabled(trigger)) continue;

@@ -66,6 +66,17 @@ export function commandRunJobConfig(): JobTypeConfig {
 	});
 }
 
+// File-backed so triggered chain runs survive restarts. Dedupes on chainName+target
+// so repeat trigger fires (e.g. a metadata-changed burst) collapse onto one active job.
+export function chainRunJobConfig(): JobTypeConfig {
+	return fileJobConfig((p) => {
+		const chainName = typeof p.chainName === 'string' ? p.chainName.trim() : '';
+		if (!chainName) return '';
+		const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
+		return `${chainName}|${targetPath}`;
+	});
+}
+
 export function imageMetadataJobConfig(): JobTypeConfig {
 	return fileJobConfig((p) => {
 		const imagePath = typeof p.imagePath === 'string' ? p.imagePath : '';
