@@ -212,12 +212,13 @@ export type ProviderKind =
 	| 'google'
 	| 'openrouter'
 	| 'ollama'
+	| 'openai-compatible'
 	| 'gemini-cli'
 	| 'claude-cli'
 	| 'codex-cli'
 	| 'opencode-cli';
 
-export const API_PROVIDER_KINDS: ProviderKind[] = ['openai', 'anthropic', 'google', 'openrouter', 'ollama'];
+export const API_PROVIDER_KINDS: ProviderKind[] = ['openai', 'anthropic', 'google', 'openrouter', 'ollama', 'openai-compatible'];
 export const CLI_PROVIDER_KINDS: ProviderKind[] = ['gemini-cli', 'claude-cli', 'codex-cli', 'opencode-cli'];
 
 export function providerModality(kind: ProviderKind): ProviderModality {
