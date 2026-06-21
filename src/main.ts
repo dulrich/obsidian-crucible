@@ -32,7 +32,8 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
 import { ImageMetadataExtractWorkflow } from './orchestration/workflows/ImageMetadataExtractWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
@@ -150,6 +151,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
+		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
 		this.orchestrator.register('image_metadata_extract', new ImageMetadataExtractWorkflow(), imageMetadataJobConfig());
 		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
 		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
@@ -172,6 +174,7 @@ export default class CruciblePlugin extends Plugin {
 		this.registerInternalCommands();
 		this.registerAgents();
 		this.registerChains();
+		this.registerTriggers();
 
 		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
 		this.registerView(INGESTION_DASHBOARD_VIEW_TYPE, (leaf) => new IngestionDashboardView(leaf, this));
@@ -1074,6 +1077,12 @@ export default class CruciblePlugin extends Plugin {
 			new Notice(`YouTube fetch failed: ${message}`);
 			return false;
 		}
+	}
+
+	// Load user-defined triggers from settings into the engine. Mirrors registerChains():
+	// call on load and after any trigger edit so the live registry tracks settings.
+	registerTriggers() {
+		this.triggers.setUserTriggers(this.settings.triggers);
 	}
 
 	registerChains() {
