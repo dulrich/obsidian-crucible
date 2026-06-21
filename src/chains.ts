@@ -1,6 +1,8 @@
 import { App, Modal, Notice, Editor, TFile } from 'obsidian';
 import { AgentResult, Chain, ChainStep, CommandArgSchema } from './types';
 import { appendDebugLog } from './utils';
+import { calculateWordCount } from './lint';
+import { evaluateSyncGuard, guardContext } from './triggers/guardEval';
 import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
 import { logWarn } from './log';
 
@@ -224,7 +226,7 @@ export class ChainManager {
 	private async executeStep(step: ChainStep, previousResponse: unknown, chainVars: Record<string, string>, editor?: Editor, targetFile?: TFile): Promise<unknown> {
 		// Guard step: evaluate condition against target file
 		if (step.stepType === 'guard') {
-			return this.evaluateGuard(step, chainVars, targetFile);
+			return await this.evaluateGuard(step, chainVars, targetFile);
 		}
 
 		const hasInternal = this.registry.has(step.commandId);
@@ -261,43 +263,24 @@ export class ChainManager {
 		}
 	}
 
-	private evaluateGuard(step: ChainStep, _chainVars: Record<string, string>, targetFile?: TFile): boolean {
+	private async evaluateGuard(step: ChainStep, _chainVars: Record<string, string>, targetFile?: TFile): Promise<boolean> {
 		const condition = step.guardCondition;
 		if (!condition) return true;
 
 		const file = targetFile ?? this.app.workspace.getActiveFile();
 		if (!file) return false;
 
-		const cache = this.app.metadataCache.getFileCache(file);
-		const fm = cache?.frontmatter ?? {};
-		const tags: string[] = [];
-		const rawTags: unknown = fm.tags;
-		if (Array.isArray(rawTags)) {
-			tags.push(...rawTags.map((t: string) => t.replace(/^#/, '')));
-		} else if (typeof rawTags === 'string') {
-			tags.push(rawTags.replace(/^#/, ''));
-		}
-		// Also include inline tags from cache
-		if (cache?.tags) {
-			cache.tags.forEach(t => tags.push(t.tag.replace(/^#/, '')));
+		// Content-sourced (async): read the note body and count prose words.
+		if (condition.type === 'word-count-lt' || condition.type === 'word-count-gt') {
+			const threshold = Number(condition.value);
+			if (!Number.isFinite(threshold)) return false;
+			const content = await this.app.vault.cachedRead(file);
+			const count = calculateWordCount(content);
+			return condition.type === 'word-count-lt' ? count < threshold : count > threshold;
 		}
 
-		switch (condition.type) {
-			case 'has-tag':
-				return condition.tag ? tags.includes(condition.tag.replace(/^#/, '')) : false;
-			case 'not-has-tag':
-				return condition.tag ? !tags.includes(condition.tag.replace(/^#/, '')) : true;
-			case 'has-property':
-				return condition.property ? condition.property in fm : false;
-			case 'not-has-property':
-				return condition.property ? !(condition.property in fm) : true;
-			case 'property-equals':
-				return condition.property
-					? String(fm[condition.property] ?? '') === (condition.value ?? '')
-					: false;
-			default:
-				return true;
-		}
+		const cache = this.app.metadataCache.getFileCache(file);
+		return evaluateSyncGuard(condition, guardContext(cache));
 	}
 
 	previewChain(chain: Chain) {

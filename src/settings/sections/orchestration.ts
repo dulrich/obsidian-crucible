@@ -386,7 +386,7 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	containerEl.createEl('p', { text: 'Code-defined rules that enqueue jobs automatically on note lifecycle events or schedules. Triggered work runs through the queue (dedupe, pacing, timeouts, note locks).' });
 
 	const triggersGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
-	const triggers = tab.plugin.triggers?.list() ?? [];
+	const triggers = tab.plugin.triggers?.listFounding() ?? [];
 	triggers.forEach((trigger, index) => {
 		if (index > 0) triggersGroup.createEl('hr', { cls: 'crucible-row-divider' });
 		bindToggle(triggersGroup, {

@@ -23,6 +23,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	private activeTab: CrucibleSettingsTab = 'configure';
 	editingCaptureIndex: number = -1;
 	editingChainIndex: number = -1;
+	editingTriggerIndex: number = -1;
 	editingProviderIndex: number = -1;
 	editingAgentIndex: number = -1;
 	editingWorkflowId: string | null = null;
@@ -36,6 +37,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	private isEditingDetail(): boolean {
 		return this.editingCaptureIndex !== -1 ||
 			this.editingChainIndex !== -1 ||
+			this.editingTriggerIndex !== -1 ||
 			this.editingProviderIndex !== -1 ||
 			this.editingAgentIndex !== -1 ||
 			this.editingWorkflowId !== null;
@@ -44,6 +46,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 	private resetEditingState(): void {
 		this.editingCaptureIndex = -1;
 		this.editingChainIndex = -1;
+		this.editingTriggerIndex = -1;
 		this.editingProviderIndex = -1;
 		this.editingAgentIndex = -1;
 		this.editingWorkflowId = null;

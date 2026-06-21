@@ -51,6 +51,7 @@ export type CrucibleCommandPaletteHintCharsetMode = 'all-ascii' | 'alphanumeric-
 import { Hotkey, Command } from 'obsidian';
 import { Currency } from './orchestration/utils/fx';
 import { GeoResult } from './orchestration/utils/weather';
+import type { JobType } from './orchestration/types';
 
 declare module 'obsidian' {
 	interface App {
@@ -92,7 +93,23 @@ export interface CommandArgSchema {
 	options?: Record<string, string>;
 }
 
-export type GuardConditionType = 'has-tag' | 'not-has-tag' | 'has-property' | 'not-has-property' | 'property-equals';
+export type GuardConditionType =
+	| 'has-tag'
+	| 'not-has-tag'
+	| 'has-property'
+	| 'not-has-property'
+	| 'property-equals'
+	| 'property-lt'      // numeric: Number(frontmatter[property]) < Number(value)
+	| 'property-gt'      // numeric: Number(frontmatter[property]) > Number(value)
+	| 'word-count-lt'    // numeric: note body word count < Number(value) (async, content-sourced)
+	| 'word-count-gt';   // numeric: note body word count > Number(value) (async, content-sourced)
+
+// The frontmatter-sourced guard types: synchronously evaluable from the metadata
+// cache. Used by the trigger engine (whose guard is sync); `word-count-*` is only
+// valid as a chain guard step, where evaluation is async and can read content.
+export const SYNC_GUARD_CONDITION_TYPES: GuardConditionType[] = [
+	'has-tag', 'not-has-tag', 'has-property', 'not-has-property', 'property-equals', 'property-lt', 'property-gt',
+];
 
 export interface GuardCondition {
 	type: GuardConditionType;
@@ -120,6 +137,35 @@ export interface Chain {
 	// mutating). A non-mutating chain (e.g. one that only opens a view/dashboard) skips
 	// the per-note lock so it doesn't gray out / serialize against the note.
 	mutating?: boolean;
+}
+
+// A user-configurable if-this-then-that rule. Adapted into an OrchestrationTrigger at
+// registration time (see TriggerRegistry.setUserTriggers); like all triggers it only
+// enqueues jobs, inheriting queue dedupe / pacing / timeout / note-lock semantics.
+export type TriggerEvent = 'create' | 'modify' | 'rename' | 'metadata-changed';
+
+export interface TriggerScope {
+	// Path prefix the file must sit under to qualify, e.g. "Clippings". Empty = whole vault.
+	folder?: string;
+	// Whether files in nested subfolders qualify. Default true.
+	includeSubfolders?: boolean;
+}
+
+export type TriggerAction =
+	| { kind: 'chain'; chainName: string }
+	| { kind: 'workflow'; jobType: JobType; params?: Record<string, string> };
+
+export interface TriggerDef {
+	id: string;
+	name: string;
+	enabled: boolean;
+	on: { event: TriggerEvent } | { everyMinutes: number };
+	scope?: TriggerScope;
+	// Evaluated against the file's frontmatter/tags. word-count-* types are not allowed
+	// here (the trigger guard is sync); use a chain guard step for those.
+	conditions: GuardCondition[];
+	conditionMode?: 'all' | 'any'; // default 'all' (AND)
+	action: TriggerAction;
 }
 
 export interface AgentResult {
@@ -317,6 +363,8 @@ export interface CrucibleSettings {
 	captures: Capture[];
 	// Chains
 	chains: Chain[];
+	// Triggers (user-configured if-this-then-that rules; run a chain or enqueue a workflow)
+	triggers: TriggerDef[];
 	// LLM providers (connection + model)
 	providers: Provider[];
 	// Agents (provider + prompts, callable from chains)
@@ -462,6 +510,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	shortcuts: [],
 	captures: [],
 	chains: [],
+	triggers: [],
 	providers: [],
 	agents: [],
 	showToC: true,
