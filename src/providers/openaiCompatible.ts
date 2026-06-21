@@ -19,26 +19,41 @@ function isOpenRouter(provider: Provider): boolean {
 	return provider.kind === 'openrouter';
 }
 
+// A user-configured local server (LM Studio, llama.cpp, vLLM, LocalAI, …) speaking the
+// OpenAI wire format. It honours provider.baseUrl and treats the API key as optional.
+function isLocal(provider: Provider): boolean {
+	return provider.kind === 'openai-compatible';
+}
+
 function label(provider: Provider): string {
+	if (isLocal(provider)) return 'Local';
 	return isOpenRouter(provider) ? 'OpenRouter' : 'OpenAI';
 }
 
-// Honoured by the embedding + image endpoints (completion uses the fixed vendor URL, matching
-// the original behaviour).
+// Resolves the API base for every endpoint (completion, embedding, image). For the OpenAI and
+// OpenRouter vendors this returns their fixed default unless an override is set; for local
+// servers it falls back to LM Studio's default port.
 function apiBaseUrl(provider: Provider): string {
-	const fallback = isOpenRouter(provider) ? 'https://openrouter.ai/api/v1' : 'https://api.openai.com/v1';
+	const fallback = isOpenRouter(provider)
+		? 'https://openrouter.ai/api/v1'
+		: isLocal(provider)
+			? 'http://localhost:1234/v1'
+			: 'https://api.openai.com/v1';
 	return (provider.baseUrl || fallback).replace(/\/$/, '');
 }
 
 function authHeaders(ctx: HttpCallContext): Record<string, string> {
-	return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ctx.apiKey}` };
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	// Local servers may run without auth; only send the header when a key is present.
+	if (ctx.apiKey) headers['Authorization'] = `Bearer ${ctx.apiKey}`;
+	return headers;
 }
 
 export const openAICompatibleClient: HttpProviderClient = {
 	async complete(ctx, system, user): Promise<ProviderCompletionResult> {
 		const openRouter = isOpenRouter(ctx.provider);
 		const response = await requestUrl({
-			url: openRouter ? 'https://openrouter.ai/api/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions',
+			url: `${apiBaseUrl(ctx.provider)}/chat/completions`,
 			method: 'POST',
 			headers: openRouter ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx),
 			body: JSON.stringify({
@@ -47,8 +62,8 @@ export const openAICompatibleClient: HttpProviderClient = {
 					{ role: 'system', content: system },
 					{ role: 'user', content: user },
 				],
-				// OpenAI pins a sampling temperature; OpenRouter intentionally leaves it to the model default.
-				...(openRouter ? {} : { temperature: 0.7 }),
+				// OpenAI pins a sampling temperature; OpenRouter and local servers leave it to the model default.
+				...(ctx.provider.kind === 'openai' ? { temperature: 0.7 } : {}),
 			}),
 		});
 
