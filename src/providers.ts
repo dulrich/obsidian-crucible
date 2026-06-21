@@ -18,6 +18,7 @@ export const providerSecretKey = (id: string) => `crucible-provider-${id}-key`;
 const HTTP_PROVIDER_CLIENTS: Partial<Record<ProviderKind, HttpProviderClient>> = {
 	openai: openAICompatibleClient,
 	openrouter: openAICompatibleClient,
+	'openai-compatible': openAICompatibleClient,
 	anthropic: anthropicClient,
 	google: googleClient,
 	ollama: ollamaClient,
@@ -93,10 +94,11 @@ export class ProviderManager {
 		return client as HttpProviderClient & Required<Pick<HttpProviderClient, M>>;
 	}
 
-	// Load + validate the API key once for any HTTP provider call. Ollama needs no key.
+	// Load + validate the API key once for any HTTP provider call. Ollama needs no key;
+	// openai-compatible (local servers like LM Studio) may optionally carry one.
 	private async httpContext(provider: Provider, modelId: string): Promise<{ provider: Provider; modelId: string; apiKey: string }> {
 		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
-		if (!apiKey && provider.kind !== 'ollama') {
+		if (!apiKey && provider.kind !== 'ollama' && provider.kind !== 'openai-compatible') {
 			throw new Error(`API key missing for provider "${provider.name || provider.id}"`);
 		}
 		return { provider, modelId, apiKey };

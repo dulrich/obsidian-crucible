@@ -137,6 +137,25 @@ function renderEditProvider(tab: CrucibleSettingTab, containerEl: HTMLElement, p
 				get: () => provider.baseUrl || '',
 				set: (v) => { provider.baseUrl = v; },
 			}, save);
+		} else if (provider.kind === 'openai-compatible') {
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			bindText(containerEl, {
+				name: 'Server URL',
+				desc: 'OpenAI-compatible base URL, including the API path. For LM Studio use http://localhost:1234/v1',
+				placeholder: 'http://localhost:1234/v1',
+				get: () => provider.baseUrl || '',
+				set: (v) => { provider.baseUrl = v; },
+			}, save);
+
+			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+			const apiKeySetting = new Setting(containerEl)
+				.setName('API Key (optional)')
+				.setDesc('Only required by servers configured with an API key (e.g. vLLM --api-key). Stored securely in Obsidian Secret Storage.');
+			mountSecretControl(apiKeySetting, {
+				load: () => tab.plugin.providerManager.loadApiKey(provider.id),
+				store: (v) => tab.plugin.providerManager.storeApiKey(provider.id, v),
+				clear: () => tab.plugin.providerManager.deleteApiKey(provider.id),
+			});
 		} else {
 			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 			const apiKeySetting = new Setting(containerEl)
