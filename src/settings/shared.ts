@@ -18,6 +18,7 @@ export const PROVIDER_KIND_LABELS: Record<ProviderKind, string> = {
 	google: 'Google (Gemini)',
 	openrouter: 'OpenRouter',
 	ollama: 'Ollama (Local API)',
+	'openai-compatible': 'OpenAI-Compatible (Local)',
 	'gemini-cli': 'Gemini CLI',
 	'claude-cli': 'Claude Code CLI',
 	'codex-cli': 'OpenAI Codex CLI',
