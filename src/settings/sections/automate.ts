@@ -1,12 +1,13 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting, Command } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain } from "../../types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain, GuardCondition, GuardConditionType, SYNC_GUARD_CONDITION_TYPES, TriggerDef, TriggerEvent } from "../../types";
+import type { JobType } from "../../orchestration/types";
 import { agentCommandId } from "../../agents";
 import { getPeriodConfigByTarget } from "../../periods";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "../../suggesters";
 import { SearchWithContainer, sortByNameWithEmptyLast, addWarningIcon } from "../shared";
-import { bindText, bindToggle, bindDropdown, bindSearch, bindTextArea } from "../bind";
+import { bindText, bindToggle, bindDropdown, bindSearch, bindTextArea, bindNumber } from "../bind";
 
 function getChainCommandExtras(tab: CrucibleSettingTab): Command[] {
 	const chainOnlyCommands: Command[] = [
@@ -37,9 +38,14 @@ export function renderAutomateSettings(tab: CrucibleSettingTab, containerEl: HTM
 		renderEditChain(tab, containerEl);
 		return;
 	}
+	if (tab.editingTriggerIndex !== -1) {
+		renderEditTrigger(tab, containerEl);
+		return;
+	}
 
 	renderCaptureListSection(tab, containerEl);
 	renderChainListSection(tab, containerEl);
+	renderTriggerListSection(tab, containerEl);
 	renderShortcutSettings(tab, containerEl);
 }
 
@@ -314,6 +320,10 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 					.addOption('has-property', 'Note has property')
 					.addOption('not-has-property', 'Note does not have property')
 					.addOption('property-equals', 'Property equals value')
+					.addOption('property-lt', 'Property < number')
+					.addOption('property-gt', 'Property > number')
+					.addOption('word-count-lt', 'Word count < number')
+					.addOption('word-count-gt', 'Word count > number')
 					.setValue(gc.type)
 					.onChange(async (v) => {
 						gc.type = v as typeof gc.type;
@@ -361,6 +371,38 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 						.setValue(gc.value ?? '')
 						.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await save(); })
 						.inputEl.addClass('pi-width-normal'));
+			} else if (gc.type === 'property-lt' || gc.type === 'property-gt') {
+				const op = gc.type === 'property-lt' ? '<' : '>';
+				new Setting(stepGroup)
+					.setName('Property')
+					.addText(t => t
+						.setPlaceholder('word-count')
+						.setValue(gc.property ?? '')
+						.onChange(async (v) => { gc.property = v; step.guardCondition = gc; await save(); })
+						.inputEl.addClass('pi-width-normal'));
+				stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
+				new Setting(stepGroup)
+					.setName('Number')
+					.setDesc(`Guard passes if the property value is ${op} this number.`)
+					.addText(t => {
+						t.setPlaceholder('6000')
+							.setValue(gc.value ?? '')
+							.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await save(); });
+						t.inputEl.type = 'number';
+						t.inputEl.addClass('pi-width-small');
+					});
+			} else if (gc.type === 'word-count-lt' || gc.type === 'word-count-gt') {
+				const op = gc.type === 'word-count-lt' ? '<' : '>';
+				new Setting(stepGroup)
+					.setName('Word count')
+					.setDesc(`Guard passes if the note body word count is ${op} this number.`)
+					.addText(t => {
+						t.setPlaceholder('6000')
+							.setValue(gc.value ?? '')
+							.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await save(); });
+						t.inputEl.type = 'number';
+						t.inputEl.addClass('pi-width-small');
+					});
 			}
 		} else {
 			new Setting(stepGroup)
@@ -532,6 +574,329 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	actionRow.addButton(bt => bt.setButtonText('Preview chain').onClick(() => {
 		tab.plugin.chainManager.previewChain(chain);
 	}));
+}
+
+// Job types sensible to enqueue directly from a trigger. chain_run/command_run are
+// omitted: the "chain" action uses chain_run, and command_run needs a command id.
+const TRIGGER_WORKFLOW_LABELS: Partial<Record<JobType, string>> = {
+	daily_brief_lite: 'Daily brief (lite)',
+	youtube_tracker: 'YouTube tracker',
+	blogs_tracker: 'Blogs/RSS tracker',
+	link_scan: 'Link scan',
+	transcript_refine: 'Refine transcript',
+	youtube_metadata_fetch: 'Fetch YouTube metadata',
+};
+
+const GUARD_TYPE_LABELS: Record<GuardConditionType, string> = {
+	'has-tag': 'Note has tag',
+	'not-has-tag': 'Note does not have tag',
+	'has-property': 'Note has property',
+	'not-has-property': 'Note does not have property',
+	'property-equals': 'Property equals value',
+	'property-lt': 'Property < number',
+	'property-gt': 'Property > number',
+	'word-count-lt': 'Word count < number',
+	'word-count-gt': 'Word count > number',
+};
+
+function newTriggerId(): string {
+	const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+	if (c?.randomUUID) return c.randomUUID();
+	return `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function newTrigger(): TriggerDef {
+	return {
+		id: newTriggerId(),
+		name: '',
+		enabled: true,
+		on: { event: 'create' },
+		scope: { folder: '', includeSubfolders: true },
+		conditions: [],
+		conditionMode: 'all',
+		action: { kind: 'chain', chainName: '' },
+	};
+}
+
+function describeTrigger(trigger: TriggerDef): string {
+	const when = 'everyMinutes' in trigger.on ? `every ${trigger.on.everyMinutes} min` : `on ${trigger.on.event}`;
+	const scope = !('everyMinutes' in trigger.on) && trigger.scope?.folder ? ` in ${trigger.scope.folder}` : '';
+	const conds = trigger.conditions.length ? `, ${trigger.conditions.length} condition${trigger.conditions.length > 1 ? 's' : ''}` : '';
+	const action = trigger.action.kind === 'chain'
+		? `chain "${trigger.action.chainName || '(none)'}"`
+		: `workflow ${TRIGGER_WORKFLOW_LABELS[trigger.action.jobType] ?? trigger.action.jobType}`;
+	return `${when}${scope}${conds} → ${action}`;
+}
+
+function getTriggerWarning(tab: CrucibleSettingTab, trigger: TriggerDef): string | null {
+	if (trigger.action.kind === 'chain') {
+		const chainName = trigger.action.chainName;
+		if (!chainName) return 'No chain selected; this trigger will not run.';
+		if (!tab.plugin.settings.chains.some(c => c.name === chainName)) {
+			return `Chain "${chainName}" does not exist.`;
+		}
+	}
+	if ('everyMinutes' in trigger.on && (trigger.scope?.folder || trigger.conditions.length)) {
+		return 'Schedule triggers have no note context; scope and conditions are ignored.';
+	}
+	return null;
+}
+
+function renderTriggerListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
+	new Setting(containerEl).setName('Triggers').setHeading();
+	containerEl.createEl('p', { text: 'Run a chain or enqueue a workflow automatically when a note event or schedule fires. Triggered work runs through the queue (dedupe, pacing, timeouts, note locks).' });
+
+	const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	if (tab.plugin.settings.triggers.length === 0) {
+		group.createDiv({ text: 'No triggers defined.', cls: 'crucible-empty-state' });
+	} else {
+		sortByNameWithEmptyLast(tab.plugin.settings.triggers, t => t.name).forEach(({ item: trigger, index }, displayIdx) => {
+			if (displayIdx > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+			const setting = new Setting(group)
+				.setName(trigger.name || '(unnamed)')
+				.setDesc(describeTrigger(trigger))
+				.addToggle(t => t
+					.setTooltip('Enabled')
+					.setValue(trigger.enabled)
+					.onChange(async (v) => { trigger.enabled = v; await tab.plugin.saveSettings(); tab.plugin.registerTriggers(); }))
+				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate trigger').onClick(async () => {
+					const copy = JSON.parse(JSON.stringify(trigger)) as TriggerDef;
+					copy.id = newTriggerId();
+					copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
+					tab.plugin.settings.triggers.push(copy);
+					await tab.plugin.saveSettings();
+					tab.plugin.registerTriggers();
+					tab.display();
+				}))
+				.addExtraButton(cb => cb.setIcon('pencil').setTooltip('Edit trigger').onClick(() => {
+					tab.editingTriggerIndex = index;
+					tab.display();
+				}))
+				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete trigger').onClick(async () => {
+					tab.plugin.settings.triggers.splice(index, 1);
+					await tab.plugin.saveSettings();
+					tab.plugin.registerTriggers();
+					tab.display();
+				}));
+			const warning = getTriggerWarning(tab, trigger);
+			if (warning) addWarningIcon(setting.nameEl, warning);
+		});
+	}
+
+	new Setting(containerEl).addButton(bt => bt.setButtonText('Add trigger').setCta().onClick(async () => {
+		tab.plugin.settings.triggers.push(newTrigger());
+		await tab.plugin.saveSettings();
+		tab.editingTriggerIndex = tab.plugin.settings.triggers.length - 1;
+		tab.display();
+	}));
+}
+
+function renderTriggerConditions(tab: CrucibleSettingTab, containerEl: HTMLElement, trigger: TriggerDef, save: () => void | Promise<void>, reregister: () => void) {
+	new Setting(containerEl).setName('Conditions').setHeading();
+	containerEl.createEl('p', { text: 'All/any of these must hold (evaluated against the note\'s frontmatter and tags) for the action to run.' });
+
+	const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+	if (trigger.conditions.length > 1) {
+		new Setting(group)
+			.setName('Match')
+			.addDropdown(d => d
+				.addOption('all', 'All conditions (AND)')
+				.addOption('any', 'Any condition (OR)')
+				.setValue(trigger.conditionMode ?? 'all')
+				.onChange(async (v) => { trigger.conditionMode = v as 'all' | 'any'; await save(); reregister(); }));
+		group.createEl('hr', { cls: 'crucible-row-divider' });
+	}
+
+	if (trigger.conditions.length === 0) {
+		group.createDiv({ text: 'No conditions — the action runs on every matching event.', cls: 'crucible-empty-state' });
+	}
+
+	trigger.conditions.forEach((cond, i) => {
+		if (i > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+		new Setting(group)
+			.setName(`Condition ${i + 1}`)
+			.addDropdown(d => {
+				// word-count-* needs an async content read; not available to the sync trigger guard.
+				SYNC_GUARD_CONDITION_TYPES.forEach(t => { d.addOption(t, GUARD_TYPE_LABELS[t]); });
+				d.setValue(cond.type);
+				d.onChange(async (v) => { cond.type = v as GuardConditionType; await save(); reregister(); tab.refreshDisplay(); });
+			})
+			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove condition').onClick(async () => {
+				trigger.conditions.splice(i, 1);
+				await save();
+				reregister();
+				tab.refreshDisplay();
+			}));
+
+		if (cond.type === 'has-tag' || cond.type === 'not-has-tag') {
+			bindText(group, { name: 'Tag', placeholder: '#refined', get: () => cond.tag ?? '', set: (v) => { cond.tag = v; }, after: reregister }, save);
+		} else if (cond.type === 'has-property' || cond.type === 'not-has-property') {
+			bindText(group, { name: 'Property', placeholder: 'yt-video-id', get: () => cond.property ?? '', set: (v) => { cond.property = v; }, after: reregister }, save);
+		} else if (cond.type === 'property-equals') {
+			bindText(group, { name: 'Property', placeholder: 'status', get: () => cond.property ?? '', set: (v) => { cond.property = v; }, after: reregister }, save);
+			bindText(group, { name: 'Value', placeholder: 'done', get: () => cond.value ?? '', set: (v) => { cond.value = v; }, after: reregister }, save);
+		} else if (cond.type === 'property-lt' || cond.type === 'property-gt') {
+			bindText(group, { name: 'Property', placeholder: 'word-count', get: () => cond.property ?? '', set: (v) => { cond.property = v; }, after: reregister }, save);
+			bindNumber(group, { name: 'Number', placeholder: '6000', get: () => cond.value ?? '', set: (v) => { cond.value = v; }, after: reregister }, save);
+		}
+	});
+
+	new Setting(containerEl).addButton(bt => bt.setButtonText('Add condition').onClick(async () => {
+		const next: GuardCondition = { type: 'has-property' };
+		trigger.conditions.push(next);
+		await save();
+		reregister();
+		tab.display();
+	}));
+}
+
+function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
+	const save = () => tab.plugin.saveSettings();
+	const reregister = () => tab.plugin.registerTriggers();
+	const trigger = tab.plugin.settings.triggers[tab.editingTriggerIndex];
+	if (!trigger) {
+		tab.editingTriggerIndex = -1;
+		renderAutomateSettings(tab, containerEl);
+		return;
+	}
+
+	const heading = new Setting(containerEl).setName('Edit Trigger').setHeading();
+	const warning = getTriggerWarning(tab, trigger);
+	if (warning) addWarningIcon(heading.nameEl, warning);
+
+	const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	bindText(group, {
+		name: 'Trigger name',
+		placeholder: 'e.g. Ingest YouTube clippings',
+		get: () => trigger.name,
+		set: (v) => { trigger.name = v; },
+		after: reregister,
+	}, save);
+	group.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(group, {
+		name: 'Enabled',
+		get: () => trigger.enabled,
+		set: (v) => { trigger.enabled = v; },
+		after: reregister,
+	}, save);
+
+	// --- When ---
+	new Setting(containerEl).setName('When').setHeading();
+	const whenGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	new Setting(whenGroup)
+		.setName('Trigger on')
+		.addDropdown(d => d
+			.addOption('event', 'Note event')
+			.addOption('schedule', 'Schedule')
+			.setValue('everyMinutes' in trigger.on ? 'schedule' : 'event')
+			.onChange(async (v) => {
+				trigger.on = v === 'schedule' ? { everyMinutes: 60 } : { event: 'create' };
+				await save();
+				reregister();
+				tab.display();
+			}));
+	whenGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	if ('everyMinutes' in trigger.on) {
+		bindNumber(whenGroup, {
+			name: 'Every (minutes)',
+			desc: '0 disables the schedule.',
+			placeholder: '60',
+			min: 0,
+			get: () => String('everyMinutes' in trigger.on ? trigger.on.everyMinutes : 0),
+			set: (raw) => { if ('everyMinutes' in trigger.on) trigger.on.everyMinutes = Math.max(0, Number(raw) || 0); },
+			after: reregister,
+		}, save);
+	} else {
+		new Setting(whenGroup)
+			.setName('Event')
+			.addDropdown(d => d
+				.addOption('create', 'Note created')
+				.addOption('modify', 'Note modified')
+				.addOption('metadata-changed', 'Frontmatter/metadata changed')
+				.addOption('rename', 'Note renamed')
+				.setValue('event' in trigger.on ? trigger.on.event : 'create')
+				.onChange(async (v) => { trigger.on = { event: v as TriggerEvent }; await save(); reregister(); }));
+	}
+
+	// --- Scope + Conditions (event triggers only) ---
+	if (!('everyMinutes' in trigger.on)) {
+		new Setting(containerEl).setName('Scope').setHeading();
+		const scopeGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		const scope = trigger.scope ?? (trigger.scope = { folder: '', includeSubfolders: true });
+		bindSearch(scopeGroup, {
+			name: 'Folder',
+			desc: 'Only notes under this folder qualify. Empty = whole vault.',
+			placeholder: 'Clippings',
+			get: () => scope.folder ?? '',
+			set: (v) => { scope.folder = v; },
+			suggest: (el) => { new FolderSuggest(tab.app, el); },
+			after: reregister,
+		}, save);
+		scopeGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		bindToggle(scopeGroup, {
+			name: 'Include subfolders',
+			get: () => scope.includeSubfolders !== false,
+			set: (v) => { scope.includeSubfolders = v; },
+			after: reregister,
+		}, save);
+
+		renderTriggerConditions(tab, containerEl, trigger, save, reregister);
+	}
+
+	// --- Then (action) ---
+	new Setting(containerEl).setName('Then').setHeading();
+	const actionGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	new Setting(actionGroup)
+		.setName('Action')
+		.addDropdown(d => d
+			.addOption('chain', 'Run a chain')
+			.addOption('workflow', 'Enqueue a workflow')
+			.setValue(trigger.action.kind)
+			.onChange(async (v) => {
+				trigger.action = v === 'workflow'
+					? { kind: 'workflow', jobType: 'daily_brief_lite' }
+					: { kind: 'chain', chainName: '' };
+				await save();
+				reregister();
+				tab.display();
+			}));
+	actionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	const action = trigger.action;
+	if (action.kind === 'chain') {
+		new Setting(actionGroup)
+			.setName('Chain')
+			.setDesc('The chain to run on the triggering note.')
+			.addDropdown(d => {
+				d.addOption('', '(select chain)');
+				tab.plugin.settings.chains.filter(c => c.name).forEach(c => { d.addOption(c.name, c.name); });
+				d.setValue(action.chainName);
+				d.onChange(async (v) => { action.chainName = v; await save(); reregister(); tab.refreshDisplay(); });
+			});
+	} else {
+		new Setting(actionGroup)
+			.setName('Workflow')
+			.setDesc('The orchestration workflow to enqueue.')
+			.addDropdown(d => {
+				Object.entries(TRIGGER_WORKFLOW_LABELS).forEach(([jt, label]) => { d.addOption(jt, label); });
+				d.setValue(action.jobType);
+				d.onChange(async (v) => { action.jobType = v as JobType; await save(); reregister(); });
+			});
+	}
+
+	containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+	new Setting(containerEl)
+		.addButton(bt => bt.setButtonText('Done').setCta().onClick(() => {
+			tab.editingTriggerIndex = -1;
+			tab.display();
+		}))
+		.addButton(bt => bt.setButtonText('Delete trigger').setWarning().onClick(async () => {
+			tab.plugin.settings.triggers.splice(tab.editingTriggerIndex, 1);
+			tab.editingTriggerIndex = -1;
+			await save();
+			reregister();
+			tab.display();
+		}));
 }
 
 function renderShortcutSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
