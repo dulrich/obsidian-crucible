@@ -4,9 +4,11 @@ import {
 	INTAKE_ROOT_YOUTUBE,
 	TRACKER_GENERATED_BY_YOUTUBE,
 	buildYoutubeSeenIdSet,
+	feedSeenExtraSkipPrefixes,
 	loadConfiguredChannels,
 	parseIntakeVideos,
 } from '../../orchestration/utils/feedIntake';
+import { YOUTUBE_FEED_SOURCE } from '../../orchestration/utils/feedSources';
 import { loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import { channelDisplayName } from '../../orchestration/utils/youtube';
 import { findExistingChannelAboutNote } from '../../orchestration/utils/youtubeApi';
@@ -34,7 +36,7 @@ export async function computeChannelControlRows(app: App, plugin: CruciblePlugin
 	// Video ids that have a real capture note (a vault note carrying the video's
 	// yt-video-id / source), independent of whether an enrichment metadata note
 	// exists. This is what "Ingested" reflects.
-	const captured = buildYoutubeSeenIdSet(app, false);
+	const captured = buildYoutubeSeenIdSet(app, false, undefined, feedSeenExtraSkipPrefixes(plugin, YOUTUBE_FEED_SOURCE));
 
 	const agg = new Map<string, ChannelAgg>();
 	const get = (channelId: string): ChannelAgg => {
@@ -96,6 +98,7 @@ export async function computeChannelControlRows(app: App, plugin: CruciblePlugin
 			if (ignored.has(id)) ignoredVideos++;
 			else if (captured.has(id)) ingestedVideos++;
 		}
+		const uncapturedVideos = Math.max(0, universe.size - ingestedVideos - ignoredVideos);
 		const rawName = entry.name || entry.title || channelId;
 		rows.push({
 			channelId,
@@ -104,6 +107,7 @@ export async function computeChannelControlRows(app: App, plugin: CruciblePlugin
 			trackedVideos: universe.size,
 			ingestedVideos,
 			ignoredVideos,
+			uncapturedVideos,
 			tracked: registry.has(channelId),
 		});
 	}
