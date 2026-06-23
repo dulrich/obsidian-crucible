@@ -128,14 +128,18 @@ function readDurationSeconds(app: App, enrichmentFile: TFile | null): number | n
 
 // Scans every markdown note for the backlog: a usable `yt-video-id` in
 // frontmatter with no `yt-metadata` link yet. Keying on `yt-video-id` matches
-// the "fetch video metadata for active note" command.
-export function computeYoutubeNoMetadataRows(app: App): YoutubeNoMetadataRow[] {
+// the "fetch video metadata for active note" command. Captures whose video id
+// has been ignored (e.g. the video was deleted/unavailable) are dropped from the
+// backlog — the note stays in the vault, but it no longer nags for enrichment.
+export async function computeYoutubeNoMetadataRows(app: App): Promise<YoutubeNoMetadataRow[]> {
+	const ignored = await loadIgnoredVideoIds(app);
 	const out: YoutubeNoMetadataRow[] = [];
 	for (const file of app.vault.getMarkdownFiles()) {
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 		if (!fm) continue;
 		const videoId = coerceVideoId(fm['yt-video-id']);
 		if (!videoId) continue;
+		if (ignored.has(videoId)) continue;
 		if (isYtMetadataLinked(fm['yt-metadata'])) continue;
 		const createdRaw: unknown = fm['created'];
 		const created = typeof createdRaw === 'string' ? Date.parse(createdRaw) || file.stat.ctime : file.stat.ctime;

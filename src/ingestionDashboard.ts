@@ -29,6 +29,7 @@ import type { JobType, OrchestrationJob } from './orchestration/types';
 import { renderSortableTable } from './ingestion/render/sortableTable';
 import { renderTableSection } from './ingestion/render/section';
 import type {
+	ChannelControlRow,
 	ClippingRow,
 	OrphanRow,
 	SectionContext,
@@ -45,6 +46,7 @@ import {
 	computeUncapturedVideoRows,
 	computeYoutubeNoMetadataRows,
 } from './ingestion/data/uncaptured';
+import { computeChannelControlRows } from './ingestion/data/channels';
 import { computeOrphanedAttachmentRows } from './ingestion/data/orphanedAttachments';
 import {
 	blogIgnoreUrl,
@@ -92,6 +94,14 @@ function searchBatchTitle(job: OrchestrationJob): string {
 	return 'Search batch';
 }
 
+function ratio(n: number, d: number): number {
+	return d > 0 ? n / d : 0;
+}
+
+function countWithPct(n: number, d: number): string {
+	return d > 0 ? `${n} (${Math.round((n / d) * 100)}%)` : String(n);
+}
+
 const DEBOUNCE_MS = 150;
 // Vault-scan sections (uncaptured lists, no-metadata, orphans) recompute the
 // whole vault, so they get a longer debounce than the cheap, event-driven ones.
@@ -105,6 +115,8 @@ export class IngestionDashboardUI {
 	private uncapturedVideosCache: UncapturedVideoRow[] = [];
 	private orphanedAttachmentsCache: OrphanRow[] = [];
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
+	// Channel control center filter: which channels to list.
+	private channelFilter: 'all' | 'tracked' | 'untracked' = 'all';
 	// Last-seen signature of the frontmatter/links that actually drive the
 	// vault-scan sections, keyed by path. Lets a metadataCache 'changed' event
 	// (which fires on every keystroke) skip those refreshes when nothing relevant
@@ -139,6 +151,13 @@ export class IngestionDashboardUI {
 			'YouTube captures without metadata',
 			'Vault notes with a yt-video-id in frontmatter but no yt-metadata link yet.',
 			(heading) => this.renderEnqueueAllMetadataButton(heading),
+		);
+		this.buildSection(
+			'channelControl',
+			'Channel control center',
+			'Every YouTube channel known to the vault, with tracked / ingested / ignored video counts and a link to its about.md.',
+			(heading) => this.renderEnrichAllChannelsButton(heading),
+			true,
 		);
 		this.buildSection(
 			'orphanedAttachments',
@@ -657,6 +676,7 @@ export class IngestionDashboardUI {
 			'uncapturedVideos',
 			'ignoredVideos',
 			'youtubeWithoutMetadata',
+			'channelControl',
 			'orphanedAttachments',
 		];
 		for (const id of ids) await this.refresh(id);
@@ -680,6 +700,7 @@ export class IngestionDashboardUI {
 			case 'uncapturedVideos': return this.renderUncapturedVideos(body, ctx);
 			case 'ignoredVideos': return this.renderIgnoredVideos(body, ctx);
 			case 'youtubeWithoutMetadata': return this.renderYoutubeNoMetadata(body, ctx);
+			case 'channelControl': return this.renderChannelControl(body, ctx);
 			case 'orphanedAttachments': return this.renderOrphanedAttachments(body, ctx);
 		}
 	}
@@ -883,7 +904,7 @@ export class IngestionDashboardUI {
 
 	// --- Section: YouTube captures without metadata ---
 	private async renderYoutubeNoMetadata(body: HTMLElement, ctx: SectionContext): Promise<void> {
-		const rows = computeYoutubeNoMetadataRows(this.app);
+		const rows = await computeYoutubeNoMetadataRows(this.app);
 		const inFlight = this.youtubeMetadataInFlight();
 
 		renderTableSection<YoutubeNoMetadataRow>({
@@ -895,6 +916,7 @@ export class IngestionDashboardUI {
 				{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => this.renderFileLink(td, r.file) },
 				{ key: 'created', label: 'Create Date', sortable: true, sortKey: r => r.created, render: (r, td) => td.setText(formatDate(r.created)) },
 				{ key: 'enqueue', label: '', render: (r, td) => this.renderEnqueueMetadataCell(td, r, inFlight) },
+				{ key: 'ignore', label: '', render: (r, td) => this.renderIgnoreButton(td, 'youtube', r.videoId, ctx, 'ignoredVideos') },
 			],
 		});
 	}
@@ -933,7 +955,7 @@ export class IngestionDashboardUI {
 			void (async () => {
 				btn.disabled = true;
 				try {
-					const rows = computeYoutubeNoMetadataRows(this.app);
+					const rows = await computeYoutubeNoMetadataRows(this.app);
 					if (rows.length === 0) {
 						new Notice('No captures awaiting metadata.');
 						return;
@@ -953,6 +975,89 @@ export class IngestionDashboardUI {
 				} finally {
 					btn.disabled = false;
 					void this.refresh('youtubeWithoutMetadata');
+				}
+			})();
+		});
+	}
+
+	// --- Section: Channel control center ---
+	private async renderChannelControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
+		body.empty();
+		body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
+		const all = await computeChannelControlRows(this.app, this.plugin);
+		body.empty();
+
+		// Filter control row (re-built each render); survives because it lives in the
+		// section body while the table renders into a child container.
+		const controls = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
+		const filters: Array<{ id: 'all' | 'tracked' | 'untracked'; label: string }> = [
+			{ id: 'all', label: 'All' },
+			{ id: 'tracked', label: 'Tracked' },
+			{ id: 'untracked', label: 'Untracked' },
+		];
+		for (const f of filters) {
+			const btn = controls.createEl('button', { text: f.label });
+			if (this.channelFilter === f.id) btn.addClass('mod-cta');
+			btn.addEventListener('click', () => {
+				if (this.channelFilter === f.id) return;
+				this.channelFilter = f.id;
+				void ctx.refresh();
+			});
+		}
+
+		const rows = all.filter(r =>
+			this.channelFilter === 'all'
+				? true
+				: this.channelFilter === 'tracked' ? r.tracked : !r.tracked);
+
+		const tableBody = body.createDiv();
+		renderTableSection<ChannelControlRow>({
+			body: tableBody, ctx, rows,
+			emptyText: 'No channels match this filter.',
+			defaultSort: { column: 'name', direction: 'asc' },
+			setCount: n => this.setSectionCount('channelControl', n),
+			columns: [
+				{ key: 'name', label: 'Channel', sortable: true, sortKey: r => r.name.toLowerCase(), render: (r, td) => r.aboutFile ? this.renderFileLink(td, r.aboutFile, r.name) : renderChannelLink(td, r.channelId, r.name) },
+				{ key: 'tracked', label: 'Videos', sortable: true, sortKey: r => r.trackedVideos, render: (r, td) => td.setText(String(r.trackedVideos)) },
+				{ key: 'ingested', label: 'Ingested', sortable: true, sortKey: r => ratio(r.ingestedVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.ingestedVideos, r.trackedVideos)) },
+				{ key: 'ignored', label: 'Ignored', sortable: true, sortKey: r => ratio(r.ignoredVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.ignoredVideos, r.trackedVideos)) },
+				{ key: 'isTracked', label: 'Tracked?', sortable: true, sortKey: r => r.tracked ? 1 : 0, render: (r, td) => td.setText(r.tracked ? 'yes' : 'no') },
+				{ key: 'enrich', label: '', render: (r, td) => this.renderChannelEnrichButton(td, r, ctx) },
+			],
+		});
+	}
+
+	private renderChannelEnrichButton(td: HTMLElement, row: ChannelControlRow, ctx: SectionContext): void {
+		const btn = td.createEl('button', { text: row.aboutFile ? 'Re-enrich' : 'Enrich' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				const job = await this.plugin.orchestrator.enqueue('youtube_channel_enrich', {
+					channelId: row.channelId,
+					force: true,
+				}, { priority: 'high', lane: 'user' });
+				if (job) {
+					btn.setText('Queued');
+					new Notice(`Enqueued channel enrichment for ${row.name}.`);
+				} else {
+					btn.disabled = false;
+				}
+				void ctx.refresh();
+			})();
+		});
+	}
+
+	private renderEnrichAllChannelsButton(heading: HTMLElement): void {
+		const btn = heading.createEl('button', { text: 'Enrich all', cls: 'crucible-ingestion-enqueue-intake' });
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					const job = await this.plugin.orchestrator.enqueue('youtube_channel_enrich_sweep', {}, { priority: 'high', lane: 'user' });
+					new Notice(job ? 'Enqueued channel enrichment sweep.' : 'Channel enrichment sweep already queued.');
+				} finally {
+					btn.disabled = false;
+					void this.refresh('channelControl');
 				}
 			})();
 		});

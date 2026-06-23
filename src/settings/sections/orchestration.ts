@@ -705,6 +705,29 @@ function renderEditYoutubeTrackerWorkflow(tab: CrucibleSettingTab, containerEl: 
 		suggest: (el) => { new FolderSuggest(tab.app, el); },
 	}, save);
 
+	bindToggle(containerEl, {
+		name: 'Auto-enrich channel metadata',
+		desc: 'When on, a scheduled sweep refreshes each known channel\'s about.md note (subject to the interval and max-age below). Requires a configured API key.',
+		get: () => s.orchestrationYoutubeChannelEnrichEnabled === true,
+		set: (v) => { s.orchestrationYoutubeChannelEnrichEnabled = v; },
+	}, save);
+
+	bindNumber(containerEl, {
+		name: 'Channel enrichment interval (minutes)',
+		desc: 'How often the channel about.md sweep runs (0 = off). Only fetches channels whose about.md is missing or older than the max age below.',
+		placeholder: '0',
+		get: () => String(s.orchestrationYoutubeChannelEnrichIntervalMinutes),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationYoutubeChannelEnrichIntervalMinutes = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0; },
+	}, save);
+
+	bindNumber(containerEl, {
+		name: 'Channel about.md max age (days)',
+		desc: 'Scheduled/sweep runs skip channels whose about.md was fetched within this many days. Per-channel "Re-enrich" always re-fetches.',
+		placeholder: '30',
+		get: () => String(s.orchestrationYoutubeChannelEnrichMaxAgeDays),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationYoutubeChannelEnrichMaxAgeDays = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 30; },
+	}, save);
+
 	const youtubeKeySetting = new Setting(containerEl)
 		.setName('YouTube Data API key')
 		.setDesc('Stored securely in Obsidian Secret Storage. Required for the per-video metadata fetch command.');

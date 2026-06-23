@@ -26,13 +26,15 @@ import {
 import { ingestYoutubeVideoMetadata, isYtMetadataLinked } from './orchestration/utils/youtubeApi';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
+import { YoutubeChannelEnrichWorkflow } from './orchestration/workflows/YoutubeChannelEnrichWorkflow';
+import { YoutubeChannelEnrichSweepWorkflow } from './orchestration/workflows/YoutubeChannelEnrichSweepWorkflow';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 import { IngestionDashboardView, INGESTION_DASHBOARD_VIEW_TYPE } from './ingestionDashboardView';
 import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
 import { ImageMetadataExtractWorkflow } from './orchestration/workflows/ImageMetadataExtractWorkflow';
@@ -150,6 +152,8 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
+		this.orchestrator.register('youtube_channel_enrich', new YoutubeChannelEnrichWorkflow(), youtubeChannelEnrichJobConfig(this));
+		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow());
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
 		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
 		this.orchestrator.register('image_metadata_extract', new ImageMetadataExtractWorkflow(), imageMetadataJobConfig());
@@ -412,6 +416,13 @@ export default class CruciblePlugin extends Plugin {
 			on: { everyMs: () => Math.max(0, this.settings.orchestrationYoutubeTrackerIntervalMinutes) * 60_000 },
 			enabled: () => this.settings.orchestrationYoutubeTrackerEnabled,
 			jobs: () => [{ type: 'youtube_tracker' }],
+		});
+		this.triggers.register({
+			id: 'youtube-channel-enrich-schedule',
+			description: 'Refresh stale YouTube channel about.md notes on a fixed interval (0 minutes = off).',
+			on: { everyMs: () => Math.max(0, this.settings.orchestrationYoutubeChannelEnrichIntervalMinutes) * 60_000 },
+			enabled: () => this.settings.orchestrationYoutubeChannelEnrichEnabled,
+			jobs: () => [{ type: 'youtube_channel_enrich_sweep' }],
 		});
 		this.triggers.register({
 			id: 'blogs-tracker-schedule',

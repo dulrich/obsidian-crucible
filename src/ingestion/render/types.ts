@@ -12,6 +12,7 @@ export type SectionId =
 	| 'uncapturedVideos'
 	| 'ignoredVideos'
 	| 'youtubeWithoutMetadata'
+	| 'channelControl'
 	| 'orphanedAttachments';
 
 export interface SortState {
@@ -74,6 +75,16 @@ export interface YoutubeNoMetadataRow {
 	title: string;
 	created: number;
 	videoId: string;
+}
+
+export interface ChannelControlRow {
+	channelId: string;
+	name: string;
+	aboutFile: TFile | null;
+	trackedVideos: number;
+	ingestedVideos: number;
+	ignoredVideos: number;
+	tracked: boolean;
 }
 
 export interface UncapturedPostRow {
