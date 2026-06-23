@@ -1021,6 +1021,7 @@ export class IngestionDashboardUI {
 				{ key: 'tracked', label: 'Videos', sortable: true, sortKey: r => r.trackedVideos, render: (r, td) => td.setText(String(r.trackedVideos)) },
 				{ key: 'ingested', label: 'Ingested', sortable: true, sortKey: r => ratio(r.ingestedVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.ingestedVideos, r.trackedVideos)) },
 				{ key: 'ignored', label: 'Ignored', sortable: true, sortKey: r => ratio(r.ignoredVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.ignoredVideos, r.trackedVideos)) },
+				{ key: 'uncaptured', label: 'Uncaptured', sortable: true, sortKey: r => ratio(r.uncapturedVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.uncapturedVideos, r.trackedVideos)) },
 				{ key: 'isTracked', label: 'Tracked?', sortable: true, sortKey: r => r.tracked ? 1 : 0, render: (r, td) => td.setText(r.tracked ? 'yes' : 'no') },
 				{ key: 'enrich', label: '', render: (r, td) => this.renderChannelEnrichButton(td, r, ctx) },
 			],

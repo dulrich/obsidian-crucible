@@ -3,11 +3,13 @@ import type CruciblePlugin from '../../main';
 import {
 	buildBlogsSeenIdSet,
 	buildYoutubeSeenIdSet,
+	feedSeenExtraSkipPrefixes,
 	loadConfiguredBlogs,
 	loadConfiguredChannels,
 	scanBlogsTrackerRuns,
 	scanYoutubeTrackerRuns,
 } from '../../orchestration/utils/feedIntake';
+import { BLOGS_FEED_SOURCE, YOUTUBE_FEED_SOURCE } from '../../orchestration/utils/feedSources';
 import { buildBlogCanonHostMap } from '../../orchestration/utils/blogs';
 import { blogMetadataRoot, findExistingBlogMetadataNote } from '../../orchestration/utils/blogsApi';
 import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
@@ -19,7 +21,7 @@ export async function computeUncapturedPostRows(app: App, plugin: CruciblePlugin
 	const configured = await loadConfiguredBlogs(app, plugin);
 	const hostRules = buildBlogCanonHostMap(Array.from(configured.values(), v => v.blog));
 	const metadataRoot = blogMetadataRoot(plugin);
-	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app), hostRules, [metadataRoot, '_crucible']);
+	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app), hostRules, feedSeenExtraSkipPrefixes(plugin, BLOGS_FEED_SOURCE));
 	const scan = await scanBlogsTrackerRuns(app, seen, configured);
 
 	const rows: UncapturedPostRow[] = [];
@@ -90,7 +92,7 @@ function stringList(value: unknown): string[] | undefined {
 // YouTube videos seen in tracker runs but not yet captured as a vault note,
 // each annotated with its enrichment metadata note (if any) and duration.
 export async function computeUncapturedVideoRows(app: App, plugin: CruciblePlugin): Promise<UncapturedVideoRow[]> {
-	const seen = buildYoutubeSeenIdSet(app, false, await loadIgnoredVideoIds(app));
+	const seen = buildYoutubeSeenIdSet(app, false, await loadIgnoredVideoIds(app), feedSeenExtraSkipPrefixes(plugin, YOUTUBE_FEED_SOURCE));
 	const configured = await loadConfiguredChannels(app, plugin);
 	const scan = await scanYoutubeTrackerRuns(app, seen, configured);
 	const root = plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata';

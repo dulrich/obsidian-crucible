@@ -84,6 +84,7 @@ export interface ChannelControlRow {
 	trackedVideos: number;
 	ingestedVideos: number;
 	ignoredVideos: number;
+	uncapturedVideos: number;
 	tracked: boolean;
 }
 
