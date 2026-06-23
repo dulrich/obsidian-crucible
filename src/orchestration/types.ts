@@ -9,6 +9,8 @@ export type JobType =
 	| 'transcript_refine'
 	| 'link_scan'
 	| 'youtube_metadata_fetch'
+	| 'youtube_channel_enrich'
+	| 'youtube_channel_enrich_sweep'
 	| 'command_run'
 	| 'chain_run'
 	| 'image_metadata_extract'

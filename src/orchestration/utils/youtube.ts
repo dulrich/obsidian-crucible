@@ -32,11 +32,21 @@ export function extractVideoIdFromUrl(value: string): string | null {
 	return null;
 }
 
+// The Channel column is sometimes authored as a markdown link — e.g.
+// `[Acerola](https://www.youtube.com/@acerola)` — so the visible label is just
+// the link text. Collapse that to the display name; otherwise the raw link leaks
+// into the control-center table and (via resolveChannelFolder) into folder slugs.
+export function channelDisplayName(raw: string): string {
+	const trimmed = raw.trim();
+	const match = trimmed.match(/^\[([^\]]+)\]\([^)]*\)$/);
+	return (match?.[1] ?? trimmed).trim();
+}
+
 export function parseChannelsTable(content: string): ChannelEntry[] {
 	const rows = parseTable(content, ['Channel', 'ID', 'Tags', 'Priority']);
 	const entries: ChannelEntry[] = [];
 	for (const row of rows) {
-		const name = (row.Channel ?? '').trim();
+		const name = channelDisplayName((row.Channel ?? '').trim());
 		const channelId = (row.ID ?? '').trim();
 		if (!name || !channelId) continue;
 		const rawPriority = (row.Priority ?? '').trim().toLowerCase();
