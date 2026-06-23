@@ -415,6 +415,10 @@ export interface CrucibleSettings {
 	orchestrationYoutubeTrackerDiffMode: boolean;
 	orchestrationYoutubeTrackerWriteEmptyRuns: boolean;
 	orchestrationYoutubeMetadataRoot: string;
+	// Channel metadata enrichment (about.md per channel)
+	orchestrationYoutubeChannelEnrichEnabled: boolean;
+	orchestrationYoutubeChannelEnrichIntervalMinutes: number;
+	orchestrationYoutubeChannelEnrichMaxAgeDays: number;
 	// Workflow: blogs_tracker
 	orchestrationBlogsTrackerEnabled: boolean;
 	orchestrationBlogsNote: string;
@@ -555,6 +559,9 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationYoutubeTrackerDiffMode: true,
 	orchestrationYoutubeTrackerWriteEmptyRuns: false,
 	orchestrationYoutubeMetadataRoot: '_yt_metadata',
+	orchestrationYoutubeChannelEnrichEnabled: false,
+	orchestrationYoutubeChannelEnrichIntervalMinutes: 0,
+	orchestrationYoutubeChannelEnrichMaxAgeDays: 30,
 	orchestrationBlogsTrackerEnabled: true,
 	orchestrationBlogsNote: '_system/blogs/Blogs.md',
 	orchestrationBlogsTrackerDiffMode: true,
