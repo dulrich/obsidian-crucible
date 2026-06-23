@@ -113,9 +113,18 @@ export function buildFeedSeenIdSet<Entry, Item>(
 		if ((inSkip || inExtraSkip) && !(diffMode && inIntake)) continue;
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 		if (!fm) continue;
+		if (fm['type'] === 'link-record') continue;
 		source.ingestFrontmatterIds(fm, seen, diffMode, inIntake, hostRules);
 	}
 	return seen;
+}
+
+export function feedSeenExtraSkipPrefixes<Entry, Item>(plugin: CruciblePlugin, source: FeedSource<Entry, Item>): string[] {
+	const linkRegistryRoot = plugin.settings.orchestrationLinkRegistryRoot || '_crucible/link_registry';
+	const metadataRoot = source.kind === 'youtube'
+		? plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata'
+		: plugin.settings.orchestrationBlogsMetadataRoot || '_blog_metadata';
+	return [linkRegistryRoot, metadataRoot];
 }
 
 export async function loadConfiguredFeedEntries<Entry, Item>(
@@ -236,8 +245,13 @@ export function parseFeedIntake<Entry, Item>(
 	return entries;
 }
 
-export function buildYoutubeSeenIdSet(app: App, diffMode: boolean, seedIds?: Iterable<string>): Set<string> {
-	return buildFeedSeenIdSet(app, YOUTUBE_FEED_SOURCE, diffMode, seedIds);
+export function buildYoutubeSeenIdSet(
+	app: App,
+	diffMode: boolean,
+	seedIds?: Iterable<string>,
+	extraSkipPrefixes: string[] = [],
+): Set<string> {
+	return buildFeedSeenIdSet(app, YOUTUBE_FEED_SOURCE, diffMode, seedIds, undefined, extraSkipPrefixes);
 }
 
 export async function loadConfiguredChannels(

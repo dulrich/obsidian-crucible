@@ -19,6 +19,7 @@ import {
 import {
 	FeedOutcome,
 	buildFeedSeenIdSet,
+	feedSeenExtraSkipPrefixes,
 	loadConfiguredFeedEntries,
 	scanFeedTrackerRuns,
 } from '../utils/feedIntake';
@@ -64,7 +65,14 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 
 		const diffMode = this.diffMode(plugin);
 		const hostRules = this.source.buildHostRules?.(entries);
-		const seen = buildFeedSeenIdSet(plugin.app, this.source, diffMode, await this.loadIgnoredIds(plugin), hostRules);
+		const seen = buildFeedSeenIdSet(
+			plugin.app,
+			this.source,
+			diffMode,
+			await this.loadIgnoredIds(plugin),
+			hostRules,
+			feedSeenExtraSkipPrefixes(plugin, this.source),
+		);
 
 		const fetchSettled = await rateLimitedAllSettled(
 			entries,
