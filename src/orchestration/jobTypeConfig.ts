@@ -55,6 +55,18 @@ export function youtubeMetadataDedupeKey(p: Record<string, unknown>): string {
 	return videoId ? `video:${videoId}` : '';
 }
 
+// File-backed channel enrichment. Shares the YouTube metadata pacing settings
+// (parallelism + rate limit) so channel fetches respect the same Data API budget,
+// and collapses repeat enqueues for a channel onto one active job.
+export function youtubeChannelEnrichJobConfig(plugin: CruciblePlugin): JobTypeConfig {
+	return {
+		persistence: 'file',
+		get maxParallel() { return Math.max(1, plugin.settings.orchestrationYoutubeMetadataMaxParallel || 1); },
+		get minIntervalMs() { return Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000; },
+		dedupeKey: (p) => (typeof p.channelId === 'string' && p.channelId ? `channel:${p.channelId}` : ''),
+	};
+}
+
 // File-backed so triggered command runs survive restarts. Dedupes on
 // commandId+target so repeat trigger fires collapse onto one active job.
 export function commandRunJobConfig(): JobTypeConfig {

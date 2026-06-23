@@ -318,6 +318,191 @@ function stripMdExt(path: string): string {
 	return path.endsWith('.md') ? path.slice(0, -3) : path;
 }
 
+// --- Channel metadata (about.md) -------------------------------------------
+
+export interface YoutubeChannelMetadata {
+	channelId: string;
+	title: string;
+	description: string;
+	customUrl: string;
+	publishedAt: string;
+	country: string | null;
+	thumbnailUrl: string | null;
+	subscriberCount: number | null;
+	videoCount: number | null;
+	viewCount: number | null;
+	url: string;
+}
+
+export type ChannelIngestResult =
+	| { status: 'created';        aboutPath: string }
+	| { status: 'updated';        aboutPath: string }
+	| { status: 'skipped';        aboutPath: string }
+	| { status: 'no-channel-id';  aboutPath: null }
+	| { status: 'no-api-key';     aboutPath: null };
+
+interface YoutubeChannelApiItem {
+	id?: string;
+	snippet?: {
+		title?: string;
+		description?: string;
+		customUrl?: string;
+		publishedAt?: string;
+		country?: string;
+		thumbnails?: { high?: { url?: string }; medium?: { url?: string }; default?: { url?: string } };
+	};
+	statistics?: {
+		subscriberCount?: string;
+		videoCount?: string;
+		viewCount?: string;
+	};
+}
+
+export async function fetchYoutubeChannel(apiKey: string, channelId: string): Promise<YoutubeChannelMetadata> {
+	const params = new URLSearchParams({
+		part: 'snippet,statistics',
+		id: channelId,
+		key: apiKey,
+	});
+	const url = `https://www.googleapis.com/youtube/v3/channels?${params.toString()}`;
+	const res = await requestUrl({ url, method: 'GET', throw: false });
+
+	if (res.status === 403) {
+		const detail = extractApiErrorReason(res.text);
+		if (detail.includes('quota')) {
+			throw new Error(`YouTube Data API: quota exceeded`);
+		}
+		throw new Error(`YouTube Data API: forbidden (HTTP 403). Check the API key and Data API enablement.`);
+	}
+	if (res.status === 404) {
+		throw new Error(`YouTube Data API: channel ${channelId} not found`);
+	}
+	if (res.status !== 200) {
+		const snippet = (res.text || '').slice(0, 200).replace(/\s+/g, ' ');
+		throw new Error(`YouTube Data API: HTTP ${res.status} — ${snippet}`);
+	}
+
+	let payload: { items?: YoutubeChannelApiItem[] };
+	try {
+		payload = JSON.parse(res.text || '{}') as { items?: YoutubeChannelApiItem[] };
+	} catch {
+		throw new Error(`YouTube Data API: malformed JSON response`);
+	}
+
+	const item = payload.items?.[0];
+	if (!item) {
+		throw new Error(`YouTube Data API: channel ${channelId} not found`);
+	}
+
+	const id = item.id || channelId;
+	const thumbs = item.snippet?.thumbnails;
+	return {
+		channelId: id,
+		title: item.snippet?.title ?? '',
+		description: item.snippet?.description ?? '',
+		customUrl: item.snippet?.customUrl ?? '',
+		publishedAt: item.snippet?.publishedAt ?? '',
+		country: item.snippet?.country ?? null,
+		thumbnailUrl: thumbs?.high?.url ?? thumbs?.medium?.url ?? thumbs?.default?.url ?? null,
+		subscriberCount: toNumberOrNull(item.statistics?.subscriberCount),
+		videoCount: toNumberOrNull(item.statistics?.videoCount),
+		viewCount: toNumberOrNull(item.statistics?.viewCount),
+		url: `https://www.youtube.com/channel/${id}`,
+	};
+}
+
+export function youtubeChannelAboutNotePath(root: string, channelFolder: string): string {
+	return normalizePath(`${root}/${channelFolder}/about.md`);
+}
+
+// Scans each `<root>/<slug>/about.md` and returns the one whose frontmatter
+// `channelId` matches, so a channel's about note is found regardless of which
+// folder slug it landed under (parallels findExistingMetadataNote).
+export function findExistingChannelAboutNote(app: App, root: string, channelId: string): TFile | null {
+	const rootFolder = app.vault.getAbstractFileByPath(normalizePath(root));
+	if (!(rootFolder instanceof TFolder)) return null;
+	for (const child of rootFolder.children) {
+		if (!(child instanceof TFolder)) continue;
+		const candidate = app.vault.getAbstractFileByPath(`${child.path}/about.md`);
+		if (!(candidate instanceof TFile)) continue;
+		const fm = app.metadataCache.getFileCache(candidate)?.frontmatter;
+		if (fm && typeof fm['channelId'] === 'string' && fm['channelId'] === channelId) return candidate;
+	}
+	return null;
+}
+
+export function buildChannelAboutNoteBody(meta: YoutubeChannelMetadata): string {
+	const fm: string[] = ['---'];
+	fm.push(`channelId: ${meta.channelId}`);
+	fm.push(`title: ${yamlString(meta.title)}`);
+	fm.push(`url: ${meta.url}`);
+	if (meta.customUrl) fm.push(`customUrl: ${yamlString(meta.customUrl)}`);
+	fm.push(`publishedAt: ${meta.publishedAt}`);
+	fm.push(`country: ${meta.country === null ? 'null' : yamlString(meta.country)}`);
+	if (meta.thumbnailUrl) fm.push(`thumbnail: ${meta.thumbnailUrl}`);
+	fm.push(`subscriberCount: ${meta.subscriberCount ?? 'null'}`);
+	fm.push(`videoCount: ${meta.videoCount ?? 'null'}`);
+	fm.push(`viewCount: ${meta.viewCount ?? 'null'}`);
+	fm.push(`fetched_at: ${new Date().toISOString()}`);
+	fm.push(`source_command: youtube-fetch-channel-metadata`);
+	fm.push('---', '');
+
+	const title = meta.title || meta.channelId;
+	const description = meta.description ?? '';
+	return `${fm.join('\n')}# ${title}\n\n## Description\n\n${description}\n`;
+}
+
+// Reads the about note's fetched_at age in ms (Infinity when unknown).
+export function channelAboutAgeMs(app: App, file: TFile): number {
+	const fm: Record<string, unknown> = app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+	const raw = fm['fetched_at'];
+	const ts = typeof raw === 'string' ? Date.parse(raw) : NaN;
+	return Number.isFinite(ts) ? Date.now() - ts : Number.POSITIVE_INFINITY;
+}
+
+// Find-or-fetch-write the channel about.md, serialized under the
+// `yt-channel::<channelId>` resource lock. When an about note already exists and
+// is younger than maxAgeMs (and force is not set), it is left untouched and no
+// API call is made; otherwise the note is fetched and (over)written.
+export async function ensureChannelAboutNote(
+	plugin: CruciblePlugin,
+	channelId: string,
+	opts: { force?: boolean; maxAgeMs?: number } = {},
+): Promise<ChannelIngestResult> {
+	const app = plugin.app;
+	const trimmedId = channelId.trim();
+	if (!trimmedId) return { status: 'no-channel-id', aboutPath: null };
+
+	const root = normalizePath(plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata');
+	const maxAgeMs = opts.maxAgeMs ?? Number.POSITIVE_INFINITY;
+
+	return await plugin.noteLocks.withResourceLock('yt-channel', trimmedId, 'yt-channel-about-ensure', async (): Promise<ChannelIngestResult> => {
+		const existing = findExistingChannelAboutNote(app, root, trimmedId);
+		if (existing && !opts.force && channelAboutAgeMs(app, existing) < maxAgeMs) {
+			return { status: 'skipped', aboutPath: existing.path };
+		}
+
+		const apiKey = await loadYoutubeApiKey(app);
+		if (!apiKey) return { status: 'no-api-key', aboutPath: null };
+
+		const meta = await fetchYoutubeChannel(apiKey, trimmedId);
+		const channelFolder = await resolveChannelFolder(app, plugin, meta.channelId, meta.title);
+		const path = youtubeChannelAboutNotePath(root, channelFolder);
+		const body = buildChannelAboutNoteBody(meta);
+
+		const target = existing ?? app.vault.getAbstractFileByPath(path);
+		if (target instanceof TFile) {
+			await app.vault.modify(target, body);
+			return { status: 'updated', aboutPath: target.path };
+		}
+
+		const slashIdx = path.lastIndexOf('/');
+		if (slashIdx > 0) await ensureFolder(app, path.slice(0, slashIdx));
+		const created = await app.vault.create(path, body);
+		return { status: 'created', aboutPath: created.path };
+	});
+}
+
 export function parseIso8601Duration(value: string): number | null {
 	if (!value) return null;
 	const m = value.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
