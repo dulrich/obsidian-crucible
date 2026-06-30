@@ -22,13 +22,14 @@ import {
 } from './orchestration/utils/ignoredIds';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
-import { runBlogIngestCommand } from './orchestration/utils/blogsApi';
+import { blogMetadataRoot, runBlogIngestCommand } from './orchestration/utils/blogsApi';
 import { logWarn } from './log';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueAdapter';
 import type { JobType, OrchestrationJob } from './orchestration/types';
 import { renderSortableTable } from './ingestion/render/sortableTable';
 import { renderTableSection } from './ingestion/render/section';
 import type {
+	BlogControlRow,
 	ChannelControlRow,
 	ClippingRow,
 	OrphanRow,
@@ -39,6 +40,7 @@ import type {
 	UncapturedVideoRow,
 	YoutubeNoMetadataRow,
 } from './ingestion/render/types';
+import { computeBlogControlRows } from './ingestion/data/blogs';
 import { computeUnprocessedClippingRows } from './ingestion/data/clippings';
 import { computeUnrefinedTranscriptRows } from './ingestion/data/transcripts';
 import {
@@ -115,6 +117,8 @@ export class IngestionDashboardUI {
 	private uncapturedVideosCache: UncapturedVideoRow[] = [];
 	private orphanedAttachmentsCache: OrphanRow[] = [];
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
+	// Blog control center filter: which blogs to list.
+	private blogFilter: 'all' | 'tracked' | 'untracked' = 'all';
 	// Channel control center filter: which channels to list.
 	private channelFilter: 'all' | 'tracked' | 'untracked' = 'all';
 	// Last-seen signature of the frontmatter/links that actually drive the
@@ -144,6 +148,13 @@ export class IngestionDashboardUI {
 		this.buildQueueMonitorSection();
 		this.buildSection('uncapturedPosts', 'Uncaptured posts', 'Blog posts seen in tracker runs but not yet captured as a vault note.', undefined, true);
 		this.buildSection('ignoredPosts', 'Ignored blogs', 'Blog post IDs you chose to ignore. They are skipped by the tracker and the uncaptured list.', undefined, true);
+		this.buildSection(
+			'blogControl',
+			'Blog control center',
+			'Every blog known to the vault, with tracked / ingested / ignored post counts.',
+			undefined,
+			true,
+		);
 		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.', undefined, true);
 		this.buildSection('ignoredVideos', 'Ignored videos', 'YouTube video IDs you chose to ignore. They are skipped by the tracker, the uncaptured list, and auto-enrich.', undefined, true);
 		this.buildSection(
@@ -198,6 +209,7 @@ export class IngestionDashboardUI {
 		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), SCAN_DEBOUNCE_MS, true);
 		const debouncedIgnoredPosts = debounce(() => void this.refresh('ignoredPosts'), DEBOUNCE_MS, true);
 		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
+		const debouncedBlogControl = debounce(() => void this.refresh('blogControl'), SCAN_DEBOUNCE_MS, true);
 		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), SCAN_DEBOUNCE_MS, true);
 		const debouncedQueueMonitor = debounce(() => {
 			void this.refresh('queueMonitor');
@@ -214,6 +226,7 @@ export class IngestionDashboardUI {
 				debouncedIgnoredVideos();
 				debouncedUncapturedPosts();
 				debouncedUncapturedVideos();
+				debouncedBlogControl();
 			}
 			const clipperRoot = this.plugin.settings.ingestionClipperInboxFolder;
 			const dailyRoot = this.plugin.settings.dailyFolder;
@@ -222,6 +235,7 @@ export class IngestionDashboardUI {
 			if (path.startsWith(`${INTAKE_ROOT_BLOGS}/`)) {
 				debouncedBlogIntake();
 				debouncedUncapturedPosts();
+				debouncedBlogControl();
 			}
 			if (path.startsWith(`${INTAKE_ROOT_YOUTUBE}/`)) {
 				debouncedYoutubeIntake();
@@ -229,6 +243,8 @@ export class IngestionDashboardUI {
 			}
 			const ytRoot = this.plugin.settings.orchestrationYoutubeMetadataRoot;
 			if (ytRoot && path.startsWith(`${ytRoot}/`)) debouncedUncapturedVideos();
+			const blogRoot = blogMetadataRoot(this.plugin);
+			if (blogRoot && path.startsWith(`${blogRoot}/`)) debouncedBlogControl();
 
 			if (reason === 'structural') {
 				// A note/attachment appeared, vanished, or moved — recompute the
@@ -236,6 +252,7 @@ export class IngestionDashboardUI {
 				this.relevantSignatures.delete(path);
 				debouncedUncapturedPosts();
 				debouncedUncapturedVideos();
+				debouncedBlogControl();
 				debouncedYoutubeNoMetadata();
 				debouncedOrphans();
 				return;
@@ -251,6 +268,7 @@ export class IngestionDashboardUI {
 				// source/post-id/yt-video-id/yt-metadata drive the uncaptured + no-metadata lists.
 				debouncedUncapturedPosts();
 				debouncedUncapturedVideos();
+				debouncedBlogControl();
 				debouncedYoutubeNoMetadata();
 			}
 			if (!prev || prev.links !== next.links) {
@@ -267,7 +285,7 @@ export class IngestionDashboardUI {
 		const bus = this.plugin.ingestionEvents;
 		if (bus) {
 			this.disposers.push(bus.on('tracker-run', e => {
-				if (e.kind === 'blog') { debouncedBlogIntake(); debouncedUncapturedPosts(); }
+				if (e.kind === 'blog') { debouncedBlogIntake(); debouncedUncapturedPosts(); debouncedBlogControl(); }
 				else { debouncedYoutubeIntake(); debouncedUncapturedVideos(); }
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => debouncedUncapturedVideos()));
@@ -294,7 +312,7 @@ export class IngestionDashboardUI {
 		if (!(file instanceof TFile)) return { fm: '', links: '' };
 		const cache = this.app.metadataCache.getFileCache(file);
 		const fm = cache?.frontmatter ?? {};
-		const fmSig = JSON.stringify([fm.source, fm['post-id'], fm['yt-video-id'], fm['yt-metadata']]);
+		const fmSig = JSON.stringify([fm.source, fm.blog, fm['post-id'], fm['yt-video-id'], fm['yt-metadata']]);
 		const links = [
 			...(cache?.embeds ?? []).map(e => e.link),
 			...(cache?.links ?? []).map(l => l.link),
@@ -673,6 +691,7 @@ export class IngestionDashboardUI {
 			'queueMonitor',
 			'uncapturedPosts',
 			'ignoredPosts',
+			'blogControl',
 			'uncapturedVideos',
 			'ignoredVideos',
 			'youtubeWithoutMetadata',
@@ -697,6 +716,7 @@ export class IngestionDashboardUI {
 			case 'queueMonitor': return this.renderQueueMonitor(body, ctx);
 			case 'uncapturedPosts': return this.renderUncapturedPosts(body, ctx);
 			case 'ignoredPosts': return this.renderIgnoredPosts(body, ctx);
+			case 'blogControl': return this.renderBlogControl(body, ctx);
 			case 'uncapturedVideos': return this.renderUncapturedVideos(body, ctx);
 			case 'ignoredVideos': return this.renderIgnoredVideos(body, ctx);
 			case 'youtubeWithoutMetadata': return this.renderYoutubeNoMetadata(body, ctx);
@@ -977,6 +997,51 @@ export class IngestionDashboardUI {
 					void this.refresh('youtubeWithoutMetadata');
 				}
 			})();
+		});
+	}
+
+	// --- Section: Blog control center ---
+	private async renderBlogControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
+		body.empty();
+		body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
+		const all = await computeBlogControlRows(this.app, this.plugin);
+		body.empty();
+
+		const controls = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
+		const filters: Array<{ id: 'all' | 'tracked' | 'untracked'; label: string }> = [
+			{ id: 'all', label: 'All' },
+			{ id: 'tracked', label: 'Tracked' },
+			{ id: 'untracked', label: 'Untracked' },
+		];
+		for (const f of filters) {
+			const btn = controls.createEl('button', { text: f.label });
+			if (this.blogFilter === f.id) btn.addClass('mod-cta');
+			btn.addEventListener('click', () => {
+				if (this.blogFilter === f.id) return;
+				this.blogFilter = f.id;
+				void ctx.refresh();
+			});
+		}
+
+		const rows = all.filter(r =>
+			this.blogFilter === 'all'
+				? true
+				: this.blogFilter === 'tracked' ? r.tracked : !r.tracked);
+
+		const tableBody = body.createDiv();
+		renderTableSection<BlogControlRow>({
+			body: tableBody, ctx, rows,
+			emptyText: 'No blogs match this filter.',
+			defaultSort: { column: 'name', direction: 'asc' },
+			setCount: n => this.setSectionCount('blogControl', n),
+			columns: [
+				{ key: 'name', label: 'Blog', sortable: true, sortKey: r => r.name.toLowerCase(), render: (r, td) => r.link ? renderExternalLink(td, r.link, r.name) : td.setText(r.name) },
+				{ key: 'tracked', label: 'Posts', sortable: true, sortKey: r => r.trackedPosts, render: (r, td) => td.setText(String(r.trackedPosts)) },
+				{ key: 'ingested', label: 'Ingested', sortable: true, sortKey: r => ratio(r.ingestedPosts, r.trackedPosts), render: (r, td) => td.setText(countWithPct(r.ingestedPosts, r.trackedPosts)) },
+				{ key: 'ignored', label: 'Ignored', sortable: true, sortKey: r => ratio(r.ignoredPosts, r.trackedPosts), render: (r, td) => td.setText(countWithPct(r.ignoredPosts, r.trackedPosts)) },
+				{ key: 'uncaptured', label: 'Uncaptured', sortable: true, sortKey: r => ratio(r.uncapturedPosts, r.trackedPosts), render: (r, td) => td.setText(countWithPct(r.uncapturedPosts, r.trackedPosts)) },
+				{ key: 'isTracked', label: 'Tracked?', sortable: true, sortKey: r => r.tracked ? 1 : 0, render: (r, td) => td.setText(r.tracked ? 'yes' : 'no') },
+			],
 		});
 	}
 

@@ -9,6 +9,7 @@ export type SectionId =
 	| 'queueMonitor'
 	| 'uncapturedPosts'
 	| 'ignoredPosts'
+	| 'blogControl'
 	| 'uncapturedVideos'
 	| 'ignoredVideos'
 	| 'youtubeWithoutMetadata'
@@ -85,6 +86,17 @@ export interface ChannelControlRow {
 	ingestedVideos: number;
 	ignoredVideos: number;
 	uncapturedVideos: number;
+	tracked: boolean;
+}
+
+export interface BlogControlRow {
+	blogKey: string;
+	name: string;
+	link: string | null;
+	trackedPosts: number;
+	ingestedPosts: number;
+	ignoredPosts: number;
+	uncapturedPosts: number;
 	tracked: boolean;
 }
 
