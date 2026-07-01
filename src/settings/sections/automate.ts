@@ -1,7 +1,7 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting, Command } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain, GuardCondition, GuardConditionType, SYNC_GUARD_CONDITION_TYPES, TriggerDef, TriggerEvent } from "../../types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain, CommandArgSchema, GuardCondition, GuardConditionType, SYNC_GUARD_CONDITION_TYPES, TriggerAction, TriggerDef, TriggerEvent } from "../../types";
 import type { JobType } from "../../orchestration/types";
 import { agentCommandId } from "../../agents";
 import { getPeriodConfigByTarget } from "../../periods";
@@ -622,9 +622,7 @@ function describeTrigger(trigger: TriggerDef): string {
 	const when = 'everyMinutes' in trigger.on ? `every ${trigger.on.everyMinutes} min` : `on ${trigger.on.event}`;
 	const scope = !('everyMinutes' in trigger.on) && trigger.scope?.folder ? ` in ${trigger.scope.folder}` : '';
 	const conds = trigger.conditions.length ? `, ${trigger.conditions.length} condition${trigger.conditions.length > 1 ? 's' : ''}` : '';
-	const action = trigger.action.kind === 'chain'
-		? `chain "${trigger.action.chainName || '(none)'}"`
-		: `workflow ${TRIGGER_WORKFLOW_LABELS[trigger.action.jobType] ?? trigger.action.jobType}`;
+	const action = describeTriggerAction(trigger.action);
 	return `${when}${scope}${conds} → ${action}`;
 }
 
@@ -636,15 +634,38 @@ function getTriggerWarning(tab: CrucibleSettingTab, trigger: TriggerDef): string
 			return `Chain "${chainName}" does not exist.`;
 		}
 	}
+	if (trigger.action.kind === 'command') {
+		const commandId = trigger.action.commandId;
+		if (!commandId) return 'No command selected; this trigger will not run.';
+		if (!tab.plugin.chainManager.hasInternalCommand(commandId)) {
+			return `Command "${commandId}" is not queueable.`;
+		}
+	}
 	if ('everyMinutes' in trigger.on && (trigger.scope?.folder || trigger.conditions.length)) {
 		return 'Schedule triggers have no note context; scope and conditions are ignored.';
 	}
 	return null;
 }
 
+function describeTriggerAction(action: TriggerAction): string {
+	if (action.kind === 'chain') return `chain "${action.chainName || '(none)'}"`;
+	if (action.kind === 'command') return `command "${action.commandId || '(none)'}"`;
+	return `workflow ${TRIGGER_WORKFLOW_LABELS[action.jobType] ?? action.jobType}`;
+}
+
+function queueableTriggerCommands(tab: CrucibleSettingTab): Command[] {
+	return tab.plugin.commandRegistry
+		.filter(entry => entry.queueable)
+		.map(entry => ({
+			id: `${tab.plugin.manifest.id}:${entry.id}`,
+			name: entry.name,
+		}))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function renderTriggerListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	new Setting(containerEl).setName('Triggers').setHeading();
-	containerEl.createEl('p', { text: 'Run a chain or enqueue a workflow automatically when a note event or schedule fires. Triggered work runs through the queue (dedupe, pacing, timeouts, note locks).' });
+	containerEl.createEl('p', { text: 'Run a chain, queueable command, or workflow automatically when an event or schedule fires. Triggered work runs through the queue (dedupe, pacing, timeouts, note locks).' });
 
 	const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
 	if (tab.plugin.settings.triggers.length === 0) {
@@ -751,6 +772,75 @@ function renderTriggerConditions(tab: CrucibleSettingTab, containerEl: HTMLEleme
 	}));
 }
 
+function renderTriggerCommandArgs(
+	tab: CrucibleSettingTab,
+	containerEl: HTMLElement,
+	action: Extract<TriggerAction, { kind: 'command' }>,
+	save: () => void | Promise<void>,
+) {
+	const schema = tab.plugin.chainManager.getCommandSchema(action.commandId);
+	if (!schema || schema.length === 0) return;
+	const args = action.args ?? (action.args = {});
+	for (const arg of schema) {
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		renderCommandArgSetting(tab, containerEl, arg, args, save);
+	}
+}
+
+function renderCommandArgSetting(
+	tab: CrucibleSettingTab,
+	containerEl: HTMLElement,
+	arg: CommandArgSchema,
+	args: Record<string, string>,
+	save: () => void | Promise<void>,
+) {
+	const setting = new Setting(containerEl)
+		.setName(arg.name)
+		.setDesc(arg.description || '');
+	switch (arg.type) {
+		case 'text':
+			setting.addText(t => t
+				.setValue(args[arg.id] || '')
+				.onChange(async (v) => { args[arg.id] = v; await save(); })
+				.inputEl.addClass('pi-width-normal'));
+			break;
+		case 'textarea':
+			setting.addTextArea(t => t
+				.setValue(args[arg.id] || '')
+				.onChange(async (v) => { args[arg.id] = v; await save(); })
+				.inputEl.addClass('crucible-setting-textarea', 'pi-width-normal'));
+			break;
+		case 'dropdown':
+			setting.addDropdown(d => {
+				if (arg.options) d.addOptions(arg.options);
+				d.setValue(args[arg.id] || '')
+					.onChange(async (v) => { args[arg.id] = v; await save(); });
+				d.selectEl.addClass('pi-width-normal');
+			});
+			break;
+		case 'file':
+			setting.addSearch(cb => {
+				cb.setPlaceholder('Select file...')
+					.setValue(args[arg.id] || '')
+					.onChange(async (v) => { args[arg.id] = v; await save(); });
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FileSuggest(tab.app, cb.inputEl);
+			});
+			break;
+		case 'folder':
+			setting.addSearch(cb => {
+				cb.setPlaceholder('Select folder...')
+					.setValue(args[arg.id] || '')
+					.onChange(async (v) => { args[arg.id] = v; await save(); });
+				const el = (cb as unknown as SearchWithContainer).containerEl;
+				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+				new FolderSuggest(tab.app, cb.inputEl);
+			});
+			break;
+	}
+}
+
 function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	const save = () => tab.plugin.saveSettings();
 	const reregister = () => tab.plugin.registerTriggers();
@@ -814,6 +904,7 @@ function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 				.addOption('create', 'Note created')
 				.addOption('modify', 'Note modified')
 				.addOption('metadata-changed', 'Frontmatter/metadata changed')
+				.addOption('youtube-metadata-enriched', 'YouTube metadata enriched')
 				.addOption('rename', 'Note renamed')
 				.setValue('event' in trigger.on ? trigger.on.event : 'create')
 				.onChange(async (v) => { trigger.on = { event: v as TriggerEvent }; await save(); reregister(); }));
@@ -851,12 +942,15 @@ function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 		.setName('Action')
 		.addDropdown(d => d
 			.addOption('chain', 'Run a chain')
+			.addOption('command', 'Run a command')
 			.addOption('workflow', 'Enqueue a workflow')
 			.setValue(trigger.action.kind)
 			.onChange(async (v) => {
 				trigger.action = v === 'workflow'
 					? { kind: 'workflow', jobType: 'daily_brief_lite' }
-					: { kind: 'chain', chainName: '' };
+					: v === 'command'
+						? { kind: 'command', commandId: '', args: {} }
+						: { kind: 'chain', chainName: '' };
 				await save();
 				reregister();
 				tab.display();
@@ -873,6 +967,23 @@ function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 				d.setValue(action.chainName);
 				d.onChange(async (v) => { action.chainName = v; await save(); reregister(); tab.refreshDisplay(); });
 			});
+	} else if (action.kind === 'command') {
+		new Setting(actionGroup)
+			.setName('Command')
+			.setDesc('The queueable Crucible command to run on the triggering note.')
+			.addDropdown(d => {
+				d.addOption('', '(select command)');
+				queueableTriggerCommands(tab).forEach(command => { d.addOption(command.id, command.name); });
+				d.setValue(action.commandId);
+				d.onChange(async (v) => {
+					action.commandId = v;
+					action.args = {};
+					await save();
+					reregister();
+					tab.refreshDisplay();
+				});
+			});
+		renderTriggerCommandArgs(tab, actionGroup, action, save);
 	} else {
 		new Setting(actionGroup)
 			.setName('Workflow')

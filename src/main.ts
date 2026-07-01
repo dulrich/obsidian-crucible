@@ -24,6 +24,8 @@ import {
 	YoutubeTrackerWorkflow,
 } from './orchestration/workflows/FeedTrackerWorkflow';
 import { ingestYoutubeVideoMetadata, isYtMetadataLinked } from './orchestration/utils/youtubeApi';
+import { addIgnoredVideoId } from './orchestration/utils/ignoredIds';
+import { youtubeVideoIdFromArgsOrFrontmatter, youtubeWatchUrlFromArgsOrFrontmatter } from './orchestration/utils/youtubeActions';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { YoutubeChannelEnrichWorkflow } from './orchestration/workflows/YoutubeChannelEnrichWorkflow';
@@ -880,6 +882,19 @@ export default class CruciblePlugin extends Plugin {
 			typeof args['key'] === 'string' ? args['key'] : '',
 		), { lockTarget: 'none' });
 		register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await this.fetchYoutubeMetadataForActiveNote(tf));
+		register('youtube-ignore-video', async (args, _p, _e, tf) => await this.ignoreYoutubeVideoCommand(args, tf), {
+			lockTarget: 'none',
+			schema: [
+				{ id: 'videoId', name: 'Video ID', type: 'text', description: 'Optional override. Leave blank to use videoId from the target metadata note.' },
+			],
+		});
+		register('youtube-watch-video', async (args, _p, _e, tf) => await this.watchYoutubeVideoCommand(args, tf), {
+			mutating: false,
+			lockTarget: 'none',
+			schema: [
+				{ id: 'url', name: 'URL', type: 'text', description: 'Optional override. Leave blank to use url from the target metadata note.' },
+			],
+		});
 
 		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()), { lockTarget: 'none' });
 		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()), { lockTarget: 'none' });
@@ -1039,6 +1054,27 @@ export default class CruciblePlugin extends Plugin {
 			});
 		});
 
+		return true;
+	}
+
+	private targetFrontmatter(targetFile?: TFile): Record<string, unknown> | undefined {
+		const file = targetFile ?? this.app.workspace.getActiveFile() ?? undefined;
+		return file ? this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined : undefined;
+	}
+
+	private async ignoreYoutubeVideoCommand(args: Record<string, string>, targetFile?: TFile): Promise<boolean> {
+		const videoId = youtubeVideoIdFromArgsOrFrontmatter(args, this.targetFrontmatter(targetFile));
+		if (!videoId) throw new Error('No YouTube video id found on the target metadata note.');
+		await this.noteLocks.withResourceLock('ignored-ids', 'videos', 'ignore-video', () =>
+			addIgnoredVideoId(this.app, videoId),
+		);
+		return true;
+	}
+
+	private async watchYoutubeVideoCommand(args: Record<string, string>, targetFile?: TFile): Promise<boolean> {
+		const url = youtubeWatchUrlFromArgsOrFrontmatter(args, this.targetFrontmatter(targetFile));
+		if (!url) throw new Error('No YouTube URL found on the target metadata note.');
+		window.open(url, '_blank', 'noopener');
 		return true;
 	}
 
