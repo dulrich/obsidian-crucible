@@ -176,6 +176,31 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: () => plugin.activateIngestionDashboardView(),
 	});
+	plugin.registerCrucibleCommand({
+		id: 'youtube-ignore-video',
+		name: 'YouTube: ignore video',
+		group: 'Ingestion',
+		run: () => plugin.chainManager.executeInternalCommand(
+			`${prefix}:youtube-ignore-video`,
+			{},
+			null,
+			undefined,
+			plugin.app.workspace.getActiveFile() ?? undefined,
+		),
+	});
+	plugin.registerCrucibleCommand({
+		id: 'youtube-watch-video',
+		name: 'YouTube: watch video',
+		group: 'Ingestion',
+		mutating: false,
+		run: () => plugin.chainManager.executeInternalCommand(
+			`${prefix}:youtube-watch-video`,
+			{},
+			null,
+			undefined,
+			plugin.app.workspace.getActiveFile() ?? undefined,
+		),
+	});
 
 	plugin.registerCrucibleCommand({
 		id: 'open-crucible-command-palette',
