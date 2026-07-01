@@ -142,7 +142,7 @@ export interface Chain {
 // A user-configurable if-this-then-that rule. Adapted into an OrchestrationTrigger at
 // registration time (see TriggerRegistry.setUserTriggers); like all triggers it only
 // enqueues jobs, inheriting queue dedupe / pacing / timeout / note-lock semantics.
-export type TriggerEvent = 'create' | 'modify' | 'rename' | 'metadata-changed';
+export type TriggerEvent = 'create' | 'modify' | 'rename' | 'metadata-changed' | 'youtube-metadata-enriched';
 
 export interface TriggerScope {
 	// Path prefix the file must sit under to qualify, e.g. "Clippings". Empty = whole vault.
@@ -153,7 +153,8 @@ export interface TriggerScope {
 
 export type TriggerAction =
 	| { kind: 'chain'; chainName: string }
-	| { kind: 'workflow'; jobType: JobType; params?: Record<string, string> };
+	| { kind: 'workflow'; jobType: JobType; params?: Record<string, string> }
+	| { kind: 'command'; commandId: string; args?: Record<string, string> };
 
 export interface TriggerDef {
 	id: string;

@@ -11,7 +11,7 @@ export interface TriggerJobSeed {
 	options?: OrchestrationEnqueueOptions;
 }
 
-export type TriggerEventName = 'create' | 'modify' | 'metadata-changed' | 'rename';
+export type TriggerEventName = 'create' | 'modify' | 'metadata-changed' | 'rename' | 'youtube-metadata-enriched';
 
 /**
  * A declarative auto-enqueue rule: a note lifecycle event or a schedule, an
@@ -113,6 +113,9 @@ export class TriggerRegistry {
 		}));
 		plugin.registerEvent(plugin.app.metadataCache.on('changed', file => {
 			this.scheduleDebouncedEvaluation('metadata-changed', file);
+		}));
+		plugin.register(plugin.ingestionEvents.on('metadata-enriched', ({ metadataFile }) => {
+			this.fireEvent('youtube-metadata-enriched', metadataFile);
 		}));
 		// Anchor schedules at startup so a plugin reload doesn't immediately re-fire
 		// every interval trigger; the first run lands one interval after load.

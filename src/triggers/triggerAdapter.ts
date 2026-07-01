@@ -26,6 +26,16 @@ function seedsFor(def: TriggerDef, file?: TFile): TriggerJobSeed[] {
 	if (action.kind === 'chain') {
 		return [{ type: 'chain_run', params: { chainName: action.chainName, targetPath: file?.path ?? '' } }];
 	}
+	if (action.kind === 'command') {
+		return [{
+			type: 'command_run',
+			params: {
+				commandId: action.commandId,
+				args: action.args ?? {},
+				...(file ? { targetPath: file.path } : {}),
+			},
+		}];
+	}
 	return [{
 		type: action.jobType,
 		params: { ...(action.params ?? {}), ...(file ? { targetPath: file.path } : {}) },
