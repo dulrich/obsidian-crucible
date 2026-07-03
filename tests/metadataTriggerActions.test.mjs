@@ -88,6 +88,81 @@ test('metadata-enriched command trigger enqueues command_run for the metadata no
 	}]);
 });
 
+test('multi-event command trigger adapts to an event list and preserves jobs', () => {
+	const def = {
+		id: 't-multi',
+		name: 'Run on create or modify',
+		enabled: true,
+		on: { events: ['create', 'modify'] },
+		scope: { folder: 'Clippings', includeSubfolders: true },
+		conditions: [],
+		action: {
+			kind: 'command',
+			commandId: 'obsidian-crucible:lint-note',
+			args: { mode: 'all' },
+		},
+	};
+	const file = { path: 'Clippings/video.md', parent: { path: 'Clippings' } };
+	const trigger = triggerDefToOrchestrationTrigger(def, pluginWithFrontmatter({}));
+
+	assert.deepEqual(trigger.on, { events: ['create', 'modify'] });
+	assert.equal(trigger.guard(file), true);
+	assert.deepEqual(trigger.jobs(file), [{
+		type: 'command_run',
+		params: {
+			commandId: 'obsidian-crucible:lint-note',
+			args: { mode: 'all' },
+			targetPath: 'Clippings/video.md',
+		},
+	}]);
+});
+
+test('multi-event trigger with an empty event list defaults to create', () => {
+	const def = {
+		id: 't-empty-events',
+		name: 'Empty events',
+		enabled: true,
+		on: { events: [] },
+		conditions: [],
+		action: { kind: 'chain', chainName: 'Capture' },
+	};
+	const trigger = triggerDefToOrchestrationTrigger(def, pluginWithFrontmatter({}));
+
+	assert.deepEqual(trigger.on, { events: ['create'] });
+});
+
+test('trigger guard accepts channelId in a configured property set', () => {
+	const def = {
+		id: 't-channel-set',
+		name: 'Ignore selected channel shorts',
+		enabled: true,
+		on: { events: ['youtube-metadata-enriched'] },
+		conditions: [
+			{
+				type: 'property-in-set',
+				property: 'channelId',
+				values: ['CHANNEL_A', 'CHANNEL_B'],
+				valueKind: 'youtube-channel',
+			},
+			{ type: 'property-lt', property: 'duration_seconds', value: '120' },
+		],
+		conditionMode: 'all',
+		action: {
+			kind: 'command',
+			commandId: 'obsidian-crucible:youtube-ignore-video',
+			args: {},
+		},
+	};
+	const file = { path: '_yt_metadata/channel/video.md', parent: { path: '_yt_metadata/channel' } };
+	const trigger = triggerDefToOrchestrationTrigger(def, pluginWithFrontmatter({
+		channelId: 'CHANNEL_B',
+		duration_seconds: 119,
+		videoId: 'VIDEO123',
+	}));
+
+	assert.equal(trigger.guard(file), true);
+});
+
 test('metadata-enriched trigger guard rejects nonmatching metadata frontmatter', () => {
 	const def = {
 		id: 't2',

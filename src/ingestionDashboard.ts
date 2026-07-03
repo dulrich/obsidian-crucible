@@ -896,7 +896,7 @@ export class IngestionDashboardUI {
 			defaultSort: { column: 'publishedAt', direction: 'desc' },
 			setCount: n => this.setSectionCount('uncapturedVideos', n),
 			columns: [
-				{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => renderChannelLink(td, r.channelId, r.channelName) },
+				{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => r.channelAboutFile ? this.renderFileLink(td, r.channelAboutFile, displayLabel(r.channelName)) : renderChannelLink(td, r.channelId, r.channelName) },
 				{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
 				{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
 				{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },

@@ -99,6 +99,7 @@ export type GuardConditionType =
 	| 'has-property'
 	| 'not-has-property'
 	| 'property-equals'
+	| 'property-in-set'
 	| 'property-lt'      // numeric: Number(frontmatter[property]) < Number(value)
 	| 'property-gt'      // numeric: Number(frontmatter[property]) > Number(value)
 	| 'word-count-lt'    // numeric: note body word count < Number(value) (async, content-sourced)
@@ -108,14 +109,18 @@ export type GuardConditionType =
 // cache. Used by the trigger engine (whose guard is sync); `word-count-*` is only
 // valid as a chain guard step, where evaluation is async and can read content.
 export const SYNC_GUARD_CONDITION_TYPES: GuardConditionType[] = [
-	'has-tag', 'not-has-tag', 'has-property', 'not-has-property', 'property-equals', 'property-lt', 'property-gt',
+	'has-tag', 'not-has-tag', 'has-property', 'not-has-property', 'property-equals', 'property-in-set', 'property-lt', 'property-gt',
 ];
+
+export type GuardConditionValueKind = 'text' | 'tag' | 'file' | 'folder' | 'youtube-channel';
 
 export interface GuardCondition {
 	type: GuardConditionType;
 	tag?: string;
 	property?: string;
 	value?: string;
+	values?: string[];
+	valueKind?: GuardConditionValueKind;
 }
 
 export interface ChainStep {
@@ -160,7 +165,7 @@ export interface TriggerDef {
 	id: string;
 	name: string;
 	enabled: boolean;
-	on: { event: TriggerEvent } | { everyMinutes: number };
+	on: { event: TriggerEvent } | { events: TriggerEvent[] } | { everyMinutes: number };
 	scope?: TriggerScope;
 	// Evaluated against the file's frontmatter/tags. word-count-* types are not allowed
 	// here (the trigger guard is sync); use a chain guard step for those.

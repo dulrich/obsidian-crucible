@@ -12,7 +12,7 @@ import {
 import { BLOGS_FEED_SOURCE, YOUTUBE_FEED_SOURCE } from '../../orchestration/utils/feedSources';
 import { buildBlogCanonHostMap } from '../../orchestration/utils/blogs';
 import { blogMetadataRoot, findExistingBlogMetadataNote } from '../../orchestration/utils/blogsApi';
-import { coerceVideoId, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
+import { coerceVideoId, findExistingChannelAboutNote, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from '../render/types';
 
@@ -99,12 +99,14 @@ export async function computeUncapturedVideoRows(app: App, plugin: CruciblePlugi
 
 	const out: UncapturedVideoRow[] = [];
 	for (const outcome of scan.outcomes) {
+		const channelAboutFile = findExistingChannelAboutNote(app, root, outcome.channel.channelId);
 		for (const video of outcome.newVideos) {
 			const enrichmentFile = await findExistingMetadataNote(app, root, video.videoId);
 			out.push({
 				videoId: video.videoId,
 				channelName: outcome.channel.name,
 				channelId: outcome.channel.channelId,
+				channelAboutFile,
 				title: video.title,
 				publishedAt: video.publishedAt,
 				url: video.url,
