@@ -64,6 +64,7 @@ export interface UncapturedVideoRow {
 	videoId: string;
 	channelName: string;
 	channelId: string;
+	channelAboutFile: TFile | null;
 	title: string;
 	publishedAt: string;
 	url: string;

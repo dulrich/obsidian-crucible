@@ -42,6 +42,13 @@ function seedsFor(def: TriggerDef, file?: TFile): TriggerJobSeed[] {
 	}];
 }
 
+function triggerEvents(onDef: Exclude<TriggerDef['on'], { everyMinutes: number }>): OrchestrationTrigger['on'] {
+	if ('events' in onDef) {
+		return { events: onDef.events.length > 0 ? onDef.events : ['create'] };
+	}
+	return { event: onDef.event };
+}
+
 // Convert a user-configured TriggerDef into the OrchestrationTrigger the engine runs.
 // Like every trigger it only enqueues jobs; the chain/workflow does the real work.
 export function triggerDefToOrchestrationTrigger(def: TriggerDef, plugin: CruciblePlugin): OrchestrationTrigger {
@@ -50,7 +57,7 @@ export function triggerDefToOrchestrationTrigger(def: TriggerDef, plugin: Crucib
 		const minutes = def.on.everyMinutes;
 		on = { everyMs: () => Math.max(0, minutes) * 60_000 };
 	} else {
-		on = { event: def.on.event };
+		on = triggerEvents(def.on);
 	}
 	return {
 		id: userTriggerId(def.id),
