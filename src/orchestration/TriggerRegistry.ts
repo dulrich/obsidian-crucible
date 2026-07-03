@@ -26,6 +26,7 @@ export interface OrchestrationTrigger {
 	description: string;
 	on:
 		| { event: TriggerEventName }
+		| { events: TriggerEventName[] }
 		| { everyMs: () => number }; // schedule; <= 0 disables
 	/** Hard gate (feature flags etc.). Combined with the per-trigger settings override. */
 	enabled: () => boolean;
@@ -157,7 +158,7 @@ export class TriggerRegistry {
 		if (this.isMaterializing() || this.plugin.noteLocks.isLocked(file.path)) return;
 		const fm = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
 		for (const trigger of this.allTriggers()) {
-			if (!('event' in trigger.on) || trigger.on.event !== event) continue;
+			if (!triggerMatchesEvent(trigger, event)) continue;
 			if (!this.isEnabled(trigger)) continue;
 			try {
 				if (trigger.guard && !trigger.guard(file, fm)) continue;
@@ -191,4 +192,10 @@ export class TriggerRegistry {
 			void this.plugin.orchestrator.enqueue(seed.type, seed.params, { lane: 'background', ...seed.options });
 		}
 	}
+}
+
+function triggerMatchesEvent(trigger: OrchestrationTrigger, event: TriggerEventName): boolean {
+	if ('event' in trigger.on) return trigger.on.event === event;
+	if ('events' in trigger.on) return trigger.on.events.includes(event);
+	return false;
 }

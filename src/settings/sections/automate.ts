@@ -1,11 +1,11 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting, Command } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain, CommandArgSchema, GuardCondition, GuardConditionType, SYNC_GUARD_CONDITION_TYPES, TriggerAction, TriggerDef, TriggerEvent } from "../../types";
+import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain, CommandArgSchema, GuardCondition, GuardConditionType, GuardConditionValueKind, SYNC_GUARD_CONDITION_TYPES, TriggerAction, TriggerDef, TriggerEvent } from "../../types";
 import type { JobType } from "../../orchestration/types";
 import { agentCommandId } from "../../agents";
 import { getPeriodConfigByTarget } from "../../periods";
-import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "../../suggesters";
+import { FileSuggest, FolderSuggest, CommandSuggest, TagSuggest, YoutubeChannelSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "../../suggesters";
 import { SearchWithContainer, sortByNameWithEmptyLast, addWarningIcon } from "../shared";
 import { bindText, bindToggle, bindDropdown, bindSearch, bindTextArea, bindNumber } from "../bind";
 
@@ -320,6 +320,7 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 					.addOption('has-property', 'Note has property')
 					.addOption('not-has-property', 'Note does not have property')
 					.addOption('property-equals', 'Property equals value')
+					.addOption('property-in-set', 'Property value in set')
 					.addOption('property-lt', 'Property < number')
 					.addOption('property-gt', 'Property > number')
 					.addOption('word-count-lt', 'Word count < number')
@@ -327,6 +328,7 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 					.setValue(gc.type)
 					.onChange(async (v) => {
 						gc.type = v as typeof gc.type;
+						normalizeGuardConditionForType(gc);
 						step.guardCondition = gc;
 						await save();
 						tab.refreshDisplay();
@@ -334,76 +336,10 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 
 			stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
 
-			if (gc.type === 'has-tag' || gc.type === 'not-has-tag') {
-				const positive = gc.type === 'has-tag';
-				new Setting(stepGroup)
-					.setName('Tag')
-					.setDesc(positive ? 'Guard passes if the active note has this tag.' : 'Guard passes if the active note does not have this tag.')
-					.addText(t => t
-						.setPlaceholder('#refined')
-						.setValue(gc.tag ?? '')
-						.onChange(async (v) => { gc.tag = v; step.guardCondition = gc; await save(); })
-						.inputEl.addClass('pi-width-normal'));
-			} else if (gc.type === 'has-property' || gc.type === 'not-has-property') {
-				const positive = gc.type === 'has-property';
-				new Setting(stepGroup)
-					.setName('Property')
-					.setDesc(positive ? 'Guard passes if the active note has this frontmatter property.' : 'Guard passes if the active note does not have this frontmatter property.')
-					.addText(t => t
-						.setPlaceholder('model')
-						.setValue(gc.property ?? '')
-						.onChange(async (v) => { gc.property = v; step.guardCondition = gc; await save(); })
-						.inputEl.addClass('pi-width-normal'));
-			} else if (gc.type === 'property-equals') {
-				new Setting(stepGroup)
-					.setName('Property')
-					.addText(t => t
-						.setPlaceholder('status')
-						.setValue(gc.property ?? '')
-						.onChange(async (v) => { gc.property = v; step.guardCondition = gc; await save(); })
-						.inputEl.addClass('pi-width-normal'));
-				stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
-				new Setting(stepGroup)
-					.setName('Value')
-					.setDesc('Guard passes if the property equals this value.')
-					.addText(t => t
-						.setPlaceholder('done')
-						.setValue(gc.value ?? '')
-						.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await save(); })
-						.inputEl.addClass('pi-width-normal'));
-			} else if (gc.type === 'property-lt' || gc.type === 'property-gt') {
-				const op = gc.type === 'property-lt' ? '<' : '>';
-				new Setting(stepGroup)
-					.setName('Property')
-					.addText(t => t
-						.setPlaceholder('word-count')
-						.setValue(gc.property ?? '')
-						.onChange(async (v) => { gc.property = v; step.guardCondition = gc; await save(); })
-						.inputEl.addClass('pi-width-normal'));
-				stepGroup.createEl('hr', { cls: 'crucible-row-divider' });
-				new Setting(stepGroup)
-					.setName('Number')
-					.setDesc(`Guard passes if the property value is ${op} this number.`)
-					.addText(t => {
-						t.setPlaceholder('6000')
-							.setValue(gc.value ?? '')
-							.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await save(); });
-						t.inputEl.type = 'number';
-						t.inputEl.addClass('pi-width-small');
-					});
-			} else if (gc.type === 'word-count-lt' || gc.type === 'word-count-gt') {
-				const op = gc.type === 'word-count-lt' ? '<' : '>';
-				new Setting(stepGroup)
-					.setName('Word count')
-					.setDesc(`Guard passes if the note body word count is ${op} this number.`)
-					.addText(t => {
-						t.setPlaceholder('6000')
-							.setValue(gc.value ?? '')
-							.onChange(async (v) => { gc.value = v; step.guardCondition = gc; await save(); });
-						t.inputEl.type = 'number';
-						t.inputEl.addClass('pi-width-small');
-					});
-			}
+			renderGuardConditionFields(tab, stepGroup, gc, async () => {
+				step.guardCondition = gc;
+				await save();
+			}, { refresh: () => tab.refreshDisplay(), targetLabel: 'active note' });
 		} else {
 			new Setting(stepGroup)
 				.setName('Command')
@@ -587,17 +523,289 @@ const TRIGGER_WORKFLOW_LABELS: Partial<Record<JobType, string>> = {
 	youtube_metadata_fetch: 'Fetch YouTube metadata',
 };
 
+const TRIGGER_EVENT_LABELS: Record<TriggerEvent, string> = {
+	create: 'Note created',
+	modify: 'Note modified',
+	'metadata-changed': 'Frontmatter/metadata changed',
+	'youtube-metadata-enriched': 'YouTube metadata enriched',
+	rename: 'Note renamed',
+};
+
+const TRIGGER_EVENT_ORDER: TriggerEvent[] = [
+	'create',
+	'modify',
+	'metadata-changed',
+	'youtube-metadata-enriched',
+	'rename',
+];
+
 const GUARD_TYPE_LABELS: Record<GuardConditionType, string> = {
 	'has-tag': 'Note has tag',
 	'not-has-tag': 'Note does not have tag',
 	'has-property': 'Note has property',
 	'not-has-property': 'Note does not have property',
 	'property-equals': 'Property equals value',
+	'property-in-set': 'Property value in set',
 	'property-lt': 'Property < number',
 	'property-gt': 'Property > number',
 	'word-count-lt': 'Word count < number',
 	'word-count-gt': 'Word count > number',
 };
+
+const GUARD_VALUE_KIND_LABELS: Record<GuardConditionValueKind, string> = {
+	text: 'Text',
+	tag: 'Tag',
+	file: 'File',
+	folder: 'Folder',
+	'youtube-channel': 'YouTube channel',
+};
+
+function isPropertyValueCondition(type: GuardConditionType): boolean {
+	return type === 'property-equals' || type === 'property-in-set';
+}
+
+function guardValueKind(condition: GuardCondition): GuardConditionValueKind {
+	return condition.valueKind ?? (condition.property?.trim() === 'channelId' ? 'youtube-channel' : 'text');
+}
+
+function defaultGuardValueKind(condition: GuardCondition): void {
+	if (!condition.valueKind && condition.property?.trim() === 'channelId') {
+		condition.valueKind = 'youtube-channel';
+	}
+}
+
+function normalizeGuardConditionForType(condition: GuardCondition): void {
+	if (isPropertyValueCondition(condition.type)) defaultGuardValueKind(condition);
+	if (condition.type === 'property-in-set' && condition.values === undefined) {
+		condition.values = condition.value ? [condition.value] : [''];
+	}
+}
+
+function renderGuardConditionFields(
+	tab: CrucibleSettingTab,
+	containerEl: HTMLElement,
+	condition: GuardCondition,
+	save: () => void | Promise<void>,
+	opts: { after?: () => void | Promise<void>; refresh?: () => void; targetLabel?: string } = {},
+): void {
+	const commit = async (refresh = false) => {
+		await save();
+		if (opts.after) await opts.after();
+		if (refresh && opts.refresh) opts.refresh();
+	};
+
+	if (condition.type === 'has-tag' || condition.type === 'not-has-tag') {
+		const positive = condition.type === 'has-tag';
+		renderGuardValueSetting(tab, containerEl, {
+			name: 'Tag',
+			desc: positive ? `Guard passes if the ${opts.targetLabel ?? 'note'} has this tag.` : `Guard passes if the ${opts.targetLabel ?? 'note'} does not have this tag.`,
+			placeholder: '#refined',
+			valueKind: 'tag',
+			get: () => condition.tag ?? '',
+			set: (v) => { condition.tag = v; },
+			commit,
+		});
+		return;
+	}
+
+	if (condition.type === 'has-property' || condition.type === 'not-has-property') {
+		const positive = condition.type === 'has-property';
+		bindText(containerEl, {
+			name: 'Property',
+			desc: positive ? `Guard passes if the ${opts.targetLabel ?? 'note'} has this frontmatter property.` : `Guard passes if the ${opts.targetLabel ?? 'note'} does not have this frontmatter property.`,
+			placeholder: 'model',
+			get: () => condition.property ?? '',
+			set: (v) => { condition.property = v; },
+			after: opts.after,
+		}, save);
+		return;
+	}
+
+	if (condition.type === 'property-equals' || condition.type === 'property-in-set') {
+		renderPropertyNameSetting(containerEl, condition, save, opts);
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		renderValueKindSetting(containerEl, condition, save, opts);
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		if (condition.type === 'property-equals') {
+			renderGuardValueSetting(tab, containerEl, {
+				name: 'Value',
+				desc: 'Guard passes if the property equals this value.',
+				placeholder: guardValuePlaceholder(condition),
+				valueKind: guardValueKind(condition),
+				get: () => condition.value ?? '',
+				set: (v) => { condition.value = v; },
+				commit,
+			});
+		} else {
+			renderGuardValueSet(tab, containerEl, condition, commit);
+		}
+		return;
+	}
+
+	if (condition.type === 'property-lt' || condition.type === 'property-gt') {
+		const op = condition.type === 'property-lt' ? '<' : '>';
+		bindText(containerEl, {
+			name: 'Property',
+			placeholder: 'word-count',
+			get: () => condition.property ?? '',
+			set: (v) => { condition.property = v; },
+			after: opts.after,
+		}, save);
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		bindNumber(containerEl, {
+			name: 'Number',
+			desc: `Guard passes if the property value is ${op} this number.`,
+			placeholder: '6000',
+			get: () => condition.value ?? '',
+			set: (v) => { condition.value = v; },
+			after: opts.after,
+		}, save);
+		return;
+	}
+
+	if (condition.type === 'word-count-lt' || condition.type === 'word-count-gt') {
+		const op = condition.type === 'word-count-lt' ? '<' : '>';
+		bindNumber(containerEl, {
+			name: 'Word count',
+			desc: `Guard passes if the note body word count is ${op} this number.`,
+			placeholder: '6000',
+			get: () => condition.value ?? '',
+			set: (v) => { condition.value = v; },
+			after: opts.after,
+		}, save);
+	}
+}
+
+function renderPropertyNameSetting(
+	containerEl: HTMLElement,
+	condition: GuardCondition,
+	save: () => void | Promise<void>,
+	opts: { after?: () => void | Promise<void>; refresh?: () => void },
+): void {
+	new Setting(containerEl)
+		.setName('Property')
+		.addText(t => t
+			.setPlaceholder('channelId')
+			.setValue(condition.property ?? '')
+			.onChange(async (v) => {
+				const hadKind = Boolean(condition.valueKind);
+				condition.property = v;
+				defaultGuardValueKind(condition);
+				await save();
+				if (opts.after) await opts.after();
+				if (!hadKind && condition.valueKind && opts.refresh) opts.refresh();
+			})
+			.inputEl.addClass('pi-width-normal'));
+}
+
+function renderValueKindSetting(
+	containerEl: HTMLElement,
+	condition: GuardCondition,
+	save: () => void | Promise<void>,
+	opts: { after?: () => void | Promise<void>; refresh?: () => void },
+): void {
+	new Setting(containerEl)
+		.setName('Value type')
+		.addDropdown(d => {
+			for (const [kind, label] of Object.entries(GUARD_VALUE_KIND_LABELS)) d.addOption(kind, label);
+			d.setValue(guardValueKind(condition));
+			d.onChange(async (v) => {
+				condition.valueKind = v as GuardConditionValueKind;
+				await save();
+				if (opts.after) await opts.after();
+				if (opts.refresh) opts.refresh();
+			});
+			d.selectEl.addClass('pi-width-half');
+		});
+}
+
+function renderGuardValueSet(
+	tab: CrucibleSettingTab,
+	containerEl: HTMLElement,
+	condition: GuardCondition,
+	commit: (refresh?: boolean) => Promise<void>,
+): void {
+	const values = condition.values ?? (condition.values = []);
+	if (values.length === 0) values.push('');
+	values.forEach((_value, index) => {
+		if (index > 0) containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		renderGuardValueSetting(tab, containerEl, {
+			name: `Value ${index + 1}`,
+			desc: index === 0 ? 'Guard passes if the property equals any listed value.' : undefined,
+			placeholder: guardValuePlaceholder(condition),
+			valueKind: guardValueKind(condition),
+			get: () => values[index] ?? '',
+			set: (v) => { values[index] = v; },
+			commit,
+			remove: values.length > 1 ? async () => {
+				values.splice(index, 1);
+				await commit(true);
+			} : undefined,
+		});
+	});
+	new Setting(containerEl).addButton(bt => bt.setButtonText('Add value').setCta().onClick(() => {
+		void (async () => {
+			values.push('');
+			await commit(true);
+		})();
+	}));
+}
+
+function guardValuePlaceholder(condition: GuardCondition): string {
+	switch (guardValueKind(condition)) {
+		case 'tag': return '#refined';
+		case 'file': return 'Folder/Note.md';
+		case 'folder': return 'Clippings';
+		case 'youtube-channel': return 'UC...';
+		default: return 'done';
+	}
+}
+
+function renderGuardValueSetting(
+	tab: CrucibleSettingTab,
+	containerEl: HTMLElement,
+	opts: {
+		name: string;
+		desc?: string;
+		placeholder?: string;
+		valueKind: GuardConditionValueKind;
+		get: () => string;
+		set: (value: string) => void;
+		commit: (refresh?: boolean) => Promise<void>;
+		remove?: () => Promise<void>;
+	},
+): void {
+	const setting = new Setting(containerEl).setName(opts.name);
+	if (opts.desc) setting.setDesc(opts.desc);
+	const onValueChange = async (v: string) => {
+		opts.set(v);
+		await opts.commit();
+	};
+	if (opts.valueKind === 'text') {
+		setting.addText(t => t
+			.setPlaceholder(opts.placeholder ?? '')
+			.setValue(opts.get())
+			.onChange(onValueChange)
+			.inputEl.addClass('pi-width-normal'));
+	} else {
+		setting.addSearch(cb => {
+			cb.setPlaceholder(opts.placeholder ?? '')
+				.setValue(opts.get())
+				.onChange(onValueChange);
+			const el = (cb as unknown as SearchWithContainer).containerEl;
+			if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+			if (opts.valueKind === 'tag') new TagSuggest(tab.app, cb.inputEl);
+			else if (opts.valueKind === 'file') new FileSuggest(tab.app, cb.inputEl);
+			else if (opts.valueKind === 'folder') new FolderSuggest(tab.app, cb.inputEl);
+			else if (opts.valueKind === 'youtube-channel') new YoutubeChannelSuggest(tab.app, cb.inputEl, tab.plugin);
+		});
+	}
+	if (opts.remove) {
+		setting.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove value').onClick(() => {
+			void opts.remove?.();
+		}));
+	}
+}
 
 function newTriggerId(): string {
 	const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
@@ -610,7 +818,7 @@ function newTrigger(): TriggerDef {
 		id: newTriggerId(),
 		name: '',
 		enabled: true,
-		on: { event: 'create' },
+		on: { events: ['create'] },
 		scope: { folder: '', includeSubfolders: true },
 		conditions: [],
 		conditionMode: 'all',
@@ -618,8 +826,21 @@ function newTrigger(): TriggerDef {
 	};
 }
 
+function triggerEventList(trigger: TriggerDef): TriggerEvent[] {
+	if ('everyMinutes' in trigger.on) return [];
+	if ('events' in trigger.on) return trigger.on.events.length > 0 ? trigger.on.events : ['create'];
+	return [trigger.on.event];
+}
+
+function setTriggerEventList(trigger: TriggerDef, events: TriggerEvent[]): void {
+	const selected = TRIGGER_EVENT_ORDER.filter(event => events.includes(event));
+	trigger.on = { events: selected.length > 0 ? selected : ['create'] };
+}
+
 function describeTrigger(trigger: TriggerDef): string {
-	const when = 'everyMinutes' in trigger.on ? `every ${trigger.on.everyMinutes} min` : `on ${trigger.on.event}`;
+	const when = 'everyMinutes' in trigger.on
+		? `every ${trigger.on.everyMinutes} min`
+		: `on ${triggerEventList(trigger).map(event => TRIGGER_EVENT_LABELS[event].toLowerCase()).join(', ')}`;
 	const scope = !('everyMinutes' in trigger.on) && trigger.scope?.folder ? ` in ${trigger.scope.folder}` : '';
 	const conds = trigger.conditions.length ? `, ${trigger.conditions.length} condition${trigger.conditions.length > 1 ? 's' : ''}` : '';
 	const action = describeTriggerAction(trigger.action);
@@ -741,7 +962,13 @@ function renderTriggerConditions(tab: CrucibleSettingTab, containerEl: HTMLEleme
 				// word-count-* needs an async content read; not available to the sync trigger guard.
 				SYNC_GUARD_CONDITION_TYPES.forEach(t => { d.addOption(t, GUARD_TYPE_LABELS[t]); });
 				d.setValue(cond.type);
-				d.onChange(async (v) => { cond.type = v as GuardConditionType; await save(); reregister(); tab.refreshDisplay(); });
+				d.onChange(async (v) => {
+					cond.type = v as GuardConditionType;
+					normalizeGuardConditionForType(cond);
+					await save();
+					reregister();
+					tab.refreshDisplay();
+				});
 			})
 			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove condition').onClick(async () => {
 				trigger.conditions.splice(i, 1);
@@ -750,17 +977,11 @@ function renderTriggerConditions(tab: CrucibleSettingTab, containerEl: HTMLEleme
 				tab.refreshDisplay();
 			}));
 
-		if (cond.type === 'has-tag' || cond.type === 'not-has-tag') {
-			bindText(group, { name: 'Tag', placeholder: '#refined', get: () => cond.tag ?? '', set: (v) => { cond.tag = v; }, after: reregister }, save);
-		} else if (cond.type === 'has-property' || cond.type === 'not-has-property') {
-			bindText(group, { name: 'Property', placeholder: 'yt-video-id', get: () => cond.property ?? '', set: (v) => { cond.property = v; }, after: reregister }, save);
-		} else if (cond.type === 'property-equals') {
-			bindText(group, { name: 'Property', placeholder: 'status', get: () => cond.property ?? '', set: (v) => { cond.property = v; }, after: reregister }, save);
-			bindText(group, { name: 'Value', placeholder: 'done', get: () => cond.value ?? '', set: (v) => { cond.value = v; }, after: reregister }, save);
-		} else if (cond.type === 'property-lt' || cond.type === 'property-gt') {
-			bindText(group, { name: 'Property', placeholder: 'word-count', get: () => cond.property ?? '', set: (v) => { cond.property = v; }, after: reregister }, save);
-			bindNumber(group, { name: 'Number', placeholder: '6000', get: () => cond.value ?? '', set: (v) => { cond.value = v; }, after: reregister }, save);
-		}
+		renderGuardConditionFields(tab, group, cond, save, {
+			after: reregister,
+			refresh: () => tab.refreshDisplay(),
+			targetLabel: 'note',
+		});
 	});
 
 	new Setting(containerEl).addButton(bt => bt.setButtonText('Add condition').onClick(async () => {
@@ -881,7 +1102,7 @@ function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 			.addOption('schedule', 'Schedule')
 			.setValue('everyMinutes' in trigger.on ? 'schedule' : 'event')
 			.onChange(async (v) => {
-				trigger.on = v === 'schedule' ? { everyMinutes: 60 } : { event: 'create' };
+				trigger.on = v === 'schedule' ? { everyMinutes: 60 } : { events: ['create'] };
 				await save();
 				reregister();
 				tab.display();
@@ -898,16 +1119,28 @@ function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 			after: reregister,
 		}, save);
 	} else {
-		new Setting(whenGroup)
-			.setName('Event')
-			.addDropdown(d => d
-				.addOption('create', 'Note created')
-				.addOption('modify', 'Note modified')
-				.addOption('metadata-changed', 'Frontmatter/metadata changed')
-				.addOption('youtube-metadata-enriched', 'YouTube metadata enriched')
-				.addOption('rename', 'Note renamed')
-				.setValue('event' in trigger.on ? trigger.on.event : 'create')
-				.onChange(async (v) => { trigger.on = { event: v as TriggerEvent }; await save(); reregister(); }));
+		const eventSetting = new Setting(whenGroup)
+			.setName('Events')
+			.setDesc('Runs when any selected event fires.');
+		const grid = eventSetting.controlEl.createDiv({ cls: 'crucible-checkbox-grid' });
+		const selected = new Set(triggerEventList(trigger));
+		for (const event of TRIGGER_EVENT_ORDER) {
+			const itemLabel = grid.createEl('label', { cls: 'crucible-checkbox-grid-item' });
+			const cb = itemLabel.createEl('input', { type: 'checkbox' });
+			cb.checked = selected.has(event);
+			itemLabel.createSpan({ text: TRIGGER_EVENT_LABELS[event] });
+			cb.addEventListener('change', () => {
+				void (async () => {
+					const next = new Set(triggerEventList(trigger));
+					if (cb.checked) next.add(event);
+					else next.delete(event);
+					setTriggerEventList(trigger, Array.from(next));
+					await save();
+					reregister();
+					if (next.size === 0) tab.refreshDisplay();
+				})();
+			});
+		}
 	}
 
 	// --- Scope + Conditions (event triggers only) ---
