@@ -1,6 +1,9 @@
-import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults, Command } from "obsidian";
+import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults, Command, getAllTags } from "obsidian";
+import type CruciblePlugin from "./main";
 import { Currency, fetchCurrencies } from "./orchestration/utils/fx";
 import { GeoResult, geocodeLocation } from "./orchestration/utils/weather";
+import { loadConfiguredChannels } from "./orchestration/utils/feedIntake";
+import type { ChannelEntry } from "./orchestration/utils/youtube";
 import { CurrencyCache, GeocodeCacheEntry } from "./types";
 
 export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFile> {
@@ -140,6 +143,107 @@ export class CommandSuggest extends AbstractInputSuggest<Command> {
 		}
 		this.close();
 	}
+}
+
+export class TagSuggest extends AbstractInputSuggest<string> {
+	public inputEl: HTMLInputElement;
+
+	constructor(app: App, inputEl: HTMLInputElement) {
+		super(app, inputEl);
+		this.inputEl = inputEl;
+	}
+
+	private getItems(): string[] {
+		const tags = new Set<string>();
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const cache = this.app.metadataCache.getFileCache(file);
+			if (!cache) continue;
+			for (const tag of getAllTags(cache) ?? []) {
+				tags.add(tag.startsWith('#') ? tag : `#${tag}`);
+			}
+		}
+		return Array.from(tags).sort((a, b) => a.localeCompare(b));
+	}
+
+	getSuggestions(inputStr: string): string[] {
+		const items = this.getItems();
+		if (!inputStr) return items.slice(0, 100);
+
+		const fuzzySearch = prepareFuzzySearch(inputStr.replace(/^#/, ''));
+		return items
+			.map(item => ({ item, result: fuzzySearch(item.replace(/^#/, '')) }))
+			.filter(res => res.result !== null)
+			.sort((a, b) => b.result!.score - a.result!.score)
+			.map(res => res.item)
+			.slice(0, 100);
+	}
+
+	renderSuggestion(tag: string, el: HTMLElement): void {
+		el.setText(tag);
+	}
+
+	selectSuggestion(tag: string): void {
+		this.inputEl.value = tag;
+		this.inputEl.dispatchEvent(new Event("input"));
+		this.close();
+	}
+}
+
+export interface YoutubeChannelSuggestItem {
+	name: string;
+	channelId: string;
+}
+
+export function youtubeChannelSuggestLabel(item: YoutubeChannelSuggestItem): string {
+	return `${item.name || '(unnamed)'} (${item.channelId})`;
+}
+
+export class YoutubeChannelSuggest extends AbstractInputSuggest<YoutubeChannelSuggestItem> {
+	public inputEl: HTMLInputElement;
+	private plugin: CruciblePlugin;
+
+	constructor(app: App, inputEl: HTMLInputElement, plugin: CruciblePlugin) {
+		super(app, inputEl);
+		this.inputEl = inputEl;
+		this.plugin = plugin;
+	}
+
+	private async getItems(): Promise<YoutubeChannelSuggestItem[]> {
+		const configured = await loadConfiguredChannels(this.app, this.plugin);
+		return Array.from(configured.values(), value => toYoutubeChannelSuggestItem(value.channel))
+			.sort((a, b) => a.name.localeCompare(b.name) || a.channelId.localeCompare(b.channelId));
+	}
+
+	async getSuggestions(inputStr: string): Promise<YoutubeChannelSuggestItem[]> {
+		const items = await this.getItems();
+		if (!inputStr) return items.slice(0, 100);
+
+		const fuzzySearch = prepareFuzzySearch(inputStr);
+		return items
+			.map(item => ({ item, result: fuzzySearch(youtubeChannelSuggestLabel(item)) }))
+			.filter(res => res.result !== null)
+			.sort((a, b) => b.result!.score - a.result!.score)
+			.map(res => res.item)
+			.slice(0, 100);
+	}
+
+	renderSuggestion(item: YoutubeChannelSuggestItem, el: HTMLElement): void {
+		el.createDiv({ text: item.name || '(unnamed)' });
+		el.createDiv({ text: item.channelId, cls: "suggestion-aux" });
+	}
+
+	selectSuggestion(item: YoutubeChannelSuggestItem): void {
+		this.inputEl.value = item.channelId;
+		this.inputEl.dispatchEvent(new Event("input"));
+		this.close();
+	}
+}
+
+function toYoutubeChannelSuggestItem(channel: ChannelEntry): YoutubeChannelSuggestItem {
+	return {
+		name: channel.name,
+		channelId: channel.channelId,
+	};
 }
 
 export class CurrencySuggest extends AbstractInputSuggest<Currency> {

@@ -22,6 +22,16 @@ function scalarString(v: unknown): string {
 	return '';
 }
 
+function scalarStrings(v: unknown): string[] {
+	if (Array.isArray(v)) return v.map(item => scalarString(item)).filter(Boolean);
+	const scalar = scalarString(v);
+	return scalar ? [scalar] : [];
+}
+
+function nonBlankSet(values: string[] | undefined): Set<string> {
+	return new Set((values ?? []).map(v => v.trim()).filter(Boolean));
+}
+
 // Frontmatter tags (array or single string) plus inline body tags, all `#`-stripped.
 export function collectTags(cache: CachedMetadata | null | undefined): string[] {
 	const tags: string[] = [];
@@ -57,6 +67,12 @@ export function evaluateSyncGuard(condition: GuardCondition, ctx: GuardEvalTags)
 			return condition.property ? !(condition.property in fm) : true;
 		case 'property-equals':
 			return condition.property ? scalarString(fm[condition.property]) === (condition.value ?? '') : false;
+		case 'property-in-set': {
+			if (!condition.property) return false;
+			const accepted = nonBlankSet(condition.values);
+			if (accepted.size === 0) return false;
+			return scalarStrings(fm[condition.property]).some(value => accepted.has(value));
+		}
 		case 'property-lt':
 		case 'property-gt': {
 			if (!condition.property) return false;
