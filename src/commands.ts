@@ -6,6 +6,7 @@ import { FilePickerModal } from './orchestration/FilePickerModal';
 import type CruciblePlugin from './main';
 import { VaultSearchModal } from './search/SearchModal';
 import { isSearchIndexablePath } from './search/chunker';
+import { exportSourceEvalTrainingData } from './sourceEval/export';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -184,6 +185,18 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		queueable: false,
 		run: () => plugin.activateSourceEvalDashboardView(),
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'export-source-eval-training-data',
+		name: 'Crucible: Export source eval training data',
+		group: 'Ingestion',
+		mutating: false,
+		queueable: false,
+		run: async () => {
+			const result = await exportSourceEvalTrainingData(plugin.app, plugin);
+			new Notice(`Exported ${result.count} source eval row${result.count === 1 ? '' : 's'} to ${result.path}`);
+		},
 	});
 
 	plugin.registerCrucibleCommand({
