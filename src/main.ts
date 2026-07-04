@@ -32,6 +32,7 @@ import { YoutubeChannelEnrichWorkflow } from './orchestration/workflows/YoutubeC
 import { YoutubeChannelEnrichSweepWorkflow } from './orchestration/workflows/YoutubeChannelEnrichSweepWorkflow';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 import { IngestionDashboardView, INGESTION_DASHBOARD_VIEW_TYPE } from './ingestionDashboardView';
+import { SourceEvalDashboardView, SOURCE_EVAL_DASHBOARD_VIEW_TYPE } from './sourceEvalDashboardView';
 import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
@@ -184,6 +185,7 @@ export default class CruciblePlugin extends Plugin {
 
 		this.registerView(CRUCIBLE_SETTINGS_VIEW_TYPE, (leaf) => new CrucibleSettingsView(leaf, this));
 		this.registerView(INGESTION_DASHBOARD_VIEW_TYPE, (leaf) => new IngestionDashboardView(leaf, this));
+		this.registerView(SOURCE_EVAL_DASHBOARD_VIEW_TYPE, (leaf) => new SourceEvalDashboardView(leaf, this));
 		this.registerEvent(this.app.metadataCache.on('resolved', () => {
 			this.searchIndexCoordinator.markMetadataResolved();
 		}));
@@ -1194,6 +1196,16 @@ export default class CruciblePlugin extends Plugin {
 		const leaf = existing[0] ?? workspace.getLeaf('tab');
 		if (!existing.length) {
 			await leaf.setViewState({ type: INGESTION_DASHBOARD_VIEW_TYPE, active: true });
+		}
+		await workspace.revealLeaf(leaf);
+	}
+
+	async activateSourceEvalDashboardView() {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(SOURCE_EVAL_DASHBOARD_VIEW_TYPE);
+		const leaf = existing[0] ?? workspace.getLeaf('tab');
+		if (!existing.length) {
+			await leaf.setViewState({ type: SOURCE_EVAL_DASHBOARD_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
 	}

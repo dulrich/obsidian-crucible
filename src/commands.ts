@@ -176,6 +176,16 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: () => plugin.activateIngestionDashboardView(),
 	});
+
+	plugin.registerCrucibleCommand({
+		id: 'open-source-eval-dashboard',
+		name: 'Crucible: Open Source Eval Dashboard',
+		group: 'Ingestion',
+		mutating: false,
+		queueable: false,
+		run: () => plugin.activateSourceEvalDashboardView(),
+	});
+
 	plugin.registerCrucibleCommand({
 		id: 'youtube-ignore-video',
 		name: 'YouTube: ignore video',

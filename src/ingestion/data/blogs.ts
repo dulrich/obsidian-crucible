@@ -45,7 +45,7 @@ export async function computeBlogControlRows(app: App, plugin: CruciblePlugin): 
 		entry.name = value.blog.name;
 		entry.link = value.blog.link;
 		entry.tracked = true;
-		nameToKey.set(normalizeBlogName(value.blog.name), blogKey);
+		nameToKey.set(normalizeBlogNameForAttribution(value.blog.name), blogKey);
 	}
 
 	const intakePrefix = `${INTAKE_ROOT_BLOGS}/`;
@@ -74,10 +74,10 @@ export async function computeBlogControlRows(app: App, plugin: CruciblePlugin): 
 			const id = postId || (source ? postIdFromUrl(source, { hostRules }) : '');
 			if (!id) continue;
 
-			const nameKey = blogName ? nameToKey.get(normalizeBlogName(blogName)) : undefined;
-			const blogKey = nameKey ?? metadataBlogKey(blogName, source, note.path);
+			const nameKey = blogName ? nameToKey.get(normalizeBlogNameForAttribution(blogName)) : undefined;
+			const blogKey = nameKey ?? metadataBlogKeyForAttribution(blogName, source, note.path);
 			const entry = get(blogKey);
-			if (!entry.name) entry.name = blogName || sourceHost(source) || blogKey;
+			if (!entry.name) entry.name = blogName || sourceHostForAttribution(source) || blogKey;
 			if (!entry.link && source) entry.link = source;
 			entry.metaIds.add(id);
 		}
@@ -120,19 +120,19 @@ function stringProp(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeBlogName(name: string): string {
+export function normalizeBlogNameForAttribution(name: string): string {
 	return name.trim().toLowerCase();
 }
 
-function metadataBlogKey(blogName: string, source: string, path: string): string {
-	const normalizedName = normalizeBlogName(blogName);
+export function metadataBlogKeyForAttribution(blogName: string, source: string, path: string): string {
+	const normalizedName = normalizeBlogNameForAttribution(blogName);
 	if (normalizedName) return `metadata:${normalizedName}`;
-	const host = sourceHost(source);
+	const host = sourceHostForAttribution(source);
 	if (host) return `metadata:${host}`;
 	return `metadata:${path}`;
 }
 
-function sourceHost(source: string): string {
+export function sourceHostForAttribution(source: string): string {
 	try {
 		return source ? new URL(source).hostname : '';
 	} catch {
