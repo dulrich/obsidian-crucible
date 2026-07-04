@@ -1,10 +1,11 @@
-import { App, Component, EventRef, TFile, debounce, setIcon } from 'obsidian';
+import { App, Component, EventRef, Notice, TFile, debounce, setIcon } from 'obsidian';
 import type CruciblePlugin from './main';
 import { computeBlogControlRows } from './ingestion/data/blogs';
 import { computeChannelControlRows } from './ingestion/data/channels';
 import { renderTableSection } from './ingestion/render/section';
 import type { Column, SectionContext, SortState } from './ingestion/render/types';
 import { computeCaptureIndex } from './sourceEval/captureIndex';
+import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { computeSourceEvalRows } from './sourceEval/metrics';
 import { SourceEvalRatingPanel } from './sourceEval/ratingPanel';
 import { buildRatingQueue, type RatingQueueBroadScope, type RatingQueueScope } from './sourceEval/ratingQueue';
@@ -54,6 +55,7 @@ export class SourceEvalDashboardUI {
 	private scoreFilter: ScoreFilter = 'all';
 	private queueScope: RatingQueueScope = 'all';
 	private queueUnlabeledOnly = true;
+	private exportWeakLabels = false;
 	private skippedQueuePaths = new Set<string>();
 	private refreshSeq = 0;
 
@@ -73,6 +75,7 @@ export class SourceEvalDashboardUI {
 			return;
 		}
 
+		this.renderExportControls(header);
 		this.buildSection('scorecard', 'Source scorecard');
 		this.buildSection('labelQueue', 'Labeling queue');
 		this.buildSection('coverage', 'Label coverage');
@@ -94,6 +97,38 @@ export class SourceEvalDashboardUI {
 		this.sections.clear();
 		this.relevantSignatures.clear();
 		this.container.empty();
+	}
+
+	private renderExportControls(parent: HTMLElement): void {
+		const controls = parent.createDiv({ cls: 'crucible-source-eval-export-controls' });
+		const weakLabel = controls.createEl('label', { cls: 'crucible-source-eval-toggle' });
+		const weak = weakLabel.createEl('input', { type: 'checkbox' });
+		weak.checked = this.exportWeakLabels;
+		weakLabel.appendText(' Include weak labels');
+		weak.addEventListener('change', () => {
+			this.exportWeakLabels = weak.checked;
+		});
+
+		const button = controls.createEl('button', { cls: 'mod-cta crucible-source-eval-export' });
+		setIcon(button, 'download');
+		button.createSpan({ text: ' Export JSONL' });
+		button.addEventListener('click', () => {
+			void this.runExport(button);
+		});
+	}
+
+	private async runExport(button: HTMLButtonElement): Promise<void> {
+		button.disabled = true;
+		try {
+			const result = await exportSourceEvalTrainingData(this.app, this.plugin, {
+				includeWeakLabels: this.exportWeakLabels,
+			});
+			new Notice(`Exported ${result.count} source eval row${result.count === 1 ? '' : 's'} to ${result.path}`);
+		} catch (e) {
+			new Notice(`Source eval export failed: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			button.disabled = false;
+		}
 	}
 
 	private buildSection(id: SourceEvalSectionId, title: string): void {
