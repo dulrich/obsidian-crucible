@@ -8,6 +8,7 @@ import { renderAiSettings } from "./settings/sections/ai";
 import { renderConfigureSettings } from "./settings/sections/configure";
 import { renderOrchestrationSettings } from "./settings/sections/orchestration";
 import { renderLintSettings } from "./settings/sections/lint";
+import { renderSourceEvalSettings } from "./settings/sections/sourceEval";
 
 type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'orchestrator' | 'lint' | 'commands';
 
@@ -208,6 +209,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			renderAiSettings(this, containerEl);
 		} else if (this.activeTab === 'orchestrator') {
 			renderOrchestrationSettings(this, containerEl);
+			if (!this.isEditingDetail()) renderSourceEvalSettings(this, containerEl);
 		} else if (this.activeTab === 'commands') {
 			renderCommandSettings(this, containerEl);
 		}

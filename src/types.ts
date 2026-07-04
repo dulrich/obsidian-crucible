@@ -47,6 +47,7 @@ export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
 export type CrucibleCommandPaletteFilterMode = 'whitelist' | 'blacklist';
 export type CrucibleCommandPaletteHintCharsetMode = 'all-ascii' | 'alphanumeric-whitelist';
+export type SourceEvalBudgetPeriod = 'week' | 'month';
 
 import { Hotkey, Command } from 'obsidian';
 import { Currency } from './orchestration/utils/fx';
@@ -453,6 +454,13 @@ export interface CrucibleSettings {
 	// Per-type worker count for the youtube_metadata_fetch memory queue.
 	orchestrationYoutubeMetadataMaxParallel: number;
 	ingestionReadingWpm: number;
+	// Source Eval Dashboard
+	sourceEvalEnabled: boolean;
+	sourceEvalReadingBudgetWords: number;
+	sourceEvalBudgetPeriod: SourceEvalBudgetPeriod;
+	sourceEvalRecencyHalfLifeDays: number;
+	sourceEvalLookbackDays: number;
+	sourceEvalExportFolder: string;
 	// Search
 	searchEnabled: boolean;
 	searchServiceUrl: string;
@@ -589,6 +597,12 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	ingestionYoutubeAutoEnrichEnabled: false,
 	orchestrationYoutubeMetadataMaxParallel: 1,
 	ingestionReadingWpm: 250,
+	sourceEvalEnabled: true,
+	sourceEvalReadingBudgetWords: 50000,
+	sourceEvalBudgetPeriod: 'week',
+	sourceEvalRecencyHalfLifeDays: 90,
+	sourceEvalLookbackDays: 180,
+	sourceEvalExportFolder: '_crucible/source_eval',
 	searchEnabled: true,
 	searchServiceUrl: 'http://127.0.0.1:8765',
 	searchVaultId: 'default',
