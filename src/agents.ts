@@ -54,7 +54,7 @@ export class AgentManager {
 			const id = agentCommandId(agent.id);
 			this.chainManager.registerInternalCommand(id, async (args, _prev, _editor, targetFile) => {
 				return await this.executeAgent(agent, args, targetFile);
-			}, AGENT_INPUT_SCHEMA);
+			}, { schema: AGENT_INPUT_SCHEMA });
 			this.registeredIds.add(id);
 		});
 	}

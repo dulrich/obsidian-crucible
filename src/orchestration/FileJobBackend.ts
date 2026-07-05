@@ -2,11 +2,12 @@ import { Notice, TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobLane, JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
+import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
+import { defaultLaneForPriority, laneRank } from './lanes';
 
 // Durable, markdown-backed job type: every job is a file under
 // orchestrationQueueRoot/{queued,running,done,failed}. Enqueue collapses repeats by
@@ -243,17 +244,6 @@ function priorityRank(priority: JobPriority): number {
 		case 'normal': return 1;
 		case 'low': return 2;
 	}
-}
-
-function laneRank(lane: JobLane): number {
-	switch (lane) {
-		case 'user': return 0;
-		case 'background': return 1;
-	}
-}
-
-function defaultLaneForPriority(priority: JobPriority | undefined): JobLane {
-	return priority === 'high' ? 'user' : 'background';
 }
 
 function parseDeferredTime(value: string | undefined): number | null {

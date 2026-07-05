@@ -5,6 +5,7 @@
 // passive: the runner claims pending entries, executes the workflow, and reports
 // the result back here.
 import type { JobLane } from './types';
+import { laneRank } from './lanes';
 
 export type MemoryJobStatus = 'pending' | 'running' | 'done' | 'failed';
 
@@ -184,12 +185,5 @@ function statusRank(status: MemoryJobStatus): number {
 		case 'pending': return 1;
 		case 'failed': return 2;
 		case 'done': return 3;
-	}
-}
-
-function laneRank(lane: JobLane): number {
-	switch (lane) {
-		case 'user': return 0;
-		case 'background': return 1;
 	}
 }
