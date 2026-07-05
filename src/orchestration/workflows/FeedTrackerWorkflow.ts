@@ -5,9 +5,7 @@ import { nowTimeInTz, todayInTz } from '../utils/dates';
 import { ensureFolder } from '../../utils';
 import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontmatter';
 import { rateLimitedAllSettled } from '../utils/rateLimit';
-import { buildBlogBulletSuffix } from '../utils/blogs';
 import type { BlogRowError, RemotePost } from '../utils/blogs';
-import { blogMetadataRoot, ensureBlogMetadataNote, findExistingBlogMetadataNote } from '../utils/blogsApi';
 import type { RemoteVideo } from '../utils/youtube';
 import {
 	BLOGS_FEED_SOURCE,
@@ -93,17 +91,18 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 
 		const failedCount = outcomes.filter(o => o.error).length;
 		const totalNew = outcomes.reduce((sum, o) => sum + o.newItems.length, 0);
+		const itemMetadataIndex = await this.source.buildItemMetadataIndex?.(plugin);
 
-		// Persist enriched metadata for every fetched post lacking a file on disk —
-		// not just unseen ones — and do it before the no-new early return below.
-		if (this.source.kind === 'blogs') {
+		// Persist enriched metadata for every fetched item that needs it — not just
+		// unseen ones — and do it before the no-new early return below.
+		if (this.source.persistItemMetadata) {
 			for (let i = 0; i < entries.length; i++) {
 				const entry = entries[i];
 				const settled = fetchSettled[i];
 				if (!entry || !settled || settled.status === 'rejected') continue;
-				const blogName = this.source.entryName(entry);
+				const entryName = this.source.entryName(entry);
 				for (const item of settled.value) {
-					await this.persistBlogMetadataIfMissing(plugin, item as unknown as RemotePost, blogName);
+					await this.source.persistItemMetadata(plugin, item, entryName, itemMetadataIndex);
 				}
 			}
 		}
@@ -116,7 +115,7 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 			};
 		}
 
-		const intakePath = await this.writeIntakeNote(plugin, outcomes, totalNew, rowErrors);
+		const intakePath = await this.writeIntakeNote(plugin, outcomes, totalNew, rowErrors, this.source.trackerGeneratedBy, itemMetadataIndex);
 
 		if (entries.length > 0 && failedCount === entries.length) {
 			return {
@@ -136,15 +135,6 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 			outputPaths: [intakePath],
 			notes,
 		};
-	}
-
-	// Writes a post's enriched-metadata note only when one does not already exist
-	// on disk. Skipping existing files keeps repeat pulls idempotent (the body
-	// stamps a fresh fetched_at, so an unconditional write would churn every run).
-	private async persistBlogMetadataIfMissing(plugin: Plugin, post: RemotePost, blogName: string): Promise<void> {
-		const root = blogMetadataRoot(plugin);
-		if (await findExistingBlogMetadataNote(plugin.app, root, post.postId)) return;
-		await ensureBlogMetadataNote(plugin, { ...post, blogName });
 	}
 
 	private async createExampleRegistry(plugin: Plugin, path: string): Promise<void> {
@@ -182,6 +172,7 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 		totalNew: number,
 		rowErrors: FeedRowError[],
 		generatedBy = this.source.trackerGeneratedBy,
+		itemMetadataIndex?: Map<string, TFile>,
 	): Promise<string> {
 		const app = plugin.app;
 		const tz = plugin.settings.orchestrationTimezone;
@@ -236,15 +227,8 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 				sections.push(`## ${this.source.entryHeading(o.entry)}`);
 				for (const item of o.newItems) {
 					const published = (this.source.itemPublishedAt(item) || '').slice(0, 10) || 'unknown';
-					// Blogs: encode enrichment fields in a trailing comment and persist the full
-					// metadata/body note at fetch time. No-op for re-parsed items (consolidate)
-					// whose bodyHtml is absent.
-					let suffix = '';
-					if (this.source.kind === 'blogs') {
-						const post = item as unknown as RemotePost;
-						suffix = buildBlogBulletSuffix(post);
-						await this.persistBlogMetadataIfMissing(plugin, post, this.source.entryName(o.entry));
-					}
+					const suffix = this.source.itemBulletSuffix?.(item) ?? '';
+					await this.source.persistItemMetadata?.(plugin, item, this.source.entryName(o.entry), itemMetadataIndex);
 					sections.push(`- **${escapeBrackets(this.source.itemTitle(item))}** — published ${published} — ${this.source.itemUrl(item)}${suffix}`);
 				}
 				sections.push('');
@@ -340,7 +324,8 @@ export class FeedTrackerConsolidateWorkflow<Entry, Item> extends FeedTrackerWork
 			};
 		}
 
-		const intakePath = await this.writeIntakeNote(plugin, scan.outcomes, totalNew, [], this.source.consolidateGeneratedBy);
+		const itemMetadataIndex = await this.source.buildItemMetadataIndex?.(plugin);
+		const intakePath = await this.writeIntakeNote(plugin, scan.outcomes, totalNew, [], this.source.consolidateGeneratedBy, itemMetadataIndex);
 		return {
 			status: 'done',
 			outputPaths: [intakePath],

@@ -1,4 +1,4 @@
-import type { Column, SectionContext } from './types';
+import type { Column, TableStateContext } from './types';
 
 export type { Column, SortState } from './types';
 
@@ -13,7 +13,7 @@ export function renderSortableTable<T>(
 	parent: HTMLElement,
 	columns: Column<T>[],
 	rows: T[],
-	ctx: SectionContext,
+	ctx: TableStateContext,
 	options: SortableTableOptions = {},
 ): void {
 	parent.empty();

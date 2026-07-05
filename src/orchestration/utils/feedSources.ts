@@ -1,3 +1,4 @@
+import { TFile } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import {
 	ChannelEntry,
@@ -13,11 +14,13 @@ import {
 	EXAMPLE_BLOGS_TABLE,
 	RemotePost,
 	buildBlogCanonHostMap,
+	buildBlogBulletSuffix,
 	fetchBlogFeed,
 	parseBlogBulletMeta,
 	parseBlogsTable,
 	postIdFromUrl,
 } from './blogs';
+import { blogMetadataRoot, buildBlogMetadataNoteIndex, ensureBlogMetadataNote } from './blogsApi';
 
 export type FeedKind = 'youtube' | 'blogs';
 export type FeedPriority = 'high' | 'normal' | 'low';
@@ -54,6 +57,9 @@ export interface FeedSource<Entry, Item> {
 	itemUrl(item: Item): string;
 	itemPublishedAt(item: Item): string;
 	itemFromBullet(line: string, entryName: string): Item | null;
+	itemBulletSuffix?(item: Item): string;
+	buildItemMetadataIndex?(plugin: CruciblePlugin): Promise<Map<string, TFile>>;
+	persistItemMetadata?(plugin: CruciblePlugin, item: Item, entryName: string, index?: Map<string, TFile>): Promise<void>;
 	isSeen(item: Item, seen: Set<string>): boolean;
 	ingestFrontmatterIds(
 		fm: Record<string, unknown>,
@@ -175,6 +181,9 @@ export const BLOGS_FEED_SOURCE: FeedSource<BlogEntry, RemotePost> = {
 	itemUrl: item => item.url,
 	itemPublishedAt: item => item.publishedAt,
 	itemFromBullet: parsePostBullet,
+	itemBulletSuffix: buildBlogBulletSuffix,
+	buildItemMetadataIndex: plugin => buildBlogMetadataNoteIndex(plugin.app, blogMetadataRoot(plugin)),
+	persistItemMetadata: persistBlogMetadataIfMissing,
 	isSeen: isSeenPost,
 	ingestFrontmatterIds: (fm, seen, diffMode, inIntake, hostRules) => {
 		ingestStringProperty(fm['post-id'], seen);
@@ -228,6 +237,16 @@ export function isSeenPost(post: RemotePost, seen: Set<string>): boolean {
 	if (post.url && seen.has(post.url)) return true;
 	if (post.url && seen.has(postIdFromUrl(post.url))) return true;
 	return false;
+}
+
+// Writes a post's enriched-metadata note only when one does not already exist
+// on disk. Skipping existing files keeps repeat pulls idempotent (the body
+// stamps a fresh fetched_at, so an unconditional write would churn every run).
+async function persistBlogMetadataIfMissing(plugin: CruciblePlugin, post: RemotePost, blogName: string, index?: Map<string, TFile>): Promise<void> {
+	if (index?.has(post.postId)) return;
+	const result = await ensureBlogMetadataNote(plugin, { ...post, blogName });
+	const file = plugin.app.vault.getAbstractFileByPath(result.metadataPath);
+	if (file instanceof TFile) index?.set(post.postId, file);
 }
 
 export function yamlScalar(value: string): string {

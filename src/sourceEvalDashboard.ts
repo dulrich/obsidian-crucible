@@ -3,7 +3,7 @@ import type CruciblePlugin from './main';
 import { computeBlogControlRows } from './ingestion/data/blogs';
 import { computeChannelControlRows } from './ingestion/data/channels';
 import { renderTableSection } from './ingestion/render/section';
-import type { Column, SectionContext, SortState } from './ingestion/render/types';
+import type { Column, SortState } from './ingestion/render/types';
 import { computeCaptureIndex } from './sourceEval/captureIndex';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { computeSourceEvalRows } from './sourceEval/metrics';
@@ -14,6 +14,7 @@ import type { CaptureRecord, ObservationSignalMap, SourceEvalRow, SourceKey, Sou
 import type { BlogControlRow, ChannelControlRow } from './ingestion/render/types';
 import { INTAKE_ROOT_BLOGS, INTAKE_ROOT_YOUTUBE } from './orchestration/utils/feedIntake';
 import { IGNORED_IDS_NOTE } from './orchestration/utils/ignoredIds';
+import { countWithPct, formatPct } from './ingestion/render/format';
 
 type SourceEvalSectionId = 'scorecard' | 'labelQueue' | 'coverage';
 type ScoreFilter = 'all' | 'tracked' | 'untracked' | 'blogs' | 'youtube';
@@ -298,7 +299,7 @@ export class SourceEvalDashboardUI {
 		this.setSectionMeta('scorecard', this.budgetMeta());
 		renderTableSection<SourceEvalRow>({
 			body: tableHost,
-			ctx: asSectionContext(ctx),
+			ctx,
 			rows,
 			columns: this.scoreColumns(),
 			emptyText: 'No sources found.',
@@ -430,7 +431,7 @@ export class SourceEvalDashboardUI {
 		this.setSectionMeta('coverage', '');
 		renderTableSection<CoverageRow>({
 			body: ctx.body,
-			ctx: asSectionContext(ctx),
+			ctx,
 			rows: this.coverageRows(),
 			columns: [
 				{ key: 'source', label: 'Source', sortable: true, sortKey: row => row.name.toLowerCase(), render: (row, td) => td.setText(row.name) },
@@ -548,19 +549,6 @@ export class SourceEvalDashboardUI {
 		if (!ctx) return;
 		ctx.metaEl.setText(text);
 	}
-}
-
-function asSectionContext(ctx: SourceEvalSectionContext): SectionContext {
-	return ctx as unknown as SectionContext;
-}
-
-function formatPct(value: number | null): string {
-	if (value === null || !Number.isFinite(value)) return '--';
-	return `${Math.round(value * 100)}%`;
-}
-
-function countWithPct(n: number, d: number): string {
-	return d > 0 ? `${n} (${Math.round((n / d) * 100)}%)` : String(n);
 }
 
 function formatCompact(value: number): string {

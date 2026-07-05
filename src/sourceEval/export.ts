@@ -18,6 +18,8 @@ import {
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../orchestration/utils/ignoredIds';
 import { coerceVideoId } from '../orchestration/utils/youtubeApi';
 import { ensureFolder } from '../utils';
+import { firstString as firstFrontmatterString, numberProp, stringProp } from '../frontmatterValues';
+import { walkMarkdown } from '../vaultWalk';
 import { computeCaptureIndex } from './captureIndex';
 import { scanObservationSignals } from './signals';
 import type { CaptureRecord, ObservationSignalMap, SourceKey, SourceType } from './types';
@@ -100,7 +102,7 @@ const LABEL_TAGS = ['gold', 'goldmine', 'revisit', 'reference', 'probably-slop']
 
 export async function exportSourceEvalTrainingData(
 	app: App,
-	plugin: Pick<CruciblePlugin, 'settings'>,
+	plugin: CruciblePlugin,
 	options: SourceEvalExportOptions = {},
 ): Promise<SourceEvalExportResult> {
 	const examples = await collectSourceEvalTrainingExamples(app, plugin, options);
@@ -119,15 +121,15 @@ export async function exportSourceEvalTrainingData(
 
 export async function collectSourceEvalTrainingExamples(
 	app: App,
-	plugin: Pick<CruciblePlugin, 'settings'>,
+	plugin: CruciblePlugin,
 	options: SourceEvalExportOptions = {},
 ): Promise<SourceEvalTrainingExample[]> {
 	const captures = await computeCaptureIndex(app, plugin);
 	const [configuredBlogs, configuredChannels, blogRows, channelRows, observations] = await Promise.all([
-		loadConfiguredBlogs(app, plugin as CruciblePlugin),
-		loadConfiguredChannels(app, plugin as CruciblePlugin),
-		computeBlogControlRows(app, plugin as CruciblePlugin),
-		computeChannelControlRows(app, plugin as CruciblePlugin),
+		loadConfiguredBlogs(app, plugin),
+		loadConfiguredChannels(app, plugin),
+		computeBlogControlRows(app, plugin),
+		computeChannelControlRows(app, plugin),
 		options.includeWeakLabels ? scanObservationSignals(app, plugin.settings.monthlyFolder) : Promise.resolve(new Map()),
 	]);
 	const sourceInfo = buildSourceInfoMap({
@@ -298,7 +300,7 @@ function buildIgnoredTrainingExample(item: SourceEvalIgnoredIntakeItem): SourceE
 
 async function collectIgnoredIntakeItems(
 	app: App,
-	plugin: Pick<CruciblePlugin, 'settings'>,
+	plugin: CruciblePlugin,
 	sourceInfo: Map<SourceKey, SourceEvalSourceInfo>,
 	ytMetadata: Map<string, Record<string, unknown>>,
 ): Promise<SourceEvalIgnoredIntakeItem[]> {
@@ -306,7 +308,7 @@ async function collectIgnoredIntakeItems(
 		loadIgnoredBlogIds(app),
 		loadIgnoredVideoIds(app),
 	]);
-	const configuredBlogs = await loadConfiguredBlogs(app, plugin as CruciblePlugin);
+	const configuredBlogs = await loadConfiguredBlogs(app, plugin);
 	const hostRules = buildBlogCanonHostMap(Array.from(configuredBlogs.values(), v => v.blog));
 	const items: SourceEvalIgnoredIntakeItem[] = [];
 	for (const file of app.vault.getMarkdownFiles()) {
@@ -451,36 +453,10 @@ function normalizeTag(tag: string): string {
 }
 
 function firstString(...values: unknown[]): string | null {
-	for (const value of values) {
-		const raw: unknown = Array.isArray(value)
-			? value.find((v: unknown): v is string => typeof v === 'string' && v.trim().length > 0)
-			: value;
-		const str = stringProp(raw);
-		if (str) return stripWikiLink(str);
-	}
-	return null;
+	const str = firstFrontmatterString(...values);
+	return str ? stripWikiLink(str) : null;
 }
 
 function stripWikiLink(value: string): string {
 	return value.replace(/^\[\[/, '').replace(/\]\]$/, '').split('|').pop()?.trim() ?? value;
-}
-
-function stringProp(value: unknown): string {
-	return typeof value === 'string' ? value.trim() : '';
-}
-
-function numberProp(value: unknown): number | null {
-	if (typeof value === 'number' && Number.isFinite(value)) return value;
-	if (typeof value === 'string') {
-		const n = Number(value);
-		if (Number.isFinite(n)) return n;
-	}
-	return null;
-}
-
-function* walkMarkdown(folder: TFolder): Generator<TFile> {
-	for (const child of folder.children) {
-		if (child instanceof TFile && child.extension === 'md') yield child;
-		if (child instanceof TFolder) yield* walkMarkdown(child);
-	}
 }

@@ -73,3 +73,16 @@ export function formatDuration(seconds: number | null): string {
 	const pad = (n: number) => String(n).padStart(2, '0');
 	return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
+
+export function ratio(n: number, d: number): number {
+	return d > 0 ? n / d : 0;
+}
+
+export function countWithPct(n: number, d: number): string {
+	return d > 0 ? `${n} (${Math.round((n / d) * 100)}%)` : String(n);
+}
+
+export function formatPct(value: number | null): string {
+	if (value === null || !Number.isFinite(value)) return '--';
+	return `${Math.round(value * 100)}%`;
+}

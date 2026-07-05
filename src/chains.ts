@@ -64,8 +64,7 @@ export class ChainManager {
 		this.app = app;
 	}
 
-	registerInternalCommand(id: string, fn: ChainCommandFn, schemaOrOptions?: CommandArgSchema[] | ChainCommandOptions) {
-		const options: ChainCommandOptions = Array.isArray(schemaOrOptions) ? { schema: schemaOrOptions } : (schemaOrOptions ?? {});
+	registerInternalCommand(id: string, fn: ChainCommandFn, options: ChainCommandOptions = {}) {
 		this.registry.set(id, {
 			fn,
 			schema: options.schema,

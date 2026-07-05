@@ -21,18 +21,21 @@ export interface SortState {
 	direction: 'asc' | 'desc';
 }
 
+export interface TableStateContext {
+	refresh: () => Promise<void> | void;
+	sort: SortState | null;
+}
+
 // Shared per-section view state: the body element a section renders into, its
 // count/meta header slots, the current sort, and a refresh hook. Both the
 // controller and the reusable render helpers operate on this.
-export interface SectionContext {
+export interface SectionContext extends TableStateContext {
 	id: SectionId;
 	title: string;
 	description: string;
 	body: HTMLElement;
 	countEl: HTMLElement;
 	metaEl: HTMLElement;
-	refresh: () => Promise<void> | void;
-	sort: SortState | null;
 }
 
 export interface Column<T> {

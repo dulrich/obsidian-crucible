@@ -22,12 +22,16 @@ await esbuild.build({
 		setup(build) {
 			build.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian-test-stub', namespace: 'stub' }));
 			build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
-				contents: [
-					'export class App {}',
-					'export class TFile {}',
-					'export function normalizePath(p) { return String(p).replace(/\\\\\\\\/g, "/").replace(/\\/+/g, "/"); }',
-					'export async function requestUrl() { throw new Error("requestUrl unavailable in tests"); }',
-				].join('\n'),
+					contents: [
+						'export class App {}',
+						'export class TFile {}',
+						'export class TFolder {}',
+						'export const Platform = { isDesktopApp: true, isMobileApp: false, isMacOS: false };',
+						'export function htmlToMarkdown(html) { return String(html); }',
+						'export function normalizePath(p) { return String(p).replace(/\\\\\\\\/g, "/").replace(/\\/+/g, "/"); }',
+						'export function parseYaml() { return {}; }',
+						'export async function requestUrl() { throw new Error("requestUrl unavailable in tests"); }',
+					].join('\n'),
 				loader: 'js',
 			}));
 		},
