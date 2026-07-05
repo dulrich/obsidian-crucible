@@ -2,6 +2,7 @@ import { App, TFile, TFolder, normalizePath, requestUrl } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { ensureFolder, slugify } from '../../utils';
 import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontmatter';
+import { yamlString } from '../../frontmatterValues';
 import { parseChannelsTable } from './youtube';
 
 export const YOUTUBE_DATA_API_SECRET_KEY = 'crucible-youtube-data-api-key';
@@ -518,11 +519,6 @@ function toNumberOrNull(value: string | undefined): number | null {
 	if (value === undefined || value === null || value === '') return null;
 	const n = Number(value);
 	return Number.isFinite(n) ? n : null;
-}
-
-function yamlString(value: string): string {
-	const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-	return `"${escaped}"`;
 }
 
 interface YoutubeApiErrorBody {

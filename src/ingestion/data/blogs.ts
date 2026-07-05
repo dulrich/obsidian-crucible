@@ -1,4 +1,4 @@
-import { App, TFile, TFolder, normalizePath } from 'obsidian';
+import { App, TFolder, normalizePath } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { buildBlogCanonHostMap, postIdFromUrl } from '../../orchestration/utils/blogs';
 import {
@@ -12,7 +12,10 @@ import {
 import { BLOGS_FEED_SOURCE } from '../../orchestration/utils/feedSources';
 import { blogMetadataRoot } from '../../orchestration/utils/blogsApi';
 import { loadIgnoredBlogIds } from '../../orchestration/utils/ignoredIds';
+import { stringProp } from '../../frontmatterValues';
+import { walkMarkdown } from '../../vaultWalk';
 import type { BlogControlRow } from '../render/types';
+import { partitionControlUniverse } from './controlCenter';
 
 interface BlogAgg {
 	name?: string;
@@ -86,38 +89,21 @@ export async function computeBlogControlRows(app: App, plugin: CruciblePlugin): 
 	const rows: BlogControlRow[] = [];
 	for (const [blogKey, entry] of agg) {
 		const universe = entry.intakeIds.size > 0 ? entry.intakeIds : entry.metaIds;
-		let ignoredPosts = 0;
-		let ingestedPosts = 0;
-		for (const id of universe) {
-			if (ignored.has(id)) ignoredPosts++;
-			else if (captured.has(id)) ingestedPosts++;
-		}
-		const uncapturedPosts = Math.max(0, universe.size - ingestedPosts - ignoredPosts);
+		const partition = partitionControlUniverse(universe, ignored, captured);
 		rows.push({
 			blogKey,
 			name: entry.name || entry.link || blogKey,
 			link: entry.link ?? null,
-			trackedPosts: universe.size,
-			ingestedPosts,
-			ignoredPosts,
-			uncapturedPosts,
+			trackedPosts: partition.total,
+			ingestedPosts: partition.ingested,
+			ignoredPosts: partition.ignored,
+			uncapturedPosts: partition.uncaptured,
 			tracked: entry.tracked,
 		});
 	}
 
 	rows.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 	return rows;
-}
-
-function* walkMarkdown(folder: TFolder): Generator<TFile> {
-	for (const child of folder.children) {
-		if (child instanceof TFile && child.extension === 'md') yield child;
-		if (child instanceof TFolder) yield* walkMarkdown(child);
-	}
-}
-
-function stringProp(value: unknown): string {
-	return typeof value === 'string' ? value.trim() : '';
 }
 
 export function normalizeBlogNameForAttribution(name: string): string {

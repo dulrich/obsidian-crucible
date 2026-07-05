@@ -13,6 +13,7 @@ import { loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import { channelDisplayName } from '../../orchestration/utils/youtube';
 import { findExistingChannelAboutNote } from '../../orchestration/utils/youtubeApi';
 import type { ChannelControlRow } from '../render/types';
+import { partitionControlUniverse } from './controlCenter';
 
 interface ChannelAgg {
 	name?: string;
@@ -92,22 +93,16 @@ export async function computeChannelControlRows(app: App, plugin: CruciblePlugin
 		// Tracked channels are measured against their tracker catalog; an
 		// untracked, capture-only channel falls back to its metadata videos.
 		const universe = entry.intakeIds.size > 0 ? entry.intakeIds : entry.metaIds;
-		let ignoredVideos = 0;
-		let ingestedVideos = 0;
-		for (const id of universe) {
-			if (ignored.has(id)) ignoredVideos++;
-			else if (captured.has(id)) ingestedVideos++;
-		}
-		const uncapturedVideos = Math.max(0, universe.size - ingestedVideos - ignoredVideos);
+		const partition = partitionControlUniverse(universe, ignored, captured);
 		const rawName = entry.name || entry.title || channelId;
 		rows.push({
 			channelId,
 			name: channelDisplayName(rawName),
 			aboutFile: findExistingChannelAboutNote(app, root, channelId),
-			trackedVideos: universe.size,
-			ingestedVideos,
-			ignoredVideos,
-			uncapturedVideos,
+			trackedVideos: partition.total,
+			ingestedVideos: partition.ingested,
+			ignoredVideos: partition.ignored,
+			uncapturedVideos: partition.uncaptured,
 			tracked: registry.has(channelId),
 		});
 	}

@@ -11,9 +11,10 @@ import {
 } from '../../orchestration/utils/feedIntake';
 import { BLOGS_FEED_SOURCE, YOUTUBE_FEED_SOURCE } from '../../orchestration/utils/feedSources';
 import { buildBlogCanonHostMap } from '../../orchestration/utils/blogs';
-import { blogMetadataRoot, findExistingBlogMetadataNote } from '../../orchestration/utils/blogsApi';
+import { blogMetadataRoot, buildBlogMetadataNoteIndex } from '../../orchestration/utils/blogsApi';
 import { coerceVideoId, findExistingChannelAboutNote, findExistingMetadataNote, parseIso8601Duration } from '../../orchestration/utils/youtubeApi';
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
+import { stringList } from '../../frontmatterValues';
 import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from '../render/types';
 
 // Blog posts seen in tracker runs but not yet captured as a vault note.
@@ -21,13 +22,14 @@ export async function computeUncapturedPostRows(app: App, plugin: CruciblePlugin
 	const configured = await loadConfiguredBlogs(app, plugin);
 	const hostRules = buildBlogCanonHostMap(Array.from(configured.values(), v => v.blog));
 	const metadataRoot = blogMetadataRoot(plugin);
+	const metadataIndex = await buildBlogMetadataNoteIndex(app, metadataRoot);
 	const seen = buildBlogsSeenIdSet(app, false, await loadIgnoredBlogIds(app), hostRules, feedSeenExtraSkipPrefixes(plugin, BLOGS_FEED_SOURCE));
 	const scan = await scanBlogsTrackerRuns(app, seen, configured);
 
 	const rows: UncapturedPostRow[] = [];
 	for (const outcome of scan.outcomes) {
 		for (const post of outcome.newPosts) {
-			const metadataFile = await findExistingBlogMetadataNote(app, metadataRoot, post.postId);
+			const metadataFile = metadataIndex.get(post.postId) ?? null;
 			const metadata = readBlogMetadata(app, metadataFile);
 			rows.push({
 				postId: post.postId,
@@ -78,15 +80,6 @@ function readBlogMetadata(app: App, file: TFile | null): BlogMetadataFields {
 		hasBody,
 		audioUrl: typeof fm.audio_url === 'string' ? fm.audio_url : undefined,
 	};
-}
-
-function stringList(value: unknown): string[] | undefined {
-	if (Array.isArray(value)) {
-		const out = value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
-		return out.length > 0 ? out : undefined;
-	}
-	if (typeof value === 'string' && value.trim()) return [value.trim()];
-	return undefined;
 }
 
 // YouTube videos seen in tracker runs but not yet captured as a vault note,

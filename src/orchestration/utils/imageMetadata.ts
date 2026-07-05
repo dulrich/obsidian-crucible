@@ -1,5 +1,6 @@
 import { App, TFile, normalizePath } from 'obsidian';
 import { FRONTMATTER_REGEX, ensureFolder } from '../../utils';
+import { yamlString } from '../../frontmatterValues';
 import type { ProviderImageExtractionResult, ProviderModelRef } from '../../types';
 
 export const IMAGE_METADATA_SCHEMA_VERSION = 1;
@@ -182,10 +183,6 @@ function frontmatterScalar(content: string, key: string): string | undefined {
 	if (!fm) return undefined;
 	const match = new RegExp(`^${escapeRegex(key)}:\\s*(.*)$`, 'm').exec(fm);
 	return match?.[1]?.trim();
-}
-
-function yamlString(value: string): string {
-	return JSON.stringify(value);
 }
 
 function unquoteYamlString(value: string): string {
