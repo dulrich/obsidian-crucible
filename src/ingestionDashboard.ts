@@ -57,6 +57,8 @@ import {
 	formatDateTime,
 	formatDuration,
 	lastRunLabel,
+	ratio,
+	countWithPct,
 } from './ingestion/render/format';
 import {
 	renderAuthorCell,
@@ -64,6 +66,7 @@ import {
 	renderExternalLink,
 	renderIgnoredIdCell,
 } from './ingestion/render/cells';
+import { renderControlCenter, type ControlCenterFilter } from './ingestion/render/controlCenter';
 
 type IntakeKind = 'blog' | 'youtube';
 
@@ -96,14 +99,6 @@ function searchBatchTitle(job: OrchestrationJob): string {
 	return 'Search batch';
 }
 
-function ratio(n: number, d: number): number {
-	return d > 0 ? n / d : 0;
-}
-
-function countWithPct(n: number, d: number): string {
-	return d > 0 ? `${n} (${Math.round((n / d) * 100)}%)` : String(n);
-}
-
 const DEBOUNCE_MS = 150;
 // Vault-scan sections (uncaptured lists, no-metadata, orphans) recompute the
 // whole vault, so they get a longer debounce than the cheap, event-driven ones.
@@ -118,9 +113,9 @@ export class IngestionDashboardUI {
 	private orphanedAttachmentsCache: OrphanRow[] = [];
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
 	// Blog control center filter: which blogs to list.
-	private blogFilter: 'all' | 'tracked' | 'untracked' = 'all';
+	private blogFilter: ControlCenterFilter = 'all';
 	// Channel control center filter: which channels to list.
-	private channelFilter: 'all' | 'tracked' | 'untracked' = 'all';
+	private channelFilter: ControlCenterFilter = 'all';
 	// Last-seen signature of the frontmatter/links that actually drive the
 	// vault-scan sections, keyed by path. Lets a metadataCache 'changed' event
 	// (which fires on every keystroke) skip those refreshes when nothing relevant
@@ -1007,30 +1002,10 @@ export class IngestionDashboardUI {
 		const all = await computeBlogControlRows(this.app, this.plugin);
 		body.empty();
 
-		const controls = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
-		const filters: Array<{ id: 'all' | 'tracked' | 'untracked'; label: string }> = [
-			{ id: 'all', label: 'All' },
-			{ id: 'tracked', label: 'Tracked' },
-			{ id: 'untracked', label: 'Untracked' },
-		];
-		for (const f of filters) {
-			const btn = controls.createEl('button', { text: f.label });
-			if (this.blogFilter === f.id) btn.addClass('mod-cta');
-			btn.addEventListener('click', () => {
-				if (this.blogFilter === f.id) return;
-				this.blogFilter = f.id;
-				void ctx.refresh();
-			});
-		}
-
-		const rows = all.filter(r =>
-			this.blogFilter === 'all'
-				? true
-				: this.blogFilter === 'tracked' ? r.tracked : !r.tracked);
-
-		const tableBody = body.createDiv();
-		renderTableSection<BlogControlRow>({
-			body: tableBody, ctx, rows,
+		renderControlCenter<BlogControlRow>({
+			body, ctx, rows: all,
+			filter: this.blogFilter,
+			setFilter: filter => { this.blogFilter = filter; },
 			emptyText: 'No blogs match this filter.',
 			defaultSort: { column: 'name', direction: 'asc' },
 			setCount: n => this.setSectionCount('blogControl', n),
@@ -1052,32 +1027,10 @@ export class IngestionDashboardUI {
 		const all = await computeChannelControlRows(this.app, this.plugin);
 		body.empty();
 
-		// Filter control row (re-built each render); survives because it lives in the
-		// section body while the table renders into a child container.
-		const controls = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
-		const filters: Array<{ id: 'all' | 'tracked' | 'untracked'; label: string }> = [
-			{ id: 'all', label: 'All' },
-			{ id: 'tracked', label: 'Tracked' },
-			{ id: 'untracked', label: 'Untracked' },
-		];
-		for (const f of filters) {
-			const btn = controls.createEl('button', { text: f.label });
-			if (this.channelFilter === f.id) btn.addClass('mod-cta');
-			btn.addEventListener('click', () => {
-				if (this.channelFilter === f.id) return;
-				this.channelFilter = f.id;
-				void ctx.refresh();
-			});
-		}
-
-		const rows = all.filter(r =>
-			this.channelFilter === 'all'
-				? true
-				: this.channelFilter === 'tracked' ? r.tracked : !r.tracked);
-
-		const tableBody = body.createDiv();
-		renderTableSection<ChannelControlRow>({
-			body: tableBody, ctx, rows,
+		renderControlCenter<ChannelControlRow>({
+			body, ctx, rows: all,
+			filter: this.channelFilter,
+			setFilter: filter => { this.channelFilter = filter; },
 			emptyText: 'No channels match this filter.',
 			defaultSort: { column: 'name', direction: 'asc' },
 			setCount: n => this.setSectionCount('channelControl', n),

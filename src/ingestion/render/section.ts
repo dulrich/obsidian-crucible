@@ -1,9 +1,9 @@
-import type { Column, SectionContext, SortState } from './types';
+import type { Column, SortState, TableStateContext } from './types';
 import { renderSortableTable } from './sortableTable';
 
 export interface RenderTableSectionOptions<T> {
 	body: HTMLElement;
-	ctx: SectionContext;
+	ctx: TableStateContext;
 	rows: T[];
 	columns: Column<T>[];
 	emptyText: string;

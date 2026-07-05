@@ -5,6 +5,7 @@ import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowRe
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { MemoryJobQueue } from './MemoryJobQueue';
+import { defaultLaneForPriority } from './lanes';
 
 // Transient, in-memory job type (the folded enrichment queue): entries live in a
 // MemoryJobQueue keyed by `dedupeKey`, drain immediately and independently of the
@@ -39,7 +40,7 @@ export class MemoryJobBackend implements JobBackend {
 		const key = this.config.dedupeKey ? this.config.dedupeKey(params) : '';
 		if (!key) return null;
 		const display = this.config.display ? this.config.display(params) : {};
-		const lane = options.lane ?? (options.priority === 'high' ? 'user' : 'background');
+		const lane = options.lane ?? defaultLaneForPriority(options.priority);
 		if (!this.queue.enqueue(key, params, display, lane)) return null;
 		return this.synthJob(key, params, lane);
 	}

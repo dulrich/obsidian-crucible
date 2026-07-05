@@ -1,4 +1,4 @@
-import { App, TFile, TFolder, getAllTags, normalizePath } from 'obsidian';
+import { App, TFolder, getAllTags, normalizePath } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { CrucibleSettings } from '../types';
 import {
@@ -9,27 +9,20 @@ import {
 import { buildBlogCanonHostMap, postIdFromUrl, type CanonMethod } from '../orchestration/utils/blogs';
 import { loadConfiguredBlogs } from '../orchestration/utils/feedIntake';
 import { coerceVideoId } from '../orchestration/utils/youtubeApi';
+import { dateProp, numberProp, stringProp } from '../frontmatterValues';
+import { walkMarkdown } from '../vaultWalk';
 import { parseEvalLabel } from './signals';
 import type { CaptureRecord, SourceKey } from './types';
 
-type CaptureIndexSettings = Pick<
-	CrucibleSettings,
-	'dailyFolder' | 'weeklyFolder' | 'monthlyFolder' | 'orchestrationYoutubeMetadataRoot' | 'orchestrationBlogsNote'
->;
-
-export interface CaptureIndexPluginLike {
-	settings: CaptureIndexSettings;
-}
-
 export async function computeCaptureIndex(
 	app: App,
-	plugin: CaptureIndexPluginLike,
+	plugin: CruciblePlugin,
 ): Promise<CaptureRecord[] | null> {
 	const root = app.vault.getAbstractFileByPath(plugin.settings.dailyFolder);
 	if (!(root instanceof TFolder)) return null;
 
 	const youtubeChannels = buildYoutubeVideoChannelMap(app, plugin.settings.orchestrationYoutubeMetadataRoot);
-	const configuredBlogs = await loadConfiguredBlogs(app, plugin as CruciblePlugin);
+	const configuredBlogs = await loadConfiguredBlogs(app, plugin);
 	const blogResolver = buildBlogSourceResolver(configuredBlogs);
 	const hostRules = buildBlogCanonHostMap(Array.from(configuredBlogs.values(), v => v.blog));
 
@@ -156,25 +149,6 @@ function firstFrontmatterLink(value: unknown): string {
 	return raw.trim().replace(/^\[\[/, '').replace(/\]\]$/, '').split('|')[0]?.split('#')[0]?.trim() ?? '';
 }
 
-function stringProp(value: unknown): string {
-	return typeof value === 'string' ? value.trim() : '';
-}
-
-function numberProp(value: unknown): number | null {
-	if (typeof value === 'number' && Number.isFinite(value)) return value;
-	if (typeof value === 'string') {
-		const n = Number(value);
-		if (Number.isFinite(n)) return n;
-	}
-	return null;
-}
-
-function dateProp(value: unknown): number | null {
-	if (typeof value !== 'string') return null;
-	const parsed = Date.parse(value);
-	return Number.isFinite(parsed) ? parsed : null;
-}
-
 function uniqueTags(tags: string[]): string[] {
 	return Array.from(new Set(tags.map(t => t.trim()).filter(Boolean)));
 }
@@ -187,11 +161,4 @@ function matchesPeriodPath(path: string, folder: string | undefined, basenamePat
 	if (!normalized.startsWith(prefix)) return false;
 	const rest = normalized.slice(prefix.length);
 	return !rest.includes('/') && basenamePattern.test(rest);
-}
-
-function* walkMarkdown(folder: TFolder): Generator<TFile> {
-	for (const child of folder.children) {
-		if (child instanceof TFile && child.extension === 'md') yield child;
-		if (child instanceof TFolder) yield* walkMarkdown(child);
-	}
 }

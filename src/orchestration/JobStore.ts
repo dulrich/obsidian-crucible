@@ -5,6 +5,7 @@ import { JobStatus, JobType, OrchestrationJob, JobPriority, JobLane } from './ty
 import { newJobId, nowIso } from './utils/dates';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
+import { defaultLaneForPriority, laneRank, parseLane } from './lanes';
 
 const STATUS_FOLDER: Record<JobStatus, string> = {
 	queued: 'inbox',
@@ -17,11 +18,6 @@ const PRIORITY_RANK: Record<JobPriority, number> = {
 	high: 0,
 	normal: 1,
 	low: 2,
-};
-
-const LANE_RANK: Record<JobLane, number> = {
-	user: 0,
-	background: 1,
 };
 
 export interface QueuePaths {
@@ -120,7 +116,7 @@ export class JobStore {
 		}
 
 		out.sort((a, b) => {
-			const lane = LANE_RANK[a.job.lane] - LANE_RANK[b.job.lane];
+			const lane = laneRank(a.job.lane) - laneRank(b.job.lane);
 			if (lane !== 0) return lane;
 			const priority = PRIORITY_RANK[a.job.priority] - PRIORITY_RANK[b.job.priority];
 			return priority !== 0 ? priority : a.job.id.localeCompare(b.job.id);
@@ -281,12 +277,4 @@ export class JobStore {
 			return null;
 		}
 	}
-}
-
-function defaultLaneForPriority(priority: JobPriority | undefined): JobLane {
-	return priority === 'high' ? 'user' : 'background';
-}
-
-function parseLane(value: unknown, priority: JobPriority): JobLane {
-	return value === 'user' || value === 'background' ? value : defaultLaneForPriority(priority);
 }

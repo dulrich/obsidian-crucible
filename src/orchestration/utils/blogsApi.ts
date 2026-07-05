@@ -1,6 +1,8 @@
 import { App, TFile, TFolder, htmlToMarkdown, normalizePath, parseYaml } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { ensureFolder, slugify } from '../../utils';
+import { walkMarkdown } from '../../vaultWalk';
+import { yamlString } from '../../frontmatterValues';
 import type { UncapturedPostRow } from '../../ingestion/render/types';
 import type { BlogPostKind, RemotePost } from './blogs';
 
@@ -32,10 +34,6 @@ export type BlogIngestCommandResult =
 
 export function blogMetadataRoot(plugin: CruciblePlugin): string {
 	return normalizePath(plugin.settings.orchestrationBlogsMetadataRoot || DEFAULT_BLOGS_METADATA_ROOT);
-}
-
-function yamlString(value: string): string {
-	return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 export function buildBlogMetadataNoteBody(meta: BlogPostMetadata, bodyMarkdown: string | null): string {
@@ -119,19 +117,27 @@ function resolveInternalCommandId(plugin: CruciblePlugin, commandId: string): st
 }
 
 export async function findExistingBlogMetadataNote(app: App, root: string, postId: string): Promise<TFile | null> {
+	const index = await buildBlogMetadataNoteIndex(app, root);
+	return index.get(postId) ?? null;
+}
+
+export async function buildBlogMetadataNoteIndex(app: App, root: string): Promise<Map<string, TFile>> {
+	const out = new Map<string, TFile>();
 	const rootFolder = app.vault.getAbstractFileByPath(normalizePath(root));
-	if (!(rootFolder instanceof TFolder)) return null;
+	if (!(rootFolder instanceof TFolder)) return out;
 	for (const file of walkMarkdown(rootFolder)) {
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
+		let postId: string | null = null;
 		if (fm) {
-			if (typeof fm['post-id'] === 'string' && fm['post-id'].trim() === postId) return file;
-			continue;
+			postId = typeof fm['post-id'] === 'string' && fm['post-id'].trim() ? fm['post-id'].trim() : null;
+		} else {
+			// Cache miss: a just-created file isn't in metadataCache until Obsidian
+			// re-parses it, so read frontmatter from disk to match it immediately.
+			postId = await readPostIdFromDisk(app, file);
 		}
-		// Cache miss: a just-created file isn't in metadataCache until Obsidian
-		// re-parses it, so read frontmatter from disk to match it immediately.
-		if ((await readPostIdFromDisk(app, file)) === postId) return file;
+		if (postId && !out.has(postId)) out.set(postId, file);
 	}
-	return null;
+	return out;
 }
 
 async function readPostIdFromDisk(app: App, file: TFile): Promise<string | null> {
@@ -175,13 +181,6 @@ async function allocateMetadataNotePath(app: App, root: string, meta: BlogPostMe
 		suffix += 1;
 	}
 	return candidate;
-}
-
-function* walkMarkdown(folder: TFolder): Generator<TFile> {
-	for (const child of folder.children) {
-		if (child instanceof TFile && child.extension === 'md') yield child;
-		if (child instanceof TFolder) yield* walkMarkdown(child);
-	}
 }
 
 function countMarkdownWords(markdown: string): number {
