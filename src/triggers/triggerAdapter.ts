@@ -64,10 +64,10 @@ export function triggerDefToOrchestrationTrigger(def: TriggerDef, plugin: Crucib
 		description: def.name,
 		on,
 		enabled: () => def.enabled,
-		guard: (file) => {
+		guard: (file, _fm, cache) => {
 			if (!inScope(file, def.scope)) return false;
-			const cache = plugin.app.metadataCache.getFileCache(file);
-			return evaluateSyncGuards(def.conditions, guardContext(cache), def.conditionMode ?? 'all');
+			const consistentCache = cache ?? plugin.app.metadataCache.getFileCache(file);
+			return evaluateSyncGuards(def.conditions, guardContext(consistentCache), def.conditionMode ?? 'all');
 		},
 		jobs: (file) => seedsFor(def, file),
 	};

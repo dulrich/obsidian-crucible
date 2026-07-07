@@ -1,5 +1,6 @@
 import { Notice } from 'obsidian';
 import { CrucibleCommandPaletteModal, buildHintOptions, buildScoreText, computeHint, getPaletteItems } from './commandPalette';
+import { CrucibleFileOpenPaletteModal } from './fileOpenPalette';
 import { shortestUniqueFuzzyString, shortestTopMatchFuzzyString } from './commandPaletteHints';
 import { appendDebugLog } from './utils';
 import { FilePickerModal } from './orchestration/FilePickerModal';
@@ -231,7 +232,22 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Other',
 		mutating: false,
 		available: () => plugin.settings.crucibleCommandPaletteEnabled,
+		availabilityHelp: () => plugin.settings.crucibleCommandPaletteEnabled
+			? null
+			: 'Enable Commands > Command palette > Enable Crucible command palette.',
 		run: () => new CrucibleCommandPaletteModal(plugin.app, plugin).open(),
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'open-crucible-file-palette',
+		name: 'Open Crucible file-open palette',
+		group: 'Other',
+		mutating: false,
+		available: () => plugin.settings.crucibleFileOpenPaletteEnabled,
+		availabilityHelp: () => plugin.settings.crucibleFileOpenPaletteEnabled
+			? null
+			: 'Enable Commands > File-open palette > Enable Crucible file-open palette.',
+		run: () => new CrucibleFileOpenPaletteModal(plugin.app, plugin).open(),
 	});
 
 	plugin.registerCrucibleCommand({
@@ -240,6 +256,9 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Other',
 		mutating: false,
 		available: () => plugin.settings.crucibleCommandPaletteEnabled,
+		availabilityHelp: () => plugin.settings.crucibleCommandPaletteEnabled
+			? null
+			: 'Enable Commands > Command palette > Enable Crucible command palette.',
 		run: () => void writeHintDebugReport(plugin),
 	});
 

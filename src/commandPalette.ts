@@ -1,5 +1,5 @@
 import { App, Command, FuzzyMatch, FuzzySuggestModal, prepareFuzzySearch } from 'obsidian';
-import CruciblePlugin from './main';
+import type CruciblePlugin from './main';
 import { CrucibleSettings } from './types';
 import { getCommandHotkeyLabel } from './utils';
 import { HintOptions, shortestUniqueFuzzyString, shortestTopMatchFuzzyString } from './commandPaletteHints';
@@ -63,20 +63,39 @@ export function getPaletteItems(app: App, plugin: CruciblePlugin): Command[] {
 	const all = Object.values(app.commands.commands);
 	const settings = plugin.settings;
 	const prefix = plugin.manifest.id;
-	const crucibleCommandIds = new Set(plugin.commandRegistry.map(e => `${prefix}:${e.id}`));
+	const crucibleCommands = new Map(plugin.commandRegistry.map(e => [`${prefix}:${e.id}`, e]));
 	const whitelist = new Set(settings.crucibleCommandPaletteWhitelist);
 	const blacklist = new Set(settings.crucibleCommandPaletteBlacklist);
 
 	return all.filter(cmd => {
-		if (crucibleCommandIds.has(cmd.id)) {
+		const entry = crucibleCommands.get(cmd.id);
+		if (entry) {
 			const unprefixed = cmd.id.startsWith(`${prefix}:`) ? cmd.id.slice(prefix.length + 1) : cmd.id;
-			return !settings.hiddenCommands.includes(unprefixed);
+			return !settings.hiddenCommands.includes(unprefixed) && isCrucibleCommandAvailable(entry.available);
 		}
 		if (settings.crucibleCommandPaletteFilterMode === 'whitelist') {
-			return whitelist.has(cmd.id);
+			return whitelist.has(cmd.id) && isObsidianCommandAvailable(cmd);
 		}
-		return !blacklist.has(cmd.id);
+		return !blacklist.has(cmd.id) && isObsidianCommandAvailable(cmd);
 	});
+}
+
+function isCrucibleCommandAvailable(available: (() => boolean) | undefined): boolean {
+	if (!available) return true;
+	try {
+		return available();
+	} catch {
+		return false;
+	}
+}
+
+function isObsidianCommandAvailable(cmd: Command): boolean {
+	if (!cmd.checkCallback) return true;
+	try {
+		return cmd.checkCallback(true) === true;
+	} catch {
+		return false;
+	}
 }
 
 export class CrucibleCommandPaletteModal extends FuzzySuggestModal<Command> {
