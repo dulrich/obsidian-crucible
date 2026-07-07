@@ -1,10 +1,12 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import type { CrucibleCommandGroup } from "../../main";
+import type { CrucibleCommandEntry, CrucibleCommandGroup } from "../../main";
+import { commandAvailabilityHelp } from "../../commandAvailability";
 import { getCommandHotkeyLabel } from "../../utils";
 import { CommandSuggest, getCommandSuggestDisplayName } from "../../suggesters";
-import { CrucibleCommandPaletteFilterMode, CrucibleCommandPaletteHintCharsetMode } from "../../types";
+import { CrucibleCommandPaletteFilterMode, CrucibleCommandPaletteHintCharsetMode, CrucibleFileOpenIgnoredFolderMode } from "../../types";
+import { formatExtensionFilter, parseExtensionFilter } from "../../fileOpenRanking";
 import { SearchWithContainer } from "../shared";
 import { bindToggle, bindDropdown, bindText, bindNumber } from "../bind";
 
@@ -34,6 +36,8 @@ function renderHotkey(tab: CrucibleSettingTab, el: HTMLElement, commandId: strin
 	el.prepend(hotkeyEl);
 }
 
+type CommandVisibilityItem = Pick<CrucibleCommandEntry, 'id' | 'name' | 'availabilityHelp'>;
+
 export function renderCommandSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	new Setting(containerEl).setName('Command visibility').setHeading();
 	containerEl.createEl('p', { text: 'Control where commands appear. "Palette" shows the command in the Obsidian Command Palette. "Chains" shows it in the chain step search.' });
@@ -44,7 +48,7 @@ export function renderCommandSettings(tab: CrucibleSettingTab, containerEl: HTML
 	};
 
 	// Palette + Chain Search toggles — for commands registered with this.addCommand()
-	const renderGroup = (title: string, commands: { id: string, name: string }[]) => {
+	const renderGroup = (title: string, commands: CommandVisibilityItem[]) => {
 		if (commands.length === 0) return;
 
 		new Setting(containerEl).setName(title).setHeading();
@@ -58,22 +62,34 @@ export function renderCommandSettings(tab: CrucibleSettingTab, containerEl: HTML
 
 		commands.forEach((cmd, index) => {
 			if (index > 0) group.createEl('hr', { cls: 'crucible-row-divider' });
+			const disabledHelp = commandAvailabilityHelp(cmd);
 			const s = new Setting(group)
-				.setName(cmd.name)
-				.addToggle(toggle => toggle
-					.setTooltip('Show in Command Palette')
+				.setName(cmd.name);
+			if (disabledHelp !== null) {
+				s.setDesc(disabledHelp);
+				s.settingEl.addClass('is-disabled');
+				s.descEl.addClass('crucible-setting-warning');
+			}
+			s.addToggle(toggle => {
+				toggle
+					.setTooltip(disabledHelp ?? 'Show in Command Palette')
 					.setValue(!tab.plugin.settings.hiddenCommands.includes(cmd.id))
+					.setDisabled(disabledHelp !== null)
 					.onChange(async (value) => {
 						tab.plugin.settings.hiddenCommands = toggleList(tab.plugin.settings.hiddenCommands, cmd.id, value);
 						await tab.plugin.saveSettings();
-					}))
-				.addToggle(toggle => toggle
-					.setTooltip('Show in Chain Search')
+					});
+			});
+			s.addToggle(toggle => {
+				toggle
+					.setTooltip(disabledHelp ?? 'Show in Chain Search')
 					.setValue(!tab.plugin.settings.hiddenFromChainSearch.includes(cmd.id))
+					.setDisabled(disabledHelp !== null)
 					.onChange(async (value) => {
 						tab.plugin.settings.hiddenFromChainSearch = toggleList(tab.plugin.settings.hiddenFromChainSearch, cmd.id, value);
 						await tab.plugin.saveSettings();
-					}));
+					});
+			});
 
 			renderHotkey(tab, s.controlEl, cmd.id);
 		});
@@ -122,12 +138,67 @@ export function renderCommandSettings(tab: CrucibleSettingTab, containerEl: HTML
 	for (const group of GROUP_ORDER) {
 		const commands = tab.plugin.commandRegistry
 			.filter(c => c.group === group)
-			.map(c => ({ id: c.id, name: c.name }));
+			.map(c => ({ id: c.id, name: c.name, availabilityHelp: c.availabilityHelp }));
 		renderGroup(group, commands);
 	}
 	renderChainOnlyGroup('Chain Commands', getChainOnlyCommandList());
 
 	renderCrucibleCommandPaletteSettings(tab, containerEl);
+	renderCrucibleFileOpenPaletteSettings(tab, containerEl);
+}
+
+function renderCrucibleFileOpenPaletteSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
+	const s = tab.plugin.settings;
+	const save = () => tab.plugin.saveSettings();
+
+	new Setting(containerEl).setName('File-open palette').setHeading();
+	containerEl.createEl('p', { text: 'A replacement file switcher with full-path fuzzy matching and Crucible excluded-folder handling.' });
+
+	const group = containerEl.createDiv({ cls: 'crucible-settings-group' });
+
+	bindToggle(group, {
+		name: 'Enable Crucible file-open palette',
+		desc: 'Registers the "Open Crucible file-open palette" command. Bind a hotkey in Obsidian\'s Hotkeys settings to invoke it.',
+		get: () => s.crucibleFileOpenPaletteEnabled,
+		set: (v) => { s.crucibleFileOpenPaletteEnabled = v; },
+		after: () => tab.refreshDisplay(),
+	}, save);
+
+	if (!s.crucibleFileOpenPaletteEnabled) return;
+
+	group.createEl('hr', { cls: 'crucible-row-divider' });
+
+	bindDropdown(group, {
+		name: 'Excluded search folders',
+		desc: 'How files in folders marked "Search" under Lint > Excluded folders appear.',
+		options: {
+			derank: 'Derank',
+			hide: 'Hide',
+			include: 'Include',
+		},
+		get: () => s.crucibleFileOpenPaletteIgnoredFolderMode,
+		set: (v) => { s.crucibleFileOpenPaletteIgnoredFolderMode = v as CrucibleFileOpenIgnoredFolderMode; },
+	}, save);
+
+	group.createEl('hr', { cls: 'crucible-row-divider' });
+
+	bindToggle(group, {
+		name: 'Create missing Markdown notes',
+		desc: 'When the typed path does not already exist, show a row that creates a new Markdown note.',
+		get: () => s.crucibleFileOpenPaletteCreateMissing,
+		set: (v) => { s.crucibleFileOpenPaletteCreateMissing = v; },
+	}, save);
+
+	group.createEl('hr', { cls: 'crucible-row-divider' });
+
+	bindText(group, {
+		name: 'Openable file extensions',
+		desc: 'Comma- or space-separated extensions. Leave blank to include every vault file.',
+		placeholder: 'md, canvas, pdf',
+		get: () => formatExtensionFilter(s.crucibleFileOpenPaletteExtensions),
+		set: (v) => { s.crucibleFileOpenPaletteExtensions = parseExtensionFilter(v); },
+		width: 'pi-width-wide',
+	}, save);
 }
 
 function renderCrucibleCommandPaletteSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {

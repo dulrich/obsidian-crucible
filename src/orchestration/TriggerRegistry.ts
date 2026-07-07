@@ -1,4 +1,5 @@
 import { TFile } from 'obsidian';
+import type { CachedMetadata } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobType, OrchestrationEnqueueOptions } from './types';
 import type { TriggerDef } from '../types';
@@ -31,13 +32,13 @@ export interface OrchestrationTrigger {
 	/** Hard gate (feature flags etc.). Combined with the per-trigger settings override. */
 	enabled: () => boolean;
 	/** Event triggers only: must return true for the file to enqueue. */
-	guard?: (file: TFile, fm: Record<string, unknown> | undefined) => boolean;
+	guard?: (file: TFile, fm: Record<string, unknown> | undefined, cache?: CachedMetadata) => boolean;
 	/** Jobs to enqueue when the trigger fires. `file` is set for event triggers. */
 	jobs: (file?: TFile) => TriggerJobSeed[];
 }
 
-// Coalesces the per-keystroke metadataCache 'changed' / vault 'modify' bursts into one
-// evaluation.
+// Coalesces repeated cache-ready updates during active editing into one evaluation.
+// Consistency comes from metadataCache 'changed', not from this timer.
 const EVENT_DEBOUNCE_MS = 2000;
 // Schedule triggers are checked on a heartbeat so `everyMs` getters track live
 // settings without re-registering timers.
@@ -52,6 +53,9 @@ const SCHEDULE_TICK_MS = 60_000;
 export class TriggerRegistry {
 	private readonly foundingTriggers: OrchestrationTrigger[] = [];
 	private userTriggers: OrchestrationTrigger[] = [];
+	// Raw note events that must wait for metadataCache 'changed' before conditions
+	// can be evaluated against a consistent cache snapshot.
+	private readonly pendingConsistentEvents = new Map<string, Set<TriggerEventName>>();
 	// Debounce timers per path, separated by event so a 'modify' burst and a
 	// 'metadata-changed' burst on the same note don't clobber each other's timer.
 	private readonly pendingByEvent = new Map<TriggerEventName, Map<string, number>>();
@@ -104,19 +108,19 @@ export class TriggerRegistry {
 		this.started = true;
 		const { plugin } = this;
 		plugin.registerEvent(plugin.app.vault.on('create', file => {
-			if (file instanceof TFile) this.fireEvent('create', file);
+			if (file instanceof TFile) this.waitForConsistentCache('create', file);
 		}));
 		plugin.registerEvent(plugin.app.vault.on('rename', file => {
 			if (file instanceof TFile) this.fireEvent('rename', file);
 		}));
 		plugin.registerEvent(plugin.app.vault.on('modify', file => {
-			if (file instanceof TFile) this.scheduleDebouncedEvaluation('modify', file);
+			if (file instanceof TFile) this.waitForConsistentCache('modify', file);
 		}));
-		plugin.registerEvent(plugin.app.metadataCache.on('changed', file => {
-			this.scheduleDebouncedEvaluation('metadata-changed', file);
+		plugin.registerEvent(plugin.app.metadataCache.on('changed', (file, _data, cache) => {
+			this.onCacheChanged(file, cache);
 		}));
 		plugin.register(plugin.ingestionEvents.on('metadata-enriched', ({ metadataFile }) => {
-			this.fireEvent('youtube-metadata-enriched', metadataFile);
+			this.waitForConsistentCache('youtube-metadata-enriched', metadataFile, true);
 		}));
 		// Anchor schedules at startup so a plugin reload doesn't immediately re-fire
 		// every interval trigger; the first run lands one interval after load.
@@ -132,9 +136,43 @@ export class TriggerRegistry {
 			for (const timer of timers.values()) window.clearTimeout(timer);
 			timers.clear();
 		}
+		this.pendingConsistentEvents.clear();
 	}
 
-	private scheduleDebouncedEvaluation(event: TriggerEventName, file: TFile): void {
+	private waitForConsistentCache(event: TriggerEventName, file: TFile, useCurrentCache = false): void {
+		if (file.extension !== 'md') return;
+		if (useCurrentCache) {
+			const cache = this.plugin.app.metadataCache.getFileCache(file);
+			if (cache) {
+				this.evaluateCacheReadyEvent(event, file, cache);
+				return;
+			}
+		}
+		let pending = this.pendingConsistentEvents.get(file.path);
+		if (!pending) {
+			pending = new Set<TriggerEventName>();
+			this.pendingConsistentEvents.set(file.path, pending);
+		}
+		pending.add(event);
+	}
+
+	private onCacheChanged(file: TFile, cache: CachedMetadata): void {
+		if (file.extension !== 'md') return;
+		const events = this.pendingConsistentEvents.get(file.path) ?? new Set<TriggerEventName>();
+		this.pendingConsistentEvents.delete(file.path);
+		events.add('metadata-changed');
+		for (const event of events) this.evaluateCacheReadyEvent(event, file, cache);
+	}
+
+	private evaluateCacheReadyEvent(event: TriggerEventName, file: TFile, cache: CachedMetadata): void {
+		if (event === 'modify' || event === 'metadata-changed') {
+			this.scheduleDebouncedEvaluation(event, file, cache);
+			return;
+		}
+		this.fireEvent(event, file, cache);
+	}
+
+	private scheduleDebouncedEvaluation(event: TriggerEventName, file: TFile, cache: CachedMetadata): void {
 		if (file.extension !== 'md') return;
 		let timers = this.pendingByEvent.get(event);
 		if (!timers) {
@@ -147,21 +185,23 @@ export class TriggerRegistry {
 		eventTimers.set(file.path, window.setTimeout(() => {
 			eventTimers.delete(file.path);
 			const fresh = this.plugin.app.vault.getAbstractFileByPath(file.path);
-			if (fresh instanceof TFile) this.fireEvent(event, fresh);
+			if (fresh instanceof TFile) this.fireEvent(event, fresh, cache);
 		}, EVENT_DEBOUNCE_MS));
 	}
 
-	private fireEvent(event: TriggerEventName, file: TFile): void {
+	private fireEvent(event: TriggerEventName, file: TFile, cache?: CachedMetadata): void {
 		if (file.extension !== 'md') return;
 		// While a command/chain holds the note's lock it is the sole mutator; its
 		// mid-flight writes must not spawn jobs (same gate as the auto edit-triggers).
 		if (this.isMaterializing() || this.plugin.noteLocks.isLocked(file.path)) return;
-		const fm = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		const fm = cache
+			? cache.frontmatter as Record<string, unknown> | undefined
+			: this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
 		for (const trigger of this.allTriggers()) {
 			if (!triggerMatchesEvent(trigger, event)) continue;
 			if (!this.isEnabled(trigger)) continue;
 			try {
-				if (trigger.guard && !trigger.guard(file, fm)) continue;
+				if (trigger.guard && !trigger.guard(file, fm, cache)) continue;
 				this.enqueueAll(trigger, file);
 			} catch (e) {
 				logWarn('trigger', trigger.id, 'failed on', file.path, e);

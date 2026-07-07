@@ -77,6 +77,12 @@ export interface CrucibleCommandEntry {
 	// target-file-aware registration — so the queued run targets the job's note
 	// instead of fire-and-forget on the active one. Defaults to "twin exists".
 	queueable: boolean;
+	// Runtime availability for palette invocation. Settings and chain-authoring
+	// surfaces intentionally remain registry-driven instead of availability-driven.
+	available?: () => boolean;
+	// Settings-facing feature-gate help. Return text only when a separate feature
+	// setting disables the command; context gates like "needs active file" stay out.
+	availabilityHelp?: () => string | null;
 }
 
 type CrucibleCommandRunner = () => Promise<unknown>;
@@ -365,6 +371,7 @@ export default class CruciblePlugin extends Plugin {
 		group: CrucibleCommandGroup;
 		run: () => unknown;
 		available?: () => boolean;
+		availabilityHelp?: () => string | null;
 		mutating?: boolean;
 		queueable?: boolean;
 	}): void {
@@ -374,7 +381,15 @@ export default class CruciblePlugin extends Plugin {
 		const queueable = opts.queueable
 			?? (this.chainManager.hasInternalCommand(`${this.manifest.id}:${opts.id}`)
 				|| this.chainManager.hasInternalCommand(`crucible:${opts.id}`));
-		this.commandRegistry.push({ id: opts.id, name: opts.name, group: opts.group, mutating: opts.mutating ?? true, queueable });
+		this.commandRegistry.push({
+			id: opts.id,
+			name: opts.name,
+			group: opts.group,
+			mutating: opts.mutating ?? true,
+			queueable,
+			available: opts.available,
+			availabilityHelp: opts.availabilityHelp,
+		});
 		this.commandRunners.set(opts.id, async () => await opts.run());
 		this.addCommand({
 			id: opts.id,
