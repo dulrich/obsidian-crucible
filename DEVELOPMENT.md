@@ -8,13 +8,15 @@ initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
 pending-plans:
+initiative-status: active
+initiative-cadence: as-needed
 ---
 
 # Blocked on User
 
 
 ---
-Todos
+# Todos
 - [ ]  open-file palette is painfully slow
 - [ ] open-file palette ranking algorithm is worse than the built-in (favor short/continuous substring?)
 - [ ] file type support should be a set of checkboxes based on the types obsidian can read
