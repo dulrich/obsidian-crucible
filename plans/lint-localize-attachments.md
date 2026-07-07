@@ -213,7 +213,7 @@ Image conversion uses the Electron Canvas API (built-in). MD5 uses Node `crypto`
 2. `npx tsc -noEmit -skipLibCheck` → zero errors.
 3. `node esbuild.config.mjs production` → builds.
 4. Manual smoke (in vault):
-   - **Remote image download.** Create a note with `![](https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png)`; with images/attached on, run `Lint: localize attachments`. Expect: file downloaded into the templated folder, renamed `<md5>_MD5.png` (or `.webp` if convert-attached is on), embed rewritten to `![[<folder>/<hash>_MD5.webp]]`.
+   - **Remote image download.** Create a note with `![](_resources/initiatives/obsidian-crucible/plans/lint-localize-attachments/9dcbe10291023468fcdecffa0a9ce85d_MD5.png)`; with images/attached on, run `Lint: localize attachments`. Expect: file downloaded into the templated folder, renamed `<md5>_MD5.png` (or `.webp` if convert-attached is on), embed rewritten to `![[<folder>/<hash>_MD5.webp]]`.
    - **Paste image.** Paste a screenshot into an editor with paste trigger on and convert-pasted on. Expect: image lands in attachment folder as `*_MD5.webp`, embed inserted at the cursor.
    - **Audio off by default.** Embed an MP3 with `![[song.mp3]]`; with audio/attached off, run the command. Expect: file untouched.
    - **Audio on.** Flip audio/attached on; re-run. Expect: file moved into the templated folder and renamed (no re-encoding).

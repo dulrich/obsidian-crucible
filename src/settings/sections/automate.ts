@@ -3,6 +3,7 @@ import { Setting, Command } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { Capture, CaptureTarget, CaptureSource, CaptureTargetSectionMode, CaptureWriteMode, Chain } from "../../types";
 import { agentCommandId } from "../../agents";
+import { featureDisabledCommandExcludeIds, mergeCommandExcludeIds } from "../../commandAvailability";
 import { getPeriodConfigByTarget } from "../../periods";
 import { FileSuggest, FolderSuggest, CommandSuggest, findCommandSuggestItem, getCommandSuggestDisplayName } from "../../suggesters";
 import { SearchWithContainer, sortByNameWithEmptyLast, addWarningIcon } from "../shared";
@@ -368,9 +369,13 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 						});
 					const el = (cb as unknown as SearchWithContainer).containerEl;
 					if (el) el.addClass('crucible-search-container', 'pi-width-normal');
+					const excludedCommands = mergeCommandExcludeIds(
+						tab.plugin.settings.hiddenFromChainSearch,
+						featureDisabledCommandExcludeIds(tab.plugin.commandRegistry, tab.plugin.manifest.id),
+					);
 					new CommandSuggest(tab.app, cb.inputEl, commandExtras, command => {
 						void updateCommandId(command.id);
-					}, tab.plugin.settings.hiddenFromChainSearch);
+					}, excludedCommands);
 				});
 
 			const schema = tab.plugin.chainManager.getCommandSchema(step.commandId);
