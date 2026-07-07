@@ -47,6 +47,7 @@ export type ToCCollapseBehavior = 'manual' | 'click' | 'blur';
 
 export type CrucibleCommandPaletteFilterMode = 'whitelist' | 'blacklist';
 export type CrucibleCommandPaletteHintCharsetMode = 'all-ascii' | 'alphanumeric-whitelist';
+export type CrucibleFileOpenIgnoredFolderMode = 'include' | 'derank' | 'hide';
 export type SourceEvalBudgetPeriod = 'week' | 'month';
 
 import { Hotkey, Command } from 'obsidian';
@@ -399,6 +400,11 @@ export interface CrucibleSettings {
 	crucibleCommandPaletteHintMaxLen: number;
 	crucibleCommandPaletteHintPrefixPenalty: number;
 	crucibleCommandPaletteHintPositionBias: number;
+	// Crucible File-open Palette (optional Quick Switcher replacement)
+	crucibleFileOpenPaletteEnabled: boolean;
+	crucibleFileOpenPaletteIgnoredFolderMode: CrucibleFileOpenIgnoredFolderMode;
+	crucibleFileOpenPaletteCreateMissing: boolean;
+	crucibleFileOpenPaletteExtensions: string[];
 	// Orchestrator
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
@@ -550,6 +556,10 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	crucibleCommandPaletteHintMaxLen: 6,
 	crucibleCommandPaletteHintPrefixPenalty: 1,
 	crucibleCommandPaletteHintPositionBias: 0,
+	crucibleFileOpenPaletteEnabled: false,
+	crucibleFileOpenPaletteIgnoredFolderMode: 'derank',
+	crucibleFileOpenPaletteCreateMissing: false,
+	crucibleFileOpenPaletteExtensions: [],
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
