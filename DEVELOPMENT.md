@@ -17,6 +17,7 @@ initiative-cadence: as-needed
 
 ---
 # Todos
-- [ ]  open-file palette is painfully slow
+- [ ] Lint: Localize: ignore folder (initiatives) separate from no-link (we want to lint frontmatter, but not auto-localize as it's external) -- ideal might be to embed inline image data if possible
+- [ ] open-file palette is painfully slow
 - [ ] open-file palette ranking algorithm is worse than the built-in (favor short/continuous substring?)
 - [ ] file type support should be a set of checkboxes based on the types obsidian can read
