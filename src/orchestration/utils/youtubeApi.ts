@@ -7,23 +7,16 @@ import { parseChannelsTable } from './youtube';
 
 export const YOUTUBE_DATA_API_SECRET_KEY = 'crucible-youtube-data-api-key';
 
-export async function loadYoutubeApiKey(app: App): Promise<string> {
-	if (!app.secretStorage) return '';
-	// await: getSecret may be sync or Promise-returning across Obsidian versions;
-	// awaiting a non-Promise is a no-op, so this is correct either way (and lets the
-	// `|| ''` fallback catch a resolved null instead of leaking the Promise).
-	return (await app.secretStorage.getSecret(YOUTUBE_DATA_API_SECRET_KEY)) || '';
+export async function loadYoutubeApiKey(plugin: CruciblePlugin): Promise<string> {
+	return plugin.secretRegistry.get(YOUTUBE_DATA_API_SECRET_KEY);
 }
 
-export async function storeYoutubeApiKey(app: App, key: string): Promise<void> {
-	if (!app.secretStorage) return;
-	await app.secretStorage.setSecret(YOUTUBE_DATA_API_SECRET_KEY, key);
+export async function storeYoutubeApiKey(plugin: CruciblePlugin, key: string): Promise<void> {
+	await plugin.secretRegistry.store(YOUTUBE_DATA_API_SECRET_KEY, key);
 }
 
-export async function deleteYoutubeApiKey(app: App): Promise<void> {
-	if (!app.secretStorage) return;
-	// SecretStorage doesn't expose an explicit delete, so we clear by setting empty.
-	await app.secretStorage.setSecret(YOUTUBE_DATA_API_SECRET_KEY, '');
+export async function deleteYoutubeApiKey(plugin: CruciblePlugin): Promise<void> {
+	await plugin.secretRegistry.clear(YOUTUBE_DATA_API_SECRET_KEY);
 }
 
 export interface YoutubeVideoMetadata {
@@ -220,7 +213,7 @@ export async function ensureMetadataNote(plugin: CruciblePlugin, videoId: string
 			return { status: 'exists', metadataPath: existing.path };
 		}
 
-		const apiKey = await loadYoutubeApiKey(app);
+		const apiKey = await loadYoutubeApiKey(plugin);
 		if (!apiKey) return { status: 'no-api-key', metadataPath: null };
 
 		const meta = await fetchYoutubeVideo(apiKey, trimmedId);
@@ -486,7 +479,7 @@ export async function ensureChannelAboutNote(
 			return { status: 'skipped', aboutPath: existing.path };
 		}
 
-		const apiKey = await loadYoutubeApiKey(app);
+		const apiKey = await loadYoutubeApiKey(plugin);
 		if (!apiKey) return { status: 'no-api-key', aboutPath: null };
 
 		const meta = await fetchYoutubeChannel(apiKey, trimmedId);
