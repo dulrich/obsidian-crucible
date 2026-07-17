@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Editor, TFile } from 'obsidian';
+import { App, MarkdownView, Modal, Notice, Editor, TFile } from 'obsidian';
 import { AgentResult, Chain, ChainStep, CommandArgSchema } from './types';
 import { appendDebugLog } from './utils';
 import { calculateWordCount } from './lint';
@@ -198,7 +198,25 @@ export class ChainManager {
 			}
 		}
 
+		await this.reconcileOpenEditor(currentTargetFile);
 		new Notice(`Chain "${chain.name}" completed`);
+	}
+
+	// A chain that moves (renames) its target note and then mutates it on disk — e.g.
+	// Ingest-as-News (move-to-daily → lint) — leaves the open editor holding a buffer
+	// that never adopted the post-rename disk writes. The editor is authoritative for
+	// its own autosave, so on its next save it clobbers disk with that stale buffer,
+	// silently dropping the mutation (the moved note ends up without the lint's
+	// word-count). Run this while the chain still holds the note lock, after the last
+	// step, to force the buffer to match disk so a later autosave preserves the writes.
+	private async reconcileOpenEditor(file: TFile | undefined): Promise<void> {
+		if (!file) return;
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view || view.file?.path !== file.path) return;
+		const disk = await this.app.vault.read(file);
+		if (view.getViewData() === disk) return;
+		logWarn('chain', 'reconciling open editor buffer to disk', file.path);
+		view.setViewData(disk, false);
 	}
 
 	private async appendDebugLog(chain: Chain, entry: string) {
