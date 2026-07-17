@@ -6,6 +6,7 @@ import { anthropicClient } from './providers/anthropic';
 import { googleClient } from './providers/google';
 import { ollamaClient } from './providers/ollama';
 import { ProviderCompletionOptions, runCliCompletion } from './providers/cli';
+import type { SecretRegistry } from './secretRegistry';
 
 export { CLI_DEFAULT_TIMEOUT_SECONDS } from './providers/cli';
 export type { ProviderCompletionOptions } from './providers/cli';
@@ -27,25 +28,20 @@ const HTTP_PROVIDER_CLIENTS: Partial<Record<ProviderKind, HttpProviderClient>> =
 export class ProviderManager {
 	app: App;
 
-	constructor(app: App) {
+	constructor(app: App, private readonly secrets: SecretRegistry) {
 		this.app = app;
 	}
 
 	async loadApiKey(providerId: string): Promise<string> {
-		if (!this.app.secretStorage) return '';
-		// await: getSecret may be sync or Promise-returning across Obsidian versions.
-		return (await this.app.secretStorage.getSecret(providerSecretKey(providerId))) || '';
+		return this.secrets.get(providerSecretKey(providerId));
 	}
 
 	async storeApiKey(providerId: string, key: string): Promise<void> {
-		if (!this.app.secretStorage) return;
-		await this.app.secretStorage.setSecret(providerSecretKey(providerId), key);
+		await this.secrets.store(providerSecretKey(providerId), key);
 	}
 
 	async deleteApiKey(providerId: string): Promise<void> {
-		if (!this.app.secretStorage) return;
-		// SecretStorage doesn't always have an explicit delete, so we clear it.
-		await this.app.secretStorage.setSecret(providerSecretKey(providerId), '');
+		await this.secrets.clear(providerSecretKey(providerId));
 	}
 
 	async complete(provider: Provider, modelId: string, system: string, user: string, options: ProviderCompletionOptions = {}): Promise<ProviderCompletionResult> {

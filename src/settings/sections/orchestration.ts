@@ -738,15 +738,9 @@ function renderEditYoutubeTrackerWorkflow(tab: CrucibleSettingTab, containerEl: 
 		.setName('YouTube Data API key')
 		.setDesc('Stored securely in Obsidian Secret Storage. Required for the per-video metadata fetch command.');
 	mountSecretControl(youtubeKeySetting, {
-		load: () => loadYoutubeApiKey(tab.app),
-		store: async (v) => {
-			await storeYoutubeApiKey(tab.app, v);
-			if (v.trim()) await tab.plugin.secretRegistry.record(YOUTUBE_DATA_API_SECRET_KEY);
-		},
-		clear: async () => {
-			await deleteYoutubeApiKey(tab.app);
-			await tab.plugin.secretRegistry.forget(YOUTUBE_DATA_API_SECRET_KEY);
-		},
+		load: () => loadYoutubeApiKey(tab.plugin),
+		store: (v) => storeYoutubeApiKey(tab.plugin, v),
+		clear: () => deleteYoutubeApiKey(tab.plugin),
 		expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(YOUTUBE_DATA_API_SECRET_KEY),
 	});
 }
