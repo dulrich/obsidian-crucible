@@ -137,6 +137,17 @@ If your plugin does not need CSS, delete this file.
   white-space: nowrap;
 }
 
+.crucible-secret-missing-text {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.crucible-secret-missing-input input {
+  border-color: var(--text-error);
+}
+
 .crucible-settings-group .setting-item-control {
   gap: 8px;
 }

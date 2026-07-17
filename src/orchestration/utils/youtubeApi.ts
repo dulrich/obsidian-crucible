@@ -9,18 +9,21 @@ export const YOUTUBE_DATA_API_SECRET_KEY = 'crucible-youtube-data-api-key';
 
 export async function loadYoutubeApiKey(app: App): Promise<string> {
 	if (!app.secretStorage) return '';
-	return app.secretStorage.getSecret(YOUTUBE_DATA_API_SECRET_KEY) || '';
+	// await: getSecret may be sync or Promise-returning across Obsidian versions;
+	// awaiting a non-Promise is a no-op, so this is correct either way (and lets the
+	// `|| ''` fallback catch a resolved null instead of leaking the Promise).
+	return (await app.secretStorage.getSecret(YOUTUBE_DATA_API_SECRET_KEY)) || '';
 }
 
 export async function storeYoutubeApiKey(app: App, key: string): Promise<void> {
 	if (!app.secretStorage) return;
-	app.secretStorage.setSecret(YOUTUBE_DATA_API_SECRET_KEY, key);
+	await app.secretStorage.setSecret(YOUTUBE_DATA_API_SECRET_KEY, key);
 }
 
 export async function deleteYoutubeApiKey(app: App): Promise<void> {
 	if (!app.secretStorage) return;
 	// SecretStorage doesn't expose an explicit delete, so we clear by setting empty.
-	app.secretStorage.setSecret(YOUTUBE_DATA_API_SECRET_KEY, '');
+	await app.secretStorage.setSecret(YOUTUBE_DATA_API_SECRET_KEY, '');
 }
 
 export interface YoutubeVideoMetadata {

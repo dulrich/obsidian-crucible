@@ -45,10 +45,18 @@ export interface OrchestrationJob {
 	deferUntil?: string;
 }
 
+// Distinct, machine-checkable failure reasons a workflow can surface so callers can
+// branch on the cause without string-matching `error`. `no-api-key` specifically
+// means "credential is missing" (as opposed to a transient/rejected API response),
+// so the enrichment queue can stop auto-refilling on it and only it.
+export type WorkflowFailureReason = 'no-api-key';
+
 export interface WorkflowResult {
 	status: 'done' | 'failed' | 'deferred';
 	outputPaths?: string[];
 	error?: string;
+	/** Typed cause for `status: 'failed'`, when the workflow can name one. */
+	failureReason?: WorkflowFailureReason;
 	notes?: string;
 	retryAfterMs?: number;
 }

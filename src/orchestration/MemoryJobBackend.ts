@@ -6,6 +6,7 @@ import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { defaultLaneForPriority } from './lanes';
+import { logWarn } from '../log';
 
 // Transient, in-memory job type (the folded enrichment queue): entries live in a
 // MemoryJobQueue keyed by `dedupeKey`, drain immediately and independently of the
@@ -56,15 +57,20 @@ export class MemoryJobBackend implements JobBackend {
 			if (result.status === 'failed') {
 				const error = result.error ?? 'Workflow returned failed status';
 				this.queue.markFailed(entry.key, error);
-				// Stop auto-refilling when the API key is missing so the queue does not
-				// hammer a hopeless request (mirrors the old enrichment behavior).
-				if (/api key/i.test(error)) this.queue.setAutoEnabled(false);
+				logWarn('job', this.type, entry.key, 'failed:', error);
+				// Stop auto-refilling ONLY when the credential is genuinely missing, so the
+				// queue does not hammer a hopeless request. Gated on the typed reason (not a
+				// substring of `error`) so a transient/rejected API response — e.g. a 403
+				// whose message mentions "API key" — never latches auto-enrich off.
+				if (result.failureReason === 'no-api-key') this.queue.setAutoEnabled(false);
 			} else {
 				this.queue.markDone(entry.key);
 				this.emitMetadataEnriched(entry.key, entry.params, result);
 			}
 		} catch (e) {
-			this.queue.markFailed(entry.key, e instanceof Error ? e.message : String(e));
+			const error = e instanceof Error ? e.message : String(e);
+			this.queue.markFailed(entry.key, error);
+			logWarn('job', this.type, entry.key, 'threw:', error);
 		}
 		this.queue.sweepTerminal();
 		return 'ran';
