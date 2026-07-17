@@ -2,6 +2,7 @@ import type CruciblePlugin from '../main';
 import type { Orchestrator } from './Orchestrator';
 import type { JobType } from './types';
 import { Semaphore } from './utils/semaphore';
+import { computeShouldDrain, readJobTypeAutorun } from './autorunGate';
 
 const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
 
@@ -15,6 +16,10 @@ export class OrchestrationAutoRunner {
 	private disposed = false;
 	private unsubscribe: (() => void) | null = null;
 	private readonly drainingTypes = new Set<JobType>();
+	// Types currently in a manual drain (Run next / enqueue-and-run), which ignores
+	// the auto-run gate. Tracked so a manual drain isn't double-started and so an
+	// auto-kick doesn't collide with one already in flight.
+	private readonly manualDrainingTypes = new Set<JobType>();
 	// A kick that arrives while a type is mid-drain is recorded here instead of being
 	// dropped, then replayed once the drain winds down — closes the lost-wakeup race
 	// where a job enqueued during wind-down would wait for the next event.
@@ -60,6 +65,18 @@ export class OrchestrationAutoRunner {
 		await this.orchestrator.runNext();
 	}
 
+	// Manual drain of a single type, ignoring the auto-run gate: runs everything
+	// currently queued for `type` (no auto-source refill happens when the type's
+	// auto-run is off, so this drains only what is already enqueued). Used by the
+	// enqueue-and-run buttons and the per-type "Run next" control so a job runs even
+	// when both Auto toggles are off. No-op if the type is already draining.
+	runType(type: JobType): void {
+		if (this.disposed) return;
+		if (this.drainingTypes.has(type) || this.manualDrainingTypes.has(type)) return;
+		if (!this.orchestrator.hasPending(type)) return;
+		void this.drainType(type, true);
+	}
+
 	kickAll(): void {
 		for (const type of this.orchestrator.jobTypes()) this.kickDrainType(type);
 	}
@@ -67,26 +84,34 @@ export class OrchestrationAutoRunner {
 	kickDrainType(type: JobType): void {
 		if (this.disposed) return;
 		if (!this.shouldDrain(type)) return;
-		// Already draining: record the kick so it replays after the current drain ends.
-		if (this.drainingTypes.has(type)) {
+		// Already draining (auto or manual): record the kick so it replays after the
+		// current drain ends.
+		if (this.drainingTypes.has(type) || this.manualDrainingTypes.has(type)) {
 			this.redrainRequested.add(type);
 			return;
 		}
-		void this.drainType(type);
+		void this.drainType(type, false);
 	}
 
-	// File types only drain under autorun; memory types always drain.
+	// The auto-run gate: file types drain under the global Autorun toggle (unless
+	// vetoed per-type); memory types drain only when their per-type auto-run is on.
 	private shouldDrain(type: JobType): boolean {
-		return this.orchestrator.drainsWithoutAutorun(type) || (this.enabled && this.fileDrainReady);
+		return computeShouldDrain({
+			drainsWithoutAutorun: this.orchestrator.drainsWithoutAutorun(type),
+			typeAutorun: readJobTypeAutorun(this.plugin.settings.orchestrationJobTypeAutorun, type),
+			globalAutorunEnabled: this.enabled,
+			fileDrainReady: this.fileDrainReady,
+		});
 	}
 
-	private async drainType(type: JobType): Promise<void> {
-		this.drainingTypes.add(type);
+	private async drainType(type: JobType, manual: boolean): Promise<void> {
+		const activeSet = manual ? this.manualDrainingTypes : this.drainingTypes;
+		activeSet.add(type);
 		try {
 			const workerCount = Math.max(1, this.orchestrator.getConfig(type).maxParallel);
-			await Promise.all(Array.from({ length: workerCount }, () => this.typeWorker(type)));
+			await Promise.all(Array.from({ length: workerCount }, () => this.typeWorker(type, manual)));
 		} finally {
-			this.drainingTypes.delete(type);
+			activeSet.delete(type);
 		}
 		// Replay a kick that landed mid-drain so work enqueued during the wind-down
 		// window isn't stranded until the next event.
@@ -95,11 +120,12 @@ export class OrchestrationAutoRunner {
 		}
 	}
 
-	private async typeWorker(type: JobType): Promise<void> {
+	private async typeWorker(type: JobType, manual: boolean): Promise<void> {
 		const gate = this.orchestrator.getGate(type);
 		for (;;) {
 			if (this.disposed) return;
-			if (!this.shouldDrain(type)) return;
+			// A manual drain ignores the auto-run gate but still stops when empty.
+			if (!manual && !this.shouldDrain(type)) return;
 			const config = this.orchestrator.getConfig(type);
 
 			// Memory types know precisely when they are empty (and can refill); file
