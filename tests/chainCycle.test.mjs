@@ -49,7 +49,7 @@ const { ChainManager, chainStepResult } = await import(pathToFileURL(outfile).hr
 // No active file → executeChain skips the note-lock path and runs steps directly,
 // so the cycle guard is the only thing standing between a self-referential chain
 // and unbounded recursion.
-const stubApp = { workspace: { getActiveFile: () => null } };
+const stubApp = { workspace: { getActiveFile: () => null, getActiveViewOfType: () => null } };
 
 test('a self-referential chain is skipped instead of recursing forever', async () => {
 	globalThis.__notices = [];
