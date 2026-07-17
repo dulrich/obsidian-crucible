@@ -44,9 +44,17 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 
 	containerEl.createEl('hr');
 	new Setting(containerEl).setName('Excluded folders').setHeading();
-	containerEl.createEl('p', { text: 'Notes in these folders can be excluded from linting, search indexing, or both.' });
+	containerEl.createEl('p', { text: 'Exclude notes in these folders from linting, search indexing, and/or attachment localization — each independently. Excluding Localize (only) lets a folder of external images still be linted for frontmatter without pulling its images local.' });
 
 	const ignoreGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	if (s.excludedFolders.length > 0) {
+		const header = ignoreGroup.createDiv({ cls: 'crucible-exclusion-header' });
+		header.createSpan({ cls: 'crucible-exclusion-header-folder', text: 'Folder' });
+		const headerScopes = header.createDiv({ cls: 'crucible-exclusion-scopes' });
+		for (const label of ['Lint', 'Search', 'Localize']) {
+			headerScopes.createSpan({ cls: 'crucible-exclusion-scope-col', text: label });
+		}
+	}
 	s.excludedFolders.forEach((entry, index) => {
 		if (index > 0) ignoreGroup.createEl('hr', { cls: 'crucible-mini-hr' });
 		const row = ignoreGroup.createDiv({ cls: 'crucible-folder-template-row' });
@@ -56,26 +64,20 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 			set: (v) => { entry.folder = v; },
 			suggest: (el) => { el.classList.add('crucible-full-width-search'); new FolderSuggest(tab.app, el); },
 		}, save);
-		setting.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => { s.excludedFolders.splice(index, 1); await save(); tab.display(); }); });
+		setting.addExtraButton(cb => { cb.setIcon('trash').setTooltip('Remove').onClick(async () => { s.excludedFolders.splice(index, 1); await save(); tab.display(); }); });
 		setting.infoEl.remove();
 
 		const scopes = row.createDiv({ cls: 'crucible-exclusion-scopes' });
-		const lintSetting = bindToggle(scopes, {
-			name: 'Lint',
-			tooltip: 'Exclude from lint commands',
-			get: () => entry.lint,
-			set: (v) => { entry.lint = v; },
-		}, save);
-		lintSetting.infoEl.remove();
-		const searchSetting = bindToggle(scopes, {
-			name: 'Search',
-			tooltip: 'Exclude from search indexing',
-			get: () => entry.search,
-			set: (v) => { entry.search = v; },
-		}, save);
-		searchSetting.infoEl.remove();
+		const addScope = (label: string, tooltip: string, get: () => boolean, set: (v: boolean) => void) => {
+			const scopeSetting = bindToggle(scopes, { name: label, tooltip, get, set }, save);
+			scopeSetting.infoEl.remove();
+			scopeSetting.settingEl.addClass('crucible-exclusion-scope-col');
+		};
+		addScope('Lint', 'Exclude from lint commands', () => entry.lint, (v) => { entry.lint = v; });
+		addScope('Search', 'Exclude from search indexing', () => entry.search, (v) => { entry.search = v; });
+		addScope('Localize', 'Exclude from attachment localization', () => entry.localize, (v) => { entry.localize = v; });
 	});
-	new Setting(ignoreGroup).addButton(bt => bt.setButtonText('Add excluded folder').setCta().onClick(async () => { s.excludedFolders.push({ folder: '', lint: true, search: false }); await save(); tab.display(); }));
+	new Setting(ignoreGroup).addButton(bt => bt.setButtonText('Add excluded folder').setCta().onClick(async () => { s.excludedFolders.push({ folder: '', lint: true, search: false, localize: false }); await save(); tab.display(); }));
 
 	renderLocalizeAttachmentsSettings(tab, containerEl);
 }

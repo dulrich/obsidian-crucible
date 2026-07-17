@@ -61,22 +61,48 @@ test('empty exclusion rows are inactive', () => {
 
 test('dedupeExcludedFolders merges scopes by normalized folder', () => {
 	assert.deepEqual(dedupeExcludedFolders([
-		{ folder: '/archive/', lint: true, search: false },
-		{ folder: 'archive', lint: false, search: true },
-	]), [{ folder: 'archive', lint: true, search: true }]);
+		{ folder: '/archive/', lint: true, search: false, localize: false },
+		{ folder: 'archive', lint: false, search: true, localize: true },
+	]), [{ folder: 'archive', lint: true, search: true, localize: true }]);
 });
 
 test('ensureDefaultSearchExclusion adds _crucible search exclusion once', () => {
-	assert.deepEqual(ensureDefaultSearchExclusion([]), [{ folder: '_crucible', lint: false, search: true }]);
+	assert.deepEqual(ensureDefaultSearchExclusion([]), [{ folder: '_crucible', lint: false, search: true, localize: false }]);
 	assert.deepEqual(
-		ensureDefaultSearchExclusion([{ folder: '_crucible', lint: true, search: true }]),
-		[{ folder: '_crucible', lint: true, search: true }],
+		ensureDefaultSearchExclusion([{ folder: '_crucible', lint: true, search: true, localize: false }]),
+		[{ folder: '_crucible', lint: true, search: true, localize: false }],
 	);
 });
 
-test('migrateExcludedFolders preserves legacy lint exclusions as lint-only', () => {
+test('migrateExcludedFolders preserves legacy lint exclusions as lint- and localize-excluded', () => {
 	assert.deepEqual(migrateExcludedFolders([], ['archive']), [
-		{ folder: '_crucible', lint: false, search: true },
-		{ folder: 'archive', lint: true, search: false },
+		{ folder: '_crucible', lint: false, search: true, localize: false },
+		{ folder: 'archive', lint: true, search: false, localize: true },
 	]);
+});
+
+test('migrateExcludedFolders defaults localize to lint for rows missing the field', () => {
+	assert.deepEqual(migrateExcludedFolders([
+		{ folder: 'linted', lint: true, search: false },
+		{ folder: 'searched', lint: false, search: true },
+	], []), [
+		{ folder: '_crucible', lint: false, search: true, localize: false },
+		{ folder: 'linted', lint: true, search: false, localize: true },
+		{ folder: 'searched', lint: false, search: true, localize: false },
+	]);
+});
+
+test('migrateExcludedFolders keeps an explicit localize choice (independent of lint)', () => {
+	assert.deepEqual(migrateExcludedFolders([
+		{ folder: 'initiatives', lint: false, search: false, localize: true },
+	], []), [
+		{ folder: '_crucible', lint: false, search: true, localize: false },
+		{ folder: 'initiatives', lint: false, search: false, localize: true },
+	]);
+});
+
+test('isPathExcluded honors the independent localize scope', () => {
+	const settings = { excludedFolders: [{ folder: 'initiatives', lint: false, search: false, localize: true }] };
+	assert.equal(isPathExcluded(settings, 'initiatives/post.md', 'localize'), true);
+	assert.equal(isPathExcluded(settings, 'initiatives/post.md', 'lint'), false);
 });
