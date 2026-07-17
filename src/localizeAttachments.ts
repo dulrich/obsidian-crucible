@@ -5,6 +5,8 @@ import {
 	LocalizeMediaType,
 } from './types';
 import { Linter } from './lint';
+import { isPathExcluded } from './exclusions';
+import type { ExclusionScope } from './types';
 import { appendDebugLog, applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
 import { logError, logWarn } from './log';
 import { withMaterializing } from './frontmatter';
@@ -308,7 +310,7 @@ export class AttachmentLocalizer {
 	}
 
 	async localizeNote(file: TFile, silent: boolean = false): Promise<boolean> {
-		if (this.linter.isPathIgnored(file.path)) return true;
+		if (isPathExcluded(this.settings, file.path, 'localize')) return true;
 		if (file.extension !== 'md') return true;
 
 		const spinner = silent ? null : new Notice(`Localizing attachments in "${file.basename}"...`, 0);
@@ -365,13 +367,13 @@ export class AttachmentLocalizer {
 		return await this.localizeFolder(this.app.vault.getRoot());
 	}
 
-	private collectMarkdownFiles(folder: TFolder): TFile[] {
+	private collectMarkdownFiles(folder: TFolder, scope: ExclusionScope): TFile[] {
 		const files: TFile[] = [];
 		const collect = (current: TFolder) => {
-			if (this.linter.isPathIgnored(current.path)) return;
+			if (isPathExcluded(this.settings, current.path, scope)) return;
 			for (const child of current.children) {
 				if (child instanceof TFile && child.extension === 'md') {
-					if (!this.linter.isPathIgnored(child.path)) files.push(child);
+					if (!isPathExcluded(this.settings, child.path, scope)) files.push(child);
 				} else if (child instanceof TFolder) {
 					collect(child);
 				}
@@ -382,7 +384,7 @@ export class AttachmentLocalizer {
 	}
 
 	async localizeFolder(folder: TFolder): Promise<boolean> {
-		const files = this.collectMarkdownFiles(folder);
+		const files = this.collectMarkdownFiles(folder, 'localize');
 
 		if (files.length === 0) {
 			new Notice('No Markdown files to scan for attachments');
@@ -463,7 +465,9 @@ export class AttachmentLocalizer {
 	}
 
 	async repairFolder(folder: TFolder): Promise<boolean> {
-		const files = this.collectMarkdownFiles(folder);
+		// Repair (fixing broken local links) is unrelated to localization opt-out, so
+		// it keeps honoring the `lint` scope rather than the new `localize` one.
+		const files = this.collectMarkdownFiles(folder, 'lint');
 		if (files.length === 0) {
 			new Notice('No Markdown files to scan for attachments');
 			return true;
@@ -752,7 +756,7 @@ export class AttachmentLocalizer {
 
 	async handlePaste(evt: ClipboardEvent, editor: Editor, view: MarkdownView): Promise<boolean> {
 		if (!view.file) return false;
-		if (this.linter.isPathIgnored(view.file.path)) return false;
+		if (isPathExcluded(this.settings, view.file.path, 'localize')) return false;
 		const items = evt.clipboardData?.items;
 		if (!items || items.length === 0) return false;
 
