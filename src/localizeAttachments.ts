@@ -4,7 +4,6 @@ import {
 	ImageConvertFormat,
 	LocalizeMediaType,
 } from './types';
-import { Linter } from './lint';
 import { isPathExcluded } from './exclusions';
 import type { ExclusionScope } from './types';
 import { appendDebugLog, applyAttachmentTemplate, classifyLocalizeMediaType, ensureFolder } from './utils';
@@ -234,7 +233,6 @@ function md5(bytes: Uint8Array): string {
 export class AttachmentLocalizer {
 	private app: App;
 	private settings: CrucibleSettings;
-	private linter: Linter;
 	private setMaterializing: (state: boolean) => void;
 	private noteLocks?: NoteLockManager;
 	private enqueueImageMetadata?: (imagePath: string, sourceNotePath: string) => void;
@@ -242,14 +240,12 @@ export class AttachmentLocalizer {
 	constructor(
 		app: App,
 		settings: CrucibleSettings,
-		linter: Linter,
 		setMaterializing: (state: boolean) => void,
 		noteLocks?: NoteLockManager,
 		enqueueImageMetadata?: (imagePath: string, sourceNotePath: string) => void,
 	) {
 		this.app = app;
 		this.settings = settings;
-		this.linter = linter;
 		this.setMaterializing = setMaterializing;
 		this.noteLocks = noteLocks;
 		this.enqueueImageMetadata = enqueueImageMetadata;
@@ -410,7 +406,9 @@ export class AttachmentLocalizer {
 	// (preferring the note's expected attachment folder — the inverse of the move-without-rewrite
 	// bug). Refs that already resolve are left untouched; unrecoverable ones are reported.
 	async repairNote(file: TFile, silent: boolean = false): Promise<{ repaired: number; unrepairable: number } | null> {
-		if (this.linter.isPathIgnored(file.path)) return { repaired: 0, unrepairable: 0 };
+		// Repair honors the 'lint' scope, matching repairFolder: fixing broken local
+		// links is unrelated to the localization opt-out.
+		if (isPathExcluded(this.settings, file.path, 'lint')) return { repaired: 0, unrepairable: 0 };
 		if (file.extension !== 'md') return { repaired: 0, unrepairable: 0 };
 
 		const spinner = silent ? null : new Notice(`Repairing attachment links in "${file.basename}"...`, 0);
