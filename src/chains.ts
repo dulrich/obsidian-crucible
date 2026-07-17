@@ -218,16 +218,10 @@ export class ChainManager {
 		const views = leaves
 			.map(leaf => leaf.view)
 			.filter((view): view is MarkdownView => view instanceof MarkdownView && view.file?.path === file.path);
-		if (views.length === 0) {
-			logWarn('chain', 'reconcile: no open markdown view for', file.path);
-			return;
-		}
+		if (views.length === 0) return;
 		const disk = await this.app.vault.read(file);
 		for (const view of views) {
-			if (view.getViewData() === disk) {
-				logWarn('chain', 'reconcile: editor buffer already matches disk', file.path);
-				continue;
-			}
+			if (view.getViewData() === disk) continue;
 			logWarn('chain', 'reconciling open editor buffer to disk', file.path);
 			view.setViewData(disk, false);
 		}
