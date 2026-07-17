@@ -3,12 +3,16 @@ export interface FolderTemplate {
 	template: string;
 }
 
-export type ExclusionScope = 'lint' | 'search';
+export type ExclusionScope = 'lint' | 'search' | 'localize';
 
 export interface ExcludedFolder {
 	folder: string;
 	lint: boolean;
 	search: boolean;
+	// Exclude from attachment localization (manual, folder/vault, and auto-localize).
+	// Separate from `lint` so a folder of external images can be linted for
+	// frontmatter without its images being pulled local.
+	localize: boolean;
 }
 
 export interface Shortcut {
@@ -508,7 +512,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	folderTemplates: [],
 	lintFrontmatterInsert: '',
 	lintYamlKeyPriority: ['title', 'created', 'updated', 'word-count'],
-	excludedFolders: [{ folder: '_crucible', lint: false, search: true }],
+	excludedFolders: [{ folder: '_crucible', lint: false, search: true, localize: false }],
 	lintCreatedKey: 'created',
 	lintModifiedKey: 'updated',
 	lintBlankLineAfterYaml: true,

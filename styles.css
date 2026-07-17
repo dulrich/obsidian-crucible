@@ -110,9 +110,22 @@ If your plugin does not need CSS, delete this file.
   opacity: 0.4;
 }
 
-.crucible-folder-template-row .setting-item {
+.crucible-folder-template-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.crucible-folder-template-row > .setting-item {
+  flex: 1 1 auto;
+  min-width: 0;
   padding-top: 8px !important;
   padding-bottom: 8px !important;
+  border-top: 0;
+}
+
+.crucible-folder-template-row > .setting-item .setting-item-control {
+  width: 100%;
 }
 
 /* Standard control widths */
@@ -805,16 +818,36 @@ If your plugin does not need CSS, delete this file.
 
 .crucible-exclusion-scopes {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
   align-items: center;
-  margin-top: 0.35rem;
+  flex: 0 0 auto;
 }
 
-.crucible-exclusion-scopes .setting-item {
-  flex: 0 0 auto;
-  padding: 0;
-  border: 0;
+.crucible-exclusion-scope-col {
+  width: 72px;
+  flex: 0 0 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 !important;
+  border: 0 !important;
+}
+
+.crucible-exclusion-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 4px 0 2px;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+  color: var(--text-muted);
+}
+
+.crucible-exclusion-header-folder {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .crucible-source-eval-dashboard {
