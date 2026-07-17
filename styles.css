@@ -719,6 +719,11 @@ If your plugin does not need CSS, delete this file.
   gap: 0.4rem;
 }
 
+.crucible-ingestion-queue-panic-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
 .crucible-queue-type-controls {
   display: flex;
   flex-wrap: wrap;

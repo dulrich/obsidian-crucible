@@ -34,6 +34,7 @@ const {
 
 test('memory type does not drain when its per-type auto-run is unset (default idle)', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: true,
 		typeAutorun: undefined,
 		globalAutorunEnabled: true, // global Autorun must not force a memory drain
@@ -43,6 +44,7 @@ test('memory type does not drain when its per-type auto-run is unset (default id
 
 test('memory type does not drain when its per-type auto-run is off', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: true,
 		typeAutorun: false,
 		globalAutorunEnabled: true,
@@ -52,6 +54,7 @@ test('memory type does not drain when its per-type auto-run is off', () => {
 
 test('memory type drains when its per-type auto-run is on, independent of global Autorun', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: true,
 		typeAutorun: true,
 		globalAutorunEnabled: false,
@@ -63,6 +66,7 @@ test('memory type drains when its per-type auto-run is on, independent of global
 
 test('file type drains under global Autorun once the file-drain delay has elapsed', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: false,
 		typeAutorun: undefined,
 		globalAutorunEnabled: true,
@@ -72,6 +76,7 @@ test('file type drains under global Autorun once the file-drain delay has elapse
 
 test('file type waits for the initial file-drain delay even with global Autorun on', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: false,
 		typeAutorun: undefined,
 		globalAutorunEnabled: true,
@@ -81,6 +86,7 @@ test('file type waits for the initial file-drain delay even with global Autorun 
 
 test('file type does not drain when global Autorun is off', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: false,
 		typeAutorun: undefined,
 		globalAutorunEnabled: false,
@@ -90,6 +96,7 @@ test('file type does not drain when global Autorun is off', () => {
 
 test('file type per-type false vetoes even when global Autorun is on', () => {
 	assert.equal(computeShouldDrain({
+		queueEnabled: true,
 		drainsWithoutAutorun: false,
 		typeAutorun: false,
 		globalAutorunEnabled: true,
@@ -100,34 +107,65 @@ test('file type per-type false vetoes even when global Autorun is on', () => {
 // --- the display predicate (Queue Monitor) ---
 
 test('typeAutorunEnabled: memory type reflects its per-type flag, default off', () => {
-	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: true, typeAutorun: undefined, globalAutorunEnabled: true }), false);
-	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: true, typeAutorun: true, globalAutorunEnabled: false }), true);
+	assert.equal(typeAutorunEnabled({ queueEnabled: true, drainsWithoutAutorun: true, typeAutorun: undefined, globalAutorunEnabled: true }), false);
+	assert.equal(typeAutorunEnabled({ queueEnabled: true, drainsWithoutAutorun: true, typeAutorun: true, globalAutorunEnabled: false }), true);
 });
 
 test('typeAutorunEnabled: file type is global Autorun minus a per-type veto — per-type true cannot bypass a disabled global', () => {
-	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: true }), true);
-	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: false }), false);
-	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: false, globalAutorunEnabled: true }), false);
-	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: true, globalAutorunEnabled: false }), false);
+	assert.equal(typeAutorunEnabled({ queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: true }), true);
+	assert.equal(typeAutorunEnabled({ queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: false }), false);
+	assert.equal(typeAutorunEnabled({ queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: false, globalAutorunEnabled: true }), false);
+	assert.equal(typeAutorunEnabled({ queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: true, globalAutorunEnabled: false }), false);
 });
 
 test('display and drain agree: computeShouldDrain is exactly typeAutorunEnabled plus readiness', () => {
-	for (const drainsWithoutAutorun of [true, false]) {
-		for (const typeAutorun of [true, false, undefined]) {
-			for (const globalAutorunEnabled of [true, false]) {
-				const inputs = { drainsWithoutAutorun, typeAutorun, globalAutorunEnabled };
-				const label = JSON.stringify(inputs);
-				// With readiness satisfied, the drain decision IS the displayed state.
-				assert.equal(computeShouldDrain({ ...inputs, fileDrainReady: true }), typeAutorunEnabled(inputs), label);
-				// Before readiness, only memory types (which don't wait on it) drain.
-				assert.equal(
-					computeShouldDrain({ ...inputs, fileDrainReady: false }),
-					drainsWithoutAutorun && typeAutorunEnabled(inputs),
-					label,
-				);
+	for (const queueEnabled of [true, false]) {
+		for (const drainsWithoutAutorun of [true, false]) {
+			for (const typeAutorun of [true, false, undefined]) {
+				for (const globalAutorunEnabled of [true, false]) {
+					const inputs = { queueEnabled, drainsWithoutAutorun, typeAutorun, globalAutorunEnabled };
+					const label = JSON.stringify(inputs);
+					// With readiness satisfied, the drain decision IS the displayed state.
+					assert.equal(computeShouldDrain({ ...inputs, fileDrainReady: true }), typeAutorunEnabled(inputs), label);
+					// Before readiness, only memory types (which don't wait on it) drain.
+					assert.equal(
+						computeShouldDrain({ ...inputs, fileDrainReady: false }),
+						drainsWithoutAutorun && typeAutorunEnabled(inputs),
+						label,
+					);
+				}
 			}
 		}
 	}
+});
+
+// --- the queue-wide panic switch (orchestrationQueueEnabled) ---
+
+test('panic off vetoes every type regardless of the per-type and global flags', () => {
+	for (const drainsWithoutAutorun of [true, false]) {
+		for (const typeAutorun of [true, false, undefined]) {
+			for (const globalAutorunEnabled of [true, false]) {
+				for (const fileDrainReady of [true, false]) {
+					const inputs = { queueEnabled: false, drainsWithoutAutorun, typeAutorun, globalAutorunEnabled };
+					const label = JSON.stringify({ ...inputs, fileDrainReady });
+					assert.equal(typeAutorunEnabled(inputs), false, label);
+					assert.equal(computeShouldDrain({ ...inputs, fileDrainReady }), false, label);
+				}
+			}
+		}
+	}
+});
+
+test('panic back on restores the underlying configuration verbatim', () => {
+	const memoryOn = { queueEnabled: true, drainsWithoutAutorun: true, typeAutorun: true, globalAutorunEnabled: false };
+	const fileOn = { queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: true };
+	assert.equal(typeAutorunEnabled(memoryOn), true);
+	assert.equal(typeAutorunEnabled(fileOn), true);
+	assert.equal(typeAutorunEnabled({ ...memoryOn, queueEnabled: false }), false);
+	assert.equal(typeAutorunEnabled({ ...fileOn, queueEnabled: false }), false);
+	// Flipping queueEnabled back is the only change needed to resume.
+	assert.equal(typeAutorunEnabled({ ...memoryOn, queueEnabled: true }), true);
+	assert.equal(typeAutorunEnabled({ ...fileOn, queueEnabled: true }), true);
 });
 
 // --- settings-map readers ---

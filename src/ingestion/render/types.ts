@@ -6,6 +6,7 @@ export type SectionId =
 	| 'unrefinedTranscripts'
 	| 'blogIntake'
 	| 'youtubeIntake'
+	| 'queueControls'
 	| 'queueMonitor'
 	| 'uncapturedPosts'
 	| 'ignoredPosts'

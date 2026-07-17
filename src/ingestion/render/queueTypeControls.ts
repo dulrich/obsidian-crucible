@@ -2,11 +2,12 @@ import type CruciblePlugin from '../../main';
 import type { JobType } from '../../orchestration/types';
 import { readTypeAutorun, readTypeMinIntervalOverride, typeAutorunEnabled } from '../../orchestration/autorunGate';
 
-// Compact per-type control strip for the Queue Monitor: one row per job type that
-// currently has queued/running work, with the type's auto-run toggle, its effective
-// state (the drain gate's decision minus the readiness inputs, so display can never
-// disagree with behavior), a rate-limit override, and a manual "Run" that drains
-// the type's queued jobs regardless of the auto-run gate.
+// Compact per-type control strip for the Queue controls section: one row per
+// registered job type (queued work or not, so vetoes and rate overrides are
+// configurable while queues sit idle), with the type's auto-run toggle, its
+// effective state (the drain gate's decision minus the readiness inputs, so
+// display can never disagree with behavior), a rate-limit override, and a manual
+// "Run" that drains the type's queued jobs regardless of the auto-run gate.
 export function renderQueueTypeControls(
 	plugin: CruciblePlugin,
 	body: HTMLElement,
@@ -43,6 +44,7 @@ function renderTypeControl(
 		: 'File type: auto-runs when its auto toggle and the global Autorun are both on.';
 	const updateChip = () => {
 		const on = typeAutorunEnabled({
+			queueEnabled: plugin.settings.orchestrationQueueEnabled !== false,
 			drainsWithoutAutorun,
 			typeAutorun: typeAutorun(),
 			globalAutorunEnabled: plugin.settings.orchestrationQueueAutorunEnabled === true,

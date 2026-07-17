@@ -423,6 +423,10 @@ export interface CrucibleSettings {
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
 	orchestrationQueueAutorunEnabled: boolean;
+	// Queue-wide panic switch (default true). Off stops ALL auto-draining while
+	// preserving the Autorun/Auto-enrich/per-type flags underneath, so re-enabling
+	// restores the exact prior configuration. Manual Run/enqueue still executes.
+	orchestrationQueueEnabled: boolean;
 	// Per-job-type queue controls, keyed by JobType. `autoRun` gates auto-draining:
 	// a memory type (the folded enrichment queue) auto-drains only when true — so
 	// turning its Auto toggle off leaves the queue idle instead of draining
@@ -586,6 +590,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
 	orchestrationQueueAutorunEnabled: false,
+	orchestrationQueueEnabled: true,
 	orchestrationJobTypeControls: {},
 	orchestrationMaxConcurrent: 3,
 	orchestrationAutorunTimeoutSeconds: 600,
