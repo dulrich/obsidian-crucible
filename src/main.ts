@@ -234,6 +234,9 @@ export default class CruciblePlugin extends Plugin {
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
+				// Diagnostic: trace every write to a note and whether word-count survives,
+				// to catch a post-lint clobber (window.__CRUCIBLE_DEBUG__).
+				void this.app.vault.read(file).then(c => logWarn('modify', file.path, 'word-count?', /(^|\n)\s*word-count\s*:/.test(c)));
 				debouncedLint(file);
 				this.autoLocalizeScheduler.schedule(file, 'edit');
 			}
