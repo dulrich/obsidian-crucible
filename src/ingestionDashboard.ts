@@ -115,7 +115,6 @@ export class IngestionDashboardUI {
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
 	// The Queue Monitor card's Auto-enrich checkbox, re-synced when the per-type
 	// strip flips the enrichment type's auto-run (both write the same flags).
-	private enrichToggle: HTMLInputElement | null = null;
 	// Blog control center filter: which blogs to list.
 	private blogFilter: ControlCenterFilter = 'all';
 	// Channel control center filter: which channels to list.
@@ -144,6 +143,7 @@ export class IngestionDashboardUI {
 		this.buildSection('unrefinedTranscripts', 'Unrefined transcripts', 'Notes tagged #transcript that are not yet tagged #refined.');
 		this.buildSection('blogIntake', 'Blog intake', 'Blog tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'blog'), true);
 		this.buildSection('youtubeIntake', 'YouTube intake', 'YouTube tracker runs (most recent first).', (heading) => this.renderEnqueueIntakeButton(heading, 'youtube'), true);
+		this.buildQueueControlsSection();
 		this.buildQueueMonitorSection();
 		this.buildSection('uncapturedPosts', 'Uncaptured posts', 'Blog posts seen in tracker runs but not yet captured as a vault note.', undefined, true);
 		this.buildSection('ignoredPosts', 'Ignored blogs', 'Blog post IDs you chose to ignore. They are skipped by the tracker and the uncaptured list.', undefined, true);
@@ -193,7 +193,6 @@ export class IngestionDashboardUI {
 		}
 		this.eventRefs.length = 0;
 		this.plugin.enrichmentQueue?.setAutoSource(null);
-		this.enrichToggle = null;
 		this.intakeButtons.clear();
 		this.sections.clear();
 		this.relevantSignatures.clear();
@@ -392,16 +391,47 @@ export class IngestionDashboardUI {
 		ctx.metaEl.setText(text);
 	}
 
-	private buildQueueMonitorSection(): void {
+	// The Queue controls section: every global and per-type auto-run/rate control
+	// in one default-collapsed card, so per-type vetoes and rate overrides are
+	// configurable while the queues sit idle. Settings-driven, so it renders once
+	// at build and re-renders only from its own handlers (and the Queue monitor
+	// panic switch) — never from queue events, which would clobber a mid-edit
+	// rate input.
+	private buildQueueControlsSection(): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
 		const { countEl, metaEl } = this.createSectionHeader(
 			card,
-			'Queue monitor',
-			'All queued and running jobs across the file-backed and in-memory queues.',
-			false,
+			'Queue controls',
+			'Auto-run toggles and rate limits, global and per job type.',
+			true,
 		);
+		const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
 
-		const controls = card.createDiv({ cls: 'crucible-ingestion-queue-controls' });
+		const ctx: SectionContext = {
+			id: 'queueControls',
+			title: 'Queue controls',
+			description: '',
+			body,
+			countEl,
+			metaEl,
+			sort: null,
+			refresh: () => this.renderQueueControls(body),
+		};
+		this.sections.set('queueControls', ctx);
+		this.renderQueueControls(body);
+
+		// Enable + push the initial auto-source if Auto-enrich is on. Both are required:
+		// MemoryJobQueue.refill() no-ops unless autoEnabled AND autoSource are set, and
+		// nothing else enables the queue on load — without this the box reads ON but
+		// enrichment stays idle until the toggle is cycled off/on.
+		if (this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true) {
+			void this.plugin.setAutoEnrichEnabled(true, () => this.uncapturedQueueItems());
+		}
+	}
+
+	private renderQueueControls(body: HTMLElement): void {
+		body.empty();
+		const controls = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
 
 		// --- Orchestrator controls ---
 		const autorunLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-toggle' });
@@ -413,6 +443,8 @@ export class IngestionDashboardUI {
 				this.plugin.settings.orchestrationQueueAutorunEnabled = autorunToggle.checked;
 				await this.plugin.saveSettings();
 				this.plugin.orchestrationAutoRunner?.setEnabled(autorunToggle.checked);
+				// Global Autorun feeds every file type's chip; re-render the strip.
+				this.renderQueueControls(body);
 			})();
 		});
 
@@ -426,11 +458,13 @@ export class IngestionDashboardUI {
 		const enrichToggle = enrichToggleLabel.createEl('input', { type: 'checkbox' });
 		enrichToggle.checked = this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
 		enrichToggleLabel.appendText(' Auto enrich from Uncaptured Videos');
-		this.enrichToggle = enrichToggle;
 		// setAutoEnrichEnabled owns the flag sync (legacy flag, per-type auto-run,
 		// live queue enable); the dashboard supplies its sort-following auto-source.
 		enrichToggle.addEventListener('change', () => {
-			void this.plugin.setAutoEnrichEnabled(enrichToggle.checked, () => this.uncapturedQueueItems());
+			void this.plugin
+				.setAutoEnrichEnabled(enrichToggle.checked, () => this.uncapturedQueueItems())
+				// The enrichment type's chip in the strip reflects the same flag.
+				.then(() => this.renderQueueControls(body));
 		});
 
 		const rateLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-rate' });
@@ -450,6 +484,50 @@ export class IngestionDashboardUI {
 			})();
 		});
 
+		// Per-type strip for every registered type. When it flips the enrichment
+		// type's auto-run, reassert the dashboard's auto-source (the strip can't
+		// supply one, and refill no-ops without it), then re-render so the
+		// Auto-enrich checkbox and every chip stay in sync.
+		renderQueueTypeControls(this.plugin, body, this.plugin.orchestrator.jobTypes(), () => {
+			if (this.plugin.enrichmentQueue?.isAutoEnabled()) {
+				this.plugin.enrichmentQueue.setAutoSource(() => this.uncapturedQueueItems());
+			}
+			this.renderQueueControls(body);
+		});
+	}
+
+	private buildQueueMonitorSection(): void {
+		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
+		const { countEl, metaEl } = this.createSectionHeader(
+			card,
+			'Queue monitor',
+			'All queued and running jobs across the file-backed and in-memory queues.',
+			false,
+		);
+
+		// Deliberately just a panic switch here: one motion stops ALL auto-draining
+		// while preserving the Autorun/Auto-enrich/per-type configuration underneath,
+		// so re-enabling restores exactly the prior behavior. Manual Run/enqueue
+		// still executes. The detailed controls live in the Queue controls section.
+		const controls = card.createDiv({ cls: 'crucible-ingestion-queue-controls' });
+		const panicLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-toggle' });
+		const panicToggle = panicLabel.createEl('input', { type: 'checkbox' });
+		panicToggle.checked = this.plugin.settings.orchestrationQueueEnabled !== false;
+		panicLabel.appendText(' Queue enabled');
+		controls.createSpan({
+			cls: 'crucible-ingestion-queue-panic-hint',
+			text: 'Off stops all auto-draining (manual Run still works). Per-type settings live under Queue controls above.',
+		});
+		panicToggle.addEventListener('change', () => {
+			void (async () => {
+				this.plugin.settings.orchestrationQueueEnabled = panicToggle.checked;
+				await this.plugin.saveSettings();
+				if (panicToggle.checked) this.plugin.orchestrationAutoRunner?.kickAll();
+				// The panic veto feeds every chip in the Queue controls strip.
+				await this.sections.get('queueControls')?.refresh();
+			})();
+		});
+
 		const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
 		body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 
@@ -464,14 +542,6 @@ export class IngestionDashboardUI {
 			refresh: () => this.renderQueueMonitor(body, ctx),
 		};
 		this.sections.set('queueMonitor', ctx);
-
-		// Enable + push the initial auto-source if the toggle is on. Both are required:
-		// MemoryJobQueue.refill() no-ops unless autoEnabled AND autoSource are set, and
-		// nothing else enables the queue on load — without this the box reads ON but
-		// enrichment stays idle until the toggle is cycled off/on.
-		if (enrichToggle.checked) {
-			void this.plugin.setAutoEnrichEnabled(true, () => this.uncapturedQueueItems());
-		}
 	}
 
 	private renderEnqueueIntakeButton(heading: HTMLElement, kind: IntakeKind): void {
@@ -596,18 +666,6 @@ export class IngestionDashboardUI {
 			body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 			return;
 		}
-
-		// Per-type controls for each type with pending/running work (auto-run toggle,
-		// effective state, rate-limit override, manual Run). When the strip flips the
-		// enrichment type's auto-run, re-sync the card's Auto-enrich checkbox (both
-		// controls write the same flags) and reassert the dashboard's auto-source —
-		// the strip can't supply one, and refill no-ops without it.
-		renderQueueTypeControls(this.plugin, body, Array.from(typeCounts.keys()) as JobType[], () => {
-			if (this.enrichToggle) this.enrichToggle.checked = this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
-			if (this.plugin.enrichmentQueue?.isAutoEnabled()) {
-				this.plugin.enrichmentQueue.setAutoSource(() => this.uncapturedQueueItems());
-			}
-		});
 
 		if (!ctx.sort) ctx.sort = { column: 'status', direction: 'asc' };
 

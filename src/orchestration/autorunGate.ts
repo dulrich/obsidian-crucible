@@ -27,6 +27,8 @@ export interface JobTypeControl {
 export type JobTypeControlsMap = Partial<Record<JobType, JobTypeControl>>;
 
 export interface AutorunGateInputs {
+	/** The queue-wide panic switch (settings.orchestrationQueueEnabled). Off vetoes every type. */
+	queueEnabled: boolean;
 	drainsWithoutAutorun: boolean;
 	/** The per-type auto-run flag from settings, if any. */
 	typeAutorun: boolean | undefined;
@@ -37,6 +39,9 @@ export interface AutorunGateInputs {
 // decision is exactly it plus the file-drain readiness input (computeShouldDrain),
 // so what the user sees can never disagree with what the runner does.
 export function typeAutorunEnabled(inputs: AutorunGateInputs): boolean {
+	// The queue-wide panic switch stops all auto-draining while preserving the
+	// per-type/global flags underneath; manual runs bypass this gate entirely.
+	if (!inputs.queueEnabled) return false;
 	if (inputs.drainsWithoutAutorun) {
 		// Memory type: only its own per-type flag governs. Default off.
 		return inputs.typeAutorun === true;

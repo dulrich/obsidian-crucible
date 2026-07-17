@@ -110,6 +110,7 @@ export class OrchestrationAutoRunner {
 	// vetoed per-type); memory types drain only when their per-type auto-run is on.
 	private shouldDrain(type: JobType): boolean {
 		return computeShouldDrain({
+			queueEnabled: this.plugin.settings.orchestrationQueueEnabled !== false,
 			drainsWithoutAutorun: this.orchestrator.drainsWithoutAutorun(type),
 			typeAutorun: readTypeAutorun(this.plugin.settings.orchestrationJobTypeControls, type),
 			globalAutorunEnabled: this.enabled,
