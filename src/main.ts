@@ -1,19 +1,16 @@
-import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Modal, TFolder, Editor, normalizePath } from 'obsidian';
+import { Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, TFolder, Editor } from 'obsidian';
 import { CrucibleSettingTab } from "./settings";
-import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema, Provider, providerModality } from "./types";
+import { CrucibleSettings, DEFAULT_SETTINGS, Provider, providerModality } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
-import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
-import { ChainCommandOptions, ChainManager, chainStepResult } from "./chains";
+import { CaptureManager } from "./captures";
+import { ChainManager } from "./chains";
 import { ProviderManager } from "./providers";
 import { SecretRegistry, describeSecretKey } from "./secretRegistry";
 import { AgentManager, agentCommandId } from "./agents";
 import { TableOfContentsUI } from "./toc";
-import { applyTemplateString, ensureFolder, FRONTMATTER_REGEX } from './utils';
-import { MoveFileFolderPickerModal, normalizeFolderPath } from './folderPicker';
-import { PeriodId, getCurrentPeriodAssetFolder, getPeriodConfig, periodDisabledMessage } from './periods';
-import { normalizeFrontmatterPropertyName, parseTagList, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterTags, withMaterializing } from './frontmatter';
+import { applyTemplateString } from './utils';
 import { JobStore } from './orchestration/JobStore';
 import { Orchestrator } from './orchestration/Orchestrator';
 import type { JobType } from './orchestration/types';
@@ -25,9 +22,7 @@ import {
 	YoutubeTrackerConsolidateWorkflow,
 	YoutubeTrackerWorkflow,
 } from './orchestration/workflows/FeedTrackerWorkflow';
-import { ingestYoutubeVideoMetadata, isYtMetadataLinked } from './orchestration/utils/youtubeApi';
-import { addIgnoredVideoId } from './orchestration/utils/ignoredIds';
-import { youtubeVideoIdFromArgsOrFrontmatter, youtubeWatchUrlFromArgsOrFrontmatter } from './orchestration/utils/youtubeActions';
+import { coerceVideoId, isYtMetadataLinked } from './orchestration/utils/youtubeApi';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { YoutubeChannelEnrichWorkflow } from './orchestration/workflows/YoutubeChannelEnrichWorkflow';
@@ -55,6 +50,10 @@ import { migrateExcludedFolders } from './exclusions';
 import { localizedImageInfo } from './orchestration/utils/imageMetadata';
 import { logError, logWarn } from './log';
 import { AutoLocalizeScheduler } from './autoLocalizeScheduler';
+import { registerInternalCommands } from './internalCommands';
+import { registerMoveFileCommands as registerMoveFileCommandsImpl } from './moveFileCommands';
+import { registerCaptures as registerCapturesImpl, promptForText as promptForTextImpl } from './captureCommands';
+import { openDayPicker, openWeekPicker, openMonthPicker, handlePeriodFileCreate } from './periodPickers';
 
 export type CrucibleCommandGroup =
 	| 'Materialize'
@@ -97,9 +96,13 @@ export default class CruciblePlugin extends Plugin {
 	attachmentLocalizer: AttachmentLocalizer;
 	commandRegistry: CrucibleCommandEntry[] = [];
 	private commandRunners = new Map<string, CrucibleCommandRunner>();
-	private isMaterializing = false;
-	private materializer: Materializer;
-	private captureManager: CaptureManager;
+	// Widened from `private`: read/written by internalCommands.ts, captureCommands.ts
+	// and periodPickers.ts, which take `plugin` rather than being class members
+	// (see the commands.ts registration-hub pattern). TS visibility only —
+	// no runtime behavior change.
+	isMaterializing = false;
+	materializer: Materializer;
+	captureManager: CaptureManager;
 	chainManager: ChainManager;
 	providerManager: ProviderManager;
 	secretRegistry: SecretRegistry;
@@ -187,7 +190,7 @@ export default class CruciblePlugin extends Plugin {
 		}));
 		this.triggers.start();
 
-		this.registerInternalCommands();
+		registerInternalCommands(this);
 		this.registerAgents();
 		this.registerChains();
 		this.registerTriggers();
@@ -414,7 +417,8 @@ export default class CruciblePlugin extends Plugin {
 		return runner ? await runner() : null;
 	}
 
-	private clearCommandRegistryGroup(group: CrucibleCommandGroup): void {
+	// Widened from `private`: called by captureCommands.ts's registerCaptures.
+	clearCommandRegistryGroup(group: CrucibleCommandGroup): void {
 		for (const entry of this.commandRegistry) {
 			if (entry.group === group) this.commandRunners.delete(entry.id);
 		}
@@ -591,556 +595,15 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	registerMoveFileCommands(prefix: string): void {
-		const moveDailyId = 'move-current-file-to-daily-folder';
-		const moveFolderId = 'move-current-file-to-folder';
-
-		const wrapMoveResult = (moved: TFile | null) => moved ? chainStepResult(true, moved) : false;
-		const moveDaily = async (_args: Record<string, string>, _prev: unknown, _editor?: Editor, targetFile?: TFile) => {
-			if (!this.settings.dailyEnabled) {
-				new Notice(periodDisabledMessage('daily'));
-				return false;
-			}
-			return wrapMoveResult(await this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), targetFile));
-		};
-		const moveFolder = async (args: Record<string, string>, _prev: unknown, _editor?: Editor, targetFile?: TFile) => {
-			const folder = args.folder?.trim();
-			const moved = folder
-				? await this.moveFileToFolder(folder, targetFile)
-				: await this.openMoveFileFolderPicker(targetFile);
-			return wrapMoveResult(moved);
-		};
-		const moveFolderSchema: CommandArgSchema[] = [
-			{
-				id: 'folder',
-				name: 'Destination folder',
-				type: 'folder',
-				description: 'Folder to move the current file into. Leave empty to show the folder picker.',
-			},
-		];
-
-		for (const id of [`${prefix}:${moveDailyId}`, `crucible:${moveDailyId}`]) {
-			this.chainManager.registerInternalCommand(id, moveDaily);
-		}
-		for (const id of [`${prefix}:${moveFolderId}`, `crucible:${moveFolderId}`]) {
-			this.chainManager.registerInternalCommand(id, moveFolder, { schema: moveFolderSchema });
-		}
-
-		this.registerCrucibleCommand({
-			id: moveDailyId,
-			name: 'Move current file to daily folder',
-			group: 'Files',
-			available: () => this.app.workspace.getActiveFile() !== null,
-			run: () => {
-				const activeFile = this.app.workspace.getActiveFile();
-				if (!activeFile) return;
-				if (!this.settings.dailyEnabled) {
-					new Notice(periodDisabledMessage('daily'));
-					return;
-				}
-				return this.moveFileToFolder(getCurrentPeriodAssetFolder(this.settings, 'daily'), activeFile);
-			},
-		});
-
-		this.registerCrucibleCommand({
-			id: moveFolderId,
-			name: 'Move current file to folder...',
-			group: 'Files',
-			available: () => this.app.workspace.getActiveFile() !== null,
-			run: () => {
-				const activeFile = this.app.workspace.getActiveFile();
-				if (activeFile) return this.openMoveFileFolderPicker(activeFile);
-				return null;
-			},
-		});
-	}
-
-	private async openMoveFileFolderPicker(targetFile?: TFile): Promise<TFile | null> {
-		const file = targetFile ?? this.app.workspace.getActiveFile();
-		if (!file) {
-			new Notice('No active file to move.');
-			return null;
-		}
-
-		return await new Promise<TFile | null>((resolve) => {
-			new MoveFileFolderPickerModal(
-				this.app,
-				this.settings,
-				async (folderPath) => {
-					resolve(await this.moveFileToFolder(folderPath, file));
-				},
-				() => resolve(null),
-			).open();
-		});
-	}
-
-	private async moveFileToFolder(folderPath: string, targetFile?: TFile): Promise<TFile | null> {
-		try {
-			const file = targetFile ?? this.app.workspace.getActiveFile();
-			if (!file) {
-				new Notice('No active file to move.');
-				return null;
-			}
-
-			return await this.noteLocks.withLock(file.path, 'move-file', async () => {
-				const normalizedFolder = normalizeFolderPath(folderPath);
-				if (!normalizedFolder) {
-					new Notice('Move target folder is not configured.');
-					return null;
-				}
-
-				await ensureFolder(this.app, normalizedFolder);
-				const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
-				if (targetPath === file.path) {
-					new Notice(`Already in ${normalizedFolder}`);
-					return file;
-				}
-
-				const existing = this.app.vault.getAbstractFileByPath(targetPath);
-				if (existing) {
-					new Notice(`Move target already exists: ${targetPath}`);
-					return null;
-				}
-
-				const oldPath = file.path;
-				await this.app.fileManager.renameFile(file, targetPath);
-				this.noteLocks.handleRename(oldPath, targetPath);
-				new Notice(`Moved to ${normalizedFolder}`);
-				const moved = this.app.vault.getAbstractFileByPath(targetPath);
-				return moved instanceof TFile ? moved : file;
-			});
-		} catch (e) {
-			new Notice(`Error moving file: ${(e as Error).message}`);
-			return null;
-		}
+		registerMoveFileCommandsImpl(this, prefix);
 	}
 
 	registerCaptures() {
-		const prefix = this.manifest.id;
-		this.clearCommandRegistryGroup('Captures');
-		this.settings.captures.forEach((capture, index) => {
-			if (!capture.name) return;
-			const id = `capture-${index}`;
-			const fullId = `${prefix}:${id}`;
-
-			// Register in ChainManager so it can handle args/responses
-			this.chainManager.registerInternalCommand(fullId, async (args, _prev, editor, targetFile) => {
-				const resolvedValue = args._default || await this.resolveCaptureValue(capture, editor);
-				if (resolvedValue === null) return false;
-				return await this.captureManager.executeCapture(
-					capture,
-					resolvedValue,
-					targetFile,
-					this.resolveCaptureContext(editor, capture, targetFile),
-				);
-			});
-
-			this.registerCrucibleCommand({
-				id,
-				name: `Capture: ${capture.name}`,
-				group: 'Captures',
-				run: async () => {
-					const editor = this.activeEditor();
-					const value = await this.resolveCaptureValue(capture, editor);
-					if (value === null) return;
-
-					await this.captureManager.executeCapture(
-						capture,
-						value,
-						undefined,
-						this.resolveCaptureContext(editor, capture),
-					);
-				},
-			});
-		});
-	}
-
-	private async resolveCaptureValue(capture: Capture, editor?: Editor): Promise<string | null> {
-		const source = capture.source || 'dialog';
-
-		switch (source) {
-			case 'line':
-				if (editor) return editor.getLine(editor.getCursor().line);
-				new Notice('This capture reads the current line — switch to edit mode.');
-				return null;
-			case 'line-fallback':
-				if (editor) {
-					const line = editor.getLine(editor.getCursor().line);
-					if (line.trim()) return line;
-				}
-				return await this.promptForCaptureValue(capture);
-			case 'selection': {
-				if (editor) {
-					const selection = editor.getSelection();
-					if (selection.trim()) return selection;
-				}
-				const dom = window.getSelection()?.toString() ?? '';
-				if (dom.trim()) return dom;
-				new Notice('No text selected. Select text in the note first.');
-				return null;
-			}
-			case 'selection-fallback': {
-				if (editor) {
-					const selection = editor.getSelection();
-					if (selection.trim()) return selection;
-				}
-				const dom = window.getSelection()?.toString() ?? '';
-				if (dom.trim()) return dom;
-				return await this.promptForCaptureValue(capture);
-			}
-			case 'dialog':
-			default:
-				return await this.promptForCaptureValue(capture);
-		}
-	}
-
-	private resolveCaptureContext(editor: Editor | undefined, capture: Capture, sourceFile?: TFile): CaptureExecutionContext {
-		if ((capture.targetSectionMode ?? 'fixed') === 'source' && !editor) {
-			new Notice('This capture targets the source section but no editor is active. Switch to edit mode.');
-			throw new Error('Source-section capture requires an active editor');
-		}
-		return {
-			sourceSectionHeader: editor ? findCurrentSectionHeader(editor) : null,
-			sourceFile: sourceFile ?? this.app.workspace.getActiveFile(),
-		};
+		registerCapturesImpl(this);
 	}
 
 	async promptForText(title: string): Promise<string | null> {
-		return new Promise((resolve) => {
-			let submitted = false;
-			new TextInputModal(
-				this.app,
-				title,
-				(value) => {
-					submitted = true;
-					resolve(value);
-				},
-				() => {
-					if (!submitted) resolve(null);
-				},
-			).open();
-		});
-	}
-
-	private async promptForCaptureValue(capture: Capture): Promise<string | null> {
-		return new Promise((resolve) => {
-			new TextInputModal(
-				this.app, 
-				`Capture: ${capture.name}`, 
-				(value) => {
-					resolve(value);
-				},
-				() => { 
-					this.refreshToC(); 
-					resolve(null);
-				}
-			).open();
-		});
-	}
-
-	private openCaptureDialog(capture: Capture) {
-		void (async () => {
-			const value = await this.promptForCaptureValue(capture);
-			if (value !== null) {
-				await this.captureManager.executeCapture(capture, value);
-			}
-		})();
-	}
-
-	private registerInternalCommands() {
-		const prefix = this.manifest.id;
-
-		// Built-in commands
-		const register = (
-			id: string,
-			fn: (args: Record<string, string>, prev: unknown, editor?: Editor, targetFile?: TFile) => Promise<unknown>,
-			options?: ChainCommandOptions,
-		) => {
-			this.chainManager.registerInternalCommand(`${prefix}:${id}`, fn, options);
-			this.chainManager.registerInternalCommand(`crucible:${id}`, fn, options);
-		};
-
-		register('lint-note', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
-		register('lint-vault', async () => await this.linter.lintVault(), { lockTarget: 'none' });
-		register('word-count', async (_a, _p, _e, tf) => await this.linter.lintNote(tf));
-		register('lint-cleanup-transcript', async (_a, _p, _e, tf) => await this.linter.cleanupTranscriptInFile(tf));
-		register('lint-localize-attachments', async (_a, _p, _e, tf) => {
-			const file = tf ?? this.app.workspace.getActiveFile();
-			if (!file || file.extension !== 'md') {
-				new Notice('Open a Markdown note to localize attachments');
-				return false;
-			}
-			return await this.attachmentLocalizer.localizeNote(file);
-		});
-		register('lint-localize-attachments-vault', async () => await this.attachmentLocalizer.localizeVault(), { lockTarget: 'none' });
-		register('lint-repair-attachments', async (_a, _p, _e, tf) => {
-			const file = tf ?? this.app.workspace.getActiveFile();
-			if (!file || file.extension !== 'md') {
-				new Notice('Open a Markdown note to repair attachment links');
-				return false;
-			}
-			return (await this.attachmentLocalizer.repairNote(file)) !== null;
-		});
-		register('lint-repair-attachments-vault', async () => await this.attachmentLocalizer.repairVault(), { lockTarget: 'none' });
-		register('lint-rename-property', async (args) => await this.linter.renamePropertyInVault(
-			typeof args['oldKey'] === 'string' ? args['oldKey'] : '',
-			typeof args['newKey'] === 'string' ? args['newKey'] : '',
-		), { lockTarget: 'none' });
-		register('lint-remove-property', async (args) => await this.linter.removePropertyFromVault(
-			typeof args['key'] === 'string' ? args['key'] : '',
-		), { lockTarget: 'none' });
-		register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await this.fetchYoutubeMetadataForActiveNote(tf));
-		register('youtube-ignore-video', async (args, _p, _e, tf) => await this.ignoreYoutubeVideoCommand(args, tf), {
-			lockTarget: 'none',
-			schema: [
-				{ id: 'videoId', name: 'Video ID', type: 'text', description: 'Optional override. Leave blank to use videoId from the target metadata note.' },
-			],
-		});
-		register('youtube-watch-video', async (args, _p, _e, tf) => await this.watchYoutubeVideoCommand(args, tf), {
-			mutating: false,
-			lockTarget: 'none',
-			schema: [
-				{ id: 'url', name: 'URL', type: 'text', description: 'Optional override. Leave blank to use url from the target metadata note.' },
-			],
-		});
-
-		register('materialize-day-today', async () => await this.materializer.materializeDay(window.moment()), { lockTarget: 'none' });
-		register('materialize-week-today', async () => await this.materializer.materializeWeek(window.moment()), { lockTarget: 'none' });
-		register('materialize-month-today', async () => await this.materializer.materializeMonth(window.moment()), { lockTarget: 'none' });
-
-		// --- Sources: produce content for chain steps via {{response}} ---
-		register('source:active-file', async (_a, _p, _e, tf) => {
-			const file = tf ?? this.app.workspace.getActiveFile();
-			if (!file) throw new Error('No active file');
-			const content = await this.app.vault.read(file);
-			return content.replace(FRONTMATTER_REGEX, '').trim();
-		}, { mutating: false });
-
-		register('copy-active-file', async (_a, _p, _e, tf) => {
-			const file = tf ?? this.app.workspace.getActiveFile();
-			if (!file) throw new Error('No active file');
-			const content = await this.app.vault.read(file);
-			await navigator.clipboard.writeText(content);
-			new Notice('Note copied to clipboard');
-			return true;
-		}, { mutating: false });
-
-		register('source:selection', async (_args, _prev, editor) => {
-			if (editor) return editor.getSelection();
-			const dom = window.getSelection()?.toString() ?? '';
-			if (!dom) throw new Error('No text selected. Select text in the note first.');
-			return dom;
-		}, { mutating: false, lockTarget: 'none' });
-
-		register('source:input', async (args) => {
-			const title = args.title || 'Input';
-			return await new Promise<string | false>((resolve) => {
-				let submitted = false;
-				new TextInputModal(
-					this.app,
-					title,
-					(value) => { submitted = true; resolve(value); },
-					() => { if (!submitted) resolve(false); }
-				).open();
-			});
-		}, {
-			mutating: false,
-			lockTarget: 'none',
-			schema: [{ id: 'title', name: 'Title', type: 'text', description: 'Heading shown above the input box.' }],
-		});
-		
-		register('mark-as-forwarded', async (_args, _prev, editor) => {
-			if (!editor) throw new Error('mark-as-forwarded requires edit mode');
-			const cursor = editor.getCursor();
-			const lineNum = cursor.line;
-			const line = editor.getLine(lineNum);
-			const checkboxRegex = /^(\s*[-*+]\s+\[) (\]\s+.*)$/;
-			if (checkboxRegex.test(line)) {
-				const newLine = line.replace(checkboxRegex, '$1>$2');
-				editor.setLine(lineNum, newLine);
-				editor.setCursor(cursor);
-				return true;
-			}
-			return false;
-		});
-
-		register('upsert-tags', async (args, _p, _e, tf) => {
-			return await this.upsertActiveFileTags(args.tags || '', tf);
-		}, {
-			schema: [
-				{ id: 'tags', name: 'Tags', type: 'textarea', description: 'Tags to add to the active note frontmatter. Use commas, spaces, or one per line. Leading # is optional.' }
-			],
-		});
-
-		register('upsert-property', async (args, _p, _e, tf) => {
-			return await this.upsertActiveFileProperty(args.property || '', args.value || '', tf);
-		}, {
-			schema: [
-				{ id: 'property', name: 'Property', type: 'text', description: 'Frontmatter property name to create or update on the active note.' },
-				{ id: 'value', name: 'Value', type: 'textarea', description: 'Value to write to the property. Supports {{response}} from the previous chain step.' }
-			],
-		});
-
-		register('copy-note-to-folder', async (args, _p, _e, tf) => {
-			const file = tf ?? this.app.workspace.getActiveFile();
-			if (!file) throw new Error('No active file');
-			const folder = args.folder?.trim();
-			if (!folder) throw new Error('No destination folder specified');
-			if (!this.app.vault.getFolderByPath(folder)) await this.app.vault.createFolder(folder);
-			const destPath = `${folder}/${file.name}`;
-			const exists = this.app.vault.getFileByPath(destPath);
-			if (exists) { new Notice(`Copy already exists: ${destPath}`); return destPath; }
-			const content = await this.app.vault.read(file);
-			await this.app.vault.create(destPath, content);
-			new Notice(`Copied to ${destPath}`);
-			return destPath;
-		}, {
-			schema: [
-				{ id: 'folder', name: 'Destination folder', type: 'folder', description: 'Vault folder to copy the current note into.' }
-			],
-		});
-
-		register('replace-note-body', async (args, prev, _e, tf) => {
-			const file = tf ?? this.app.workspace.getActiveFile();
-			if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
-			const replacement = args.content || (typeof prev === 'string' ? prev : '');
-			if (!replacement) throw new Error('No replacement content provided');
-			const existing = await this.app.vault.read(file);
-			const fmMatch = existing.match(/^---\n[\s\S]*?\n---\n/);
-			const frontmatter = fmMatch ? fmMatch[0] : '';
-			await withMaterializing(state => { this.isMaterializing = state; }, async () => {
-				await this.app.vault.modify(file, frontmatter + replacement);
-			});
-			new Notice('Note body replaced');
-			return true;
-		}, {
-			schema: [
-				{ id: 'content', name: 'Content', type: 'textarea', description: 'New body for the note. If empty, uses {{response}} from the previous step.' }
-			],
-		});
-
-		register('capture', async (args, _prev, editor, tf) => {
-			const name = args.name;
-			const manualValue = args.value;
-			const capture = this.settings.captures.find(c => c.name === name);
-			if (capture) {
-				const resolvedValue = manualValue || await this.resolveCaptureValue(capture, editor);
-				if (resolvedValue === null) return false;
-				return await this.captureManager.executeCapture(
-					capture,
-					resolvedValue,
-					tf,
-					this.resolveCaptureContext(editor, capture, tf),
-				);
-			}
-			new Notice(`Capture not found: ${name}`);
-			return false;
-		}, {
-			schema: [
-				{ id: 'name', name: 'Capture name', type: 'text', description: 'Name of the capture workflow to trigger.' },
-				{ id: 'value', name: 'Content', type: 'textarea', description: 'Optional content. If omitted, will prompt or use source.' }
-			],
-		});
-	}
-
-	private async upsertActiveFileTags(tagsInput: string, targetFile?: TFile): Promise<boolean> {
-		const file = targetFile ?? this.app.workspace.getActiveFile();
-		if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
-
-		const newTags = parseTagList(tagsInput);
-		if (newTags.length === 0) throw new Error('No tags provided');
-
-		await withMaterializing(state => { this.isMaterializing = state; }, async () => {
-			await updateFrontmatter(this.app, file, (fm) => {
-				upsertFrontmatterTags(fm, tagsInput);
-			});
-		});
-
-		return true;
-	}
-
-	private async upsertActiveFileProperty(property: string, value: string, targetFile?: TFile): Promise<boolean> {
-		const file = targetFile ?? this.app.workspace.getActiveFile();
-		if (!file || file.extension !== 'md') throw new Error('No active Markdown file');
-
-		const propertyName = normalizeFrontmatterPropertyName(property);
-		if (!propertyName) throw new Error('Property name is required');
-
-		await withMaterializing(state => { this.isMaterializing = state; }, async () => {
-			await updateFrontmatter(this.app, file, (fm) => {
-				upsertFrontmatterProperty(fm, propertyName, value);
-			});
-		});
-
-		return true;
-	}
-
-	private targetFrontmatter(targetFile?: TFile): Record<string, unknown> | undefined {
-		const file = targetFile ?? this.app.workspace.getActiveFile() ?? undefined;
-		return file ? this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined : undefined;
-	}
-
-	private async ignoreYoutubeVideoCommand(args: Record<string, string>, targetFile?: TFile): Promise<boolean> {
-		const videoId = youtubeVideoIdFromArgsOrFrontmatter(args, this.targetFrontmatter(targetFile));
-		if (!videoId) throw new Error('No YouTube video id found on the target metadata note.');
-		await this.noteLocks.withResourceLock('ignored-ids', 'videos', 'ignore-video', () =>
-			addIgnoredVideoId(this.app, videoId),
-		);
-		return true;
-	}
-
-	private async watchYoutubeVideoCommand(args: Record<string, string>, targetFile?: TFile): Promise<boolean> {
-		const url = youtubeWatchUrlFromArgsOrFrontmatter(args, this.targetFrontmatter(targetFile));
-		if (!url) throw new Error('No YouTube URL found on the target metadata note.');
-		window.open(url, '_blank', 'noopener');
-		return true;
-	}
-
-	// Fetches + links YouTube metadata for `targetFile` (defaults to the active
-	// note). Returns whether the link was set. Used both by the standalone command
-	// and as an awaited chain step — passing the chain's target file is what makes
-	// it run on the right note, in order, and inside the chain's note-lock context
-	// (reentrant), instead of fire-and-forget on the active note via executeCommandById.
-	async fetchYoutubeMetadataForActiveNote(targetFile?: TFile): Promise<boolean> {
-		const file = targetFile ?? this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-		if (!file) {
-			new Notice('No active note');
-			return false;
-		}
-		const fm: Record<string, unknown> | undefined = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		const raw: unknown = fm ? fm['yt-video-id'] : undefined;
-		const videoId = coerceVideoId(raw);
-		if (!videoId) {
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			new Notice('Active note has no yt-video-id in frontmatter');
-			return false;
-		}
-
-		try {
-			const result = await withMaterializing(state => { this.isMaterializing = state; }, () =>
-				ingestYoutubeVideoMetadata(this, file, videoId),
-			);
-			switch (result.status) {
-				case 'created':
-					new Notice(`YouTube metadata saved: ${result.metadataPath}`);
-					this.emitMetadataEnriched(videoId, result.metadataPath, file);
-					return true;
-				case 'exists':
-					new Notice('YouTube metadata already exists; linked.');
-					this.emitMetadataEnriched(videoId, result.metadataPath, file);
-					return true;
-				case 'no-video-id':
-					// eslint-disable-next-line obsidianmd/ui/sentence-case
-					new Notice('Active note has no yt-video-id in frontmatter');
-					return false;
-				case 'no-api-key':
-					new Notice('YouTube data API key not set — configure it in settings → orchestrator → YouTube tracker');
-					return false;
-			}
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			new Notice(`YouTube fetch failed: ${message}`);
-			return false;
-		}
+		return promptForTextImpl(this, title);
 	}
 
 	// Load user-defined triggers from settings into the engine. Mirrors registerChains():
@@ -1197,14 +660,6 @@ export default class CruciblePlugin extends Plugin {
 		await workspace.revealLeaf(leaf);
 	}
 
-	private emitMetadataEnriched(videoId: string, metadataPath: string, sourceFile?: TFile): void {
-		const bus = this.ingestionEvents;
-		if (!bus) return;
-		const file = this.app.vault.getAbstractFileByPath(metadataPath);
-		if (!(file instanceof TFile)) return;
-		bus.emit('metadata-enriched', { videoId, metadataFile: file, sourceFile });
-	}
-
 	async activateIngestionDashboardView() {
 		const { workspace } = this.app;
 		const existing = workspace.getLeavesOfType(INGESTION_DASHBOARD_VIEW_TYPE);
@@ -1226,33 +681,15 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	openDayPicker() {
-		if (!this.settings.dailyEnabled) {
-			new Notice(periodDisabledMessage('daily'));
-			return;
-		}
-		new PickerModal(this.app, 'Pick a date', 'date', window.moment().format('YYYY-MM-DD'), (dateStr) => {
-			void this.materializer.materializeDay(window.moment(dateStr, 'YYYY-MM-DD'));
-		}).open();
+		openDayPicker(this);
 	}
 
 	openWeekPicker() {
-		if (!this.settings.weeklyEnabled) {
-			new Notice(periodDisabledMessage('weekly'));
-			return;
-		}
-		new PickerModal(this.app, 'Pick a week', 'week', window.moment().format('GGGG-[W]WW'), (weekStr) => {
-			void this.materializer.materializeWeek(window.moment(weekStr, 'GGGG-[W]WW'));
-		}).open();
+		openWeekPicker(this);
 	}
 
 	openMonthPicker() {
-		if (!this.settings.monthlyEnabled) {
-			new Notice(periodDisabledMessage('monthly'));
-			return;
-		}
-		new PickerModal(this.app, 'Pick a month', 'month', window.moment().format('YYYY-MM'), (monthStr) => {
-			void this.materializer.materializeMonth(window.moment(monthStr, 'YYYY-MM'));
-		}).open();
+		openMonthPicker(this);
 	}
 
 	async handleFileCreate(file: TAbstractFile) {
@@ -1266,9 +703,9 @@ export default class CruciblePlugin extends Plugin {
 		const parentPath = file.parent?.path || '';
 		const fileName = file.basename;
 
-		if (await this.handlePeriodFileCreate(file, parentPath, fileName, 'daily')) return;
-		if (await this.handlePeriodFileCreate(file, parentPath, fileName, 'weekly')) return;
-		if (await this.handlePeriodFileCreate(file, parentPath, fileName, 'monthly')) return;
+		if (await handlePeriodFileCreate(this, file, parentPath, fileName, 'daily')) return;
+		if (await handlePeriodFileCreate(this, file, parentPath, fileName, 'weekly')) return;
+		if (await handlePeriodFileCreate(this, file, parentPath, fileName, 'monthly')) return;
 
 		const mapping = this.settings.folderTemplates.find(ft => ft.folder === parentPath);
 		if (mapping && mapping.template) {
@@ -1286,97 +723,5 @@ export default class CruciblePlugin extends Plugin {
 				this.isMaterializing = false;
 			}
 		}
-	}
-
-	private async handlePeriodFileCreate(
-		file: TFile,
-		parentPath: string,
-		fileName: string,
-		period: PeriodId,
-	): Promise<boolean> {
-		const config = getPeriodConfig(this.settings, period);
-		if (parentPath !== config.folder) return false;
-
-		if (!config.enabled) {
-			new Notice(periodDisabledMessage(period));
-			return true;
-		}
-
-		const dateMatch = fileName.match(periodFileNameRegex(period));
-		if (dateMatch) {
-			void this.materializePeriodFromString(period, dateMatch[1]!);
-		} else {
-			await this.app.fileManager.trashFile(file);
-			this.openPeriodPicker(period);
-		}
-		return true;
-	}
-
-	private async materializePeriodFromString(period: PeriodId, value: string): Promise<boolean> {
-		if (period === 'daily') return await this.materializer.materializeDay(window.moment(value, 'YYYY-MM-DD'));
-		if (period === 'weekly') return await this.materializer.materializeWeek(window.moment(value, 'GGGG-[W]WW'));
-		return await this.materializer.materializeMonth(window.moment(value, 'YYYY-MM'));
-	}
-
-	private openPeriodPicker(period: PeriodId): void {
-		if (period === 'daily') this.openDayPicker();
-		else if (period === 'weekly') this.openWeekPicker();
-		else this.openMonthPicker();
-	}
-}
-
-function periodFileNameRegex(period: PeriodId): RegExp {
-	if (period === 'daily') return /^(\d{4}-\d{2}-\d{2})$/;
-	if (period === 'weekly') return /^(\d{4}-W\d{2})$/;
-	return /^(\d{4}-\d{2})$/;
-}
-
-function coerceVideoId(value: unknown): string {
-	if (typeof value === 'string') return value.trim();
-	if (typeof value === 'number') return String(value).trim();
-	if (Array.isArray(value)) {
-		for (const item of value) {
-			if (typeof item === 'string' && item.trim()) return item.trim();
-		}
-	}
-	return '';
-}
-
-function findCurrentSectionHeader(editor: Editor): string | null {
-	for (let lineNum = editor.getCursor().line; lineNum >= 0; lineNum--) {
-		const line = editor.getLine(lineNum).trim();
-		if (/^#{1,6}\s+\S/.test(line)) return line;
-	}
-	return null;
-}
-
-class PickerModal extends Modal {
-	title: string;
-	type: string;
-	initialValue: string;
-	onSubmit: (result: string) => void;
-
-	constructor(app: App, title: string, type: string, initialValue: string, onSubmit: (result: string) => void) {
-		super(app);
-		this.title = title;
-		this.type = type;
-		this.initialValue = initialValue;
-		this.onSubmit = onSubmit;
-	}
-
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.createEl('h2', { text: this.title });
-		const input = contentEl.createEl('input', { type: this.type });
-		input.classList.add('crucible-picker-input');
-		input.value = this.initialValue;
-		const submit = contentEl.createEl('button', { text: 'Submit' });
-		const triggerSubmit = () => { if (input.value) { this.onSubmit(input.value); this.close(); } };
-		submit.onclick = triggerSubmit;
-		input.addEventListener('keydown', (e) => { if (e.key === 'Enter') triggerSubmit(); });
-	}
-
-	onClose() {
-		this.contentEl.empty();
 	}
 }
