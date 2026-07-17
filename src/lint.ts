@@ -42,6 +42,14 @@ function deriveSourceIdProperties(fm: Record<string, unknown>): void {
 	upsertFrontmatterPropertyIfEmpty(fm, 'post-id', postIdFromUrl(source));
 }
 
+// Diagnostic only: is a `word-count:` key present in the note's frontmatter block?
+// Used by debug-gated probes tracing where the Ingest-as-News lint write is lost.
+function hasWordCountProp(content: string): boolean {
+	const fm = content.match(FRONTMATTER_REGEX);
+	const block = fm ? fm[1] ?? '' : '';
+	return /(^|\n)\s*word-count\s*:/.test(block);
+}
+
 export function cleanupYoutubeTranscript(content: string): string {
 	const fmMatch = content.match(FRONTMATTER_REGEX);
 	const fmText = fmMatch ? fmMatch[0] : '';
@@ -249,6 +257,7 @@ export class Linter {
 					deriveSourceIdProperties(fm);
 					sortFrontmatterProperties(fm, this.settings.lintYamlKeyPriority);
 				});
+				logWarn('lint', 'post-processFrontMatter word-count on disk?', hasWordCountProp(await this.app.vault.read(file)), file.path);
 
 				if (this.settings.lintBlankLineAfterYaml) {
 					// Atomic read-modify-write under the vault lock. A prior read()/modify()
@@ -267,6 +276,7 @@ export class Linter {
 						return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
 					});
 				}
+				logWarn('lint', 'end-of-lint word-count on disk?', hasWordCountProp(await this.app.vault.read(file)), file.path);
 			}));
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
