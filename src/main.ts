@@ -129,7 +129,6 @@ export default class CruciblePlugin extends Plugin {
 		this.attachmentLocalizer = new AttachmentLocalizer(
 			this.app,
 			this.settings,
-			this.linter,
 			(state: boolean) => { this.isMaterializing = state; },
 			this.noteLocks,
 			(imagePath, sourceNotePath) => this.enqueueImageMetadataExtraction(imagePath, sourceNotePath),
