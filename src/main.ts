@@ -2,7 +2,7 @@ import { App, Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, Moda
 import { CrucibleSettingTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Capture, CommandArgSchema, Provider, providerModality } from "./types";
 import { Materializer } from "./materialize";
-import { Linter } from "./lint";
+import { Linter, wordCountFmValue } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
 import { ChainCommandOptions, ChainManager, chainStepResult } from "./chains";
@@ -234,9 +234,10 @@ export default class CruciblePlugin extends Plugin {
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
-				// Diagnostic: trace every write to a note and whether word-count survives,
-				// to catch a post-lint clobber (window.__CRUCIBLE_DEBUG__).
-				void this.app.vault.read(file).then(c => logWarn('modify', file.path, 'word-count?', /(^|\n)\s*word-count\s*:/.test(c)));
+				// Diagnostic: trace every write to a note and the word-count VALUE (not just
+				// key existence — the clipper template seeds an empty word-count), to catch a
+				// post-lint clobber that resets it (window.__CRUCIBLE_DEBUG__).
+				void this.app.vault.read(file).then(c => logWarn('modify', file.path, 'word-count=', wordCountFmValue(c)));
 				debouncedLint(file);
 				this.autoLocalizeScheduler.schedule(file, 'edit');
 			}
