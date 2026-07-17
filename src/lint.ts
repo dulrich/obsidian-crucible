@@ -4,7 +4,7 @@ import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing } from './frontmatter';
 import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
 import { postIdFromUrl } from './orchestration/utils/blogs';
-import { logError } from './log';
+import { logError, logWarn } from './log';
 import { NoteLockManager, withOptionalNoteLock } from './orchestration/NoteLockManager';
 import { isPathExcluded } from './exclusions';
 
@@ -211,12 +211,16 @@ export class Linter {
 	}
 
 	async lintFile(file: TFile, silent: boolean = false): Promise<boolean> {
-		if (this.isPathIgnored(file.path)) return true;
+		if (this.isPathIgnored(file.path)) {
+			logWarn('lint', 'skipped — path is lint-excluded:', file.path);
+			return true;
+		}
 
 		try {
 			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
 				const content = await this.app.vault.read(file);
 				const wordCount = this.calculateWordCount(content);
+				logWarn('lint', 'applying frontmatter:', file.path, `(word-count ${wordCount})`);
 				const insertYaml: Record<string, string> = {};
 				
 				if (this.settings.lintFrontmatterInsert) {
