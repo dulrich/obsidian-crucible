@@ -7,6 +7,7 @@ import { AttachmentLocalizer } from "./localizeAttachments";
 import { CaptureExecutionContext, CaptureManager, TextInputModal } from "./captures";
 import { ChainCommandOptions, ChainManager, chainStepResult } from "./chains";
 import { ProviderManager } from "./providers";
+import { SecretRegistry, describeSecretKey } from "./secretRegistry";
 import { AgentManager, agentCommandId } from "./agents";
 import { TableOfContentsUI } from "./toc";
 import { applyTemplateString, ensureFolder, FRONTMATTER_REGEX } from './utils';
@@ -49,7 +50,7 @@ import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
 import { localizedImageInfo } from './orchestration/utils/imageMetadata';
-import { logError } from './log';
+import { logError, logWarn } from './log';
 import { AutoLocalizeScheduler } from './autoLocalizeScheduler';
 
 export type CrucibleCommandGroup =
@@ -98,6 +99,7 @@ export default class CruciblePlugin extends Plugin {
 	private captureManager: CaptureManager;
 	chainManager: ChainManager;
 	providerManager: ProviderManager;
+	secretRegistry: SecretRegistry;
 	agentManager: AgentManager;
 	jobStore: JobStore;
 	orchestrator: Orchestrator;
@@ -146,6 +148,7 @@ export default class CruciblePlugin extends Plugin {
 		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.chainManager = new ChainManager(this.app, this.noteLocks);
 		this.providerManager = new ProviderManager(this.app);
+		this.secretRegistry = new SecretRegistry(this);
 		this.searchManager = new SearchManager(this.app, this.settings, this.providerManager);
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
@@ -196,6 +199,7 @@ export default class CruciblePlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.searchIndexCoordinator.markLayoutReady();
 			void this.orchestrator.scan({ notify: false });
+			void this.warnOnMissingSecrets();
 		});
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
@@ -422,8 +426,22 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CrucibleSettings>); 
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CrucibleSettings>);
 		await this.migrateSettings();
+	}
+
+	// Reconcile the stored-secret registry against Obsidian's secret store and warn
+	// once if a key the user saved has vanished (e.g. an Obsidian update reset the
+	// store). Silent when the store is unavailable (a different failure) or intact.
+	async warnOnMissingSecrets(): Promise<void> {
+		const result = await this.secretRegistry.reconcile();
+		if (!result || result.missing.length === 0) return;
+		const labels = result.missing.map(key => describeSecretKey(this, key));
+		logWarn('secrets', 'missing from store:', labels.join(', '));
+		new Notice(
+			`Crucible: ${labels.length} saved API key${labels.length > 1 ? 's are' : ' is'} missing from Obsidian's secret store — re-enter in Settings (${labels.join(', ')}).`,
+			0,
+		);
 	}
 	
 	private async migrateSettings() {

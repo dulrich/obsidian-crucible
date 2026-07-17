@@ -3,7 +3,7 @@ import { Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelCapability, providerModality } from "../../types";
 import { agentCommandId } from "../../agents";
-import { CLI_DEFAULT_TIMEOUT_SECONDS } from "../../providers";
+import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
 import { FileSuggest, FolderSuggest } from "../../suggesters";
 import {
 	PROVIDER_KIND_LABELS,
@@ -153,8 +153,15 @@ function renderEditProvider(tab: CrucibleSettingTab, containerEl: HTMLElement, p
 				.setDesc('Only required by servers configured with an API key (e.g. vLLM --api-key). Stored securely in Obsidian Secret Storage.');
 			mountSecretControl(apiKeySetting, {
 				load: () => tab.plugin.providerManager.loadApiKey(provider.id),
-				store: (v) => tab.plugin.providerManager.storeApiKey(provider.id, v),
-				clear: () => tab.plugin.providerManager.deleteApiKey(provider.id),
+				store: async (v) => {
+					await tab.plugin.providerManager.storeApiKey(provider.id, v);
+					if (v.trim()) await tab.plugin.secretRegistry.record(providerSecretKey(provider.id));
+				},
+				clear: async () => {
+					await tab.plugin.providerManager.deleteApiKey(provider.id);
+					await tab.plugin.secretRegistry.forget(providerSecretKey(provider.id));
+				},
+				expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(providerSecretKey(provider.id)),
 			});
 		} else {
 			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
@@ -163,8 +170,15 @@ function renderEditProvider(tab: CrucibleSettingTab, containerEl: HTMLElement, p
 				.setDesc('Stored securely in Obsidian Secret Storage.');
 			mountSecretControl(apiKeySetting, {
 				load: () => tab.plugin.providerManager.loadApiKey(provider.id),
-				store: (v) => tab.plugin.providerManager.storeApiKey(provider.id, v),
-				clear: () => tab.plugin.providerManager.deleteApiKey(provider.id),
+				store: async (v) => {
+					await tab.plugin.providerManager.storeApiKey(provider.id, v);
+					if (v.trim()) await tab.plugin.secretRegistry.record(providerSecretKey(provider.id));
+				},
+				clear: async () => {
+					await tab.plugin.providerManager.deleteApiKey(provider.id);
+					await tab.plugin.secretRegistry.forget(providerSecretKey(provider.id));
+				},
+				expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(providerSecretKey(provider.id)),
 			});
 		}
 	} else {

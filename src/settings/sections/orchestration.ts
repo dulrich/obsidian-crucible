@@ -4,7 +4,7 @@ import type { CrucibleSettingTab } from "../../settings";
 import { CrucibleSettings, CurrencyCache, GeocodeCacheEntry, ProviderModelRef } from "../../types";
 import { FileSuggest, FolderSuggest, CurrencySuggest, LocationSuggest } from "../../suggesters";
 import { isValidTimezone } from "../../orchestration/utils/dates";
-import { deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "../../orchestration/utils/youtubeApi";
+import { YOUTUBE_DATA_API_SECRET_KEY, deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "../../orchestration/utils/youtubeApi";
 import { addWarningIcon, mountSecretControl } from "../shared";
 import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea, bindDropdown } from "../bind";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
@@ -733,8 +733,15 @@ function renderEditYoutubeTrackerWorkflow(tab: CrucibleSettingTab, containerEl: 
 		.setDesc('Stored securely in Obsidian Secret Storage. Required for the per-video metadata fetch command.');
 	mountSecretControl(youtubeKeySetting, {
 		load: () => loadYoutubeApiKey(tab.app),
-		store: (v) => storeYoutubeApiKey(tab.app, v),
-		clear: () => deleteYoutubeApiKey(tab.app),
+		store: async (v) => {
+			await storeYoutubeApiKey(tab.app, v);
+			if (v.trim()) await tab.plugin.secretRegistry.record(YOUTUBE_DATA_API_SECRET_KEY);
+		},
+		clear: async () => {
+			await deleteYoutubeApiKey(tab.app);
+			await tab.plugin.secretRegistry.forget(YOUTUBE_DATA_API_SECRET_KEY);
+		},
+		expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(YOUTUBE_DATA_API_SECRET_KEY),
 	});
 }
 

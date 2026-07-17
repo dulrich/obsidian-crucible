@@ -51,7 +51,7 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 			case 'no-video-id':
 				return { status: 'failed', error: `No video id for ${label}` };
 			case 'no-api-key':
-				return { status: 'failed', error: 'YouTube Data API key not configured.' };
+				return { status: 'failed', error: 'YouTube Data API key not configured.', failureReason: 'no-api-key' };
 		}
 	}
 }

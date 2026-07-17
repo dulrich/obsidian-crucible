@@ -95,6 +95,9 @@ export function mountSecretControl(setting: Setting, opts: {
 	load: () => Promise<string>;
 	store: (value: string) => Promise<void>;
 	clear: () => Promise<void>;
+	// True when this key was previously saved but now reads empty — i.e. it vanished
+	// from the store out-of-band. Renders a warning state prompting re-entry.
+	expectedButMissing?: () => boolean;
 }): void {
 	const placeholder = opts.placeholder ?? 'Enter API key...';
 	const indicatorText = opts.indicatorText ?? 'API Key in Obsidian Secrets';
@@ -112,12 +115,19 @@ export function mountSecretControl(setting: Setting, opts: {
 			});
 	};
 
-	const renderInput = (focus = false) => {
+	const renderInput = (focus = false, missing = false) => {
 		wrapper.empty();
+		if (missing) {
+			wrapper.createSpan({
+				text: 'Was saved but now missing — re-enter',
+				cls: 'crucible-secret-missing-text',
+			});
+		}
 		const text = new TextComponent(wrapper);
 		text.inputEl.type = 'password';
 		text.setPlaceholder(placeholder);
 		text.inputEl.addClass('pi-width-normal');
+		if (missing) text.inputEl.addClass('crucible-secret-missing-input');
 		text.onChange(async (v) => { await opts.store(v); });
 		text.inputEl.addEventListener('blur', () => {
 			if (text.inputEl.value) renderIndicator();
@@ -128,5 +138,6 @@ export function mountSecretControl(setting: Setting, opts: {
 	renderInput();
 	void opts.load().then(value => {
 		if (value) renderIndicator();
+		else if (opts.expectedButMissing?.()) renderInput(false, true);
 	});
 }
