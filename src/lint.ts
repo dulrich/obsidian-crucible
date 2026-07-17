@@ -251,22 +251,21 @@ export class Linter {
 				});
 
 				if (this.settings.lintBlankLineAfterYaml) {
-					const contentAfterFM = await this.app.vault.read(file);
-					const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
-					if (yamlMatch) {
+					// Atomic read-modify-write under the vault lock. A prior read()/modify()
+					// pair could observe content captured before updateFrontmatter()'s
+					// processFrontMatter write had landed (notably right after a chain rename),
+					// then clobber that write — e.g. dropping the freshly-written word-count
+					// while keeping earlier edits. process() always sees current on-disk content.
+					await this.app.vault.process(file, (contentAfterFM) => {
+						const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
+						if (!yamlMatch) return contentAfterFM;
 						const yamlBlockWithNewlines = yamlMatch[0];
 						const currentNewlines = yamlMatch[2] || "";
-						
-						if (currentNewlines.length !== 2 || currentNewlines !== "\n\n") {
-							const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
-							const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
-							const updatedContent = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
-							
-							if (updatedContent !== contentAfterFM) {
-								await this.app.vault.modify(file, updatedContent);
-							}
-						}
-					}
+						if (currentNewlines === "\n\n") return contentAfterFM;
+						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
+						const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
+						return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
+					});
 				}
 			}));
 		} catch (e) {
