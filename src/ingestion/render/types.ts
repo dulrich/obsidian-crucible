@@ -1,5 +1,9 @@
-import type { TFile } from 'obsidian';
+import type { App, TFile } from 'obsidian';
 import type { LocalizeMediaType } from '../../types';
+import type CruciblePlugin from '../../main';
+import type { EnrichmentQueueItem } from '../../orchestration/EnrichmentQueueAdapter';
+
+export type IntakeKind = 'blog' | 'youtube';
 
 export type SectionId =
 	| 'unprocessedClippings'
@@ -37,6 +41,29 @@ export interface SectionContext extends TableStateContext {
 	body: HTMLElement;
 	countEl: HTMLElement;
 	metaEl: HTMLElement;
+}
+
+// Narrow seam section modules render against instead of the full controller:
+// only what render logic actually touches on the controller today (grepped
+// per section, see wp-d2-report.md for the per-field justification).
+export interface DashboardHost {
+	readonly plugin: CruciblePlugin;
+	readonly app: App;
+	readonly container: HTMLElement;
+	refresh(id: SectionId): Promise<void>;
+	createSectionHeader(
+		card: HTMLElement,
+		title: string,
+		description: string,
+		defaultCollapsed: boolean,
+	): { heading: HTMLElement; countEl: HTMLElement; metaEl: HTMLElement };
+	registerSection(ctx: SectionContext): void;
+	setSectionCount(id: SectionId, n: number): void;
+	setSectionMeta(id: SectionId, text: string): void;
+	// The enrichment auto-source: uncaptured videos without an enrichment file yet,
+	// in the uncaptured-videos section's current sort order. Owned by
+	// uncapturedVideos.ts but read by queueControls.ts too, so it stays on the host.
+	uncapturedQueueItems(): EnrichmentQueueItem[];
 }
 
 export interface Column<T> {
