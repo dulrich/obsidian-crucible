@@ -345,7 +345,6 @@ export class AttachmentLocalizer {
 					let updated = rewriteLocalizedAttachmentRefs(fresh, replacements);
 					if (placeholderCount > 0) updated = stripDataUriImagePlaceholders(updated).content;
 					if (updated !== fresh) {
-						logWarn('localize', 'modifying note', file.path, 'word-count fresh?', /(^|\n)\s*word-count\s*:/.test(fresh), '-> updated?', /(^|\n)\s*word-count\s*:/.test(updated));
 						await this.app.vault.modify(file, updated);
 					}
 				}

@@ -42,19 +42,6 @@ function deriveSourceIdProperties(fm: Record<string, unknown>): void {
 	upsertFrontmatterPropertyIfEmpty(fm, 'post-id', postIdFromUrl(source));
 }
 
-// Diagnostic only: the `word-count:` value in the note's frontmatter block, or a
-// sentinel. The clipper template seeds an EMPTY `word-count:` from the first clip, so
-// key-existence is meaningless — only the value distinguishes a persisted lint write
-// (e.g. "380") from the empty template value ("<empty>") or an absent key.
-export function wordCountFmValue(content: string): string {
-	const fm = content.match(FRONTMATTER_REGEX);
-	const block = fm ? fm[1] ?? '' : '';
-	const m = block.match(/(^|\n)[^\S\r\n]*word-count[^\S\r\n]*:[^\S\r\n]*(.*)/);
-	if (!m) return '<absent>';
-	const value = (m[2] ?? '').trim();
-	return value === '' ? '<empty>' : value;
-}
-
 // Force the frontmatter `word-count:` to `value`, operating on the raw note content
 // (not the metadata cache). `fileManager.processFrontMatter` merges against the
 // cache's frontmatterPosition, which is stale right after a rapid rename+edit (e.g.
@@ -253,7 +240,6 @@ export class Linter {
 			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
 				const content = await this.app.vault.read(file);
 				const wordCount = this.calculateWordCount(content);
-				logWarn('lint', 'applying frontmatter:', file.path, `(word-count ${wordCount})`);
 				const insertYaml: Record<string, string> = {};
 				
 				if (this.settings.lintFrontmatterInsert) {
@@ -281,9 +267,7 @@ export class Linter {
 					upsertFrontmatterProperty(fm, 'word-count', wordCount);
 					deriveSourceIdProperties(fm);
 					sortFrontmatterProperties(fm, this.settings.lintYamlKeyPriority);
-					logWarn('lint', 'in-callback fm word-count=', fm['word-count'], 'keys=', Object.keys(fm).join(','));
 				});
-				logWarn('lint', 'post-processFrontMatter word-count value=', wordCountFmValue(await this.app.vault.read(file)), file.path);
 
 				// One atomic, cache-independent pass under the vault lock that (1) reasserts
 				// the word-count value — processFrontMatter can silently drop it when the
@@ -306,7 +290,6 @@ export class Linter {
 					}
 					return out;
 				});
-				logWarn('lint', 'end-of-lint word-count value=', wordCountFmValue(await this.app.vault.read(file)), file.path);
 			}));
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
