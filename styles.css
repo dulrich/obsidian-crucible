@@ -719,6 +719,46 @@ If your plugin does not need CSS, delete this file.
   gap: 0.4rem;
 }
 
+.crucible-queue-type-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0 0.75rem 0.5rem;
+  font-size: var(--font-ui-small);
+}
+
+.crucible-queue-type-controls-label {
+  color: var(--text-muted);
+}
+
+.crucible-queue-type-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.crucible-queue-type-name {
+  font-family: var(--font-monospace);
+}
+
+.crucible-queue-type-autorun {
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.crucible-queue-type-autorun.is-on {
+  color: var(--text-success);
+}
+
+.crucible-queue-type-autorun.is-off {
+  color: var(--text-muted);
+}
+
 .crucible-queue-status-running {
   color: var(--text-accent);
 }

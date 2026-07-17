@@ -16,6 +16,7 @@ import { PeriodId, getCurrentPeriodAssetFolder, getPeriodConfig, periodDisabledM
 import { normalizeFrontmatterPropertyName, parseTagList, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterTags, withMaterializing } from './frontmatter';
 import { JobStore } from './orchestration/JobStore';
 import { Orchestrator } from './orchestration/Orchestrator';
+import type { JobType } from './orchestration/types';
 import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
 import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
 import {
@@ -461,6 +462,20 @@ export default class CruciblePlugin extends Plugin {
 			dirty = true;
 		}
 
+		// Seed the enrichment type's per-type auto-run from the legacy Auto-enrich
+		// toggle so existing users keep their current behavior: draining now respects
+		// this flag (previously memory types drained regardless), and Auto-enrich is
+		// the single control that governs both source refill and draining. Only seed
+		// when unset so a later explicit choice is preserved.
+		if (!this.settings.orchestrationJobTypeAutorun || typeof this.settings.orchestrationJobTypeAutorun !== 'object') {
+			this.settings.orchestrationJobTypeAutorun = {};
+			dirty = true;
+		}
+		if (typeof this.settings.orchestrationJobTypeAutorun['youtube_metadata_fetch'] !== 'boolean') {
+			this.settings.orchestrationJobTypeAutorun['youtube_metadata_fetch'] = this.settings.ingestionYoutubeAutoEnrichEnabled === true;
+			dirty = true;
+		}
+
 		for (const agent of this.settings.agents) {
 			if (!agent.executionMode) {
 				agent.executionMode = 'read-only';
@@ -509,8 +524,22 @@ export default class CruciblePlugin extends Plugin {
 		}
 	}
 
-	async saveSettings() { 
-		await this.saveData(this.settings); 
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
+	// Set a per-type auto-run override, persist it, and kick a drain when enabling so
+	// the change takes effect immediately. Turning it off leaves any in-flight worker
+	// to finish its current job, then the type goes idle (the drain loop re-checks the
+	// gate each iteration). Callers that flip the enrichment Auto toggle use this so
+	// the auto-run flag and the legacy Auto-enrich flag stay in sync.
+	async setJobTypeAutorun(type: JobType, enabled: boolean): Promise<void> {
+		if (!this.settings.orchestrationJobTypeAutorun || typeof this.settings.orchestrationJobTypeAutorun !== 'object') {
+			this.settings.orchestrationJobTypeAutorun = {};
+		}
+		this.settings.orchestrationJobTypeAutorun[type] = enabled;
+		await this.saveSettings();
+		if (enabled) this.orchestrationAutoRunner?.kickDrainType(type);
 	}
 
 	refreshToC() {
