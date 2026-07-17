@@ -21,7 +21,14 @@ await esbuild.build({
 	outfile,
 });
 
-const { computeShouldDrain, effectiveTypeAutorun, readJobTypeAutorun } = await import(pathToFileURL(outfile).href);
+const {
+	computeShouldDrain,
+	typeAutorunEnabled,
+	readTypeAutorun,
+	readTypeMinIntervalOverride,
+	setTypeControl,
+	migrateJobTypeControls,
+} = await import(pathToFileURL(outfile).href);
 
 // --- memory types (the folded enrichment queue) ---
 
@@ -90,26 +97,108 @@ test('file type per-type false vetoes even when global Autorun is on', () => {
 	}), false);
 });
 
-// --- effective per-type auto-run state (Queue Monitor display) ---
+// --- the display predicate (Queue Monitor) ---
 
-test('effectiveTypeAutorun: memory type reflects its per-type flag, default off', () => {
-	assert.equal(effectiveTypeAutorun({ drainsWithoutAutorun: true, typeAutorun: undefined, globalAutorunEnabled: true }), false);
-	assert.equal(effectiveTypeAutorun({ drainsWithoutAutorun: true, typeAutorun: true, globalAutorunEnabled: false }), true);
+test('typeAutorunEnabled: memory type reflects its per-type flag, default off', () => {
+	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: true, typeAutorun: undefined, globalAutorunEnabled: true }), false);
+	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: true, typeAutorun: true, globalAutorunEnabled: false }), true);
 });
 
-test('effectiveTypeAutorun: file type follows the global toggle unless overridden', () => {
-	assert.equal(effectiveTypeAutorun({ drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: true }), true);
-	assert.equal(effectiveTypeAutorun({ drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: false }), false);
-	assert.equal(effectiveTypeAutorun({ drainsWithoutAutorun: false, typeAutorun: false, globalAutorunEnabled: true }), false);
-	assert.equal(effectiveTypeAutorun({ drainsWithoutAutorun: false, typeAutorun: true, globalAutorunEnabled: false }), true);
+test('typeAutorunEnabled: file type is global Autorun minus a per-type veto — per-type true cannot bypass a disabled global', () => {
+	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: true }), true);
+	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: undefined, globalAutorunEnabled: false }), false);
+	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: false, globalAutorunEnabled: true }), false);
+	assert.equal(typeAutorunEnabled({ drainsWithoutAutorun: false, typeAutorun: true, globalAutorunEnabled: false }), false);
 });
 
-// --- settings-map reader ---
+test('display and drain agree: computeShouldDrain is exactly typeAutorunEnabled plus readiness', () => {
+	for (const drainsWithoutAutorun of [true, false]) {
+		for (const typeAutorun of [true, false, undefined]) {
+			for (const globalAutorunEnabled of [true, false]) {
+				const inputs = { drainsWithoutAutorun, typeAutorun, globalAutorunEnabled };
+				const label = JSON.stringify(inputs);
+				// With readiness satisfied, the drain decision IS the displayed state.
+				assert.equal(computeShouldDrain({ ...inputs, fileDrainReady: true }), typeAutorunEnabled(inputs), label);
+				// Before readiness, only memory types (which don't wait on it) drain.
+				assert.equal(
+					computeShouldDrain({ ...inputs, fileDrainReady: false }),
+					drainsWithoutAutorun && typeAutorunEnabled(inputs),
+					label,
+				);
+			}
+		}
+	}
+});
 
-test('readJobTypeAutorun returns the boolean when present, undefined otherwise', () => {
-	assert.equal(readJobTypeAutorun({ youtube_metadata_fetch: true }, 'youtube_metadata_fetch'), true);
-	assert.equal(readJobTypeAutorun({ youtube_metadata_fetch: false }, 'youtube_metadata_fetch'), false);
-	assert.equal(readJobTypeAutorun({}, 'youtube_metadata_fetch'), undefined);
-	assert.equal(readJobTypeAutorun(undefined, 'youtube_metadata_fetch'), undefined);
-	assert.equal(readJobTypeAutorun({ youtube_metadata_fetch: 'yes' }, 'youtube_metadata_fetch'), undefined);
+// --- settings-map readers ---
+
+test('readTypeAutorun returns the flag when present, undefined otherwise (tolerant of garbage)', () => {
+	assert.equal(readTypeAutorun({ youtube_metadata_fetch: { autoRun: true } }, 'youtube_metadata_fetch'), true);
+	assert.equal(readTypeAutorun({ youtube_metadata_fetch: { autoRun: false } }, 'youtube_metadata_fetch'), false);
+	assert.equal(readTypeAutorun({ youtube_metadata_fetch: {} }, 'youtube_metadata_fetch'), undefined);
+	assert.equal(readTypeAutorun({}, 'youtube_metadata_fetch'), undefined);
+	assert.equal(readTypeAutorun(undefined, 'youtube_metadata_fetch'), undefined);
+	assert.equal(readTypeAutorun({ youtube_metadata_fetch: { autoRun: 'yes' } }, 'youtube_metadata_fetch'), undefined);
+	assert.equal(readTypeAutorun({ youtube_metadata_fetch: true }, 'youtube_metadata_fetch'), undefined);
+});
+
+test('readTypeMinIntervalOverride returns finite non-negative ms only', () => {
+	assert.equal(readTypeMinIntervalOverride({ blogs_tracker: { minIntervalMsOverride: 5000 } }, 'blogs_tracker'), 5000);
+	assert.equal(readTypeMinIntervalOverride({ blogs_tracker: { minIntervalMsOverride: 0 } }, 'blogs_tracker'), 0);
+	assert.equal(readTypeMinIntervalOverride({ blogs_tracker: { minIntervalMsOverride: -1 } }, 'blogs_tracker'), undefined);
+	assert.equal(readTypeMinIntervalOverride({ blogs_tracker: { minIntervalMsOverride: Number.NaN } }, 'blogs_tracker'), undefined);
+	assert.equal(readTypeMinIntervalOverride({ blogs_tracker: {} }, 'blogs_tracker'), undefined);
+	assert.equal(readTypeMinIntervalOverride(undefined, 'blogs_tracker'), undefined);
+});
+
+// --- setTypeControl ---
+
+test('setTypeControl normalizes a missing/garbage map and merges patches per field', () => {
+	const fromGarbage = setTypeControl('nonsense', 'blogs_tracker', { autoRun: true });
+	assert.deepEqual(fromGarbage, { blogs_tracker: { autoRun: true } });
+	const merged = setTypeControl({ blogs_tracker: { autoRun: true } }, 'blogs_tracker', { minIntervalMsOverride: 3000 });
+	assert.deepEqual(merged, { blogs_tracker: { autoRun: true, minIntervalMsOverride: 3000 } });
+});
+
+test('setTypeControl clears a field on explicit undefined and drops an empty entry', () => {
+	const start = { blogs_tracker: { autoRun: true, minIntervalMsOverride: 3000 } };
+	const noRate = setTypeControl(start, 'blogs_tracker', { minIntervalMsOverride: undefined });
+	assert.deepEqual(noRate, { blogs_tracker: { autoRun: true } });
+	const empty = setTypeControl(noRate, 'blogs_tracker', { autoRun: undefined });
+	assert.deepEqual(empty, {});
+});
+
+test('setTypeControl does not mutate its input map', () => {
+	const start = { blogs_tracker: { autoRun: true } };
+	setTypeControl(start, 'blogs_tracker', { autoRun: false });
+	assert.deepEqual(start, { blogs_tracker: { autoRun: true } });
+});
+
+// --- one-shot migration from orchestrationJobTypeAutorun ---
+
+test('migrateJobTypeControls folds legacy boolean entries and seeds enrichment from Auto-enrich', () => {
+	const map = migrateJobTypeControls({}, { blogs_tracker: false }, true);
+	assert.deepEqual(map, {
+		blogs_tracker: { autoRun: false },
+		youtube_metadata_fetch: { autoRun: true },
+	});
+});
+
+test('migrateJobTypeControls: an explicit controls entry wins over the legacy map and the seed', () => {
+	const map = migrateJobTypeControls(
+		{ youtube_metadata_fetch: { autoRun: false, minIntervalMsOverride: 9000 } },
+		{ youtube_metadata_fetch: true },
+		true,
+	);
+	assert.deepEqual(map, { youtube_metadata_fetch: { autoRun: false, minIntervalMsOverride: 9000 } });
+});
+
+test('migrateJobTypeControls: a legacy enrichment entry wins over the Auto-enrich seed', () => {
+	const map = migrateJobTypeControls({}, { youtube_metadata_fetch: false }, true);
+	assert.deepEqual(map, { youtube_metadata_fetch: { autoRun: false } });
+});
+
+test('migrateJobTypeControls tolerates garbage inputs and non-boolean legacy values', () => {
+	const map = migrateJobTypeControls('nonsense', { blogs_tracker: 'yes' }, false);
+	assert.deepEqual(map, { youtube_metadata_fetch: { autoRun: false } });
 });

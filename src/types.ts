@@ -58,6 +58,7 @@ import { Hotkey, Command } from 'obsidian';
 import { Currency } from './orchestration/utils/fx';
 import { GeoResult } from './orchestration/utils/weather';
 import type { JobType } from './orchestration/types';
+import type { JobTypeControlsMap } from './orchestration/autorunGate';
 
 declare module 'obsidian' {
 	interface App {
@@ -422,14 +423,14 @@ export interface CrucibleSettings {
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
 	orchestrationQueueAutorunEnabled: boolean;
-	// Per-job-type auto-run override, keyed by JobType. A memory type (the folded
-	// enrichment queue) auto-drains only when its entry here is true — so turning its
-	// Auto toggle off leaves the queue idle instead of draining regardless. A file
-	// type auto-drains under the global Autorun toggle unless its entry here is
-	// explicitly false (a per-type veto). Missing entry = default (file types on via
-	// global autorun, memory types off). Manual "Run next"/enqueue runs one job of a
-	// type regardless of this gate.
-	orchestrationJobTypeAutorun: Record<string, boolean>;
+	// Per-job-type queue controls, keyed by JobType. `autoRun` gates auto-draining:
+	// a memory type (the folded enrichment queue) auto-drains only when true — so
+	// turning its Auto toggle off leaves the queue idle instead of draining
+	// regardless — while a file type auto-drains under the global Autorun toggle
+	// unless explicitly false (a per-type veto). `minIntervalMsOverride` overrides
+	// the type's configured cooloff between job starts. Manual "Run"/enqueue-and-run
+	// bypasses the auto-run gate.
+	orchestrationJobTypeControls: JobTypeControlsMap;
 	// Global cap on total in-flight jobs across all types when draining.
 	orchestrationMaxConcurrent: number;
 	// Per-job execution timeout for the autorun drain; 0 disables. A hung workflow
@@ -585,7 +586,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
 	orchestrationQueueAutorunEnabled: false,
-	orchestrationJobTypeAutorun: {},
+	orchestrationJobTypeControls: {},
 	orchestrationMaxConcurrent: 3,
 	orchestrationAutorunTimeoutSeconds: 600,
 	orchestrationDailyBriefEnabled: true,

@@ -745,6 +745,17 @@ If your plugin does not need CSS, delete this file.
   font-family: var(--font-monospace);
 }
 
+.crucible-queue-type-toggle,
+.crucible-queue-type-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.crucible-queue-type-rate input {
+  width: 3.5rem;
+}
+
 .crucible-queue-type-autorun {
   font-size: var(--font-ui-smaller);
   text-transform: uppercase;
