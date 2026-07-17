@@ -211,12 +211,26 @@ export class ChainManager {
 	// step, to force the buffer to match disk so a later autosave preserves the writes.
 	private async reconcileOpenEditor(file: TFile | undefined): Promise<void> {
 		if (!file) return;
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!view || view.file?.path !== file.path) return;
+		// Scan every open markdown leaf, not just the active one: the note may be open
+		// in a background/unfocused leaf (e.g. the web clipper created it without focus),
+		// and its stale buffer will still clobber disk on autosave.
+		const leaves = this.app.workspace.getLeavesOfType('markdown');
+		const views = leaves
+			.map(leaf => leaf.view)
+			.filter((view): view is MarkdownView => view instanceof MarkdownView && view.file?.path === file.path);
+		if (views.length === 0) {
+			logWarn('chain', 'reconcile: no open markdown view for', file.path);
+			return;
+		}
 		const disk = await this.app.vault.read(file);
-		if (view.getViewData() === disk) return;
-		logWarn('chain', 'reconciling open editor buffer to disk', file.path);
-		view.setViewData(disk, false);
+		for (const view of views) {
+			if (view.getViewData() === disk) {
+				logWarn('chain', 'reconcile: editor buffer already matches disk', file.path);
+				continue;
+			}
+			logWarn('chain', 'reconciling open editor buffer to disk', file.path);
+			view.setViewData(disk, false);
+		}
 	}
 
 	private async appendDebugLog(chain: Chain, entry: string) {
