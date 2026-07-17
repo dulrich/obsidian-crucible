@@ -51,6 +51,7 @@ await esbuild.build({
 const {
 	stripNonProseContent,
 	calculateWordCount,
+	setFrontmatterWordCount,
 } = await import(pathToFileURL(outfile));
 
 test('inline <svg> chart contributes no words', () => {
@@ -96,6 +97,45 @@ test('image embeds drop, links reduce to visible text', () => {
 
 test('plain prose counts correctly (regression guard)', () => {
 	assert.equal(calculateWordCount('The quick brown fox jumps over the lazy dog.'), 9);
+});
+
+test('setFrontmatterWordCount fills an empty clipper-seeded word-count', () => {
+	const before = ['---', 'title: THE SWELL', 'word-count:', 'tags:', '  - news', '---', '', 'Body prose here.'].join('\n');
+	const after = setFrontmatterWordCount(before, 380);
+	assert.match(after, /\nword-count: 380\n/);
+	// Only the value line changed; everything else is preserved verbatim.
+	assert.equal(after, before.replace('word-count:', 'word-count: 380'));
+});
+
+test('setFrontmatterWordCount overwrites an existing numeric value', () => {
+	const before = ['---', 'word-count: 12', 'title: X', '---', '', 'Body.'].join('\n');
+	assert.match(setFrontmatterWordCount(before, 500), /\nword-count: 500\n/);
+	assert.doesNotMatch(setFrontmatterWordCount(before, 500), /word-count: 12/);
+});
+
+test('setFrontmatterWordCount preserves indentation of the key', () => {
+	const before = ['---', '  word-count: 1', '---', '', 'Body.'].join('\n');
+	assert.match(setFrontmatterWordCount(before, 7), /\n {2}word-count: 7\n/);
+});
+
+test('setFrontmatterWordCount appends the key when absent from an existing block', () => {
+	const before = ['---', 'title: X', '---', '', 'Body.'].join('\n');
+	const after = setFrontmatterWordCount(before, 42);
+	assert.match(after, /word-count: 42/);
+	assert.match(after, /title: X/);
+});
+
+test('setFrontmatterWordCount is a no-op when there is no frontmatter block', () => {
+	const before = 'Just a body, no frontmatter.';
+	assert.equal(setFrontmatterWordCount(before, 99), before);
+});
+
+test('setFrontmatterWordCount leaves the body untouched', () => {
+	const before = ['---', 'word-count:', '---', '', 'Line one.', 'word-count: not-this', 'Line three.'].join('\n');
+	const after = setFrontmatterWordCount(before, 3);
+	// The body line mentioning word-count must be preserved; only the frontmatter changes.
+	assert.match(after, /\nword-count: not-this\n/);
+	assert.match(after, /^---\nword-count: 3\n---/);
 });
 
 test('frontmatter is excluded', () => {

@@ -55,6 +55,26 @@ export function wordCountFmValue(content: string): string {
 	return value === '' ? '<empty>' : value;
 }
 
+// Force the frontmatter `word-count:` to `value`, operating on the raw note content
+// (not the metadata cache). `fileManager.processFrontMatter` merges against the
+// cache's frontmatterPosition, which is stale right after a rapid rename+edit (e.g.
+// the Ingest-as-News chain running before the clipper's writes have been re-indexed),
+// silently dropping the value write. This content-based pass — run under vault.process
+// — is immune to that race. No-op when the note has no frontmatter block.
+export function setFrontmatterWordCount(content: string, value: number): string {
+	const m = content.match(FRONTMATTER_REGEX);
+	if (!m) return content;
+	const block = m[1] ?? '';
+	const lineRe = /(^|\n)([^\S\r\n]*)word-count[^\S\r\n]*:[^\r\n]*/;
+	const newBlock = lineRe.test(block)
+		? block.replace(lineRe, `$1$2word-count: ${value}`)
+		: `${block.replace(/[\r\n]*$/, '')}\nword-count: ${value}`;
+	if (newBlock === block) return content;
+	const idx = m.index ?? 0;
+	const rebuiltFm = m[0].replace(block, newBlock);
+	return content.slice(0, idx) + rebuiltFm + content.slice(idx + m[0].length);
+}
+
 export function cleanupYoutubeTranscript(content: string): string {
 	const fmMatch = content.match(FRONTMATTER_REGEX);
 	const fmText = fmMatch ? fmMatch[0] : '';
@@ -261,26 +281,31 @@ export class Linter {
 					upsertFrontmatterProperty(fm, 'word-count', wordCount);
 					deriveSourceIdProperties(fm);
 					sortFrontmatterProperties(fm, this.settings.lintYamlKeyPriority);
+					logWarn('lint', 'in-callback fm word-count=', fm['word-count'], 'keys=', Object.keys(fm).join(','));
 				});
 				logWarn('lint', 'post-processFrontMatter word-count value=', wordCountFmValue(await this.app.vault.read(file)), file.path);
 
-				if (this.settings.lintBlankLineAfterYaml) {
-					// Atomic read-modify-write under the vault lock. A prior read()/modify()
-					// pair could observe content captured before updateFrontmatter()'s
-					// processFrontMatter write had landed (notably right after a chain rename),
-					// then clobber that write — e.g. dropping the freshly-written word-count
-					// while keeping earlier edits. process() always sees current on-disk content.
-					await this.app.vault.process(file, (contentAfterFM) => {
-						const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
-						if (!yamlMatch) return contentAfterFM;
-						const yamlBlockWithNewlines = yamlMatch[0];
-						const currentNewlines = yamlMatch[2] || "";
-						if (currentNewlines === "\n\n") return contentAfterFM;
-						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
-						const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
-						return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
-					});
-				}
+				// One atomic, cache-independent pass under the vault lock that (1) reasserts
+				// the word-count value — processFrontMatter can silently drop it when the
+				// metadata cache is stale after a rapid rename+edit (the Ingest-as-News race)
+				// — and (2) normalizes the blank line after the YAML block when enabled.
+				const blankLine = this.settings.lintBlankLineAfterYaml;
+				await this.app.vault.process(file, (contentAfterFM) => {
+					let out = setFrontmatterWordCount(contentAfterFM, wordCount);
+					if (blankLine) {
+						const yamlMatch = out.match(FRONTMATTER_REGEX);
+						if (yamlMatch) {
+							const yamlBlockWithNewlines = yamlMatch[0];
+							const currentNewlines = yamlMatch[2] || "";
+							if (currentNewlines !== "\n\n") {
+								const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
+								const body = out.slice(yamlBlockWithNewlines.length);
+								out = yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
+							}
+						}
+					}
+					return out;
+				});
 				logWarn('lint', 'end-of-lint word-count value=', wordCountFmValue(await this.app.vault.read(file)), file.path);
 			}));
 		} catch (e) {
