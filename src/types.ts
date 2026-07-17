@@ -62,7 +62,7 @@ import type { JobType } from './orchestration/types';
 declare module 'obsidian' {
 	interface App {
 		// Optional: an undocumented API whose presence and shape vary across Obsidian
-		// versions — every caller guards with `if (!app.secretStorage)`.
+		// versions — accessed only through the SecretRegistry facade, which guards it.
 		secretStorage?: SecretStorage;
 		plugins: {
 			enabledPlugins: Set<string>;

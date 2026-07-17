@@ -148,37 +148,15 @@ function renderEditProvider(tab: CrucibleSettingTab, containerEl: HTMLElement, p
 			}, save);
 
 			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
-			const apiKeySetting = new Setting(containerEl)
-				.setName('API Key (optional)')
-				.setDesc('Only required by servers configured with an API key (e.g. vLLM --api-key). Stored securely in Obsidian Secret Storage.');
-			mountSecretControl(apiKeySetting, {
-				load: () => tab.plugin.providerManager.loadApiKey(provider.id),
-				store: async (v) => {
-					await tab.plugin.providerManager.storeApiKey(provider.id, v);
-					if (v.trim()) await tab.plugin.secretRegistry.record(providerSecretKey(provider.id));
-				},
-				clear: async () => {
-					await tab.plugin.providerManager.deleteApiKey(provider.id);
-					await tab.plugin.secretRegistry.forget(providerSecretKey(provider.id));
-				},
-				expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(providerSecretKey(provider.id)),
+			mountProviderApiKeyControl(tab, containerEl, provider, {
+				name: 'API Key (optional)',
+				desc: 'Only required by servers configured with an API key (e.g. vLLM --api-key). Stored securely in Obsidian Secret Storage.',
 			});
 		} else {
 			containerEl.createEl('hr', { cls: 'crucible-row-divider' });
-			const apiKeySetting = new Setting(containerEl)
-				.setName('API Key')
-				.setDesc('Stored securely in Obsidian Secret Storage.');
-			mountSecretControl(apiKeySetting, {
-				load: () => tab.plugin.providerManager.loadApiKey(provider.id),
-				store: async (v) => {
-					await tab.plugin.providerManager.storeApiKey(provider.id, v);
-					if (v.trim()) await tab.plugin.secretRegistry.record(providerSecretKey(provider.id));
-				},
-				clear: async () => {
-					await tab.plugin.providerManager.deleteApiKey(provider.id);
-					await tab.plugin.secretRegistry.forget(providerSecretKey(provider.id));
-				},
-				expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(providerSecretKey(provider.id)),
+			mountProviderApiKeyControl(tab, containerEl, provider, {
+				name: 'API Key',
+				desc: 'Stored securely in Obsidian Secret Storage.',
 			});
 		}
 	} else {
@@ -263,6 +241,19 @@ function renderEditProvider(tab: CrucibleSettingTab, containerEl: HTMLElement, p
 
 	containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 	renderProviderModelsList(tab, containerEl, provider);
+}
+
+// The provider API-key control is identical for every kind that has one (only the
+// name/desc differ between "required" and "optional" kinds) — one mount point instead
+// of two verbatim copies.
+function mountProviderApiKeyControl(tab: CrucibleSettingTab, containerEl: HTMLElement, provider: Provider, label: { name: string; desc: string }) {
+	const apiKeySetting = new Setting(containerEl).setName(label.name).setDesc(label.desc);
+	mountSecretControl(apiKeySetting, {
+		load: () => tab.plugin.providerManager.loadApiKey(provider.id),
+		store: (v) => tab.plugin.providerManager.storeApiKey(provider.id, v),
+		clear: () => tab.plugin.providerManager.deleteApiKey(provider.id),
+		expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(providerSecretKey(provider.id)),
+	});
 }
 
 function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElement, provider: Provider) {
