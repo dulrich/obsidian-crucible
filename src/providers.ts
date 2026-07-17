@@ -33,18 +33,19 @@ export class ProviderManager {
 
 	async loadApiKey(providerId: string): Promise<string> {
 		if (!this.app.secretStorage) return '';
-		return this.app.secretStorage.getSecret(providerSecretKey(providerId)) || '';
+		// await: getSecret may be sync or Promise-returning across Obsidian versions.
+		return (await this.app.secretStorage.getSecret(providerSecretKey(providerId))) || '';
 	}
 
 	async storeApiKey(providerId: string, key: string): Promise<void> {
 		if (!this.app.secretStorage) return;
-		this.app.secretStorage.setSecret(providerSecretKey(providerId), key);
+		await this.app.secretStorage.setSecret(providerSecretKey(providerId), key);
 	}
 
 	async deleteApiKey(providerId: string): Promise<void> {
 		if (!this.app.secretStorage) return;
 		// SecretStorage doesn't always have an explicit delete, so we clear it.
-		this.app.secretStorage.setSecret(providerSecretKey(providerId), '');
+		await this.app.secretStorage.setSecret(providerSecretKey(providerId), '');
 	}
 
 	async complete(provider: Provider, modelId: string, system: string, user: string, options: ProviderCompletionOptions = {}): Promise<ProviderCompletionResult> {
@@ -99,7 +100,7 @@ export class ProviderManager {
 	private async httpContext(provider: Provider, modelId: string): Promise<{ provider: Provider; modelId: string; apiKey: string }> {
 		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
 		if (!apiKey && provider.kind !== 'ollama' && provider.kind !== 'openai-compatible') {
-			throw new Error(`API key missing for provider "${provider.name || provider.id}"`);
+			throw new Error(`API key missing for provider "${provider.name || provider.id}" — re-enter it in Settings → AI.`);
 		}
 		return { provider, modelId, apiKey };
 	}

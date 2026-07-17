@@ -57,7 +57,9 @@ import type { JobType } from './orchestration/types';
 
 declare module 'obsidian' {
 	interface App {
-		secretStorage: SecretStorage;
+		// Optional: an undocumented API whose presence and shape vary across Obsidian
+		// versions — every caller guards with `if (!app.secretStorage)`.
+		secretStorage?: SecretStorage;
 		plugins: {
 			enabledPlugins: Set<string>;
 			disablePlugin(id: string): Promise<void>;
@@ -81,10 +83,12 @@ declare module 'obsidian' {
 	}
 }
 
+// The methods may be sync or Promise-returning depending on the Obsidian version;
+// callers `await` the results so both shapes work.
 export interface SecretStorage {
-	setSecret(key: string, value: string): void;
-	getSecret(key: string): string | null;
-	listSecrets(): string[];
+	setSecret(key: string, value: string): void | Promise<void>;
+	getSecret(key: string): string | null | Promise<string | null>;
+	listSecrets(): string[] | Promise<string[]>;
 }
 
 export interface CommandArgSchema {
@@ -376,6 +380,10 @@ export interface CrucibleSettings {
 	triggers: TriggerDef[];
 	// LLM providers (connection + model)
 	providers: Provider[];
+	// Names (never values) of secrets the plugin has stored in Obsidian's secret
+	// store. Used to detect when a key the user saved vanishes out-of-band (e.g. an
+	// Obsidian update resets the store). Grown by observation on reconcile.
+	storedSecretKeys: string[];
 	// Agents (provider + prompts, callable from chains)
 	agents: Agent[];
 	// ToC
@@ -537,6 +545,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	chains: [],
 	triggers: [],
 	providers: [],
+	storedSecretKeys: [],
 	agents: [],
 	showToC: true,
 	tocPosition: 'bottom-right',
