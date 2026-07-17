@@ -461,9 +461,15 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindToggle(ingestionGroup, {
 		name: 'Auto-enrich YouTube metadata',
-		desc: 'When on, the dashboard drains the Uncaptured Videos list (in current sort order) through the YouTube Data API. Requires a configured API key.',
+		desc: 'When on, the dashboard drains the Uncaptured Videos list (in current sort order) through the YouTube Data API. Requires a configured API key. When off, the enrichment queue stays idle.',
 		get: () => s.ingestionYoutubeAutoEnrichEnabled === true,
 		set: (v) => { s.ingestionYoutubeAutoEnrichEnabled = v; },
+		// Keep the per-type auto-run flag (which gates draining) in sync with this
+		// legacy toggle, and reflect it into the live enrichment queue's auto-source.
+		after: async () => {
+			await tab.plugin.setJobTypeAutorun('youtube_metadata_fetch', s.ingestionYoutubeAutoEnrichEnabled === true);
+			tab.plugin.enrichmentQueue?.setAutoEnabled(s.ingestionYoutubeAutoEnrichEnabled === true);
+		},
 	}, save);
 
 	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
