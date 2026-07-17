@@ -7,7 +7,8 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans: []
+pending-plans:
+  - "[[decomposition-dashboard-main-2026-07-17]]"
 initiative-status: active
 initiative-cadence: as-needed
 ---
