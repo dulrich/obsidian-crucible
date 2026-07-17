@@ -70,6 +70,11 @@ export class SecretRegistry {
 	// registered keys are absent from the live store. Returns null when the store is
 	// unavailable — a distinct failure mode (the API is gone, not the keys) that the
 	// caller words differently and never treats as "keys wiped".
+	//
+	// listSecrets() keeps listing a key after it's cleared (clear writes '' — the
+	// store has no explicit delete), so a listed key is only treated as "present" once
+	// its value is confirmed non-empty. Otherwise a cleared key would re-register via
+	// grow-by-observation and false-report as present/missing forever.
 	async reconcile(): Promise<SecretReconcileResult | null> {
 		const storage = this.plugin.app.secretStorage;
 		if (!storage) return null;
@@ -80,11 +85,52 @@ export class SecretRegistry {
 			return null;
 		}
 		const liveCrucible = live.filter(k => k.startsWith(CRUCIBLE_SECRET_PREFIX));
-		const { merged, result } = computeReconcile(this.keys, liveCrucible);
+		const present: string[] = [];
+		for (const key of liveCrucible) {
+			let value: string;
+			try {
+				value = (await storage.getSecret(key)) || '';
+			} catch {
+				value = '';
+			}
+			if (value) present.push(key);
+		}
+		const { merged, result } = computeReconcile(this.keys, present);
 		if (merged.length !== this.keys.length) {
 			this.plugin.settings.storedSecretKeys = merged;
 			await this.plugin.saveSettings();
 		}
 		return result;
+	}
+
+	// --- Facade: the only place that touches app.secretStorage directly ----------
+	// `getSecret`/`setSecret` may be sync or Promise-returning across Obsidian
+	// versions (always await), and `secretStorage` itself is optional (older
+	// Obsidian). Both are handled here, once, instead of at each call site.
+
+	async get(key: string): Promise<string> {
+		const storage = this.plugin.app.secretStorage;
+		if (!storage) return '';
+		return (await storage.getSecret(key)) || '';
+	}
+
+	// An empty or whitespace-only value is treated as a clear (mirrors setSecret's
+	// no-explicit-delete contract) so callers don't need a separate branch.
+	async store(key: string, value: string): Promise<void> {
+		if (!value.trim()) {
+			await this.clear(key);
+			return;
+		}
+		const storage = this.plugin.app.secretStorage;
+		if (!storage) return;
+		await storage.setSecret(key, value);
+		await this.record(key);
+	}
+
+	async clear(key: string): Promise<void> {
+		const storage = this.plugin.app.secretStorage;
+		if (!storage) return;
+		await storage.setSecret(key, '');
+		await this.forget(key);
 	}
 }

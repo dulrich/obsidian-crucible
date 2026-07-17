@@ -147,8 +147,8 @@ export default class CruciblePlugin extends Plugin {
 		});
 		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.chainManager = new ChainManager(this.app, this.noteLocks);
-		this.providerManager = new ProviderManager(this.app);
 		this.secretRegistry = new SecretRegistry(this);
+		this.providerManager = new ProviderManager(this.app, this.secretRegistry);
 		this.searchManager = new SearchManager(this.app, this.settings, this.providerManager);
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);

@@ -48,7 +48,23 @@ export function debounce(fn) { return fn; }
 	logLevel: 'silent',
 });
 
-const { computeReconcile, describeSecretKey } = await import(pathToFileURL(outfile).href);
+const { computeReconcile, describeSecretKey, SecretRegistry } = await import(pathToFileURL(outfile).href);
+
+// Minimal plugin stub backing SecretRegistry: settings.storedSecretKeys is the
+// persisted registry, `store` is the fake secretStorage's key→value table (an empty
+// string models a cleared-but-still-listed key, matching real SecretStorage's lack of
+// an explicit delete).
+function makeStubPlugin(initialKeys = []) {
+	const settings = { storedSecretKeys: [...initialKeys], providers: [] };
+	const store = new Map();
+	const secretStorage = {
+		getSecret: async (key) => (store.has(key) ? store.get(key) : null),
+		setSecret: async (key, value) => { store.set(key, value); },
+		listSecrets: async () => Array.from(store.keys()),
+	};
+	const plugin = { settings, app: { secretStorage }, saveSettings: async () => {} };
+	return { plugin, store };
+}
 
 // ── computeReconcile ─────────────────────────────────────────────────────────
 
@@ -92,4 +108,74 @@ test('describeSecretKey maps YouTube and provider keys to human labels', () => {
 	assert.equal(describeSecretKey(plugin, 'crucible-youtube-data-api-key'), 'YouTube Data API key');
 	assert.equal(describeSecretKey(plugin, 'crucible-provider-or-key'), 'OpenRouter API key');
 	assert.equal(describeSecretKey(plugin, 'crucible-unknown'), 'crucible-unknown');
+});
+
+// ── SecretRegistry facade + reconcile hardening ─────────────────────────────────
+
+test('facade store records the key; facade clear forgets it', async () => {
+	const { plugin, store } = makeStubPlugin();
+	const registry = new SecretRegistry(plugin);
+	const key = 'crucible-provider-or-key';
+
+	await registry.store(key, 'sk-test-value');
+	assert.equal(store.get(key), 'sk-test-value');
+	assert.ok(registry.isRegistered(key));
+
+	await registry.clear(key);
+	assert.equal(store.get(key), '');
+	assert.ok(!registry.isRegistered(key));
+});
+
+test('facade store with an empty value clears instead of recording', async () => {
+	const { plugin, store } = makeStubPlugin(['crucible-provider-or-key']);
+	store.set('crucible-provider-or-key', 'sk-existing');
+	const registry = new SecretRegistry(plugin);
+
+	await registry.store('crucible-provider-or-key', '');
+	assert.equal(store.get('crucible-provider-or-key'), '');
+	assert.ok(!registry.isRegistered('crucible-provider-or-key'));
+});
+
+test('deleting a provider (facade clear) forgets its key — reconcile reports nothing missing', async () => {
+	const { plugin, store } = makeStubPlugin();
+	const registry = new SecretRegistry(plugin);
+	const key = 'crucible-provider-or-key';
+
+	await registry.store(key, 'sk-test-value');
+	// What ProviderManager.deleteApiKey now does: clear via the facade.
+	await registry.clear(key);
+	assert.equal(store.get(key), ''); // still listed, but empty
+
+	const result = await registry.reconcile();
+	assert.deepEqual(result.missing, []);
+	assert.deepEqual(result.present, []);
+});
+
+test('reconcile treats a listed-but-empty key as absent: no re-register, no false report', async () => {
+	const { plugin, store } = makeStubPlugin();
+	store.set('crucible-provider-or-key', ''); // cleared out-of-band, still listed
+	const registry = new SecretRegistry(plugin);
+
+	const result = await registry.reconcile();
+	assert.deepEqual(result.missing, []);
+	assert.deepEqual(result.present, []);
+	assert.deepEqual(plugin.settings.storedSecretKeys, []);
+});
+
+test('reconcile still grows-by-observation and reports missing for genuinely present/absent keys', async () => {
+	const { plugin, store } = makeStubPlugin(['crucible-youtube-data-api-key']);
+	store.set('crucible-provider-or-key', 'sk-live'); // present, not yet registered
+	// crucible-youtube-data-api-key is registered but absent from the store entirely.
+	const registry = new SecretRegistry(plugin);
+
+	const result = await registry.reconcile();
+	assert.deepEqual(result.missing, ['crucible-youtube-data-api-key']);
+	assert.deepEqual(result.present, ['crucible-provider-or-key']);
+	assert.deepEqual(plugin.settings.storedSecretKeys.sort(), ['crucible-provider-or-key', 'crucible-youtube-data-api-key']);
+});
+
+test('facade get returns empty string when secretStorage is unavailable', async () => {
+	const plugin = { settings: { storedSecretKeys: [] }, app: {}, saveSettings: async () => {} };
+	const registry = new SecretRegistry(plugin);
+	assert.equal(await registry.get('crucible-provider-or-key'), '');
 });
