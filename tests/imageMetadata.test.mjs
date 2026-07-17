@@ -88,6 +88,23 @@ function createFakeApp() {
 				return Array.from(files.keys()).filter(p => p.endsWith('.md')).map(p => new TFileStub(p));
 			},
 		},
+		metadataCache: {
+			// Always-fresh cache derived from the file map, so updateFrontmatter's
+			// write-consistency barrier takes its fast path in these tests.
+			getFileCache(file) {
+				const content = files.get(file.path) ?? '';
+				const m = /^---\n[\s\S]*?\n---/.exec(content);
+				if (!m) return {};
+				const frontmatter = {};
+				for (const line of m[0].split('\n').slice(1, -1)) {
+					const key = /^(\S[^:]*):/.exec(line);
+					if (key) frontmatter[key[1].trim()] = null;
+				}
+				return { frontmatter, frontmatterPosition: { start: { offset: 0 }, end: { offset: m[0].length } } };
+			},
+			on() { return {}; },
+			offref() {},
+		},
 		fileManager: {
 			async processFrontMatter(file, fn) {
 				const content = files.get(file.path) ?? '';

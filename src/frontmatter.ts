@@ -1,6 +1,10 @@
-import { App, TFile } from 'obsidian';
+import { App, EventRef, TFile } from 'obsidian';
+import { FRONTMATTER_REGEX } from './utils';
+import { logError, logWarn } from './log';
 
 type FrontmatterRecord = Record<string, unknown>;
+
+export const FRONTMATTER_CACHE_BARRIER_TIMEOUT_MS = 2000;
 
 export async function withMaterializing<T>(setMaterializing: (state: boolean) => void, action: () => Promise<T>): Promise<T> {
 	setMaterializing(true);
@@ -11,8 +15,112 @@ export async function withMaterializing<T>(setMaterializing: (state: boolean) =>
 	}
 }
 
-export async function updateFrontmatter(app: App, file: TFile, update: (fm: FrontmatterRecord) => void): Promise<void> {
-	await app.fileManager.processFrontMatter(file, update);
+// All frontmatter writes go through here. `fileManager.processFrontMatter` merges the
+// callback's mutations against the metadata cache's view of the file; when the cache
+// hasn't re-indexed the current bytes (post-rename + rapid edit, e.g. the Ingest-as-News
+// chain), the merge lands on the wrong byte range and values are silently lost. Mirror of
+// the read-side barrier in TriggerRegistry.waitForConsistentCache: when the cache is
+// stale, wait (bounded) for the file's next `metadataCache.on('changed')` before writing.
+// See the processFrontMatter quirk in AGENTS.md.
+export async function updateFrontmatter(
+	app: App,
+	file: TFile,
+	update: (fm: FrontmatterRecord) => void,
+	cacheBarrierTimeoutMs = FRONTMATTER_CACHE_BARRIER_TIMEOUT_MS,
+): Promise<void> {
+	const fresh = await waitForFreshFrontmatterCache(app, file, cacheBarrierTimeoutMs);
+	if (fresh) {
+		await app.fileManager.processFrontMatter(file, update);
+		return;
+	}
+	logWarn(`frontmatter cache still stale after ${cacheBarrierTimeoutMs}ms; writing anyway (${file.path})`);
+	const mutated = new Map<string, unknown>();
+	await app.fileManager.processFrontMatter(file, (fm: FrontmatterRecord) => {
+		const before = new Map(Object.entries(fm));
+		update(fm);
+		for (const key of Object.keys(fm)) {
+			if (!before.has(key) || before.get(key) !== fm[key]) mutated.set(key, fm[key]);
+		}
+	});
+	if (mutated.size === 0) return;
+	const content = await app.vault.read(file);
+	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
+	const lost = Array.from(mutated).filter(([key, value]) => !frontmatterValueLanded(block, key, value));
+	if (lost.length > 0) {
+		logError(`frontmatter write lost under stale cache for keys [${lost.map(([key]) => key).join(', ')}] (${file.path})`);
+	}
+}
+
+// Raw-content check that a scalar write survived; structured values (arrays, objects)
+// only get a key-presence check — matching their YAML layout here isn't worth it.
+function frontmatterValueLanded(block: string, key: string, value: unknown): boolean {
+	const line = block.split(/\r?\n/).find(l => frontmatterLineKey(l) === key);
+	if (line === undefined) return false;
+	if (value === null || value === undefined) return true;
+	if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return true;
+	const raw = line.slice(line.indexOf(':') + 1).trim();
+	return raw === String(value) || raw.replace(/^(['"])(.*)\1$/, '$2') === String(value);
+}
+
+async function waitForFreshFrontmatterCache(app: App, file: TFile, timeoutMs: number): Promise<boolean> {
+	// The metadata cache only indexes markdown; processFrontMatter refuses other files anyway.
+	if (file.extension !== 'md') return true;
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		if (frontmatterCacheIsFresh(app, file, await app.vault.read(file))) return true;
+		const remaining = deadline - Date.now();
+		if (remaining <= 0 || !(await nextMetadataChange(app, file.path, remaining))) return false;
+	}
+}
+
+function frontmatterCacheIsFresh(app: App, file: TFile, content: string): boolean {
+	const cache = app.metadataCache.getFileCache(file);
+	const cachedEnd = cache?.frontmatterPosition?.end?.offset;
+	const m = content.match(FRONTMATTER_REGEX);
+	if (!m) return cachedEnd === undefined;
+	if (cachedEnd === undefined) return false;
+	const trailingNewlines = m[2] ?? '';
+	const closingEnd = m[0].slice(0, m[0].length - trailingNewlines.length).replace(/[^\S\r\n]+$/, '').length;
+	if (cachedEnd !== closingEnd) return false;
+	// Offsets can coincide across an edit; the key set catches content-level staleness.
+	const cachedKeys = Object.keys((cache?.frontmatter as FrontmatterRecord | undefined) ?? {});
+	const actualKeys = frontmatterBlockKeys(m[1] ?? '');
+	return cachedKeys.length === actualKeys.size && cachedKeys.every(key => actualKeys.has(key));
+}
+
+// Top-level keys of a raw frontmatter block: non-indented `key:` lines (indented lines
+// belong to list/block values). Quoted keys are unwrapped to match the parsed cache keys.
+function frontmatterBlockKeys(block: string): Set<string> {
+	const keys = new Set<string>();
+	for (const line of block.split(/\r?\n/)) {
+		const key = frontmatterLineKey(line);
+		if (key !== null) keys.add(key);
+	}
+	return keys;
+}
+
+function frontmatterLineKey(line: string): string | null {
+	const match = /^(\S[^:\r\n]*):(?:\s|$)/.exec(line);
+	if (!match?.[1]) return null;
+	const raw = match[1].trim();
+	const unquoted = /^(['"])(.*)\1$/.exec(raw);
+	return unquoted?.[2] ?? raw;
+}
+
+function nextMetadataChange(app: App, path: string, timeoutMs: number): Promise<boolean> {
+	return new Promise(resolve => {
+		let ref: EventRef | null = null;
+		const settle = (changed: boolean) => {
+			clearTimeout(timer);
+			if (ref) app.metadataCache.offref(ref);
+			ref = null;
+			resolve(changed);
+		};
+		const timer = setTimeout(() => settle(false), timeoutMs);
+		ref = app.metadataCache.on('changed', changedFile => {
+			if (changedFile.path === path) settle(true);
+		});
+	});
 }
 
 export function normalizeFrontmatterPropertyName(property: string): string {

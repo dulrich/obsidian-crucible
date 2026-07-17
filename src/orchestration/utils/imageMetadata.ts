@@ -1,5 +1,6 @@
 import { App, TFile, normalizePath } from 'obsidian';
 import { FRONTMATTER_REGEX, ensureFolder } from '../../utils';
+import { updateFrontmatter } from '../../frontmatter';
 import { yamlString } from '../../frontmatterValues';
 import type { ProviderImageExtractionResult, ProviderModelRef } from '../../types';
 
@@ -59,8 +60,7 @@ export async function addImageMetadataSidecarSource(app: App, sidecarPath: strin
 	if (!sourceNotePath) return;
 	const file = app.vault.getAbstractFileByPath(sidecarPath);
 	if (!(file instanceof TFile)) return;
-	await app.fileManager.processFrontMatter(file, fm => {
-		const frontmatter = fm as Record<string, unknown>;
+	await updateFrontmatter(app, file, frontmatter => {
 		const existingValue = frontmatter['source-note-paths'];
 		const existing = Array.isArray(existingValue)
 			? existingValue.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
