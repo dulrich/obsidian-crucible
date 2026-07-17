@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[tn-review-remediation-2026-07-17]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 ---

@@ -39,6 +39,8 @@ import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
+import type { AutoSourceFn } from './orchestration/EnrichmentQueueAdapter';
+import { migrateJobTypeControls, setTypeControl } from './orchestration/autorunGate';
 import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
@@ -461,17 +463,21 @@ export default class CruciblePlugin extends Plugin {
 			dirty = true;
 		}
 
-		// Seed the enrichment type's per-type auto-run from the legacy Auto-enrich
-		// toggle so existing users keep their current behavior: draining now respects
-		// this flag (previously memory types drained regardless), and Auto-enrich is
-		// the single control that governs both source refill and draining. Only seed
-		// when unset so a later explicit choice is preserved.
-		if (!this.settings.orchestrationJobTypeAutorun || typeof this.settings.orchestrationJobTypeAutorun !== 'object') {
-			this.settings.orchestrationJobTypeAutorun = {};
-			dirty = true;
-		}
-		if (typeof this.settings.orchestrationJobTypeAutorun['youtube_metadata_fetch'] !== 'boolean') {
-			this.settings.orchestrationJobTypeAutorun['youtube_metadata_fetch'] = this.settings.ingestionYoutubeAutoEnrichEnabled === true;
+		// Fold the sprint-era `orchestrationJobTypeAutorun` boolean map into the
+		// per-type controls map (one-shot: the old map existed for a single
+		// unreleased sprint), seeding the enrichment type's auto-run from the legacy
+		// Auto-enrich toggle so existing users keep their current behavior. Explicit
+		// choices already in the controls map are preserved.
+		const legacyAutorun = this.settings as CrucibleSettings & { orchestrationJobTypeAutorun?: unknown };
+		const migratedControls = migrateJobTypeControls(
+			this.settings.orchestrationJobTypeControls,
+			legacyAutorun.orchestrationJobTypeAutorun,
+			this.settings.ingestionYoutubeAutoEnrichEnabled === true,
+		);
+		if ('orchestrationJobTypeAutorun' in legacyAutorun
+			|| JSON.stringify(migratedControls) !== JSON.stringify(this.settings.orchestrationJobTypeControls)) {
+			this.settings.orchestrationJobTypeControls = migratedControls;
+			delete legacyAutorun.orchestrationJobTypeAutorun;
 			dirty = true;
 		}
 
@@ -527,18 +533,34 @@ export default class CruciblePlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	// Set a per-type auto-run override, persist it, and kick a drain when enabling so
+	// Set a per-type auto-run flag, persist it, and kick a drain when enabling so
 	// the change takes effect immediately. Turning it off leaves any in-flight worker
 	// to finish its current job, then the type goes idle (the drain loop re-checks the
-	// gate each iteration). Callers that flip the enrichment Auto toggle use this so
-	// the auto-run flag and the legacy Auto-enrich flag stay in sync.
+	// gate each iteration). The enrichment type's flag is owned by
+	// setAutoEnrichEnabled — flip that instead so its coupled flags stay in sync.
 	async setJobTypeAutorun(type: JobType, enabled: boolean): Promise<void> {
-		if (!this.settings.orchestrationJobTypeAutorun || typeof this.settings.orchestrationJobTypeAutorun !== 'object') {
-			this.settings.orchestrationJobTypeAutorun = {};
-		}
-		this.settings.orchestrationJobTypeAutorun[type] = enabled;
+		this.settings.orchestrationJobTypeControls = setTypeControl(this.settings.orchestrationJobTypeControls, type, { autoRun: enabled });
 		await this.saveSettings();
 		if (enabled) this.orchestrationAutoRunner?.kickDrainType(type);
+	}
+
+	// Set or clear (ms === undefined) a per-type rate-limit override. The drain loop
+	// reads it live before each job start, so persisting is all that's needed.
+	async setJobTypeMinInterval(type: JobType, ms: number | undefined): Promise<void> {
+		this.settings.orchestrationJobTypeControls = setTypeControl(this.settings.orchestrationJobTypeControls, type, { minIntervalMsOverride: ms });
+		await this.saveSettings();
+	}
+
+	// Single owner of the enrichment-enable sync: the legacy Auto-enrich flag, the
+	// per-type auto-run flag (which gates draining), and the live queue's enabled
+	// state move together, so "off" means idle everywhere. The auto-source is
+	// dashboard-owned (its items follow the dashboard's sort order), so it is only
+	// pushed when the caller has one; other callers leave the current source alone.
+	async setAutoEnrichEnabled(enabled: boolean, autoSource?: AutoSourceFn): Promise<void> {
+		this.settings.ingestionYoutubeAutoEnrichEnabled = enabled;
+		await this.setJobTypeAutorun('youtube_metadata_fetch', enabled);
+		this.enrichmentQueue?.setAutoEnabled(enabled);
+		if (enabled && autoSource) this.enrichmentQueue?.setAutoSource(autoSource);
 	}
 
 	refreshToC() {

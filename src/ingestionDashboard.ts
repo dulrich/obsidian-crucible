@@ -26,8 +26,8 @@ import { blogMetadataRoot, runBlogIngestCommand } from './orchestration/utils/bl
 import { logWarn } from './log';
 import type { EnrichmentQueueEntry, EnrichmentQueueItem } from './orchestration/EnrichmentQueueAdapter';
 import type { JobType, OrchestrationJob } from './orchestration/types';
-import { effectiveTypeAutorun, readJobTypeAutorun } from './orchestration/autorunGate';
 import { renderSortableTable } from './ingestion/render/sortableTable';
+import { renderQueueTypeControls } from './ingestion/render/queueTypeControls';
 import { renderTableSection } from './ingestion/render/section';
 import type {
 	BlogControlRow,
@@ -113,6 +113,9 @@ export class IngestionDashboardUI {
 	private uncapturedVideosCache: UncapturedVideoRow[] = [];
 	private orphanedAttachmentsCache: OrphanRow[] = [];
 	private intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
+	// The Queue Monitor card's Auto-enrich checkbox, re-synced when the per-type
+	// strip flips the enrichment type's auto-run (both write the same flags).
+	private enrichToggle: HTMLInputElement | null = null;
 	// Blog control center filter: which blogs to list.
 	private blogFilter: ControlCenterFilter = 'all';
 	// Channel control center filter: which channels to list.
@@ -190,6 +193,7 @@ export class IngestionDashboardUI {
 		}
 		this.eventRefs.length = 0;
 		this.plugin.enrichmentQueue?.setAutoSource(null);
+		this.enrichToggle = null;
 		this.intakeButtons.clear();
 		this.sections.clear();
 		this.relevantSignatures.clear();
@@ -422,18 +426,11 @@ export class IngestionDashboardUI {
 		const enrichToggle = enrichToggleLabel.createEl('input', { type: 'checkbox' });
 		enrichToggle.checked = this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
 		enrichToggleLabel.appendText(' Auto enrich from Uncaptured Videos');
+		this.enrichToggle = enrichToggle;
+		// setAutoEnrichEnabled owns the flag sync (legacy flag, per-type auto-run,
+		// live queue enable); the dashboard supplies its sort-following auto-source.
 		enrichToggle.addEventListener('change', () => {
-			void (async () => {
-				this.plugin.settings.ingestionYoutubeAutoEnrichEnabled = enrichToggle.checked;
-				// Auto-enrich is the single control for enrichment activity: it gates the
-				// capture trigger, the auto-source refill, AND (via the per-type auto-run
-				// flag) the draining. Keep the two flags in sync so "off" means idle.
-				await this.plugin.setJobTypeAutorun('youtube_metadata_fetch', enrichToggle.checked);
-				this.plugin.enrichmentQueue?.setAutoEnabled(enrichToggle.checked);
-				if (enrichToggle.checked) {
-					this.plugin.enrichmentQueue?.setAutoSource(() => this.uncapturedQueueItems());
-				}
-			})();
+			void this.plugin.setAutoEnrichEnabled(enrichToggle.checked, () => this.uncapturedQueueItems());
 		});
 
 		const rateLabel = controls.createEl('label', { cls: 'crucible-ingestion-queue-rate' });
@@ -473,8 +470,7 @@ export class IngestionDashboardUI {
 		// nothing else enables the queue on load — without this the box reads ON but
 		// enrichment stays idle until the toggle is cycled off/on.
 		if (enrichToggle.checked) {
-			this.plugin.enrichmentQueue?.setAutoEnabled(true);
-			this.plugin.enrichmentQueue?.setAutoSource(() => this.uncapturedQueueItems());
+			void this.plugin.setAutoEnrichEnabled(true, () => this.uncapturedQueueItems());
 		}
 	}
 
@@ -601,10 +597,17 @@ export class IngestionDashboardUI {
 			return;
 		}
 
-		// Per-type controls: for each type with pending/running work, show whether it
-		// auto-runs (memory types under their own toggle, file types under the global
-		// Autorun) and a manual "Run next" that runs one job regardless of that gate.
-		this.renderQueueTypeControls(body, Array.from(typeCounts.keys()) as JobType[]);
+		// Per-type controls for each type with pending/running work (auto-run toggle,
+		// effective state, rate-limit override, manual Run). When the strip flips the
+		// enrichment type's auto-run, re-sync the card's Auto-enrich checkbox (both
+		// controls write the same flags) and reassert the dashboard's auto-source —
+		// the strip can't supply one, and refill no-ops without it.
+		renderQueueTypeControls(this.plugin, body, Array.from(typeCounts.keys()) as JobType[], () => {
+			if (this.enrichToggle) this.enrichToggle.checked = this.plugin.settings.ingestionYoutubeAutoEnrichEnabled === true;
+			if (this.plugin.enrichmentQueue?.isAutoEnabled()) {
+				this.plugin.enrichmentQueue.setAutoSource(() => this.uncapturedQueueItems());
+			}
+		});
 
 		if (!ctx.sort) ctx.sort = { column: 'status', direction: 'asc' };
 
@@ -684,38 +687,6 @@ export class IngestionDashboardUI {
 				},
 			},
 		], rows, ctx, { limit: QUEUE_MONITOR_RENDER_LIMIT });
-	}
-
-	// Compact per-type control strip for the Queue Monitor: one row per job type that
-	// currently has queued/running work, showing its effective auto-run state and a
-	// manual "Run" that drains that type's queued jobs regardless of the auto-run gate
-	// (so work runs even when both Auto toggles are off).
-	private renderQueueTypeControls(body: HTMLElement, types: JobType[]): void {
-		if (types.length === 0) return;
-		const panel = body.createDiv({ cls: 'crucible-queue-type-controls' });
-		panel.createEl('span', { cls: 'crucible-queue-type-controls-label', text: 'Per-type:' });
-		for (const type of types.slice().sort()) {
-			const row = panel.createSpan({ cls: 'crucible-queue-type-control' });
-			const drainsWithoutAutorun = this.plugin.orchestrator.drainsWithoutAutorun(type);
-			const on = effectiveTypeAutorun({
-				drainsWithoutAutorun,
-				typeAutorun: readJobTypeAutorun(this.plugin.settings.orchestrationJobTypeAutorun, type),
-				globalAutorunEnabled: this.plugin.settings.orchestrationQueueAutorunEnabled === true,
-			});
-			row.createSpan({ cls: 'crucible-queue-type-name', text: type });
-			const chip = row.createSpan({
-				cls: `crucible-queue-type-autorun ${on ? 'is-on' : 'is-off'}`,
-				text: on ? 'auto-run' : 'idle',
-			});
-			chip.title = drainsWithoutAutorun
-				? 'Memory type: auto-runs only when its Auto toggle is on.'
-				: 'File type: auto-runs under the global Autorun toggle.';
-			const runBtn = row.createEl('button', { cls: 'crucible-queue-type-run', text: 'Run' });
-			runBtn.title = "Run this type's queued jobs now, regardless of the auto-run toggles.";
-			runBtn.addEventListener('click', () => {
-				this.plugin.orchestrationAutoRunner?.runType(type);
-			});
-		}
 	}
 
 	private async refreshAll(): Promise<void> {
@@ -994,15 +965,15 @@ export class IngestionDashboardUI {
 		btn.addEventListener('click', () => {
 			void (async () => {
 				btn.disabled = true;
-				const job = await this.plugin.orchestrator.enqueue('youtube_metadata_fetch', {
+				// enqueueAndRun kicks the type's drain, so a manual enqueue runs
+				// regardless of the Auto-enrich gate.
+				const job = await this.plugin.orchestrationAutoRunner.enqueueAndRun('youtube_metadata_fetch', {
 					targetPath: row.file.path,
 					videoId: row.videoId,
 					title: row.title,
 				}, { priority: 'high', lane: 'user', inputPaths: [row.file.path] });
 				if (job) {
 					btn.setText('Queued');
-					// Manual enqueue runs regardless of the Auto-enrich gate.
-					this.plugin.orchestrationAutoRunner?.runType('youtube_metadata_fetch');
 				} else {
 					btn.disabled = false;
 				}
@@ -1023,17 +994,18 @@ export class IngestionDashboardUI {
 					}
 					const inFlight = this.youtubeMetadataInFlight();
 					let enqueued = 0;
+					// enqueueAndRun kicks the type's drain, so manual enqueues run
+					// regardless of the Auto-enrich gate (repeat kicks no-op while the
+					// drain is already in flight).
 					for (const row of rows) {
 						if (inFlight.has(row.file.path)) continue;
-						const job = await this.plugin.orchestrator.enqueue('youtube_metadata_fetch', {
+						const job = await this.plugin.orchestrationAutoRunner.enqueueAndRun('youtube_metadata_fetch', {
 							targetPath: row.file.path,
 							videoId: row.videoId,
 							title: row.title,
 						}, { priority: 'high', lane: 'user', inputPaths: [row.file.path] });
 						if (job) enqueued++;
 					}
-					// Manual enqueue runs regardless of the Auto-enrich gate.
-					if (enqueued > 0) this.plugin.orchestrationAutoRunner?.runType('youtube_metadata_fetch');
 					new Notice(enqueued > 0 ? `Enqueued ${enqueued} metadata fetch${enqueued === 1 ? '' : 'es'}.` : 'Nothing to enqueue.');
 				} finally {
 					btn.disabled = false;
