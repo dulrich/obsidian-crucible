@@ -725,25 +725,36 @@ If your plugin does not need CSS, delete this file.
 }
 
 .crucible-queue-type-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 0.5rem 0.75rem;
   padding: 0 0.75rem 0.5rem;
   font-size: var(--font-ui-small);
+
+  /* Clamp on wide displays: cards stay readable rather than sprawling full-width. */
+  max-width: 52rem;
 }
 
-.crucible-queue-type-controls-label {
-  color: var(--text-muted);
+/* Two-up above a comfortable width; capped at 2 columns (never wider). */
+@media (width >= 640px) {
+  .crucible-queue-type-controls {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .crucible-queue-type-control {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.1rem 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  padding: 0.25rem 0.5rem;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-s);
+}
+
+.crucible-ingestion-header-toggle {
+  font-size: var(--font-ui-small);
+  font-weight: normal;
 }
 
 .crucible-queue-type-name {

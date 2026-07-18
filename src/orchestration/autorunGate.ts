@@ -4,21 +4,23 @@ import type { JobType } from './types';
 // pure drain-gating decision for the unified queue, factored out of
 // OrchestrationAutoRunner so both can be unit-tested without the Obsidian runtime.
 //
-// Two families of job type:
-//   - memory types (drainsWithoutAutorun): the folded enrichment queue. They kick
-//     their own drains on queue changes and are NOT governed by the global Autorun
-//     toggle. Instead each has a per-type auto-run flag; absent that flag they stay
-//     idle (default off) so nothing drains behind the user's back.
-//   - file types: governed by the global Autorun toggle (and the initial file-drain
-//     delay). A per-type flag set to `false` acts as a veto; otherwise the global
-//     toggle governs.
+// One uniform rule for every job type: a type auto-drains only when the queue-wide
+// panic switch (queueEnabled) is on AND its own per-type auto-run flag is explicitly
+// true. Absent that flag it stays idle (opt-in) so nothing drains behind the user's
+// back. `drainsWithoutAutorun` no longer gates — it only distinguishes readiness:
+// memory types (the folded enrichment queue) kick their own drains immediately,
+// while file types additionally wait out the initial file-drain delay.
 //
-// Manual "Run next" / enqueue-and-run bypasses this gate entirely (see
-// OrchestrationAutoRunner.runType).
+// Note: auto-run is EXECUTION control (drain). Whether jobs are automatically
+// *enqueued* is a separate concern owned elsewhere (e.g. the enrichment auto-source
+// and capture triggers) — enqueueing a type does not imply draining it.
+//
+// Manual "Run next" / per-job Run / enqueue-and-run bypasses this gate entirely (see
+// OrchestrationAutoRunner.runType / runJob).
 
 // One type's persisted queue controls. Absent fields mean "no override".
 export interface JobTypeControl {
-	/** Per-type auto-run flag; see typeAutorunEnabled for the per-family semantics. */
+	/** Per-type auto-run (drain/execution) flag; unset ⇒ idle (opt-in). */
 	autoRun?: boolean;
 	/** Overrides the type's configured cooloff between job starts (ms). */
 	minIntervalMsOverride?: number;
@@ -29,26 +31,21 @@ export type JobTypeControlsMap = Partial<Record<JobType, JobTypeControl>>;
 export interface AutorunGateInputs {
 	/** The queue-wide panic switch (settings.orchestrationQueueEnabled). Off vetoes every type. */
 	queueEnabled: boolean;
+	/** Memory types kick their own drains; file types wait the initial file-drain delay. Readiness only. */
 	drainsWithoutAutorun: boolean;
-	/** The per-type auto-run flag from settings, if any. */
+	/** The per-type auto-run flag from settings, if any. Unset ⇒ idle. */
 	typeAutorun: boolean | undefined;
-	globalAutorunEnabled: boolean;
 }
 
 // THE per-type auto-run predicate. The Queue Monitor displays it, and the drain
 // decision is exactly it plus the file-drain readiness input (computeShouldDrain),
-// so what the user sees can never disagree with what the runner does.
+// so what the user sees can never disagree with what the runner does. One uniform
+// rule for every type: queue enabled AND the type opted in.
 export function typeAutorunEnabled(inputs: AutorunGateInputs): boolean {
 	// The queue-wide panic switch stops all auto-draining while preserving the
-	// per-type/global flags underneath; manual runs bypass this gate entirely.
+	// per-type flags underneath; manual runs bypass this gate entirely.
 	if (!inputs.queueEnabled) return false;
-	if (inputs.drainsWithoutAutorun) {
-		// Memory type: only its own per-type flag governs. Default off.
-		return inputs.typeAutorun === true;
-	}
-	// File type: an explicit per-type `false` vetoes; otherwise global autorun governs.
-	if (inputs.typeAutorun === false) return false;
-	return inputs.globalAutorunEnabled;
+	return inputs.typeAutorun === true;
 }
 
 export function computeShouldDrain(inputs: AutorunGateInputs & { fileDrainReady: boolean }): boolean {
@@ -101,16 +98,16 @@ export function setTypeControl(
 
 // One-shot migration for the sprint-era `orchestrationJobTypeAutorun` boolean map:
 // fold each entry into the controls map, seeding the enrichment type's auto-run
-// from the legacy Auto-enrich toggle where the old map didn't record it. Values
-// already in the controls map always win.
+// (drain) from the legacy combined enqueue/drain flag where the old map didn't
+// record it. Values already in the controls map always win.
 export function migrateJobTypeControls(
 	controls: unknown,
 	legacyAutorun: unknown,
-	autoEnrichEnabled: boolean,
+	autoEnqueueEnabled: boolean,
 ): JobTypeControlsMap {
 	let map: JobTypeControlsMap = controls && typeof controls === 'object' ? { ...(controls as JobTypeControlsMap) } : {};
 	const folded: Record<string, unknown> = legacyAutorun && typeof legacyAutorun === 'object' ? { ...(legacyAutorun as Record<string, unknown>) } : {};
-	if (typeof folded['youtube_metadata_fetch'] !== 'boolean') folded['youtube_metadata_fetch'] = autoEnrichEnabled;
+	if (typeof folded['youtube_metadata_fetch'] !== 'boolean') folded['youtube_metadata_fetch'] = autoEnqueueEnabled;
 	for (const [type, on] of Object.entries(folded)) {
 		if (typeof on !== 'boolean') continue;
 		if (readTypeAutorun(map, type as JobType) === undefined) map = setTypeControl(map, type as JobType, { autoRun: on });

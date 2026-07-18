@@ -8,12 +8,11 @@ const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
 
 // Drains the unified queue per job type. Each type runs up to its configured
 // `maxParallel` workers, each spaced by the type's shared MinIntervalGate, with a
-// global Semaphore bounding total in-flight jobs across all types. File-backed
-// types drain under the global Autorun toggle (modulo a per-type veto); memory
-// types (folded enrichment) drain under their own per-type auto-run flag, kicked
-// by their own queue changes. See autorunGate.ts for the gate model.
+// global Semaphore bounding total in-flight jobs across all types. Every type
+// auto-drains only when the queue-wide Enabled switch is on and the type's own
+// per-type auto-run flag is set; memory types (folded enrichment) additionally kick
+// their own drains on queue changes. See autorunGate.ts for the gate model.
 export class OrchestrationAutoRunner {
-	private enabled: boolean;
 	private disposed = false;
 	private unsubscribe: (() => void) | null = null;
 	// Types currently draining, and in which mode: 'manual' (Run next /
@@ -28,7 +27,6 @@ export class OrchestrationAutoRunner {
 	private fileDrainReady = false;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly orchestrator: Orchestrator) {
-		this.enabled = plugin.settings.orchestrationQueueAutorunEnabled === true;
 		this.globalSem = new Semaphore(() => Math.max(1, plugin.settings.orchestrationMaxConcurrent || 1));
 		const bus = plugin.ingestionEvents;
 		if (bus) {
@@ -50,19 +48,24 @@ export class OrchestrationAutoRunner {
 		this.unsubscribe = null;
 	}
 
-	isEnabled(): boolean {
-		return this.enabled;
-	}
-
-	setEnabled(enabled: boolean): void {
-		this.enabled = enabled;
-		if (enabled && this.fileDrainReady) this.kickAll();
-	}
-
 	// Manual "Run next": execute a single file-backed job regardless of autorun.
 	async runOnce(): Promise<void> {
 		if (this.disposed) return;
 		await this.orchestrator.runNext();
+	}
+
+	// Manual "Run" of one specific queued job, ignoring the auto-run gate: claims and
+	// runs exactly the job identified by `key` (file job id / memory entry key),
+	// reusing the backend claim guards so it can't double-run a job a drain already
+	// took. Bounded by the global semaphore; no per-type pacing (one-shot user intent).
+	async runJob(type: JobType, key: string): Promise<'ran' | 'empty' | 'disabled'> {
+		if (this.disposed) return 'empty';
+		await this.globalSem.acquire();
+		try {
+			return await this.orchestrator.runJob(type, key);
+		} finally {
+			this.globalSem.release();
+		}
 	}
 
 	// Manual drain of a single type, ignoring the auto-run gate: runs everything
@@ -106,14 +109,14 @@ export class OrchestrationAutoRunner {
 		void this.drainType(type, 'auto');
 	}
 
-	// The auto-run gate: file types drain under the global Autorun toggle (unless
-	// vetoed per-type); memory types drain only when their per-type auto-run is on.
+	// The auto-run gate: every type drains only when the queue-wide Enabled switch is
+	// on and the type's own per-type auto-run flag is set (memory types don't wait on
+	// the initial file-drain delay).
 	private shouldDrain(type: JobType): boolean {
 		return computeShouldDrain({
 			queueEnabled: this.plugin.settings.orchestrationQueueEnabled !== false,
 			drainsWithoutAutorun: this.orchestrator.drainsWithoutAutorun(type),
 			typeAutorun: readTypeAutorun(this.plugin.settings.orchestrationJobTypeControls, type),
-			globalAutorunEnabled: this.enabled,
 			fileDrainReady: this.fileDrainReady,
 		});
 	}

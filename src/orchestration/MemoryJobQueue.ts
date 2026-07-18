@@ -30,7 +30,9 @@ export interface MemoryJobSeed {
 export class MemoryJobQueue {
 	private readonly entries = new Map<string, MemoryJobEntry>();
 	private autoSource: (() => MemoryJobSeed[]) | null = null;
-	private autoEnabled = false;
+	// Whether the auto-source is allowed to feed the queue (auto-ENQUEUE / source).
+	// Orthogonal to draining: the runner's auto-run gate decides execution.
+	private autoSourceEnabled = false;
 
 	constructor(
 		private readonly retentionMs: number,
@@ -47,13 +49,13 @@ export class MemoryJobQueue {
 		this.refill();
 	}
 
-	setAutoEnabled(enabled: boolean): void {
-		this.autoEnabled = enabled;
+	setAutoSourceEnabled(enabled: boolean): void {
+		this.autoSourceEnabled = enabled;
 		this.refill();
 	}
 
-	isAutoEnabled(): boolean {
-		return this.autoEnabled;
+	isAutoSourceEnabled(): boolean {
+		return this.autoSourceEnabled;
 	}
 
 	// Idempotent enqueue: rejects if a job with the same key is already pending or
@@ -116,7 +118,7 @@ export class MemoryJobQueue {
 	// any state (pending/running keep their slot; done/failed are intentionally not
 	// re-enqueued so a one-shot result is not retried on every refill).
 	refill(): void {
-		if (!this.autoEnabled || !this.autoSource) return;
+		if (!this.autoSourceEnabled || !this.autoSource) return;
 		let changed = false;
 		for (const seed of this.autoSource()) {
 			if (!seed.key || this.entries.has(seed.key)) continue;
@@ -147,6 +149,17 @@ export class MemoryJobQueue {
 			}
 		}
 		return null;
+	}
+
+	// Atomically claims one specific pending entry by key for a manual per-job Run.
+	// Same no-await-before-flip guarantee as claimNext, so it can't race a drain that
+	// already took it. Returns null if the key is absent or not pending.
+	claimEntry(key: string): MemoryJobEntry | null {
+		const entry = this.entries.get(key);
+		if (!entry || entry.status !== 'pending') return null;
+		entry.status = 'running';
+		this.onChange(this.entries.size);
+		return entry;
 	}
 
 	markDone(key: string): void {
