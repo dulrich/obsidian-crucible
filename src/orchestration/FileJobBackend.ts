@@ -76,6 +76,14 @@ export class FileJobBackend implements JobBackend {
 		return 'ran';
 	}
 
+	async runJob(id: string): Promise<RunOutcome> {
+		if (!this.plugin.settings.orchestrationEnabled) return 'disabled';
+		const moved = await this.claimById(id);
+		if (!moved) return 'empty';
+		await this.execute(moved);
+		return 'ran';
+	}
+
 	// File types report "maybe": emptiness is checked lazily during the claim, so the
 	// drain treats `true` as "try a claim" and `runNext` returns 'empty' when nothing
 	// is actually claimable.
@@ -116,6 +124,24 @@ export class FileJobBackend implements JobBackend {
 			return true;
 		});
 		if (!next && Number.isFinite(nextRetryAt)) this.scheduleRetryWake(nextRetryAt - Date.now());
+		if (!next) return null;
+		this.claimed.add(next.file.path);
+		try {
+			const moved = await this.store.move(next.file, next.job, 'running');
+			void this.emitQueueUpdate();
+			return moved;
+		} finally {
+			this.claimed.delete(next.file.path);
+		}
+	}
+
+	// Claim-by-id for a manual per-job Run: same synchronous claim guard as claimNext,
+	// but targets one job and ignores the deferUntil gate (the user is asking for it
+	// now). Returns null if it isn't queued or a worker already claimed it.
+	private async claimById(id: string): Promise<{ file: TFile; job: OrchestrationJob } | null> {
+		await this.store.ensureFolders();
+		const queued = await this.store.listFolder('queued');
+		const next = queued.find(e => e.job.type === this.type && e.job.id === id && !this.claimed.has(e.file.path));
 		if (!next) return null;
 		this.claimed.add(next.file.path);
 		try {

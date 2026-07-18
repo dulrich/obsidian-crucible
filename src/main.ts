@@ -35,7 +35,7 @@ import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
 import type { AutoSourceFn } from './orchestration/EnrichmentQueueAdapter';
-import { migrateJobTypeControls, setTypeControl } from './orchestration/autorunGate';
+import { migrateJobTypeControls, readTypeAutorun, setTypeControl } from './orchestration/autorunGate';
 import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
@@ -177,6 +177,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('search_upsert_batch', new SearchUpsertBatchWorkflow(), searchBatchJobConfig());
 		this.orchestrator.register('search_delete_path', new SearchDeletePathWorkflow(), searchFileJobConfig());
 		this.orchestrator.register('search_sweep', new SearchSweepWorkflow(), searchSweepJobConfig());
+		void this.migrateGlobalAutorun();
 		this.enrichmentQueue = new EnrichmentQueueAdapter(this);
 		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 		this.triggers = new TriggerRegistry(this, () => this.isMaterializing);
@@ -341,7 +342,7 @@ export default class CruciblePlugin extends Plugin {
 			id: 'yt-metadata-on-capture',
 			description: 'When a note gains a yt-video-id without a yt-metadata link, enqueue a per-note metadata fetch.',
 			on: { event: 'metadata-changed' },
-			enabled: () => this.settings.ingestionYoutubeAutoEnrichEnabled,
+			enabled: () => this.settings.ingestionYoutubeAutoEnqueueEnabled,
 			guard: (_file, fm) => {
 				if (!fm) return false;
 				return coerceVideoId(fm['yt-video-id']) !== '' && !isYtMetadataLinked(fm['yt-metadata']);
@@ -467,16 +468,29 @@ export default class CruciblePlugin extends Plugin {
 			dirty = true;
 		}
 
+		// Rename the enrichment auto-ENQUEUE (source) flag: the old
+		// `ingestionYoutubeAutoEnrichEnabled` conflated source and drain; it now means
+		// auto-enqueue only (drain is the per-type auto-run flag, seeded below). Copy
+		// the value across so the source stays on for existing users, then drop the key.
+		const legacyEnrich = this.settings as CrucibleSettings & { ingestionYoutubeAutoEnrichEnabled?: unknown };
+		if ('ingestionYoutubeAutoEnrichEnabled' in legacyEnrich) {
+			if (typeof legacyEnrich.ingestionYoutubeAutoEnrichEnabled === 'boolean') {
+				this.settings.ingestionYoutubeAutoEnqueueEnabled = legacyEnrich.ingestionYoutubeAutoEnrichEnabled;
+			}
+			delete legacyEnrich.ingestionYoutubeAutoEnrichEnabled;
+			dirty = true;
+		}
+
 		// Fold the sprint-era `orchestrationJobTypeAutorun` boolean map into the
 		// per-type controls map (one-shot: the old map existed for a single
-		// unreleased sprint), seeding the enrichment type's auto-run from the legacy
-		// Auto-enrich toggle so existing users keep their current behavior. Explicit
+		// unreleased sprint), seeding the enrichment type's auto-run (drain) from the
+		// legacy combined flag so existing users keep their current behavior. Explicit
 		// choices already in the controls map are preserved.
 		const legacyAutorun = this.settings as CrucibleSettings & { orchestrationJobTypeAutorun?: unknown };
 		const migratedControls = migrateJobTypeControls(
 			this.settings.orchestrationJobTypeControls,
 			legacyAutorun.orchestrationJobTypeAutorun,
-			this.settings.ingestionYoutubeAutoEnrichEnabled === true,
+			this.settings.ingestionYoutubeAutoEnqueueEnabled === true,
 		);
 		if ('orchestrationJobTypeAutorun' in legacyAutorun
 			|| JSON.stringify(migratedControls) !== JSON.stringify(this.settings.orchestrationJobTypeControls)) {
@@ -537,11 +551,11 @@ export default class CruciblePlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	// Set a per-type auto-run flag, persist it, and kick a drain when enabling so
-	// the change takes effect immediately. Turning it off leaves any in-flight worker
-	// to finish its current job, then the type goes idle (the drain loop re-checks the
-	// gate each iteration). The enrichment type's flag is owned by
-	// setAutoEnrichEnabled — flip that instead so its coupled flags stay in sync.
+	// Set a per-type auto-run (drain/execution) flag, persist it, and kick a drain
+	// when enabling so the change takes effect immediately. Turning it off leaves any
+	// in-flight worker to finish its current job, then the type goes idle (the drain
+	// loop re-checks the gate each iteration). Uniform for every type, enrichment
+	// included — auto-enqueue (source) is a separate control (setEnrichmentAutoEnqueue).
 	async setJobTypeAutorun(type: JobType, enabled: boolean): Promise<void> {
 		this.settings.orchestrationJobTypeControls = setTypeControl(this.settings.orchestrationJobTypeControls, type, { autoRun: enabled });
 		await this.saveSettings();
@@ -555,16 +569,38 @@ export default class CruciblePlugin extends Plugin {
 		await this.saveSettings();
 	}
 
-	// Single owner of the enrichment-enable sync: the legacy Auto-enrich flag, the
-	// per-type auto-run flag (which gates draining), and the live queue's enabled
-	// state move together, so "off" means idle everywhere. The auto-source is
-	// dashboard-owned (its items follow the dashboard's sort order), so it is only
-	// pushed when the caller has one; other callers leave the current source alone.
-	async setAutoEnrichEnabled(enabled: boolean, autoSource?: AutoSourceFn): Promise<void> {
-		this.settings.ingestionYoutubeAutoEnrichEnabled = enabled;
-		await this.setJobTypeAutorun('youtube_metadata_fetch', enabled);
-		this.enrichmentQueue?.setAutoEnabled(enabled);
+	// Auto-ENQUEUE (source) control for enrichment: whether metadata jobs are
+	// automatically created (the capture event trigger and the Uncaptured Videos
+	// auto-source both read this flag). This is ORTHOGONAL to draining — executing
+	// queued jobs is governed by the youtube_metadata_fetch per-type auto-run flag
+	// (setJobTypeAutorun). Enqueueing a type does not force it to drain. The
+	// auto-source is dashboard-owned (its items follow the dashboard's sort order),
+	// so it is only pushed when the caller has one; other callers leave it alone.
+	async setEnrichmentAutoEnqueue(enabled: boolean, autoSource?: AutoSourceFn): Promise<void> {
+		this.settings.ingestionYoutubeAutoEnqueueEnabled = enabled;
+		await this.saveSettings();
+		this.enrichmentQueue?.setAutoSourceEnabled(enabled);
 		if (enabled && autoSource) this.enrichmentQueue?.setAutoSource(autoSource);
+	}
+
+	// One-shot migration for the removed global Autorun master: if it was on, its
+	// file-type effect folds into the per-type auto-run flags — seed autoRun:true for
+	// every file-backed type without an explicit flag so previously-draining file
+	// types keep draining. Memory types were never governed by it. Runs after the
+	// backends register (needs the type list); persists only if something changed.
+	private async migrateGlobalAutorun(): Promise<void> {
+		const legacy = this.settings as CrucibleSettings & { orchestrationQueueAutorunEnabled?: unknown };
+		if (!('orchestrationQueueAutorunEnabled' in legacy)) return;
+		if (legacy.orchestrationQueueAutorunEnabled === true) {
+			for (const type of this.orchestrator.jobTypes()) {
+				if (this.orchestrator.drainsWithoutAutorun(type)) continue;
+				if (readTypeAutorun(this.settings.orchestrationJobTypeControls, type) === undefined) {
+					this.settings.orchestrationJobTypeControls = setTypeControl(this.settings.orchestrationJobTypeControls, type, { autoRun: true });
+				}
+			}
+		}
+		delete legacy.orchestrationQueueAutorunEnabled;
+		await this.saveSettings();
 	}
 
 	refreshToC() {

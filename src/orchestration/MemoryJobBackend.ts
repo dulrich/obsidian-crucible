@@ -4,7 +4,7 @@ import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
-import { MemoryJobQueue } from './MemoryJobQueue';
+import { MemoryJobEntry, MemoryJobQueue } from './MemoryJobQueue';
 import { defaultLaneForPriority } from './lanes';
 import { logWarn } from '../log';
 
@@ -49,6 +49,18 @@ export class MemoryJobBackend implements JobBackend {
 	async runNext(): Promise<RunOutcome> {
 		const entry = this.queue.claimNext();
 		if (!entry) return 'empty';
+		return this.runEntry(entry);
+	}
+
+	// Manual per-job Run: claim the one pending entry by key and run it, bypassing the
+	// gate. `empty` if it isn't pending (already running/gone).
+	async runJob(key: string): Promise<RunOutcome> {
+		const entry = this.queue.claimEntry(key);
+		if (!entry) return 'empty';
+		return this.runEntry(entry);
+	}
+
+	private async runEntry(entry: MemoryJobEntry): Promise<RunOutcome> {
 		const job = this.synthJob(entry.key, entry.params, entry.lane);
 		try {
 			const result = await runWorkflowWithTimeout(
@@ -61,8 +73,8 @@ export class MemoryJobBackend implements JobBackend {
 				// Stop auto-refilling ONLY when the credential is genuinely missing, so the
 				// queue does not hammer a hopeless request. Gated on the typed reason (not a
 				// substring of `error`) so a transient/rejected API response — e.g. a 403
-				// whose message mentions "API key" — never latches auto-enrich off.
-				if (result.failureReason === 'no-api-key') this.queue.setAutoEnabled(false);
+				// whose message mentions "API key" — never latches the auto-source off.
+				if (result.failureReason === 'no-api-key') this.queue.setAutoSourceEnabled(false);
 			} else {
 				this.queue.markDone(entry.key);
 				this.emitMetadataEnriched(entry.key, entry.params, result);

@@ -18,6 +18,12 @@ export interface JobBackend {
 	enqueue(params: Record<string, unknown>, options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null>;
 	/** Claim and run at most one job, reporting the outcome to the drain loop. */
 	runNext(): Promise<RunOutcome>;
+	/**
+	 * Claim and run one specific queued job by key (file job id / memory entry key),
+	 * bypassing the auto-run gate. Reuses the same claim guard as the drain, so it
+	 * cannot double-run a job a worker already claimed. `empty` if not found/claimable.
+	 */
+	runJob(key: string): Promise<RunOutcome>;
 	/** Whether work is (or might be) waiting. File types answer "maybe" (always true). */
 	hasPending(): boolean;
 	/** Pull fresh candidates in (memory types only); no-op otherwise. */

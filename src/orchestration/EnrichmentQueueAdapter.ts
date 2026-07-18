@@ -45,12 +45,14 @@ export class EnrichmentQueueAdapter {
 		this.queue?.setAutoSource(fn ? () => fn().map(itemToSeed) : null);
 	}
 
-	setAutoEnabled(enabled: boolean): void {
-		this.queue?.setAutoEnabled(enabled);
+	// Auto-ENQUEUE (source) enable: whether the auto-source may feed the queue. This
+	// is NOT drain/execution — that's the per-type auto-run gate in the runner.
+	setAutoSourceEnabled(enabled: boolean): void {
+		this.queue?.setAutoSourceEnabled(enabled);
 	}
 
-	isAutoEnabled(): boolean {
-		return this.queue?.isAutoEnabled() ?? false;
+	isAutoSourceEnabled(): boolean {
+		return this.queue?.isAutoSourceEnabled() ?? false;
 	}
 
 	enqueue(item: EnrichmentQueueItem): boolean {

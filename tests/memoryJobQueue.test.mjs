@@ -92,7 +92,7 @@ test('refill only runs when auto enabled and skips known keys', () => {
 	// Auto disabled by default → no refill yet.
 	assert.equal(queue.getPendingCount(), 1);
 
-	queue.setAutoEnabled(true); // triggers a refill
+	queue.setAutoSourceEnabled(true); // triggers a refill
 	assert.equal(queue.getPendingCount(), 2);
 	assert.equal(queue.getEntry('b').display.title, 'B');
 });
