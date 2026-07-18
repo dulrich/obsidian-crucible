@@ -1,5 +1,5 @@
 import { TFile } from 'obsidian';
-import type { OrchestrationJob } from '../../orchestration/types';
+import type { JobType, OrchestrationJob } from '../../orchestration/types';
 import { renderSortableTable } from '../render/sortableTable';
 import { renderFileLink } from '../render/cells';
 import { formatDateTime } from '../render/format';
@@ -47,16 +47,23 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	const panicToggle = panicLabel.createEl('input', { type: 'checkbox' });
 	panicToggle.checked = host.plugin.settings.orchestrationQueueEnabled !== false;
 	panicLabel.appendText(' Queue enabled');
+
+	// Manual "Run next": runs one queued file-backed job regardless of the gate.
+	const runNextBtn = controls.createEl('button', { text: 'Run next', cls: 'crucible-ingestion-run-next' });
+	runNextBtn.addEventListener('click', () => {
+		void host.plugin.orchestrationAutoRunner?.runOnce();
+	});
+
 	controls.createSpan({
 		cls: 'crucible-ingestion-queue-panic-hint',
-		text: 'Off stops all auto-draining (manual Run still works). Per-type settings live under Queue controls above.',
+		text: 'Off stops all auto-draining (manual Run still works). Per-type settings live under Queue Configuration above.',
 	});
 	panicToggle.addEventListener('change', () => {
 		void (async () => {
 			host.plugin.settings.orchestrationQueueEnabled = panicToggle.checked;
 			await host.plugin.saveSettings();
 			if (panicToggle.checked) host.plugin.orchestrationAutoRunner?.kickAll();
-			// The panic veto feeds every chip in the Queue controls strip.
+			// The panic veto feeds every chip in the Queue Configuration strip.
 			await host.refresh('queueControls');
 		})();
 	});
@@ -215,7 +222,24 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			key: 'action',
 			label: 'Action',
 			render: (r, td) => {
-				// Only memory-queue pending entries have a Cancel action
+				// Per-job Run: execute this one queued job now, ignoring the auto-run
+				// gate (for "auto off / deep queue, run this one"). Running rows have no
+				// Run — they're already in flight.
+				if (r.status === 'queued') {
+					const run = td.createEl('button', { text: 'Run' });
+					run.title = 'Run this job now, ignoring the auto-run gate.';
+					run.addEventListener('click', () => {
+						void (async () => {
+							run.disabled = true;
+							const outcome = await host.plugin.orchestrationAutoRunner?.runJob(r.type as JobType, r.key);
+							// 'ran' ⇒ the row is gone; refresh. Otherwise (already claimed by a
+							// drain / no runner) leave the button usable.
+							if (outcome === 'ran') await host.refresh('queueMonitor');
+							else run.disabled = false;
+						})();
+					});
+				}
+				// Memory-queue pending entries also have a Cancel action.
 				if (r.source === 'memory' && r.status === 'queued') {
 					const cancel = td.createEl('button', { text: 'Cancel' });
 					cancel.addEventListener('click', () => {

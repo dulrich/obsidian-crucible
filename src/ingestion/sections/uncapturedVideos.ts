@@ -8,15 +8,25 @@ import type { DashboardHost, SectionContext, UncapturedVideoRow } from '../rende
 export interface UncapturedVideosSection {
 	render(body: HTMLElement, ctx: SectionContext): Promise<void>;
 	// The enrichment auto-source: uncaptured videos without an enrichment file
-	// yet, in the section's current sort order. Read by queueControls.ts via
-	// DashboardHost#uncapturedQueueItems, so the cache lives here but stays
-	// reachable from the host.
+	// yet, in the section's current sort order. The cache lives here but stays
+	// reachable from the host (DashboardHost#uncapturedQueueItems).
 	uncapturedQueueItems(): EnrichmentQueueItem[];
+	// Renders the Auto-enqueue (source) toggle into the section header — the control
+	// that governs whether uncaptured videos are automatically enqueued for metadata
+	// enrichment. Draining those jobs is a separate control (Queue Configuration).
+	renderAutoEnqueueToggle(heading: HTMLElement): void;
 }
 
 // --- Section: Uncaptured Videos ---
 export function createUncapturedVideosSection(host: DashboardHost): UncapturedVideosSection {
 	let uncapturedVideosCache: UncapturedVideoRow[] = [];
+
+	// Re-assert the auto-source enable from the persisted setting on load: the queue's
+	// autoSourceEnabled flag is runtime-only, and the auto-source is dashboard-owned,
+	// so nothing else turns it back on when the dashboard mounts.
+	if (host.plugin.settings.ingestionYoutubeAutoEnqueueEnabled === true) {
+		void host.plugin.setEnrichmentAutoEnqueue(true, () => uncapturedQueueItems());
+	}
 
 	async function render(body: HTMLElement, ctx: SectionContext): Promise<void> {
 		body.empty();
@@ -41,7 +51,7 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		});
 
 		// Refresh the queue's auto-source so it stays aligned with current sort.
-		if (host.plugin.enrichmentQueue?.isAutoEnabled()) {
+		if (host.plugin.enrichmentQueue?.isAutoSourceEnabled()) {
 			host.plugin.enrichmentQueue.setAutoSource(() => uncapturedQueueItems());
 		}
 	}
@@ -56,5 +66,16 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 			}));
 	}
 
-	return { render, uncapturedQueueItems };
+	function renderAutoEnqueueToggle(heading: HTMLElement): void {
+		const label = heading.createEl('label', { cls: 'crucible-ingestion-queue-toggle crucible-ingestion-header-toggle' });
+		const toggle = label.createEl('input', { type: 'checkbox' });
+		toggle.checked = host.plugin.settings.ingestionYoutubeAutoEnqueueEnabled === true;
+		label.appendText(' Auto-enqueue enrichment');
+		label.title = 'Automatically enqueues metadata fetches for uncaptured videos. Draining them is a separate per-type control.';
+		toggle.addEventListener('change', () => {
+			void host.plugin.setEnrichmentAutoEnqueue(toggle.checked, () => uncapturedQueueItems());
+		});
+	}
+
+	return { render, uncapturedQueueItems, renderAutoEnqueueToggle };
 }
