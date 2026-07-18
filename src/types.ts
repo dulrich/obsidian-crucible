@@ -422,18 +422,16 @@ export interface CrucibleSettings {
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
-	orchestrationQueueAutorunEnabled: boolean;
-	// Queue-wide panic switch (default true). Off stops ALL auto-draining while
-	// preserving the Autorun/Auto-enrich/per-type flags underneath, so re-enabling
-	// restores the exact prior configuration. Manual Run/enqueue still executes.
+	// Queue-wide panic switch (default true) and the single master over all
+	// auto-draining. Off stops every type while preserving the per-type auto-run
+	// flags underneath, so re-enabling restores the exact prior configuration. Manual
+	// Run/enqueue still executes.
 	orchestrationQueueEnabled: boolean;
-	// Per-job-type queue controls, keyed by JobType. `autoRun` gates auto-draining:
-	// a memory type (the folded enrichment queue) auto-drains only when true — so
-	// turning its Auto toggle off leaves the queue idle instead of draining
-	// regardless — while a file type auto-drains under the global Autorun toggle
-	// unless explicitly false (a per-type veto). `minIntervalMsOverride` overrides
-	// the type's configured cooloff between job starts. Manual "Run"/enqueue-and-run
-	// bypasses the auto-run gate.
+	// Per-job-type queue controls, keyed by JobType. `autoRun` is the per-type
+	// EXECUTION (drain) gate: a type auto-drains only when the queue is Enabled AND
+	// its `autoRun` is true (unset ⇒ idle, opt-in), uniform for file and memory
+	// types. `minIntervalMsOverride` overrides the type's configured cooloff between
+	// job starts. Manual "Run"/per-job Run/enqueue-and-run bypasses the auto-run gate.
 	orchestrationJobTypeControls: JobTypeControlsMap;
 	// Global cap on total in-flight jobs across all types when draining.
 	orchestrationMaxConcurrent: number;
@@ -481,7 +479,10 @@ export interface CrucibleSettings {
 	// Ingestion Dashboard
 	ingestionClipperInboxFolder: string;
 	ingestionYoutubeEnrichRateLimitSeconds: number;
-	ingestionYoutubeAutoEnrichEnabled: boolean;
+	// Auto-ENQUEUE enrichment (source): automatically create youtube_metadata_fetch
+	// jobs — gates both the capture event trigger and the Uncaptured Videos
+	// auto-source. Orthogonal to draining (the per-type auto-run gate governs that).
+	ingestionYoutubeAutoEnqueueEnabled: boolean;
 	// Per-type worker count for the youtube_metadata_fetch memory queue.
 	orchestrationYoutubeMetadataMaxParallel: number;
 	ingestionReadingWpm: number;
@@ -589,7 +590,6 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
-	orchestrationQueueAutorunEnabled: false,
 	orchestrationQueueEnabled: true,
 	orchestrationJobTypeControls: {},
 	orchestrationMaxConcurrent: 3,
@@ -632,7 +632,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationBlogsTrackerIntervalMinutes: 0,
 	ingestionClipperInboxFolder: '_clippings/inbox',
 	ingestionYoutubeEnrichRateLimitSeconds: 2,
-	ingestionYoutubeAutoEnrichEnabled: false,
+	ingestionYoutubeAutoEnqueueEnabled: false,
 	orchestrationYoutubeMetadataMaxParallel: 1,
 	ingestionReadingWpm: 250,
 	sourceEvalEnabled: true,

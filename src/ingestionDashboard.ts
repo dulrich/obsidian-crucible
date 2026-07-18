@@ -98,7 +98,7 @@ export class IngestionDashboardUI {
 			undefined,
 			true,
 		);
-		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.', undefined, true);
+		this.buildSection('uncapturedVideos', 'Uncaptured videos', 'YouTube videos seen in tracker runs but not yet captured as a vault note.', (heading) => this.uncapturedVideosSection.renderAutoEnqueueToggle(heading), true);
 		this.buildSection('ignoredVideos', 'Ignored videos', 'YouTube video IDs you chose to ignore. They are skipped by the tracker, the uncaptured list, and auto-enrich.', undefined, true);
 		this.buildSection(
 			'youtubeWithoutMetadata',

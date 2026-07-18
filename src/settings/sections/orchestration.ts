@@ -460,15 +460,15 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 
 	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindToggle(ingestionGroup, {
-		name: 'Auto-enrich YouTube metadata',
-		desc: 'When on, the dashboard drains the Uncaptured Videos list (in current sort order) through the YouTube Data API. Requires a configured API key. When off, the enrichment queue stays idle.',
-		get: () => s.ingestionYoutubeAutoEnrichEnabled === true,
-		set: (v) => { s.ingestionYoutubeAutoEnrichEnabled = v; },
-		// setAutoEnrichEnabled owns the flag sync (legacy flag, per-type auto-run,
-		// live queue enable). No auto-source here — that stays whatever the
-		// dashboard registered, since its items follow the dashboard's sort.
+		name: 'Auto-enqueue YouTube metadata',
+		desc: 'When on, uncaptured videos (and captures that gain a yt-video-id) are automatically enqueued for metadata enrichment. This only ENQUEUES — whether those jobs execute is governed by the youtube_metadata_fetch auto-run in the dashboard Queue Configuration. Requires a configured API key.',
+		get: () => s.ingestionYoutubeAutoEnqueueEnabled === true,
+		set: (v) => { s.ingestionYoutubeAutoEnqueueEnabled = v; },
+		// setEnrichmentAutoEnqueue owns the source enable (flag + queue auto-source
+		// enable). No auto-source pushed here — that stays whatever the dashboard
+		// registered, since its items follow the dashboard's sort.
 		after: async () => {
-			await tab.plugin.setAutoEnrichEnabled(s.ingestionYoutubeAutoEnrichEnabled === true);
+			await tab.plugin.setEnrichmentAutoEnqueue(s.ingestionYoutubeAutoEnqueueEnabled === true);
 		},
 	}, save);
 

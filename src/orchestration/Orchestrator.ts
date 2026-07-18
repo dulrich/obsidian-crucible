@@ -92,6 +92,13 @@ export class Orchestrator {
 		return backend ? backend.runNext() : Promise.resolve('empty');
 	}
 
+	// Manual per-job Run: run one specific queued job (by key) of the given type,
+	// bypassing the auto-run gate. `empty` if it isn't claimable.
+	runJob(type: JobType, key: string): Promise<RunOutcome> {
+		const backend = this.backends.get(type);
+		return backend ? backend.runJob(key) : Promise.resolve('empty');
+	}
+
 	hasPending(type: JobType): boolean {
 		return this.backends.get(type)?.hasPending() ?? false;
 	}
