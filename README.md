@@ -1,3 +1,11 @@
+---
+title: README
+created: 2026-05-05
+modified: 2026-07-19
+word-count: 294
+tags: ""
+---
+
 # Crucible
 
 Crucible is an Obsidian plugin for turning capture, cleanup, ingestion, and AI-assisted note work into repeatable workflows.
