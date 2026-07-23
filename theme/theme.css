@@ -1,0 +1,192 @@
+/* ============================================================================
+   Crucible — N1 Console  (Obsidian theme)
+
+   The operational (Console) surface of the N1 Applied identity inside Obsidian.
+   Three-way surround — dark / med / light — selected via `data-surround` on
+   <body>, which the Crucible plugin writes and persists (Obsidian has no native
+   third surround, so the plugin owns that axis; theme + plugin are a matched set).
+   Med is the default (bare <body>), matching the design system's symmetric stack.
+
+   The --n1-* blocks below ARE a VENDORED SNAPSHOT of the (mid-rename) design
+   system. theme/README.md documents the source path + retrieval date + mapping.
+   Re-vendor is a one-file op: update the --n1-* blocks below from that source.
+
+   Structure:
+     1. N1 surround tokens          — the only thing that changes per surround
+     2. Obsidian semantic adapter   — CONSOLE scope (surround-independent refs)
+     3. Editorial scope             — reading/authoring surface (stub; see WP-3)
+   ============================================================================ */
+
+/* ============================================================================
+   1. N1 CONSOLE SURROUND TOKENS  (--n1-* namespace)
+   Med is the default; Dark / Light via body[data-surround]. Each block also
+   carries the signal-orange accent as HSL so Obsidian's derived accent vars
+   resolve correctly.
+   ============================================================================ */
+body,
+body[data-surround="med"] {
+  --n1-bg: #3a3a3b;
+  --n1-panel: #454547;
+  --n1-panel-2: #5a5a5c;
+  --n1-inset: #333335;
+  --n1-line: #666668;
+  --n1-text: #f3f3f4;
+  --n1-text-dim: #dedee0;
+  --n1-muted: #d2d2d4;
+  --n1-text-faint: #949496;
+  --n1-heading: #fff;
+  --n1-accent: #ff8a3d;
+  --n1-accent-hover: #ffa05c;
+  --n1-accent-text: #ffbe91;
+  --n1-on-accent: #1a1108;
+  --n1-sel-tint: #4e4847;
+  --n1-accent-h: 24;
+  --n1-accent-s: 100%;
+  --n1-accent-l: 62%;
+  --n1-ok-text: #79eba8;
+  --n1-warn-text: #f4cd85;
+  --n1-error-text: #ffc9c2;
+  --n1-info-text: #b7d7fd;
+}
+
+body[data-surround="dark"] {
+  --n1-bg: #0e0e10;
+  --n1-panel: #17181a;
+  --n1-panel-2: #26262a;
+  --n1-inset: #0d0d0f;
+  --n1-line: #37383b;
+  --n1-text: #e9e9ea;
+  --n1-text-dim: #cacbcd;
+  --n1-muted: #9b9c9f;
+  --n1-text-faint: #7c7d80;
+  --n1-heading: #fff;
+  --n1-accent: #ff8a3d;
+  --n1-accent-hover: #ffa05c;
+  --n1-accent-text: #ff8a3d;
+  --n1-on-accent: #1a1108;
+  --n1-sel-tint: #231e1c;
+  --n1-accent-h: 24;
+  --n1-accent-s: 100%;
+  --n1-accent-l: 62%;
+  --n1-ok-text: #4ade80;
+  --n1-warn-text: #f1c675;
+  --n1-error-text: #ffc0b9;
+  --n1-info-text: #60a5fa;
+}
+
+body[data-surround="light"] {
+  --n1-bg: #f4f4f5;
+  --n1-panel: #dfdfe0;
+  --n1-panel-2: #d2d2d4;
+  --n1-inset: #fbfbfc;
+  --n1-line: #a5a5a8;
+  --n1-text: #191a1b;
+  --n1-text-dim: #333335;
+  --n1-muted: #4f5052;
+  --n1-text-faint: #6d6d6f;
+  --n1-heading: #0c0c0d;
+  --n1-accent: #f07714;
+  --n1-accent-hover: #d96a0e;
+  --n1-accent-text: #7a3800;
+  --n1-on-accent: #fff;
+  --n1-sel-tint: #e0dad6;
+  --n1-accent-h: 27;
+  --n1-accent-s: 88%;
+  --n1-accent-l: 51%;
+  --n1-ok-text: #1d5c31;
+  --n1-warn-text: #684400;
+  --n1-error-text: #8f231a;
+  --n1-info-text: #144a8f;
+}
+
+/* ============================================================================
+   2. OBSIDIAN SEMANTIC ADAPTER  —  CONSOLE scope
+   Surround-independent: every mapping references a --n1-* custom property, and
+   those cascade per surround from block 1. This one block drives all of the
+   workspace chrome, sidebars, ribbons, modals, AND Crucible's own plugin UI
+   (styles.css consumes these same semantic vars — no plugin classes needed).
+   ============================================================================ */
+body {
+  /* Mono ramp — 00 = background end, 100 = strongest foreground. Obsidian
+     derives many un-mapped surfaces from these, so map the ramp too. */
+  --color-base-00: var(--n1-bg);
+  --color-base-05: var(--n1-inset);
+  --color-base-10: var(--n1-panel);
+  --color-base-20: var(--n1-panel-2);
+  --color-base-25: var(--n1-panel-2);
+  --color-base-30: var(--n1-line);
+  --color-base-35: var(--n1-line);
+  --color-base-40: var(--n1-text-faint);
+  --color-base-50: var(--n1-text-faint);
+  --color-base-60: var(--n1-muted);
+  --color-base-70: var(--n1-text-dim);
+  --color-base-100: var(--n1-text);
+
+  /* Backgrounds */
+  --background-primary: var(--n1-bg);
+  --background-primary-alt: var(--n1-panel);
+  --background-secondary: var(--n1-panel);
+  --background-secondary-alt: var(--n1-panel-2);
+  --background-modifier-border: var(--n1-line);
+  --background-modifier-border-hover: var(--n1-line);
+  --background-modifier-border-focus: var(--n1-accent);
+  --background-modifier-hover: var(--n1-panel-2);
+  --background-modifier-active-hover: var(--n1-panel-2);
+  --background-modifier-form-field: var(--n1-inset);
+
+  /* Text */
+  --text-normal: var(--n1-text);
+  --text-muted: var(--n1-muted);
+  --text-faint: var(--n1-text-faint);
+  --text-on-accent: var(--n1-on-accent);
+  --text-accent: var(--n1-accent-text);
+  --text-accent-hover: var(--n1-accent-hover);
+  --text-selection: var(--n1-sel-tint);
+  --text-error: var(--n1-error-text);
+  --text-success: var(--n1-ok-text);
+  --text-warning: var(--n1-warn-text);
+
+  /* Headings + inline title */
+  --h1-color: var(--n1-heading);
+  --h2-color: var(--n1-heading);
+  --h3-color: var(--n1-heading);
+  --h4-color: var(--n1-heading);
+  --h5-color: var(--n1-heading);
+  --h6-color: var(--n1-heading);
+  --inline-title-color: var(--n1-heading);
+
+  /* Accent — set HSL (Obsidian derives --interactive-accent from these) and the
+     resolved vars, for belt-and-suspenders across versions. */
+  --accent-h: var(--n1-accent-h);
+  --accent-s: var(--n1-accent-s);
+  --accent-l: var(--n1-accent-l);
+  --interactive-accent: var(--n1-accent);
+  --interactive-accent-hover: var(--n1-accent-hover);
+  --interactive-normal: var(--n1-panel);
+  --interactive-hover: var(--n1-panel-2);
+
+  /* Monospace metadata — Crucible surfaces IDs/metadata in --font-monospace; the
+     N1 Console look leans on technical monospace. Left to the user's configured
+     monospace font (do not hard-pin a family the vault may not have). */
+}
+
+/* ============================================================================
+   3. EDITORIAL scope  —  reading / authoring surface
+   STUB. Console (block 2) currently styles the note surface too. When the N1
+   Editorial reading direction is defined, populate --editorial-* here and scope
+   it to `.markdown-preview-view` / `.markdown-source-view .cm-editor` so the
+   reading experience can diverge from the operational chrome WITHOUT touching
+   block 2. Kept empty-but-present so that later work is purely additive.
+   See theme/README.md and the plan's "Console now, architect for Editorial".
+   ============================================================================ */
+
+/* body {
+     --editorial-measure: 68ch;
+     --editorial-prose-size: var(--font-text-size);
+     --editorial-heading-rhythm: 1.35;
+   }
+   .markdown-preview-view,
+   .markdown-source-view.mod-cm6 .cm-editor {
+     /* Editorial reading overrides land here. */
+
+/* } */
