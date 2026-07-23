@@ -9,6 +9,7 @@ tags: ""
 ---
 
 # Todos
+- [ ] tri-state light mode conflicts with obsidian setting on tab bar (can we flip via plugin on cycle?)
 - [ ] open-file palette is painfully slow
 - [ ] open-file palette ranking algorithm is worse than the built-in (favor short/continuous substring?)
 - [ ] file type support should be a set of checkboxes based on the types obsidian can read
