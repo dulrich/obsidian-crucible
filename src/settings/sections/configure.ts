@@ -1,15 +1,27 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { ToCPosition, ToCCollapseBehavior } from "../../types";
+import { ToCPosition, ToCCollapseBehavior, Surround } from "../../types";
 import { FileSuggest, FolderSuggest } from "../../suggesters";
 import { PERIOD_IDS, PeriodId, getPeriodConfig } from "../../periods";
 import { SearchWithContainer, addWarningIcon } from "../shared";
 import { bindToggle, bindDropdown, bindSearch } from "../bind";
+import { applySurround } from "../../surround";
 
 export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	const s = tab.plugin.settings;
 	const save = () => tab.plugin.saveSettings();
+
+	new Setting(containerEl).setName('Appearance').setHeading();
+	const appearanceGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	bindDropdown(appearanceGroup, {
+		name: 'Surround',
+		desc: 'Operational surface tone for the N1 Console theme (dark, med, or light). Requires the "Crucible N1 Console" theme — enable it in Appearance → Themes.',
+		options: { dark: 'Dark', med: 'Med', light: 'Light' },
+		get: () => s.surround,
+		set: (v) => { s.surround = v as Surround; },
+		after: () => applySurround(s.surround),
+	}, save);
 
 	new Setting(containerEl).setName('Table of contents').setHeading();
 	const tocGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });

@@ -54,8 +54,10 @@ import { registerInternalCommands } from './internalCommands';
 import { registerMoveFileCommands as registerMoveFileCommandsImpl } from './moveFileCommands';
 import { registerCaptures as registerCapturesImpl, promptForText as promptForTextImpl } from './captureCommands';
 import { openDayPicker, openWeekPicker, openMonthPicker, handlePeriodFileCreate } from './periodPickers';
+import { applySurround } from './surround';
 
 export type CrucibleCommandGroup =
+	| 'Appearance'
 	| 'Materialize'
 	| 'Lint'
 	| 'Files'
@@ -126,6 +128,10 @@ export default class CruciblePlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+
+		// Apply the N1 Console surround before the workspace paints, so there is no
+		// flash of the wrong surround on startup. The companion theme keys off this.
+		applySurround(this.settings.surround);
 
 		this.ingestionEvents = new IngestionEventBus();
 		this.noteLocks = new NoteLockManager(this.ingestionEvents);
