@@ -186,13 +186,15 @@ body {
    See theme/README.md and the plan's "Console now, architect for Editorial".
    ============================================================================ */
 
-/* body {
-     --editorial-measure: 68ch;
-     --editorial-prose-size: var(--font-text-size);
-     --editorial-heading-rhythm: 1.35;
-   }
-   .markdown-preview-view,
-   .markdown-source-view.mod-cm6 .cm-editor {
-     /* Editorial reading overrides land here. */
+/*  Editorial drop-in sketch (uncomment + fill when the reading direction lands):
 
-/* } */
+    body {
+      --editorial-measure: 68ch;
+      --editorial-prose-size: var(--font-text-size);
+      --editorial-heading-rhythm: 1.35;
+    }
+    .markdown-preview-view,
+    .markdown-source-view.mod-cm6 .cm-editor {
+      max-inline-size: var(--editorial-measure);
+    }
+*/
