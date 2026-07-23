@@ -25,6 +25,8 @@
    ============================================================================ */
 body,
 body[data-surround="med"] {
+  color-scheme: dark;
+
   --n1-bg: #3a3a3b;
   --n1-panel: #454547;
   --n1-panel-2: #5a5a5c;
@@ -50,6 +52,8 @@ body[data-surround="med"] {
 }
 
 body[data-surround="dark"] {
+  color-scheme: dark;
+
   --n1-bg: #0e0e10;
   --n1-panel: #17181a;
   --n1-panel-2: #26262a;
@@ -75,6 +79,8 @@ body[data-surround="dark"] {
 }
 
 body[data-surround="light"] {
+  color-scheme: light;
+
   --n1-bg: #f4f4f5;
   --n1-panel: #dfdfe0;
   --n1-panel-2: #d2d2d4;

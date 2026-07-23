@@ -320,7 +320,13 @@ export interface Agent {
 	requireNormalFinishReason: boolean;
 }
 
+/** Surround tone for the N1 Console theme (Obsidian has no native third mode, so
+ *  the plugin drives it via body[data-surround]). Med is the default. */
+export type Surround = 'dark' | 'med' | 'light';
+
 export interface CrucibleSettings {
+	// Appearance
+	surround: Surround;
 	dailyFolder: string;
 	weeklyFolder: string;
 	monthlyFolder: string;
@@ -507,6 +513,7 @@ export interface CrucibleSettings {
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
+	surround: 'med',
 	dailyFolder: 'daily/day',
 	weeklyFolder: 'daily/week',
 	monthlyFolder: 'daily/month',

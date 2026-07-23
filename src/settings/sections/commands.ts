@@ -122,6 +122,7 @@ export function renderCommandSettings(tab: CrucibleSettingTab, containerEl: HTML
 	};
 
 	const GROUP_ORDER: CrucibleCommandGroup[] = [
+		'Appearance',
 		'Materialize',
 		'Lint',
 		'Captures',

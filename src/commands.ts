@@ -8,6 +8,7 @@ import type CruciblePlugin from './main';
 import { VaultSearchModal } from './search/SearchModal';
 import { isSearchIndexablePath } from './search/chunker';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
+import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -20,6 +21,25 @@ import { exportSourceEvalTrainingData } from './sourceEval/export';
  */
 export function registerStaticCommands(plugin: CruciblePlugin): void {
 	const prefix = plugin.manifest.id;
+
+	// Appearance: N1 Console surround switch. Read-only (chrome, not notes), so
+	// mutating:false — it never takes the note lock.
+	for (const s of SURROUNDS) {
+		plugin.registerCrucibleCommand({
+			id: `set-surround-${s}`,
+			name: `Set surround: ${surroundLabel(s)}`,
+			group: 'Appearance',
+			mutating: false,
+			run: () => setSurround(plugin, s),
+		});
+	}
+	plugin.registerCrucibleCommand({
+		id: 'cycle-surround',
+		name: 'Cycle surround (dark → med → light)',
+		group: 'Appearance',
+		mutating: false,
+		run: () => setSurround(plugin, nextSurround(plugin.settings.surround)),
+	});
 
 	plugin.registerCrucibleCommand({
 		id: 'materialize-day-today',
