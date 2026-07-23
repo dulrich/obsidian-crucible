@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[queue-config-monitor-coherence-2026-07-17]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 ---
