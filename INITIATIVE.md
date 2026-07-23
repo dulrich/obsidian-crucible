@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[crucible-n1-console-obsidian-theme]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 ---
