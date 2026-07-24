@@ -127,7 +127,7 @@ async function runSearchWorkflow(
 }
 
 function searchDeferredResult(plugin: WorkflowContext['plugin'], detail?: string): WorkflowResult {
-	const message = `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: npm run search:serve`;
+	const message = `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)`;
 	return {
 		status: 'deferred',
 		error: detail ? `${message} (${detail})` : message,

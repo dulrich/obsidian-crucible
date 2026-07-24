@@ -10,7 +10,8 @@ for (let i = 2; i < process.argv.length; i += 2) {
 	args.set(process.argv[i], process.argv[i + 1]);
 }
 
-const port = Number(args.get('--port') ?? process.env.CRUCIBLE_SEARCH_PORT ?? 8765);
+const port = Number(args.get('--port') ?? process.env.CRUCIBLE_SEARCH_PORT ?? 4801);
+const host = args.get('--host') ?? process.env.CRUCIBLE_SEARCH_HOST ?? '127.0.0.1';
 const dbPath = resolve(args.get('--db') ?? process.env.CRUCIBLE_SEARCH_DB ?? '.crucible/search.sqlite');
 mkdirSync(dirname(dbPath), { recursive: true });
 
@@ -223,8 +224,8 @@ WHERE chunks_fts.vault_id = ? AND chunks_fts MATCH ?
 	}
 });
 
-server.listen(port, '127.0.0.1', () => {
-	process.stdout.write(`Crucible search companion listening on http://127.0.0.1:${port}\n`);
+server.listen(port, host, () => {
+	process.stdout.write(`Crucible search companion listening on http://${host}:${port}\n`);
 	process.stdout.write(`SQLite database: ${dbPath}\n`);
 });
 

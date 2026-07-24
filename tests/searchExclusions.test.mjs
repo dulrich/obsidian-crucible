@@ -40,7 +40,7 @@ const { SearchManager } = await import(pathToFileURL(outfile));
 
 const settings = {
 	searchEnabled: true,
-	searchServiceUrl: 'http://127.0.0.1:8765',
+	searchServiceUrl: 'http://127.0.0.1:4801',
 	searchVaultId: 'test',
 	searchSemanticEnabled: false,
 	searchChunkMaxChars: 1800,

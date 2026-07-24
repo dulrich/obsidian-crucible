@@ -39,7 +39,7 @@ function makePlugin(overrides = {}) {
 		enqueued,
 		settings: {
 			searchEnabled: true,
-			searchServiceUrl: 'http://127.0.0.1:8765',
+			searchServiceUrl: 'http://127.0.0.1:4801',
 		},
 		searchManager: {
 			companionAvailable: async () => true,
