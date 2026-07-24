@@ -84,7 +84,7 @@ export class SearchServiceClient {
 	}
 
 	private root(): string {
-		return (this.baseUrl || 'http://127.0.0.1:8765').replace(/\/$/, '');
+		return (this.baseUrl || 'http://127.0.0.1:4801').replace(/\/$/, '');
 	}
 }
 

@@ -59,7 +59,7 @@ function settings() {
 		excludedFolders: [],
 		providers: [],
 		searchVaultId: 'vault',
-		searchServiceUrl: 'http://127.0.0.1:8765',
+		searchServiceUrl: 'http://127.0.0.1:4801',
 		searchSemanticEnabled: false,
 		searchChunkMaxChars: 1800,
 		searchChunkOverlapChars: 200,

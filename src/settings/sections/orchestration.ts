@@ -242,10 +242,10 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	bindText(searchGroup, {
 		name: 'Service URL',
 		desc: 'URL of the user-run SQLite search companion service.',
-		placeholder: 'http://127.0.0.1:8765',
+		placeholder: 'http://127.0.0.1:4801',
 		width: 'pi-width-wide',
 		get: () => s.searchServiceUrl,
-		set: (v) => { s.searchServiceUrl = v.trim() || 'http://127.0.0.1:8765'; },
+		set: (v) => { s.searchServiceUrl = v.trim() || 'http://127.0.0.1:4801'; },
 	}, save);
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
