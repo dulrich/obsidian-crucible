@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[n1-console-surround-authority]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 ---
