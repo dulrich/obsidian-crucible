@@ -30,5 +30,10 @@ export default tseslint.config(
 		"version-bump.mjs",
 		"versions.json",
 		"main.js",
+		// Agent worktrees (`.claude/worktrees/<name>/`) are full checkouts of this repo.
+		// The entries above are root-relative, so they do NOT match the nested copies —
+		// without this, ESLint lints every live worktree and the gate goes red on files
+		// that aren't part of the working tree at all.
+		".claude/**",
 	]),
 );
