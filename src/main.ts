@@ -131,7 +131,7 @@ export default class CruciblePlugin extends Plugin {
 
 		// Apply the N1 Console surround before the workspace paints, so there is no
 		// flash of the wrong surround on startup. The companion theme keys off this.
-		applySurround(this.settings.surround);
+		applySurround(this.app, this.settings.surround);
 
 		this.ingestionEvents = new IngestionEventBus();
 		this.noteLocks = new NoteLockManager(this.ingestionEvents);

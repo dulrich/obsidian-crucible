@@ -86,6 +86,12 @@ declare module 'obsidian' {
 	interface MetadataCache {
 		isUserIgnored(path: string): boolean;
 	}
+	interface Vault {
+		// Undocumented but long-stable config accessors. Optional + presence-guarded at
+		// the call site, the way App.secretStorage is.
+		getConfig?(key: string): unknown;
+		setConfig?(key: string, value: unknown): void;
+	}
 }
 
 // The methods may be sync or Promise-returning depending on the Obsidian version;
