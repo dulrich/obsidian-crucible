@@ -1,0 +1,5 @@
+# Agent worktrees (`.claude/worktrees/<name>/`) are full checkouts of this repo, so the
+# `**/*.css` glob in the `lint` script would match every live worktree's styles.css and
+# theme/theme.css — turning the gate red on files that aren't part of the working tree.
+# Mirrors the ".claude/**" entry in eslint.config.mts's globalIgnores.
+.claude/**
