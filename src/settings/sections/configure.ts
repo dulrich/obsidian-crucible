@@ -16,11 +16,11 @@ export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HT
 	const appearanceGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 	bindDropdown(appearanceGroup, {
 		name: 'Surround',
-		desc: 'Operational surface tone for the N1 Console theme (dark, med, or light). Requires the "Crucible N1 Console" theme — enable it in Appearance → Themes.',
+		desc: 'Operational surface tone for the N1 Console theme (dark, med, or light). Requires the "Crucible N1 Console" theme — enable it in Appearance → Themes. Also sets Obsidian\'s base theme (Dark for Dark/Med, Light for Light), taking you off the "system" appearance setting.',
 		options: { dark: 'Dark', med: 'Med', light: 'Light' },
 		get: () => s.surround,
 		set: (v) => { s.surround = v as Surround; },
-		after: () => applySurround(s.surround),
+		after: () => applySurround(tab.plugin.app, s.surround),
 	}, save);
 
 	new Setting(containerEl).setName('Table of contents').setHeading();
