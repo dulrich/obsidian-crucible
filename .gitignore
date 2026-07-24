@@ -23,8 +23,6 @@ vault
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
 
-# Local Configs
-.stylelintrc.json
 
 # local python/terminal history
 .cond.pyhistory

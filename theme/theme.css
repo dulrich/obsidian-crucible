@@ -22,11 +22,18 @@
    Med is the default; Dark / Light via body[data-surround]. Each block also
    carries the signal-orange accent as HSL so Obsidian's derived accent vars
    resolve correctly.
+
+   Two accent families live here, and they must stay separate:
+     --n1-accent*      the vendored BRAND signal orange (design-system snapshot,
+                        kept for the vendoring contract + future callout/Editorial
+                        work). The Obsidian adapter (block 2) does NOT consume it.
+     --n1-accent-ui*    a muted UI accent Obsidian actually spends on links,
+                        toggles, selection and highlights, where the full-strength
+                        brand orange is too loud. A future re-vendor must NOT "fix"
+                        the adapter back onto --n1-accent.
    ============================================================================ */
 body,
 body[data-surround="med"] {
-  color-scheme: dark;
-
   --n1-bg: #3a3a3b;
   --n1-panel: #454547;
   --n1-panel-2: #5a5a5c;
@@ -49,11 +56,61 @@ body[data-surround="med"] {
   --n1-warn-text: #f4cd85;
   --n1-error-text: #ffc9c2;
   --n1-info-text: #b7d7fd;
+
+  /* Native-widget color-scheme — moved here (from a literal `color-scheme:`
+     declaration) so it travels through block 2 at (0,1,1) instead of losing to
+     app.css's `.theme-*` (0,1,0) the way it silently did before. */
+  --n1-color-scheme: dark;
+
+  /* Overlays, depth, blend — Obsidian's own `.theme-dark` values, hoisted so the
+     surround (not the base theme) decides them. Verbatim from app.css. */
+  --n1-mono-rgb-0: 0, 0, 0;
+  --n1-mono-rgb-100: 255, 255, 255;
+  --n1-blend-mode: lighten;
+  --n1-box-shadow: rgb(0 0 0 / 30%);
+  --n1-cover: rgb(10 10 10 / 40%);
+  --n1-canvas-color: 126, 126, 126;
+  --n1-raised-mask: transparent;
+  --n1-input-shadow: inset 0 0.5px 0.5px 0.5px rgb(255 255 255 / 9%), 0 2px 4px 0 rgb(0 0 0 / 15%), 0 1px 1.5px 0 rgb(0 0 0 / 10%), 0 1px 2px 0 rgb(0 0 0 / 20%), 0 0 0 0 transparent;
+  --n1-input-shadow-hover: inset 0 0.5px 1px 0.5px rgb(255 255 255 / 16%), 0 2px 3px 0 rgb(0 0 0 / 30%), 0 1px 1.5px 0 rgb(0 0 0 / 20%), 0 1px 2px 0 rgb(0 0 0 / 40%), 0 0 0 0 transparent;
+
+  /* --shadow-edges is deliberately NOT hoisted/mapped: app.css leaves it
+     undefined on dark, which makes --shadow-xs resolve to no shadow at all.
+     Defining it here would silently add a shadow Obsidian never had on dark. */
+  --n1-shadow-xs: 0 1px 6px rgb(0 0 0 / 4.5%), 0 4px 24px rgb(0 0 0 / 19.5%), var(--shadow-edges);
+  --n1-shadow-s: 0px 1px 2px rgb(0 0 0 / 12.1%), 0px 3.4px 6.7px rgb(0 0 0 / 17.9%), 0px 15px 30px rgb(0 0 0 / 30%);
+  --n1-shadow-l: 0px 1.8px 7.3px rgb(0 0 0 / 7.1%), 0px 6.3px 24.7px rgb(0 0 0 / 11.2%), 0px 30px 90px rgb(0 0 0 / 20%);
+
+  /* Semantic palette — Obsidian's own `.theme-dark` 8-colour set, hoisted per
+     surround. No new design decisions; refine to true N1 hues in a later pass. */
+  --n1-red: #fb464c;
+  --n1-red-rgb: 251, 70, 76;
+  --n1-orange: #e9973f;
+  --n1-orange-rgb: 233, 151, 63;
+  --n1-yellow: #e0de71;
+  --n1-yellow-rgb: 224, 222, 113;
+  --n1-green: #44cf6e;
+  --n1-green-rgb: 68, 207, 110;
+  --n1-cyan: #53dfdd;
+  --n1-cyan-rgb: 83, 223, 221;
+  --n1-blue: #027aff;
+  --n1-blue-rgb: 2, 122, 255;
+  --n1-purple: #a882ff;
+  --n1-purple-rgb: 168, 130, 255;
+  --n1-pink: #fa99cd;
+  --n1-pink-rgb: 250, 153, 205;
+
+  /* Muted UI accent (Med) — the user's own eyeballed value, hsl(24, 55%, 47%).
+     Hover is the same hue/saturation, lightness +8 (brighter on a dark ground). */
+  --n1-accent-ui-h: 24;
+  --n1-accent-ui-s: 55%;
+  --n1-accent-ui-l: 47%;
+  --n1-accent-ui: #ba6b36;
+  --n1-accent-ui-hover: #cb804d; /* hsl(24, 55%, 55%) */
+  --n1-on-accent-ui: #fff;
 }
 
 body[data-surround="dark"] {
-  color-scheme: dark;
-
   --n1-bg: #0e0e10;
   --n1-panel: #17181a;
   --n1-panel-2: #26262a;
@@ -76,11 +133,51 @@ body[data-surround="dark"] {
   --n1-warn-text: #f1c675;
   --n1-error-text: #ffc0b9;
   --n1-info-text: #60a5fa;
+  --n1-color-scheme: dark;
+
+  /* Overlays, depth, blend — same as Med: both take Obsidian's `.theme-dark` set. */
+  --n1-mono-rgb-0: 0, 0, 0;
+  --n1-mono-rgb-100: 255, 255, 255;
+  --n1-blend-mode: lighten;
+  --n1-box-shadow: rgb(0 0 0 / 30%);
+  --n1-cover: rgb(10 10 10 / 40%);
+  --n1-canvas-color: 126, 126, 126;
+  --n1-raised-mask: transparent;
+  --n1-input-shadow: inset 0 0.5px 0.5px 0.5px rgb(255 255 255 / 9%), 0 2px 4px 0 rgb(0 0 0 / 15%), 0 1px 1.5px 0 rgb(0 0 0 / 10%), 0 1px 2px 0 rgb(0 0 0 / 20%), 0 0 0 0 transparent;
+  --n1-input-shadow-hover: inset 0 0.5px 1px 0.5px rgb(255 255 255 / 16%), 0 2px 3px 0 rgb(0 0 0 / 30%), 0 1px 1.5px 0 rgb(0 0 0 / 20%), 0 1px 2px 0 rgb(0 0 0 / 40%), 0 0 0 0 transparent;
+  --n1-shadow-xs: 0 1px 6px rgb(0 0 0 / 4.5%), 0 4px 24px rgb(0 0 0 / 19.5%), var(--shadow-edges);
+  --n1-shadow-s: 0px 1px 2px rgb(0 0 0 / 12.1%), 0px 3.4px 6.7px rgb(0 0 0 / 17.9%), 0px 15px 30px rgb(0 0 0 / 30%);
+  --n1-shadow-l: 0px 1.8px 7.3px rgb(0 0 0 / 7.1%), 0px 6.3px 24.7px rgb(0 0 0 / 11.2%), 0px 30px 90px rgb(0 0 0 / 20%);
+
+  /* Semantic palette — same as Med: both take Obsidian's `.theme-dark` set. */
+  --n1-red: #fb464c;
+  --n1-red-rgb: 251, 70, 76;
+  --n1-orange: #e9973f;
+  --n1-orange-rgb: 233, 151, 63;
+  --n1-yellow: #e0de71;
+  --n1-yellow-rgb: 224, 222, 113;
+  --n1-green: #44cf6e;
+  --n1-green-rgb: 68, 207, 110;
+  --n1-cyan: #53dfdd;
+  --n1-cyan-rgb: 83, 223, 221;
+  --n1-blue: #027aff;
+  --n1-blue-rgb: 2, 122, 255;
+  --n1-purple: #a882ff;
+  --n1-purple-rgb: 168, 130, 255;
+  --n1-pink: #fa99cd;
+  --n1-pink-rgb: 250, 153, 205;
+
+  /* Muted UI accent (Dark) — a touch brighter than Med: links must read on
+     #0e0e10. Hover is the same hue/saturation, lightness +8. */
+  --n1-accent-ui-h: 24;
+  --n1-accent-ui-s: 58%;
+  --n1-accent-ui-l: 52%;
+  --n1-accent-ui: #cc763e;
+  --n1-accent-ui-hover: #d48d5e; /* hsl(24, 58%, 60%) */
+  --n1-on-accent-ui: #fff;
 }
 
 body[data-surround="light"] {
-  color-scheme: light;
-
   --n1-bg: #f4f4f5;
   --n1-panel: #dfdfe0;
   --n1-panel-2: #d2d2d4;
@@ -103,6 +200,49 @@ body[data-surround="light"] {
   --n1-warn-text: #684400;
   --n1-error-text: #8f231a;
   --n1-info-text: #144a8f;
+  --n1-color-scheme: light;
+
+  /* Overlays, depth, blend — Obsidian's own `.theme-light` values. */
+  --n1-mono-rgb-0: 255, 255, 255;
+  --n1-mono-rgb-100: 0, 0, 0;
+  --n1-blend-mode: darken;
+  --n1-box-shadow: rgb(0 0 0 / 10%);
+  --n1-cover: rgb(220 220 220 / 40%);
+  --n1-canvas-color: 192, 192, 192;
+  --n1-raised-mask: linear-gradient(to bottom left, white, transparent, white) border-box no-repeat;
+  --n1-input-shadow: inset 0 0 0 1px rgb(0 0 0 / 12%), 0 2px 3px 0 rgb(0 0 0 / 5%), 0 1px 1.5px 0 rgb(0 0 0 / 3%), 0 1px 2px 0 rgb(0 0 0 / 4%), 0 0 0 0 transparent;
+  --n1-input-shadow-hover: inset 0 0 0 1px rgb(0 0 0 / 17%), 0 2px 3px 0 rgb(0 0 0 / 10%), 0 1px 1.5px 0 rgb(0 0 0 / 3%), 0 1px 2px 0 rgb(0 0 0 / 4%), 0 0 0 0 transparent;
+  --n1-shadow-xs: 0 1px 6px rgb(0 0 0 / 1.5%), 0 4px 24px rgb(0 0 0 / 6.5%), var(--shadow-edges);
+  --n1-shadow-s: 0px 1px 2px rgb(0 0 0 / 2.8%), 0px 3.4px 6.7px rgb(0 0 0 / 4.2%), 0px 15px 30px rgb(0 0 0 / 7%);
+  --n1-shadow-l: 0px 1.8px 7.3px rgb(0 0 0 / 7.1%), 0px 6.3px 24.7px rgb(0 0 0 / 11.2%), 0px 15px 30px rgb(0 0 0 / 10%);
+
+  /* Semantic palette — Obsidian's own `.theme-light` 8-colour set. */
+  --n1-red: #e93147;
+  --n1-red-rgb: 233, 49, 71;
+  --n1-orange: #ec7500;
+  --n1-orange-rgb: 236, 117, 0;
+  --n1-yellow: #e0ac00;
+  --n1-yellow-rgb: 224, 172, 0;
+  --n1-green: #08b94e;
+  --n1-green-rgb: 8, 185, 78;
+  --n1-cyan: #00bfbc;
+  --n1-cyan-rgb: 0, 191, 188;
+  --n1-blue: #086ddd;
+  --n1-blue-rgb: 8, 109, 221;
+  --n1-purple: #7852ee;
+  --n1-purple-rgb: 120, 82, 238;
+  --n1-pink: #d53984;
+  --n1-pink-rgb: 213, 57, 132;
+
+  /* Muted UI accent (Light) — darker/denser than Med for link contrast on
+     #f4f4f5. Hover is the same hue/saturation, lightness -6 (darker on a light
+     ground). */
+  --n1-accent-ui-h: 24;
+  --n1-accent-ui-s: 72%;
+  --n1-accent-ui-l: 40%;
+  --n1-accent-ui: #af571d;
+  --n1-accent-ui-hover: #954a18; /* hsl(24, 72%, 34%) */
+  --n1-on-accent-ui: #fff;
 }
 
 /* ============================================================================
@@ -111,8 +251,29 @@ body[data-surround="light"] {
    those cascade per surround from block 1. This one block drives all of the
    workspace chrome, sidebars, ribbons, modals, AND Crucible's own plugin UI
    (styles.css consumes these same semantic vars — no plugin classes needed).
+
+   Selector is `body.theme-dark, body.theme-light` — specificity (0,1,1) — NOT
+   plain `body` (0,0,1). Obsidian's own app.css declares 55 of the variables
+   below under `.theme-dark` / `.theme-light` (specificity (0,1,0)), which beats
+   a plain-`body` adapter outright regardless of source order. (0,1,1) is the
+   minimum bump that outranks (0,1,0) while still matching on every load, since
+   WP-1 guarantees the base theme always carries one of those two classes.
+   DO NOT simplify this back to `body` — that silently resurrects the bug.
+
+   Block 1 declares only --n1-* names (never collides with app.css); this block
+   declares only Obsidian names (never a per-surround literal — everything here
+   is a `var(--n1-*)` reference). That disjoint split is what lets both blocks
+   sit at (0,1,1) without fighting each other on source order.
    ============================================================================ */
-body {
+body.theme-dark,
+body.theme-light {
+  /* Native widget rendering (native <select>/<input> chrome, the ButtonBorder
+     system colour selects/dropdowns borrow) — surround-owned, not base-theme
+     dependent. Was stuck in block 1 at (0,0,1) for the Med default, losing to
+     app.css's `.theme-*` (0,1,0); lives here now for the same reason as
+     everything else in this block. */
+  color-scheme: var(--n1-color-scheme);
+
   /* Mono ramp — 00 = background end, 100 = strongest foreground. Obsidian
      derives many un-mapped surfaces from these, so map the ramp too. */
   --color-base-00: var(--n1-bg);
@@ -144,9 +305,8 @@ body {
   --text-normal: var(--n1-text);
   --text-muted: var(--n1-muted);
   --text-faint: var(--n1-text-faint);
-  --text-on-accent: var(--n1-on-accent);
-  --text-accent: var(--n1-accent-text);
-  --text-accent-hover: var(--n1-accent-hover);
+  --text-accent: var(--n1-accent-ui);
+  --text-accent-hover: var(--n1-accent-ui-hover);
   --text-selection: var(--n1-sel-tint);
   --text-error: var(--n1-error-text);
   --text-success: var(--n1-ok-text);
@@ -161,19 +321,89 @@ body {
   --h6-color: var(--n1-heading);
   --inline-title-color: var(--n1-heading);
 
-  /* Accent — set HSL (Obsidian derives --interactive-accent from these) and the
-     resolved vars, for belt-and-suspenders across versions. */
-  --accent-h: var(--n1-accent-h);
-  --accent-s: var(--n1-accent-s);
-  --accent-l: var(--n1-accent-l);
-  --interactive-accent: var(--n1-accent);
-  --interactive-accent-hover: var(--n1-accent-hover);
+  /* Accent — UI accent (--n1-accent-ui*), NOT the vendored brand orange
+     (--n1-accent). Obsidian spends the accent on links/toggles/highlights,
+     where the full-strength signal orange is too loud; see the block-1 header
+     comment for the two-family split. --interactive-accent/-hover are not
+     written inline by Obsidian, so they map normally (no !important). */
+  --interactive-accent: var(--n1-accent-ui);
+  --interactive-accent-hover: var(--n1-accent-ui-hover);
   --interactive-normal: var(--n1-panel);
   --interactive-hover: var(--n1-panel-2);
+
+  /* Obsidian's setAccentColor (app.js) writes these four as INLINE styles on
+     <body> whenever the user has an accentColor set (this vault does:
+     appearance.json). Inline beats any stylesheet rule, so these — and only
+     these four — carry !important to seize them back for the surround.
+     Consequence: Settings → Appearance → Accent color goes inert while this
+     theme is active; that is intentional (the accent must vary per surround,
+     which the picker cannot express). Do not add !important anywhere else in
+     this file — every other declaration already wins on specificity alone. */
+  --accent-h: var(--n1-accent-ui-h) !important;
+  --accent-s: var(--n1-accent-ui-s) !important;
+  --accent-l: var(--n1-accent-ui-l) !important;
+  --text-on-accent: var(--n1-on-accent-ui) !important;
+
+  /* --color-accent / --color-accent-1 / --color-accent-2 / --color-accent-hsl
+     are deliberately left UNMAPPED: app.css computes them from
+     --accent-h/-s/-l above, which this theme now owns, so they follow for
+     free. Mapping them here would fight Obsidian's own derivation maths. */
+
+  /* Overlays, depth, blend — these 55-variable-list members were previously
+     dead weight in block 1 (app.css's `.theme-*` always won at (0,1,0) against
+     a plain-`body` adapter); now genuinely take effect. */
+  --mono-rgb-0: var(--n1-mono-rgb-0);
+  --mono-rgb-100: var(--n1-mono-rgb-100);
+  --highlight-mix-blend-mode: var(--n1-blend-mode);
+  --input-shadow: var(--n1-input-shadow);
+  --input-shadow-hover: var(--n1-input-shadow-hover);
+  --shadow-xs: var(--n1-shadow-xs);
+  --shadow-s: var(--n1-shadow-s);
+  --shadow-l: var(--n1-shadow-l);
+  --background-modifier-box-shadow: var(--n1-box-shadow);
+  --background-modifier-cover: var(--n1-cover);
+  --canvas-color: var(--n1-canvas-color);
+  --raised-mask-background: var(--n1-raised-mask);
+
+  /* Semantic palette — callouts, tags, graph nodes, syntax highlighting. */
+  --color-red: var(--n1-red);
+  --color-red-rgb: var(--n1-red-rgb);
+  --color-orange: var(--n1-orange);
+  --color-orange-rgb: var(--n1-orange-rgb);
+  --color-yellow: var(--n1-yellow);
+  --color-yellow-rgb: var(--n1-yellow-rgb);
+  --color-green: var(--n1-green);
+  --color-green-rgb: var(--n1-green-rgb);
+  --color-cyan: var(--n1-cyan);
+  --color-cyan-rgb: var(--n1-cyan-rgb);
+  --color-blue: var(--n1-blue);
+  --color-blue-rgb: var(--n1-blue-rgb);
+  --color-purple: var(--n1-purple);
+  --color-purple-rgb: var(--n1-purple-rgb);
+  --color-pink: var(--n1-pink);
+  --color-pink-rgb: var(--n1-pink-rgb);
 
   /* Monospace metadata — Crucible surfaces IDs/metadata in --font-monospace; the
      N1 Console look leans on technical monospace. Left to the user's configured
      monospace font (do not hard-pin a family the vault may not have). */
+}
+
+/* ============================================================================
+   Dropdown chevron — belt-and-suspenders
+   app.css paints `.dropdown`'s chevron with a black-stroke inline SVG, then
+   overrides it under `.theme-dark .dropdown` (0,2,0) with a white-stroke one.
+   WP-1's base-theme alignment makes this self-correcting in practice, but the
+   surround should own it directly too, in case alignment is ever bypassed.
+   (0,2,1) — one class higher than app.css's (0,2,0) — so it always wins.
+   Both data-URIs are copied verbatim from app.css.
+   ============================================================================ */
+body[data-surround="dark"] .dropdown,
+body[data-surround="med"] .dropdown {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2724%27 height=%2724%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%23FFF%27 opacity=%270.6%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27 %3E%3Cpath d=%27m7 15 5 5 5-5%27/%3E%3Cpath d=%27m7 9 5-5 5 5%27/%3E%3C/svg%3E");
+}
+
+body[data-surround="light"] .dropdown {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2724%27 height=%2724%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%23000%27 opacity=%270.9%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27 %3E%3Cpath d=%27m7 15 5 5 5-5%27/%3E%3Cpath d=%27m7 9 5-5 5 5%27/%3E%3C/svg%3E");
 }
 
 /* ============================================================================
