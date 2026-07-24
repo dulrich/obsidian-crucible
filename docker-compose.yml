@@ -1,0 +1,31 @@
+# Standalone stack for the Crucible search companion. Mirrors the block enrolled in the
+# context-control home-compose fleet (compose.home.yml), so `docker compose up` here and
+# `home-compose up crucible-search` there bring up the same service.
+#
+# JSON API only, no UI. Unauthenticated with full index write access, so the published
+# port is scoped to loopback rather than all interfaces.
+services:
+  crucible-search:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${CRUCIBLE_GIT_SHA:-unknown}
+    container_name: crucible-search
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "127.0.0.1:4801:4801"
+    environment:
+      CRUCIBLE_SEARCH_PORT: 4801
+      CRUCIBLE_SEARCH_HOST: 0.0.0.0
+      CRUCIBLE_SEARCH_DB: /data/search.sqlite
+    volumes:
+      - crucible-search-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4801/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  crucible-search-data:

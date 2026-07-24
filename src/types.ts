@@ -655,7 +655,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	sourceEvalLookbackDays: 180,
 	sourceEvalExportFolder: '_crucible/source_eval',
 	searchEnabled: true,
-	searchServiceUrl: 'http://127.0.0.1:8765',
+	searchServiceUrl: 'http://127.0.0.1:4801',
 	searchVaultId: 'default',
 	searchSemanticEnabled: false,
 	searchChunkMaxChars: 1800,

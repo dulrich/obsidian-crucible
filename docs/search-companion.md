@@ -1,8 +1,21 @@
 # Crucible Search Companion
 
-Crucible's Obsidian plugin talks to a user-run local HTTP service for search storage and ranking. This keeps native SQLite modules out of the plugin bundle.
+Crucible's Obsidian plugin talks to a local HTTP service for search storage and ranking. This keeps native SQLite modules out of the plugin bundle.
 
 ## Local SQLite
+
+### Docker Compose (primary)
+
+The companion runs as a docker-compose service, either standalone (`docker compose up` from this repo root) or enrolled in the `context-control` fleet as `crucible-search` (`home-compose up crucible-search`). The container binds `0.0.0.0` internally and publishes to the host on loopback only, so from the plugin's point of view it's reachable the same way as the standalone process below.
+
+Defaults inside the container:
+
+- URL: `http://127.0.0.1:4801`
+- Database: named volume `crucible-search-data`, mounted at `/data/search.sqlite`
+
+The volume starts **empty** — the schema self-creates on first boot, but it holds no chunks until you run a search index rebuild from the plugin. This is expected after first `up`, not a bug.
+
+### Standalone (dev fallback)
 
 ```bash
 npm run search:serve
@@ -10,20 +23,22 @@ npm run search:serve
 
 Defaults:
 
-- URL: `http://127.0.0.1:8765`
+- URL: `http://127.0.0.1:4801`
 - Database: `.crucible/search.sqlite`
 
 Overrides:
 
 ```bash
-node scripts/search-companion.mjs --port 8765 --db /path/to/search.sqlite
+node scripts/search-companion.mjs --port 4801 --host 127.0.0.1 --db /path/to/search.sqlite
 ```
+
+Or via environment: `CRUCIBLE_SEARCH_PORT`, `CRUCIBLE_SEARCH_HOST`, `CRUCIBLE_SEARCH_DB`. `CRUCIBLE_SEARCH_HOST` defaults to `127.0.0.1` (loopback-only) for the standalone path; only the container sets it to `0.0.0.0`, since a loopback bind inside a container is unreachable from the host even with a published port.
 
 The bundled companion script implements local SQLite FTS5/BM25. It accepts embedding vectors in the API payload and stores them as JSON, but does not rank with vectors yet. A future `sqlite-vec` implementation should keep the same endpoints and add vector/hybrid ranking behind `/v1/search`.
 
 Recommended plugin settings for the bundled local service:
 
-- Search service URL: `http://127.0.0.1:8765`
+- Search service URL: `http://127.0.0.1:4801`
 - Vault ID: any stable per-vault key, for example `default` or the vault folder name
 - Semantic indexing: optional; requires a configured embedding-capable provider/model
 
