@@ -102,9 +102,25 @@ leaving it as a thing you have to remember to start. Two CPU containers run besi
 | `crucible-reranker` | `127.0.0.1:4803` | `BAAI/bge-reranker-v2-m3` | `POST /rerank` |
 
 Both run the [Infinity](https://github.com/michaelfeil/infinity) inference server
-(`michaelf34/infinity:0.0.77-cpu`), started with `--device cpu --engine optimum`. Like
-`crucible-search`, both publish to `127.0.0.1` only — the embedder's port also carries an
-unauthenticated, full-access inference API.
+(`michaelf34/infinity:0.0.77-cpu`). Like `crucible-search`, both publish to `127.0.0.1` only —
+the embedder's port also carries an unauthenticated, full-access inference API.
+
+**The two engine flags differ on purpose.** The embedder runs `--engine optimum` (ONNX); the
+reranker runs `--engine torch`. `optimum` resolves ONNX weights from the HF repo, and
+`BAAI/bge-reranker-v2-m3` publishes PyTorch weights only — under `optimum` it dies during engine
+selection with `No onnx files found`, before downloading a byte, at any memory limit. `bge-m3`
+does ship `onnx/model.onnx`, so the embedder keeps the faster ONNX path. Check which weights a
+repo actually publishes before aligning these.
+
+**Why CPU and not the GPU.** This box has an RX 9070 (gfx1201/RDNA4) and host ROCm 7.2.2, but
+GPU inference is currently impossible: the newest published AMD Infinity image ships torch
+`2.5.1+rocm6.2`, whose compiled arch list stops at `gfx1100`/`gfx942`, and `latest-amd` is five
+months *older* still. gfx1201 needs ROCm 6.4+. Worse, `torch.cuda.is_available()` returns `True`
+on that image and only fails at the first real kernel — so a naive GPU switch would pass the
+healthcheck and then die on the first embedding request. Do not attempt to force it with
+`HSA_OVERRIDE_GFX_VERSION`: that wedges the GPU hard enough to cost a reboot. Full findings,
+the hang signature, recovery paths, and a retest command for future images are in
+`context-control/references/rdna4-gpu-hang.md`.
 
 **Why `bge-m3` is the recommended default.** `searchEmbeddingModel` is a plain user setting — the
 companion is dimension-agnostic and stores whatever width arrives, so nothing forces `bge-m3`
