@@ -55,7 +55,7 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 			const trimmed = text.trim();
 			if (!trimmed) continue;
 			chunks.push({
-				id: stableChunkId(input.path, ordinal, section.heading),
+				id: stableChunkId(input.vaultId, input.path, ordinal, section.heading),
 				vaultId: input.vaultId,
 				path: input.path,
 				contentHash,
@@ -156,8 +156,17 @@ function tailOverlap(text: string, overlapChars: number): string {
 	return text.slice(Math.max(0, text.length - overlapChars));
 }
 
-function stableChunkId(path: string, ordinal: number, heading: string): string {
-	return `${path}#${ordinal}:${hashString(`${path}\n${heading}\n${ordinal}`)}`;
+// The vault id is folded into the hash, not the readable prefix: the id stays
+// `path#ordinal:hash` (which is what a `chunkId` in a search result or a debug log shows) while
+// two vaults holding the same note at the same path no longer mint the same id. Before this,
+// they did — and the companion's upsert conflicted on `id` alone, so indexing vault B silently
+// re-labelled vault A's row as B's and a later reset of B took A's data with it. The companion's
+// `PRIMARY KEY (vault_id, id)` (schema 5) is the half that makes collisions harmless; this half
+// makes them not happen. It needs no migration and no re-index: existing rows keep their old ids,
+// stay unique, remain reachable (every lookup that matters is by `(vault_id, path)`), and are
+// replaced on the next per-path upsert, which is already a full replace.
+function stableChunkId(vaultId: string, path: string, ordinal: number, heading: string): string {
+	return `${path}#${ordinal}:${hashString(`${vaultId}\n${path}\n${heading}\n${ordinal}`)}`;
 }
 
 function hashString(value: string): string {

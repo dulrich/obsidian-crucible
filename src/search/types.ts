@@ -125,7 +125,13 @@ export function embeddingSpaceId(modelId: string, precision?: string): string {
 // Bumped to 4 for `chunks.embedding_space`. An older companion binary cannot store it or filter
 // the scan by it, so it would load vectors from two spaces into one matrix and cosine-score them
 // against each other — precisely the silent failure that column exists to remove.
-export const SEARCH_REQUIRED_SCHEMA_VERSION = 4;
+// Bumped to 5 for `chunks PRIMARY KEY (vault_id, id)`. An older companion binary still keys
+// chunks on `id` alone, so two vaults sharing it silently destroy each other's rows — the
+// mismatch no client-side change can compensate for. Note the consequence of honouring the
+// pairing rule here: between a plugin update and a container rebuild, health reports
+// `ok: false` and search is *unavailable*, not degraded. Rebuild the companion image in the
+// same landing.
+export const SEARCH_REQUIRED_SCHEMA_VERSION = 5;
 
 export interface SearchHealth {
 	ok: boolean;
