@@ -841,6 +841,18 @@ If your plugin does not need CSS, delete this file.
   height: 2rem;
 }
 
+/* Deliberately its own row below the search form, not a third grid column on
+   .crucible-search-form — the button only exists when a reranker is configured, so it must
+   not perturb the form's fixed two-column layout when it is absent. */
+.crucible-search-rerank-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.crucible-search-rerank-button {
+  width: auto;
+}
+
 .crucible-search-status {
   min-height: 1.2em;
   color: var(--text-muted);
@@ -914,6 +926,17 @@ If your plugin does not need CSS, delete this file.
 .crucible-search-result-snippet {
   margin-top: 0.35rem;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+/* Same idiom as .crucible-search-result-score (its own full-width row, monospace for the
+   numeric columns) — kept as a separate rule because it only renders after an explicit
+   rerank, whereas the score line is always present. */
+.crucible-search-result-rerank {
+  margin-top: 0.2rem;
+  color: var(--text-accent);
+  font-family: var(--font-monospace);
+  font-size: 0.75em;
   overflow-wrap: anywhere;
 }
 

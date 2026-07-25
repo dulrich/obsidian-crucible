@@ -1,6 +1,7 @@
 import { App, Modal, Notice, TFile, debounce, setIcon } from 'obsidian';
 import type CruciblePlugin from '../main';
 import { SEARCH_TYPEAHEAD_DEBOUNCE_MS, SEARCH_TYPEAHEAD_MIN_QUERY_LENGTH, shouldAutoSearch } from './debounce';
+import type { SearchRerankOutcome } from './SearchManager';
 import { SearchResult, SearchScoreAttribution } from './types';
 
 export class VaultSearchModal extends Modal {
@@ -17,6 +18,15 @@ export class VaultSearchModal extends Modal {
 	 * rendered. Without this guard the slow, less-specific results would land last and win.
 	 */
 	private searchGeneration = 0;
+
+	// Rerank state. `rerankButton` is null (not merely hidden) whenever no reranker is
+	// configured — WP-5 requires the action to stay absent rather than surface and error.
+	// `currentResults` is whatever is on screen right now (post-search or post-rerank);
+	// `rerankRowMeta` is non-null only after a rerank has actually rendered, and is cleared by
+	// every fresh search so a stale before/after annotation can never survive onto new results.
+	private rerankButton: HTMLButtonElement | null = null;
+	private currentResults: SearchResult[] = [];
+	private rerankRowMeta: Map<string, RerankRowMeta> | null = null;
 
 	constructor(app: App, private readonly plugin: CruciblePlugin, private readonly sweepMode = false) {
 		super(app);
@@ -66,6 +76,17 @@ export class VaultSearchModal extends Modal {
 			});
 		}
 
+		// The Rerank action, WP-5: a deliberate, explicitly-invoked button — never reachable from
+		// the input handler above, so the type-ahead debounce/3-character gate stay untouched.
+		// Hidden entirely (not just disabled) when no reranker is configured, per the brief:
+		// "the button stays hidden rather than erroring."
+		if (this.plugin.settings.searchRerankEnabled && this.plugin.settings.searchRerankModel) {
+			const rerankRow = this.contentEl.createDiv({ cls: 'crucible-search-rerank-row' });
+			this.rerankButton = rerankRow.createEl('button', { cls: 'crucible-search-rerank-button', text: 'Rerank results' });
+			this.rerankButton.disabled = true;
+			this.rerankButton.onclick = () => void this.runRerank();
+		}
+
 		this.statusEl = this.contentEl.createDiv({ cls: 'crucible-search-status' });
 		this.resultsEl = this.contentEl.createDiv({ cls: 'crucible-search-results' });
 		this.inputEl.focus();
@@ -94,6 +115,11 @@ export class VaultSearchModal extends Modal {
 			// with the vault's — e.g. mid-model-switch — and that condition deserves the same
 			// visibility, or semantic silently drops to FTS with no explanation on screen.
 			this.statusEl.setAttr('title', response.message || null);
+			// A fresh search invalidates any prior rerank annotation — it described a result set
+			// that no longer exists on screen.
+			this.rerankRowMeta = null;
+			this.currentResults = response.results;
+			this.updateRerankAvailability();
 			this.renderResults(response.results);
 		} catch (e) {
 			if (generation !== this.searchGeneration) return;
@@ -135,12 +161,60 @@ export class VaultSearchModal extends Modal {
 			// full-width wrapping row; as a nowrap column beside the title it dictated the
 			// modal's width instead of fitting inside it.
 			row.createDiv({ cls: 'crucible-search-result-score', text: formatScore(result) });
+			// Only present once a rerank has actually run, and only for rows that were part of
+			// the reranked slice (a tail beyond top-N has no entry) — see buildRerankRowMeta.
+			// Rendered unconditionally when present, including the unchanged case, so "reranking
+			// did nothing to this result set" reads as a fact on screen rather than an absence.
+			const rowMeta = this.rerankRowMeta?.get(result.chunkId);
+			if (rowMeta) {
+				row.createDiv({ cls: 'crucible-search-result-rerank', text: formatRerankRow(rowMeta) });
+			}
 			// The whole row opens the note; the buttons stay for keyboard/explicit use.
 			row.addEventListener('click', (evt) => {
 				if ((evt.target as HTMLElement).closest('button')) return;
 				void this.openResult(result);
 			});
 		}
+	}
+
+	// Explicit, button-only action — this is never invoked from the `input` handler in onOpen(),
+	// so the type-ahead debounce and 3-character gate are untouched by rerank latency.
+	private async runRerank(): Promise<void> {
+		if (!this.rerankButton || this.rerankButton.disabled) return;
+		const query = this.inputEl.value.trim();
+		if (!query || this.currentResults.length === 0) return;
+
+		// Snapshot the generation and the pre-rerank order *before* awaiting. If a newer search
+		// supersedes this generation while the rerank is in flight, isRerankStale() below
+		// discards the response — the same guard runSearch uses, just consumed rather than
+		// incremented (rerank is never itself a new "search").
+		const issuedGeneration = this.searchGeneration;
+		const before = this.currentResults;
+		this.setRerankPending(true);
+		try {
+			const outcome = await this.plugin.searchManager.rerank(query, before);
+			if (isRerankStale(issuedGeneration, this.searchGeneration)) return;
+			this.currentResults = outcome.results;
+			this.rerankRowMeta = buildRerankRowMeta(before, outcome);
+			this.renderResults(this.currentResults);
+		} catch (e) {
+			if (isRerankStale(issuedGeneration, this.searchGeneration)) return;
+			const message = e instanceof Error ? e.message : String(e);
+			new Notice(`Rerank failed: ${message}`);
+		} finally {
+			if (!isRerankStale(issuedGeneration, this.searchGeneration)) this.setRerankPending(false);
+		}
+	}
+
+	private setRerankPending(pending: boolean): void {
+		if (!this.rerankButton) return;
+		this.rerankButton.disabled = pending || this.currentResults.length === 0;
+		this.rerankButton.setText(pending ? 'Reranking…' : 'Rerank results');
+	}
+
+	private updateRerankAvailability(): void {
+		if (!this.rerankButton) return;
+		this.rerankButton.disabled = this.currentResults.length === 0;
 	}
 
 	private async openResult(result: SearchResult): Promise<void> {
@@ -152,6 +226,55 @@ export class VaultSearchModal extends Modal {
 		await this.app.workspace.getLeaf(false).openFile(file);
 		this.close();
 	}
+}
+
+// Discards a rerank response that resolved after a newer search superseded it — the same
+// searchGeneration guard runSearch uses (see the block comment above `searchGeneration`).
+// Exported as a pure function so the "type-ahead safety" behavior is directly testable without
+// instantiating a Modal: a rerank is issued against a snapshot of the generation counter, and if
+// a fresh search has since bumped it, the response must never render.
+export function isRerankStale(issuedGeneration: number, currentGeneration: number): boolean {
+	return issuedGeneration !== currentGeneration;
+}
+
+export interface RerankRowMeta {
+	beforeRank: number;
+	afterRank: number;
+	relevanceScore: number;
+}
+
+// Pure: computes the before/after rank (1-based) and reranker score for every result that
+// participated in a rerank, keyed by chunkId. `before` is the result order the user saw at the
+// moment they clicked Rerank; `outcome.results`/`outcome.scores` come straight from
+// SearchManager.rerank(). A result absent from `outcome.scores` was beyond the reranked top-N
+// (the untouched tail) and gets no row meta at all — there's nothing to report about a move that
+// never had a chance to happen. Exported so tests/providerRerank.test.mjs can assert the mapping
+// — including the out-of-order case — without a live Modal.
+export function buildRerankRowMeta(before: SearchResult[], outcome: SearchRerankOutcome): Map<string, RerankRowMeta> {
+	const beforeRank = new Map<string, number>();
+	before.forEach((result, i) => beforeRank.set(result.chunkId, i + 1));
+
+	const meta = new Map<string, RerankRowMeta>();
+	outcome.results.forEach((result, i) => {
+		const relevanceScore = outcome.scores.get(result.chunkId);
+		if (relevanceScore === undefined) return;
+		meta.set(result.chunkId, {
+			beforeRank: beforeRank.get(result.chunkId) ?? i + 1,
+			afterRank: i + 1,
+			relevanceScore,
+		});
+	});
+	return meta;
+}
+
+// Renders explicitly as "(unchanged)" rather than repeating the same number twice, so a rerank
+// that reorders nothing reads as an observed fact rather than something the reader has to notice
+// by comparing two identical numbers.
+export function formatRerankRow(meta: RerankRowMeta): string {
+	const movement = meta.beforeRank === meta.afterRank
+		? `#${meta.beforeRank} (unchanged)`
+		: `#${meta.beforeRank} → #${meta.afterRank}`;
+	return `rerank ${movement} · score ${meta.relevanceScore.toFixed(3)}`;
 }
 
 function formatSearchStatus(visible: number, total: number | undefined, mode: string | undefined, ftsOnly: boolean, rebuildRequired = false): string {

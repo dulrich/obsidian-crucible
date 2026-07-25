@@ -1,5 +1,5 @@
 import { requestUrl } from 'obsidian';
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult } from '../types';
+import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderRerankResult } from '../types';
 import {
 	HttpCallContext,
 	HttpProviderClient,
@@ -7,6 +7,7 @@ import {
 	IMAGE_EXTRACTION_USER_PROMPT,
 	normalizeEmbedding,
 	normalizeRawFinishReason,
+	normalizeRerankResults,
 	parseImageExtractionResult,
 } from './shared';
 
@@ -101,6 +102,31 @@ export const openAICompatibleClient: HttpProviderClient = {
 			throw new Error(`${label(ctx.provider)} embeddings API returned ${embeddings.length} embeddings for ${inputs.length} inputs`);
 		}
 		return { embeddings, dimensions: embeddings[0]?.length };
+	},
+
+	// Primary rerank backend (WP-5): `POST {apiBaseUrl}/rerank`, verified against Infinity's
+	// actual Pydantic schemas (michaelf34/infinity:0.0.77-cpu) rather than guessed. The
+	// reranker is configured as its own provider entry — a different port from the embedder,
+	// and (unlike the embedder) its base URL is the bare host with no `/v1` suffix, because
+	// that container is deliberately started without `--url-prefix`. Reusing apiBaseUrl()/
+	// authHeaders() here means that shape difference is just "what the user typed into Server
+	// URL" — no rerank-specific URL branch.
+	async rerank(ctx, query, documents): Promise<ProviderRerankResult> {
+		const response = await requestUrl({
+			url: `${apiBaseUrl(ctx.provider)}/rerank`,
+			method: 'POST',
+			headers: authHeaders(ctx),
+			body: JSON.stringify({ model: ctx.modelId, query, documents }),
+		});
+
+		if (response.status !== 200) {
+			throw new Error(`${label(ctx.provider)} rerank API returned ${response.status}: ${response.text}`);
+		}
+
+		// results[].index refers to the position in *this request's* documents array and is not
+		// guaranteed to arrive in that order (Infinity sorts by relevance_score descending) —
+		// normalizeRerankResults is the single place that maps back by index rather than position.
+		return { results: normalizeRerankResults(response.json, documents.length) };
 	},
 
 	async extractImage(ctx, base64, mimeType): Promise<ProviderImageExtractionResult> {

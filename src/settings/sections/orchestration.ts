@@ -109,6 +109,21 @@ function describeImageExtractionModel(tab: CrucibleSettingTab, ref: ProviderMode
 	return `${providerName} · ${model.label || model.id}`;
 }
 
+// Unlike embedding/image-extraction, reranking has no dedicated model-capability checkbox
+// (that lives on the AI settings tab, out of WP-5's scope) — any configured model can be picked.
+// Point it at a provider that either speaks Infinity's native /rerank (a separate
+// openai-compatible entry, typically http://127.0.0.1:4803 with no /v1 suffix — that container
+// is deliberately started without --url-prefix) or any chat model, which is scored via the
+// slower, fuzzier complete()-based fallback instead.
+function describeRerankModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
+	if (!ref) return 'No reranker model selected. The Rerank button stays hidden on the search modal.';
+	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
+	const model = provider?.models.find(m => m.id === ref.modelId);
+	if (!provider || !model) return 'Selected reranker model is missing. The Rerank button stays hidden on the search modal.';
+	const providerName = provider.name || provider.kind;
+	return `${providerName} · ${model.label || model.id}`;
+}
+
 const ROUTINE_NOTICE_JOB_TYPES: JobType[] = [
 	'daily_brief_lite',
 	'youtube_tracker',
@@ -391,6 +406,50 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			await save();
 			tab.display();
 		}));
+
+	// WP-5: reranking is a deliberate, explicitly-invoked action on the search modal — never a
+	// type-ahead pipeline stage (see the AGENTS.md quirk on companion search latency for why
+	// that distinction matters). Off by default; the modal hides the Rerank button entirely,
+	// not merely disables it, until both this toggle is on and a model is picked.
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(searchGroup, {
+		name: 'Reranking',
+		desc: 'Adds an explicit "Rerank results" button to the search modal, reordering the current top results by a cross-encoder score. Never runs automatically or on type-ahead. Requires a reranker model below.',
+		get: () => s.searchRerankEnabled,
+		set: (v) => { s.searchRerankEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	new Setting(searchGroup)
+		.setName('Reranker model')
+		.setDesc(describeRerankModel(tab, s.searchRerankModel))
+		.addButton(bt => bt.setButtonText('Pick').onClick(() => {
+			if (tab.plugin.settings.providers.length === 0) {
+				new Notice('No providers configured. Add one in Settings → AI first.');
+				return;
+			}
+			const options = buildModelPickerOptions(tab.plugin.settings.providers);
+			new ModelPickerModal(tab.app, options, (ref) => {
+				s.searchRerankModel = ref;
+				void save();
+				tab.display();
+			}).open();
+		}))
+		.addButton(bt => bt.setButtonText('Clear').onClick(async () => {
+			delete s.searchRerankModel;
+			await save();
+			tab.display();
+		}));
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Rerank top N',
+		desc: 'How many of the current (already-fused) top results get sent to the reranker when the button is clicked.',
+		placeholder: '30',
+		get: () => String(s.searchRerankTopN),
+		set: (v) => { const n = Number(v.trim()); s.searchRerankTopN = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30; },
+		min: 1,
+	}, save);
 
 	// --- Workflows list ---
 	new Setting(containerEl).setName('Workflows').setHeading();

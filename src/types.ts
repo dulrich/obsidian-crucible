@@ -235,6 +235,20 @@ export interface ProviderImageExtractionResult {
 	rawFinishReason?: string;
 }
 
+// A single scored document from a `rerank()` call. `index` is the position of the document in
+// the *request's* `documents` array, not the position of this entry within `results` — a
+// cross-encoder rerank response is not guaranteed to preserve request order (Infinity's
+// `/rerank` typically returns results sorted by relevance-score descending), so callers must
+// always resolve a document by `index`, never by its position in the `results` array.
+export interface ProviderRerankResultItem {
+	index: number;
+	relevanceScore: number;
+}
+
+export interface ProviderRerankResult {
+	results: ProviderRerankResultItem[];
+}
+
 export type ProviderKind =
 	| 'openai'
 	| 'anthropic'
@@ -533,6 +547,16 @@ export interface CrucibleSettings {
 	// construction is skipped entirely, not built-then-multiplied-by-zero.
 	searchLinkBoostEnabled: boolean;
 	searchLinkBoostWeight: number;
+	// WP-5: reranking is a deliberate, explicitly-invoked action on the search modal — never a
+	// type-ahead pipeline stage. Disabled by default, and the modal hides the Rerank button
+	// entirely (not just disables it) until both a model is picked and this is on, so an
+	// unconfigured reranker never surfaces as an error.
+	searchRerankEnabled: boolean;
+	searchRerankModel?: ProviderModelRef;
+	// How many of the current (already-fused) top results get sent to the reranker. Bounds the
+	// cost of an explicit rerank click — not a type-ahead concern, but still not "rerank all 200
+	// results" by default.
+	searchRerankTopN: number;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -688,4 +712,6 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	// typical ~12-result list. See tests/linkGraph.test.mjs and the WP-6 report for the
 	// worked arithmetic.
 	searchLinkBoostWeight: 0.05,
+	searchRerankEnabled: false,
+	searchRerankTopN: 30,
 }
