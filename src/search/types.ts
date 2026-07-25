@@ -33,11 +33,15 @@ export interface SearchChunk {
 }
 
 // The companion index schema this plugin build knows how to query. Bumped to 2 when
-// `chunks_fts` gained FTS5 `prefix='2 3'`; a companion reporting less than this is serving
-// an index without the prefix table, so the client flags "rebuild required" instead of
-// silently degrading. The companion migrates its own on-disk FTS table on startup, so the
-// only mismatch that can survive is an older companion binary/image.
-export const SEARCH_REQUIRED_SCHEMA_VERSION = 2;
+// `chunks_fts` gained FTS5 `prefix='2 3'`; bumped to 3 when embeddings moved from
+// `embedding_json TEXT` to `embedding BLOB` + `embedding_dim` + `embedding_model` and the
+// companion's vector leg started reading them. A companion reporting less than this is
+// serving an index the current client cannot rely on, so the client flags "rebuild required"
+// instead of silently degrading. The companion migrates its own on-disk schema on startup
+// (additive ALTERs, plus the FTS rebuild), so the only mismatch that can survive is an older
+// companion binary/image — which is why this constant and the companion's SCHEMA_VERSION are
+// always bumped in the same change.
+export const SEARCH_REQUIRED_SCHEMA_VERSION = 3;
 
 export interface SearchHealth {
 	ok: boolean;

@@ -18,6 +18,7 @@ import {
 	SCHEMA_VERSION,
 	buildFtsQuery,
 	createSchema,
+	createVectorBackend,
 	fuseSearchRows,
 	migrateFtsSchema,
 	runSearch,
@@ -27,12 +28,28 @@ import {
 
 const VAULT = 'test-vault';
 
+// Every search below runs through the vector-aware path with a real backend attached, over
+// vaults that hold no embeddings — so this whole file doubles as the "vector absence
+// degrades, never fails" guarantee: the rankings asserted here are the pre-vector rankings.
+const backends = new WeakMap();
+function vectorsFor(db) {
+	let backend = backends.get(db);
+	if (!backend) {
+		backend = createVectorBackend(db);
+		backends.set(db, backend);
+	}
+	return backend;
+}
+
 function makeDb(rows) {
 	const db = new DatabaseSync(':memory:');
 	createSchema(db);
+	// No embedding: these rows exercise the FTS-only path, which is still what a vault gets
+	// until semantic indexing is deliberately turned on. Vector coverage lives in
+	// tests/searchCompanionVector.test.mjs.
 	const insertChunk = db.prepare(`
-INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`);
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`);
 	const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
 	rows.forEach((row, index) => {
 		const id = row.id ?? `chunk-${index}`;
@@ -45,7 +62,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`);
 }
 
 function search(db, query, limit = 10) {
-	return runSearch(db, { vaultId: VAULT, query, limit });
+	return runSearch(db, { vaultId: VAULT, query, limit, vectors: vectorsFor(db) });
 }
 
 test('title match outranks a body match for the same term', () => {
@@ -208,9 +225,10 @@ test('titleMatchScore ranks exact over prefix over substring over partial', () =
 	assert.equal(titleMatchScore(['widget.md'], { title: 'Widget md', path: 'a/Widget.md' }), 1);
 });
 
-test('an index built under schema 1 is migrated to the prefix-indexed FTS table', () => {
+test('a schema-1 index migrates to the prefix FTS table and gains the schema-3 embedding columns', () => {
 	const db = new DatabaseSync(':memory:');
-	// The schema-1 bootstrap, verbatim: no prefix= option.
+	// The schema-1 bootstrap, verbatim: no prefix= option, and embeddings still in a JSON
+	// TEXT column.
 	db.exec(`
 CREATE TABLE chunks (
   id TEXT PRIMARY KEY, vault_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -224,15 +242,25 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 INSERT INTO chunks VALUES ('legacy', '${VAULT}', 'Legacy.md', 'hash', 'Legacy', '', 'kubernetes deployment', 0, 0, '{}', NULL);
 INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 'kubernetes deployment');
 `);
-	assert.equal(migrateFtsSchema(db), true);
+	// createSchema does both halves of the migration: additive ALTERs for the schema-3
+	// embedding columns (the content_hash precedent — never a drop/refill of `chunks`), then
+	// the FTS rebuild. It reports whether the FTS half actually ran.
+	assert.equal(createSchema(db), true);
 	// Idempotent: a second pass is a no-op.
 	assert.equal(migrateFtsSchema(db), false);
+	const columns = db.prepare('PRAGMA table_info(chunks)').all().map(row => row.name);
+	for (const column of ['embedding', 'embedding_dim', 'embedding_model']) {
+		assert.ok(columns.includes(column), `schema 3 must add ${column} to an existing index`);
+	}
+	// The legacy TEXT column is left behind untouched — every row in a real index has it
+	// NULL, and dropping it would mean rebuilding the table for nothing.
+	assert.ok(columns.includes('embedding_json'));
 	const sql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'").get().sql;
 	assert.match(sql, /prefix\s*=/);
 	// Content is rebuilt losslessly from `chunks`, and prefix queries now work.
 	const outcome = search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['Legacy.md']);
-	assert.equal(SCHEMA_VERSION, 2);
+	assert.equal(SCHEMA_VERSION, 3);
 });
 
 // End-to-end sign check: a companion payload run through the real client normalizer must
@@ -272,11 +300,16 @@ test('the client sees the companion score convention unchanged (higher is better
 		{ path: 'Haystack.md', title: 'Haystack', text: 'one needle buried in a lot of unrelated words' },
 	]);
 	const outcome = search(db, 'needle');
+	// Both flags are taken from the outcome, never written as literals: a vault with no
+	// embeddings must *compute* its way to fts/false, and the day it stops doing that this
+	// assertion is what notices.
+	assert.equal(outcome.vectorUsed, false);
+	assert.equal(outcome.semanticAvailable, false);
 	globalThis.__companionResponse = {
 		status: 200,
 		json: {
-			mode: 'fts',
-			semanticAvailable: false,
+			mode: outcome.vectorUsed ? 'hybrid' : 'fts',
+			semanticAvailable: outcome.semanticAvailable,
 			schemaVersion: SCHEMA_VERSION,
 			total: outcome.total,
 			hasMore: false,

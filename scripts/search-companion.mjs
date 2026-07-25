@@ -18,8 +18,13 @@ import { fileURLToPath } from 'node:url';
 // expansion in buildFtsQuery cheap. An index built under schema 1 has no prefix table, so
 // the client treats an older companion as "index rebuild required" rather than silently
 // serving a degraded index.
-export const SCHEMA_VERSION = 2;
-export const SERVICE_VERSION = 'dev-fts-rrf';
+//
+// Bumped to 3 when embeddings moved from `embedding_json TEXT` to `embedding BLOB` +
+// `embedding_dim` + `embedding_model` and the vector leg started reading them. The client's
+// half of that contract is SEARCH_REQUIRED_SCHEMA_VERSION in `src/search/types.ts` — the two
+// are bumped together, always.
+export const SCHEMA_VERSION = 3;
+export const SERVICE_VERSION = 'dev-fts-rrf-vector';
 
 // bm25() takes one weight per column, including the UNINDEXED ones (they never match, so
 // their weights are inert but the arity must line up). Unweighted bm25 let a body mention
@@ -41,6 +46,16 @@ const SEARCH_POOL_MIN = 40;
 // strong second-list hit can overtake a weak first-list leader without swamping it.
 export const RRF_K = 60;
 export const RRF_TITLE_WEIGHT = 1.0;
+// The vector list joins the fusion on exactly the same footing as the title list: same k,
+// same reciprocal-rank shape, weight 1.0. A weight is the knob if one list turns out to
+// deserve more say — it is deliberately not a score blend, because bm25 and cosine are not
+// commensurable scales but their ranks are.
+export const RRF_VECTOR_WEIGHT = 1.0;
+
+// Hydration for a path the vector scan found but the FTS pool never returned. Those rows
+// have no bm25 score and no FTS snippet (they did not match), so the snippet is built from
+// the chunk text — see makeTextSnippet.
+const HYDRATE_CHUNK_SQL = 'SELECT id, path, title, heading, text, metadata_json FROM chunks WHERE id = ?';
 
 const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   id UNINDEXED,
@@ -114,16 +129,26 @@ CREATE TABLE IF NOT EXISTS chunks (
   mtime INTEGER NOT NULL,
   ordinal INTEGER NOT NULL,
   metadata_json TEXT NOT NULL,
-  embedding_json TEXT
+  embedding BLOB,
+  embedding_dim INTEGER,
+  embedding_model TEXT
 );
 ${FTS_TABLE_SQL};
 CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 `);
 
+	// Additive ALTERs, the same precedent `content_hash` set: a drop/refill of `chunks` would
+	// throw away the FTS-backing content for no reason. `embedding_json` (schema 2) is left in
+	// place on a migrated database — it is never read or written again, and every row in the
+	// live index has it NULL because `searchSemanticEnabled` has always defaulted false, so
+	// there is nothing to convert. A freshly created database simply never has the column.
 	const chunkColumns = db.prepare('PRAGMA table_info(chunks)').all().map(row => row.name);
 	if (!chunkColumns.includes('content_hash')) {
 		db.exec("ALTER TABLE chunks ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''");
 	}
+	if (!chunkColumns.includes('embedding')) db.exec('ALTER TABLE chunks ADD COLUMN embedding BLOB');
+	if (!chunkColumns.includes('embedding_dim')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_dim INTEGER');
+	if (!chunkColumns.includes('embedding_model')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_model TEXT');
 	db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
 	return migrateFtsSchema(db);
 }
@@ -156,6 +181,243 @@ export function openDatabase(dbPath) {
 	const db = new DatabaseSync(dbPath);
 	createSchema(db);
 	return db;
+}
+
+// An error whose HTTP status is part of the contract. Everything else falls through to a
+// 500. The distinction matters: `SearchServiceClient` turns *any* 5xx into
+// SearchServiceUnavailableError, which the UI renders as "the companion is not reachable —
+// start it with home-compose up crucible-search". A malformed request answered with a 500
+// therefore sends the user to restart a container that is perfectly healthy, so every
+// request-side rejection (a bad vector, a width conflict) must be a 4xx.
+export class HttpError extends Error {
+	constructor(status, message) {
+		super(message);
+		this.name = 'HttpError';
+		this.status = status;
+	}
+}
+
+// ── Embedding storage ────────────────────────────────────────────────────────────────────
+// float32 little-endian, stored as a BLOB. The size win over JSON (~2.7×) is the small
+// reason; the real one is that a BLOB reads straight into a Float32Array with zero parse,
+// so building the matrix is a memcpy per row instead of 52k JSON.parse calls on the first
+// query after wake. Do not reintroduce a JSON hop.
+const IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+export function encodeEmbedding(values) {
+	const floats = values instanceof Float32Array ? values : Float32Array.from(values);
+	if (IS_LITTLE_ENDIAN) return new Uint8Array(floats.buffer.slice(floats.byteOffset, floats.byteOffset + floats.byteLength));
+	const bytes = new Uint8Array(floats.length * 4);
+	const view = new DataView(bytes.buffer);
+	for (let i = 0; i < floats.length; i++) view.setFloat32(i * 4, floats[i], true);
+	return bytes;
+}
+
+export function decodeEmbedding(blob) {
+	const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
+	const dim = Math.floor(bytes.length / 4);
+	const out = new Float32Array(dim);
+	writeEmbeddingInto(out, 0, bytes, dim);
+	return out;
+}
+
+// Copies one stored vector into `target` at `offset` floats. On a little-endian host (every
+// platform this runs on) that is a straight byte copy into the matrix's own buffer; the
+// DataView branch exists so a big-endian host reads the same bytes correctly rather than
+// silently scoring garbage.
+function writeEmbeddingInto(target, offset, bytes, dim) {
+	if (IS_LITTLE_ENDIAN) {
+		const view = new Uint8Array(target.buffer, target.byteOffset + offset * 4, dim * 4);
+		view.set(bytes.subarray(0, dim * 4));
+		return;
+	}
+	const source = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	for (let i = 0; i < dim; i++) target[offset + i] = source.getFloat32(i * 4, true);
+}
+
+// Vectors are stored L2-normalised so cosine similarity is a plain dot product. The client
+// is not trusted to have normalised — both provider clients return whatever the model
+// produced — so normalisation happens here, on write and on the query vector.
+export function normalizeEmbedding(values) {
+	const length = Number(values?.length ?? 0);
+	const floats = new Float32Array(length);
+	let sum = 0;
+	for (let i = 0; i < length; i++) {
+		const value = values[i];
+		// Strictly a number, not merely coercible: `null` and `''` both coerce to 0, which
+		// would quietly turn a corrupt vector into a valid-looking one pointing somewhere
+		// else in the space.
+		if (typeof value !== 'number' || !Number.isFinite(value)) {
+			throw new HttpError(400, `embedding[${i}] is not a finite number`);
+		}
+		floats[i] = value;
+		sum += floats[i] * floats[i];
+	}
+	const norm = Math.sqrt(sum);
+	if (!(norm > 0) || !Number.isFinite(norm)) throw new HttpError(400, 'embedding must not be a zero vector');
+	for (let i = 0; i < floats.length; i++) floats[i] = floats[i] / norm;
+	return floats;
+}
+
+// Validation for one inbound chunk embedding. Returns null when the chunk carries none
+// (FTS-only indexing stays the default), throws HttpError(400) on anything malformed.
+export function prepareChunkEmbedding(embedding, model) {
+	if (embedding === undefined || embedding === null) return null;
+	if (!Array.isArray(embedding) && !ArrayBuffer.isView(embedding)) {
+		throw new HttpError(400, 'chunk.embedding must be an array of numbers');
+	}
+	if (embedding.length === 0) throw new HttpError(400, 'chunk.embedding must not be empty');
+	const floats = normalizeEmbedding(embedding);
+	const modelId = typeof model === 'string' && model.trim() !== '' ? model.trim() : null;
+	return { bytes: encodeEmbedding(floats), dim: floats.length, model: modelId };
+}
+
+// ── The vector backend seam ──────────────────────────────────────────────────────────────
+// Everything about *how* similarity is computed lives behind this factory. The rest of the
+// companion only ever calls `stats`, `knn` and `invalidate`, and nothing outside it may
+// assume a flat array or an in-process scan. That is what makes the documented escape
+// hatches a swap rather than a rewrite: a `vec0` (sqlite-vec) backend becomes a `knn` that
+// runs `SELECT ... MATCH` instead of a loop, and the worker-sharded variant becomes a `knn`
+// that fans the same matrix — already one flat Float32Array — over a SharedArrayBuffer.
+// Neither touches the search handler.
+//
+// Contract:
+//   name                                   → string, which backend is answering (/health)
+//   stats(vaultId?)                        → { count, dim, model }; cheap, never builds a matrix
+//   knn(vaultId, queryVector, k)           → [{ id, path, score }] descending, length ≤ k
+//   invalidate(vaultId?)                   → drop cached state (every vault when omitted)
+//
+// `stats` is cached and invalidated with the matrix because /v1/search consults it on every
+// request to report `semanticAvailable` honestly, and an uncached COUNT over `chunks` would
+// cost more than the FTS query it accompanies.
+export function createVectorBackend(db) {
+	const selectVectors = db.prepare(
+		'SELECT id, path, embedding, embedding_dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL ORDER BY rowid',
+	);
+	const statsVault = db.prepare(
+		'SELECT COUNT(*) AS count, MIN(embedding_dim) AS min_dim, MAX(embedding_dim) AS max_dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL',
+	);
+	const statsAll = db.prepare(
+		'SELECT COUNT(*) AS count, MIN(embedding_dim) AS min_dim, MAX(embedding_dim) AS max_dim FROM chunks WHERE embedding IS NOT NULL',
+	);
+	const modelVault = db.prepare(
+		'SELECT embedding_model AS model, COUNT(*) AS count FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL GROUP BY embedding_model ORDER BY count DESC LIMIT 1',
+	);
+	const modelAll = db.prepare(
+		'SELECT embedding_model AS model, COUNT(*) AS count FROM chunks WHERE embedding IS NOT NULL GROUP BY embedding_model ORDER BY count DESC LIMIT 1',
+	);
+
+	const statsCache = new Map();
+	const matrixCache = new Map();
+	const cacheKey = vaultId => (typeof vaultId === 'string' && vaultId !== '' ? vaultId : '\0all');
+
+	function readStats(vaultId) {
+		const key = cacheKey(vaultId);
+		const cached = statsCache.get(key);
+		if (cached) return cached;
+		const scoped = typeof vaultId === 'string' && vaultId !== '';
+		const row = scoped ? statsVault.get(vaultId) : statsAll.get();
+		const count = Number(row?.count ?? 0);
+		const minDim = row?.min_dim === null || row?.min_dim === undefined ? null : Number(row.min_dim);
+		const maxDim = row?.max_dim === null || row?.max_dim === undefined ? null : Number(row.max_dim);
+		// A vault holding two widths cannot be scanned as one matrix. The upsert guard makes
+		// that unreachable, but reporting dim: null (→ unavailable) is the safe answer if a
+		// database ever arrives in that state, rather than scoring across two vector spaces.
+		const dim = count > 0 && minDim !== null && minDim === maxDim ? minDim : null;
+		const modelRow = count > 0 ? (scoped ? modelVault.get(vaultId) : modelAll.get()) : null;
+		const stats = { count, dim, model: modelRow?.model ?? null };
+		statsCache.set(key, stats);
+		return stats;
+	}
+
+	// One Float32Array of count × dim, plus parallel id/path arrays. Built lazily on the
+	// first vector search for a vault and dropped wholesale on any write that touches it —
+	// rebuilt rather than patched, which is simpler and cannot drift.
+	function buildMatrix(vaultId) {
+		const stats = readStats(vaultId);
+		if (stats.count === 0 || !stats.dim) return { count: 0, dim: 0, ids: [], paths: [], matrix: null, model: null };
+		const dim = stats.dim;
+		const matrix = new Float32Array(stats.count * dim);
+		const ids = [];
+		const paths = [];
+		let row = 0;
+		for (const record of selectVectors.all(vaultId)) {
+			const blob = record.embedding;
+			if (!blob || blob.length !== dim * 4 || Number(record.embedding_dim) !== dim) continue;
+			writeEmbeddingInto(matrix, row * dim, blob instanceof Uint8Array ? blob : new Uint8Array(blob), dim);
+			ids.push(record.id);
+			paths.push(record.path);
+			row++;
+		}
+		return { count: row, dim, ids, paths, matrix, model: stats.model };
+	}
+
+	function ensureMatrix(vaultId) {
+		const key = cacheKey(vaultId);
+		let state = matrixCache.get(key);
+		if (!state) {
+			state = buildMatrix(vaultId);
+			matrixCache.set(key, state);
+		}
+		return state;
+	}
+
+	return {
+		name: 'brute-force-js',
+		stats(vaultId) {
+			return readStats(vaultId);
+		},
+		invalidate(vaultId) {
+			if (vaultId === undefined) {
+				statsCache.clear();
+				matrixCache.clear();
+				return;
+			}
+			statsCache.delete(cacheKey(vaultId));
+			matrixCache.delete(cacheKey(vaultId));
+			// The unscoped (/health) stats view covers every vault, so any write invalidates it.
+			statsCache.delete(cacheKey(undefined));
+			matrixCache.delete(cacheKey(undefined));
+		},
+		// Brute force over the FULL matrix — every chunk in the vault, not the FTS candidate
+		// pool. Reranking FTS candidates by vector similarity cannot surface a note that
+		// shares no keywords with the query, which is the entire reason this leg exists.
+		// Measured 13ms at 384d / 33ms at 1024d over 52,257 chunks; the interactive ceiling
+		// is ~250k chunks, past which the move is worker sharding (see the plan), not int8 —
+		// int8 measured *slower* in scalar JS at this size, 19.6ms vs 12.4ms at 384d.
+		knn(vaultId, queryVector, k) {
+			const state = ensureMatrix(vaultId);
+			if (state.count === 0) return [];
+			const dim = state.dim;
+			if (!queryVector || queryVector.length !== dim) {
+				throw new HttpError(400, `query embedding is ${queryVector?.length ?? 0}-dimensional but this vault is indexed at ${dim}`);
+			}
+			const query = normalizeEmbedding(queryVector);
+			const wanted = Math.max(1, Math.min(Math.floor(Number(k) || 1), state.count));
+			const matrix = state.matrix;
+			const best = [];
+			let worst = -Infinity;
+			for (let row = 0; row < state.count; row++) {
+				const offset = row * dim;
+				let sum = 0;
+				for (let d = 0; d < dim; d++) sum += matrix[offset + d] * query[d];
+				if (best.length === wanted && sum <= worst) continue;
+				// Both sides are unit vectors, so the dot product *is* the cosine; the clamp
+				// only absorbs float32 rounding at the ±1 ends.
+				const entry = { id: state.ids[row], path: state.paths[row], score: Math.max(-1, Math.min(1, sum)) };
+				let index = best.length - 1;
+				best.push(entry);
+				while (index >= 0 && best[index].score < entry.score) {
+					best[index + 1] = best[index];
+					index--;
+				}
+				best[index + 1] = entry;
+				if (best.length > wanted) best.pop();
+				worst = best[best.length - 1].score;
+			}
+			return best;
+		},
+	};
 }
 
 // Keep `.`, `/`, `:`, `@`, `-`, `_` and `'` so path- and handle-shaped queries survive, and
@@ -237,39 +499,61 @@ export function titleMatchScore(terms, row = {}) {
 	return partial > 0 ? Math.min(partial, 0.65) : 0;
 }
 
-// Reciprocal-rank fusion over two rankings of the same pooled candidate set: the weighted
-// bm25 order (already the row order coming out of SQL) and the title/path-match order.
-// Fusing ranks rather than hand-tuning one score is the point — the two scales are not
-// commensurable, but their ranks are. Rows with no title signal simply don't appear in the
-// second list and contribute 0 from it.
+// Reciprocal-rank fusion over three rankings of the same candidate set: the weighted bm25
+// order (already the row order coming out of SQL), the title/path-match order, and the
+// cosine order from the vector scan. Fusing ranks rather than hand-tuning one score is the
+// point — the three scales are not commensurable, but their ranks are. A row missing from a
+// list simply contributes 0 from it, which is how a keyword-only hit and a vector-only hit
+// coexist in one ordering.
+//
+// `vectorRows` carries rows the vector scan found that FTS never returned; their `textRank`
+// is 0 (absent from the bm25 list) rather than a made-up large rank.
 //
 // Sign convention: bm25 is negative/lower-is-better inside SQL and is negated here, so
 // every score the client sees (`score`, `scoreText`, `scoreRrf`, `attribution.base`) is
-// positive and higher-is-better.
+// positive and higher-is-better. Cosine (`scoreVector`) is already higher-is-better.
 export function fuseSearchRows(rows, options = {}) {
 	const terms = options.terms ?? [];
 	const k = options.k ?? RRF_K;
 	const titleWeight = options.titleWeight ?? RRF_TITLE_WEIGHT;
-	const limit = options.limit ?? rows.length;
+	const vectorWeight = options.vectorWeight ?? RRF_VECTOR_WEIGHT;
+	const vectorScores = options.vectorScores ?? null;
+	const vectorRows = options.vectorRows ?? [];
+	const limit = options.limit ?? (rows.length + vectorRows.length);
 
-	const entries = rows.map((row, index) => ({
+	const makeEntry = (row, textRank) => ({
 		row,
 		base: -Number(row.score_text ?? 0),
 		titleBoost: titleMatchScore(terms, row),
-		textRank: index + 1,
+		textRank,
 		titleRank: 0,
+		vectorRank: 0,
+		vectorScore: vectorScores?.has(row.path) ? vectorScores.get(row.path) : null,
 		rrf: 0,
-	}));
+	});
+	// Tie-breaks fall back to bm25 order; an entry absent from that list sorts last among
+	// ties rather than first, which a bare `textRank` of 0 would do.
+	const textOrder = entry => entry.textRank || Number.MAX_SAFE_INTEGER;
+
+	const entries = rows.map((row, index) => makeEntry(row, index + 1));
+	for (const row of vectorRows) entries.push(makeEntry(row, 0));
 
 	const titled = entries
 		.filter(entry => entry.titleBoost > 0)
-		.sort((a, b) => (b.titleBoost - a.titleBoost) || (a.textRank - b.textRank));
+		.sort((a, b) => (b.titleBoost - a.titleBoost) || (textOrder(a) - textOrder(b)));
 	titled.forEach((entry, index) => { entry.titleRank = index + 1; });
 
+	const vectored = entries
+		.filter(entry => entry.vectorScore !== null)
+		.sort((a, b) => (b.vectorScore - a.vectorScore) || (textOrder(a) - textOrder(b)));
+	vectored.forEach((entry, index) => { entry.vectorRank = index + 1; });
+
 	for (const entry of entries) {
-		entry.rrf = 1 / (k + entry.textRank) + (entry.titleRank ? titleWeight / (k + entry.titleRank) : 0);
+		entry.rrf = (entry.textRank ? 1 / (k + entry.textRank) : 0)
+			+ (entry.titleRank ? titleWeight / (k + entry.titleRank) : 0)
+			+ (entry.vectorRank ? vectorWeight / (k + entry.vectorRank) : 0);
 	}
-	entries.sort((a, b) => (b.rrf - a.rrf) || (a.textRank - b.textRank));
+	entries.sort((a, b) => (b.rrf - a.rrf) || (textOrder(a) - textOrder(b)));
 
 	return entries.slice(0, Math.max(0, limit)).map(entry => ({
 		chunkId: entry.row.id,
@@ -279,6 +563,9 @@ export function fuseSearchRows(rows, options = {}) {
 		snippet: entry.row.snippet,
 		score: entry.rrf,
 		scoreText: entry.base,
+		// Omitted (not 0) when this row never entered the vector list, so an FTS-only
+		// response is exactly the payload it was before the vector leg existed.
+		scoreVector: entry.vectorScore === null ? undefined : entry.vectorScore,
 		scoreRrf: entry.rrf,
 		metadata: safeJson(entry.row.metadata_json),
 		// Per-stage attribution: the base score, every boost that fired, and the fused
@@ -286,13 +573,96 @@ export function fuseSearchRows(rows, options = {}) {
 		// open slot for client-side stages (link adjacency, recency) to record themselves.
 		attribution: {
 			base: entry.base,
-			textRank: entry.textRank,
+			textRank: entry.textRank || null,
 			titleRank: entry.titleRank || null,
 			titleBoost: entry.titleBoost,
+			vectorRank: entry.vectorRank || null,
 			rrf: entry.rrf,
 			pooledChunks: Number(entry.row.pooled_chunks ?? 1),
 		},
 	}));
+}
+
+// The vector leg: a scan of the whole matrix, pooled to one score per path, hydrated for
+// any path the FTS pool never produced. It is deliberately a separate query fused in JS —
+// cosine does not belong inside the FTS SQL, where `MATERIALIZED` and the bm25/snippet
+// aggregate rules are already load-bearing.
+//
+// Degradation is silent-but-reported: a vault with no vectors, or a search with no query
+// embedding, simply returns the FTS-only shape. A *mismatched* query embedding sets `note`
+// instead, because scoring across two vector spaces is exactly the confidently-wrong
+// failure this feature has to avoid, while failing the whole search over it would be worse
+// than answering with keywords.
+function runVectorLeg(db, options) {
+	const outcome = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null };
+	const vectors = options.vectors;
+	if (!vectors) return outcome;
+	const stats = vectors.stats(options.vaultId);
+	outcome.dim = stats.dim;
+	outcome.model = stats.model;
+	outcome.available = stats.count > 0 && Boolean(stats.dim);
+	if (!outcome.available) return outcome;
+
+	const queryEmbedding = options.queryEmbedding;
+	if (!Array.isArray(queryEmbedding) && !ArrayBuffer.isView(queryEmbedding)) return outcome;
+	if (queryEmbedding.length === 0) return outcome;
+	if (queryEmbedding.length !== stats.dim) {
+		outcome.note = `query embedding is ${queryEmbedding.length}-dimensional but this vault is indexed at ${stats.dim}; semantic ranking skipped`;
+		return outcome;
+	}
+
+	let hits;
+	try {
+		hits = vectors.knn(options.vaultId, queryEmbedding, options.poolSize);
+	} catch (e) {
+		outcome.note = `${e instanceof Error ? e.message : String(e)}; semantic ranking skipped`;
+		return outcome;
+	}
+	if (hits.length === 0) return outcome;
+	outcome.used = true;
+
+	// Pool chunk hits to their best-scoring path, mirroring what the FTS side does with
+	// MIN(score_text): one row per path, scored on its strongest chunk.
+	const scores = new Map();
+	const bestChunk = new Map();
+	for (const hit of hits) {
+		const previous = scores.get(hit.path);
+		if (previous === undefined || hit.score > previous) {
+			scores.set(hit.path, hit.score);
+			bestChunk.set(hit.path, hit.id);
+		}
+	}
+	outcome.scores = scores;
+
+	const known = options.knownPaths ?? new Set();
+	const hydrate = options.hydrate ?? db.prepare(HYDRATE_CHUNK_SQL);
+	for (const [path, chunkId] of bestChunk) {
+		if (known.has(path)) continue;
+		const row = hydrate.get(chunkId);
+		if (!row) continue;
+		outcome.rows.push({
+			id: row.id,
+			path: row.path,
+			title: row.title,
+			heading: row.heading,
+			metadata_json: row.metadata_json,
+			snippet: makeTextSnippet(row.text),
+			// No bm25 score: this chunk did not match the query text at all. That is the
+			// point of the full-matrix scan, not a gap to paper over with a fake rank.
+			score_text: null,
+			pooled_chunks: 1,
+		});
+	}
+	return outcome;
+}
+
+// The FTS side gets its snippet from snippet(chunks_fts, 5, …, 18); a vector-only hit has no
+// match to snippet around, so take the head of the chunk at the same token budget.
+export function makeTextSnippet(text, tokens = 18) {
+	const words = String(text ?? '').split(/\s+/).filter(Boolean);
+	if (words.length === 0) return '';
+	const head = words.slice(0, tokens).join(' ');
+	return words.length > tokens ? `${head}...` : head;
 }
 
 export function runSearch(db, options) {
@@ -311,9 +681,39 @@ export function runSearch(db, options) {
 		rows = statement.all(vaultId, match, poolSize);
 	}
 
-	const total = rows.length > 0 ? Number(rows[0].total_paths ?? rows.length) : 0;
-	const results = fuseSearchRows(rows, { terms: built.terms, limit });
-	return { match, terms: built.terms, fallbackUsed, total, results };
+	const vector = runVectorLeg(db, {
+		vaultId,
+		vectors: options.vectors,
+		queryEmbedding: options.queryEmbedding,
+		poolSize,
+		hydrate: options.hydrate,
+		knownPaths: new Set(rows.map(row => row.path)),
+	});
+
+	// `total` stays the distinct-path FTS match count plus the paths only the vector scan
+	// found. A vector-only path that FTS would also have matched *beyond* the pool is
+	// counted twice; that only nudges the "N more" hint, and the alternative is a second
+	// MATCH per search, which is exactly the cost the pooled CTE was built to remove.
+	const ftsTotal = rows.length > 0 ? Number(rows[0].total_paths ?? rows.length) : 0;
+	const total = ftsTotal + vector.rows.length;
+	const results = fuseSearchRows(rows, {
+		terms: built.terms,
+		limit,
+		vectorScores: vector.scores,
+		vectorRows: vector.rows,
+	});
+	return {
+		match,
+		terms: built.terms,
+		fallbackUsed,
+		total,
+		results,
+		vectorUsed: vector.used,
+		semanticAvailable: vector.available,
+		embeddingDim: vector.dim,
+		embeddingModel: vector.model,
+		note: vector.note,
+	};
 }
 
 function clampLimit(value) {
@@ -322,10 +722,14 @@ function clampLimit(value) {
 	return Math.max(1, Math.min(Math.floor(limit), MAX_LIMIT));
 }
 
-export function createRequestHandler(db) {
+export function createRequestHandler(db, options = {}) {
+	// The vector backend is injectable so a different implementation (or a test double) can
+	// take over without touching a single line of the request handling below — that is the
+	// seam doing its job.
+	const vectors = options.vectors ?? createVectorBackend(db);
 	const upsertChunk = db.prepare(`
-INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   vault_id = excluded.vault_id,
   path = excluded.path,
@@ -336,8 +740,12 @@ ON CONFLICT(id) DO UPDATE SET
   mtime = excluded.mtime,
   ordinal = excluded.ordinal,
   metadata_json = excluded.metadata_json,
-  embedding_json = excluded.embedding_json
+  embedding = excluded.embedding,
+  embedding_dim = excluded.embedding_dim,
+  embedding_model = excluded.embedding_model
 `);
+	const selectVaultEmbeddingDim = db.prepare('SELECT embedding_dim AS dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL LIMIT 1');
+	const hydrateChunk = db.prepare(HYDRATE_CHUNK_SQL);
 	const deleteFtsById = db.prepare('DELETE FROM chunks_fts WHERE id = ?');
 	const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
 	const deleteByPath = db.prepare('DELETE FROM chunks WHERE vault_id = ? AND path = ?');
@@ -358,7 +766,19 @@ LIMIT 1
 		try {
 			const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
 			if (req.method === 'GET' && url.pathname === '/health') {
-				return json(res, 200, { ok: true, version: SERVICE_VERSION, schemaVersion: SCHEMA_VERSION, vectorAvailable: false });
+				// Computed, not a literal: `vectorAvailable` is "this index actually holds
+				// vectors the scan can use", across every vault in the database.
+				const stats = vectors.stats();
+				return json(res, 200, {
+					ok: true,
+					version: SERVICE_VERSION,
+					schemaVersion: SCHEMA_VERSION,
+					vectorAvailable: stats.count > 0 && Boolean(stats.dim),
+					vectorBackend: vectors.name,
+					embeddedChunks: stats.count,
+					embeddingDim: stats.dim,
+					embeddingModel: stats.model,
+				});
 			}
 			if (req.method === 'POST' && url.pathname === '/v1/index/reset') {
 				const body = await readJson(req);
@@ -372,6 +792,7 @@ LIMIT 1
 					db.exec('ROLLBACK');
 					throw e;
 				}
+				vectors.invalidate(vaultId);
 				return json(res, 200, { ok: true });
 			}
 			if (req.method === 'POST' && url.pathname === '/v1/chunks/delete') {
@@ -389,6 +810,7 @@ LIMIT 1
 					db.exec('ROLLBACK');
 					throw e;
 				}
+				vectors.invalidate(vaultId);
 				return json(res, 200, { ok: true });
 			}
 			if (req.method === 'POST' && url.pathname === '/v1/files/state') {
@@ -411,6 +833,13 @@ LIMIT 1
 			if (req.method === 'POST' && url.pathname === '/v1/chunks/upsert') {
 				const body = await readJson(req);
 				const chunks = Array.isArray(body.chunks) ? body.chunks : [];
+				const touchedVaults = new Set();
+				// Width consistency, enforced once per vault per request. Mixing two vector
+				// spaces inside one index is the failure mode that produces confidently wrong
+				// rankings with no error anywhere, and nothing downstream can detect it — so
+				// the write is refused here, atomically (the throw rolls the whole batch back).
+				const checkedVaults = new Set();
+				let batchDim = null;
 				db.exec('BEGIN');
 				try {
 					const clearedPaths = new Set();
@@ -425,11 +854,34 @@ LIMIT 1
 						const mtime = Number(chunk.mtime ?? 0);
 						const ordinal = Number(chunk.ordinal ?? 0);
 						const pathKey = `${vaultId}\n${path}`;
+						// The first chunk seen for a (vaultId, path) clears every existing row
+						// for that path: an upsert is a full replace, not a merge.
 						if (!clearedPaths.has(pathKey)) {
 							for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(row.id);
 							deleteByPath.run(vaultId, path);
 							clearedPaths.add(pathKey);
 						}
+						touchedVaults.add(vaultId);
+
+						const embedding = prepareChunkEmbedding(chunk.embedding, chunk.embeddingModel ?? body.embeddingModel);
+						if (embedding) {
+							if (batchDim === null) batchDim = embedding.dim;
+							else if (embedding.dim !== batchDim) {
+								throw new HttpError(400, `chunk "${id}" carries a ${embedding.dim}-dimension embedding but this batch established ${batchDim}`);
+							}
+							if (!checkedVaults.has(vaultId)) {
+								// Read *after* this path's rows were cleared, so re-embedding a
+								// vault that holds exactly one path is allowed while a genuine
+								// mix (other paths still at the old width) is refused.
+								const existing = selectVaultEmbeddingDim.get(vaultId);
+								const existingDim = existing?.dim === null || existing?.dim === undefined ? null : Number(existing.dim);
+								if (existingDim && existingDim !== embedding.dim) {
+									throw new HttpError(400, `vault "${vaultId}" is indexed with ${existingDim}-dimension embeddings; refusing a ${embedding.dim}-dimension vector. Reset the index before changing the embedding model.`);
+								}
+								checkedVaults.add(vaultId);
+							}
+						}
+
 						upsertChunk.run(
 							id,
 							vaultId,
@@ -441,7 +893,9 @@ LIMIT 1
 							Number.isFinite(mtime) ? mtime : 0,
 							Number.isFinite(ordinal) ? ordinal : 0,
 							JSON.stringify(chunk.metadata ?? {}),
-							chunk.embedding ? JSON.stringify(chunk.embedding) : null,
+							embedding ? embedding.bytes : null,
+							embedding ? embedding.dim : null,
+							embedding ? embedding.model : null,
 						);
 						deleteFtsById.run(id);
 						insertFts.run(id, vaultId, path, title, heading, text);
@@ -451,6 +905,7 @@ LIMIT 1
 					db.exec('ROLLBACK');
 					throw e;
 				}
+				for (const vault of touchedVaults) vectors.invalidate(vault);
 				return json(res, 200, { ok: true, count: chunks.length });
 			}
 			if (req.method === 'POST' && url.pathname === '/v1/search') {
@@ -462,29 +917,46 @@ LIMIT 1
 					query,
 					limit: body.limit,
 					statement: searchStatement,
+					vectors,
+					// Read at last: the client has been sending this field since the search
+					// modal shipped and the companion has been dropping it on the floor.
+					queryEmbedding: body.queryEmbedding,
+					hydrate: hydrateChunk,
 				});
-				return json(res, 200, {
-					mode: 'fts',
-					semanticAvailable: false,
+				const response = {
+					// Computed from state, not hardcoded: 'hybrid' means a query embedding
+					// arrived *and* the vault has vectors the scan actually used;
+					// `semanticAvailable` means the vault could answer semantically at all.
+					mode: outcome.vectorUsed ? 'hybrid' : 'fts',
+					semanticAvailable: outcome.semanticAvailable,
 					schemaVersion: SCHEMA_VERSION,
 					match: outcome.match,
 					fallbackUsed: outcome.fallbackUsed,
 					total: outcome.total,
 					hasMore: outcome.total > outcome.results.length,
 					results: outcome.results,
-				});
+				};
+				if (outcome.note) response.message = outcome.note;
+				return json(res, 200, response);
 			}
 			return json(res, 404, { ok: false, error: 'not found' });
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
-			// Log before replying. The client turns any 5xx into SearchServiceUnavailableError,
-			// which surfaces to the user as "companion not reachable" — so without this line a
-			// request that failed on its own merits is indistinguishable from a down container,
-			// and `docker logs` on a perfectly healthy companion shows nothing at all. That cost
-			// a long hunt during the first full rebuild.
-			console.error(`[crucible-search] ${req.method} ${req.url} failed: ${message}`);
-			if (e instanceof Error && e.stack) console.error(e.stack);
-			return json(res, 500, { ok: false, error: message });
+			// A rejection the caller can fix keeps its own 4xx; everything else is a 500.
+			// The client maps 5xx (only) to SearchServiceUnavailableError → "the companion is
+			// not reachable", so answering a bad request with a 500 would send the user off to
+			// restart a healthy container.
+			const status = e instanceof HttpError ? e.status : 500;
+			// Log before replying. Without this line a request that failed on its own merits is
+			// indistinguishable from a down container, and `docker logs` on a perfectly healthy
+			// companion shows nothing at all. That cost a long hunt during the first full rebuild.
+			if (status >= 500) {
+				console.error(`[crucible-search] ${req.method} ${req.url} failed: ${message}`);
+				if (e instanceof Error && e.stack) console.error(e.stack);
+			} else {
+				console.error(`[crucible-search] ${req.method} ${req.url} rejected (${status}): ${message}`);
+			}
+			return json(res, status, { ok: false, error: message });
 		}
 	};
 }
