@@ -15,6 +15,7 @@ export type JobType =
 	| 'chain_run'
 	| 'image_metadata_extract'
 	| 'search_rebuild'
+	| 'search_embed_missing'
 	| 'search_upsert_file'
 	| 'search_upsert_batch'
 	| 'search_delete_path'

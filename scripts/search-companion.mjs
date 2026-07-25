@@ -750,8 +750,27 @@ ON CONFLICT(id) DO UPDATE SET
 	const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
 	const deleteByPath = db.prepare('DELETE FROM chunks WHERE vault_id = ? AND path = ?');
 	const selectIdsByPath = db.prepare('SELECT id FROM chunks WHERE vault_id = ? AND path = ?');
+	// One row per path: the *dominant* content-hash group (a path mid-rewrite can briefly hold
+	// rows from two hashes). The embedding aggregates therefore describe that same group, which
+	// is the only group the caller's contentHash comparison can match.
+	//
+	// `embedded_count` is deliberately a count rather than an EXISTS: full coverage is the only
+	// thing that means "done". "Some chunks have vectors" is exactly the state an interrupted
+	// backfill leaves behind, and reporting it as covered would strand the rest permanently.
+	// `embedding_model_count`/`embedded_labelled_count` exist so a group whose chunks disagree
+	// about the producing model — or whose vectors predate model attribution — reports no model
+	// at all rather than an arbitrary one, which makes the client's "does coverage match the
+	// active model" test fail closed.
 	const selectStateByPath = db.prepare(`
-SELECT path, content_hash, MAX(mtime) AS mtime, COUNT(*) AS chunk_count
+SELECT
+  path,
+  content_hash,
+  MAX(mtime) AS mtime,
+  COUNT(*) AS chunk_count,
+  SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded_count,
+  SUM(CASE WHEN embedding IS NOT NULL AND embedding_model IS NOT NULL THEN 1 ELSE 0 END) AS embedded_labelled_count,
+  COUNT(DISTINCT embedding_model) AS embedding_model_count,
+  MAX(embedding_model) AS embedding_model
 FROM chunks
 WHERE vault_id = ? AND path = ?
 GROUP BY path, content_hash
@@ -821,11 +840,22 @@ LIMIT 1
 				for (const path of paths) {
 					const row = selectStateByPath.get(vaultId, path);
 					if (!row) continue;
+					const chunkCount = Number(row.chunk_count ?? 0);
+					const embeddedCount = Number(row.embedded_count ?? 0);
+					const labelledCount = Number(row.embedded_labelled_count ?? 0);
+					const modelCount = Number(row.embedding_model_count ?? 0);
+					// Additive fields only — no on-disk schema change, so SCHEMA_VERSION stays put.
 					files.push({
 						path: row.path,
 						contentHash: row.content_hash || undefined,
 						mtime: row.mtime,
-						chunkCount: row.chunk_count,
+						chunkCount,
+						embeddedChunkCount: embeddedCount,
+						// Full coverage, never partial. See the comment on selectStateByPath.
+						hasEmbeddings: chunkCount > 0 && embeddedCount === chunkCount,
+						embeddingModel: embeddedCount > 0 && modelCount === 1 && labelledCount === embeddedCount && row.embedding_model
+							? String(row.embedding_model)
+							: undefined,
 					});
 				}
 				return json(res, 200, { ok: true, files });
