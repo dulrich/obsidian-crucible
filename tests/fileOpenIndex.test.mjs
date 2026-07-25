@@ -59,9 +59,19 @@ function candidate(path, extension = 'md', mtime = 1) {
 	return { path, extension, stat: { mtime } };
 }
 
-function makePlugin(files, excludedFolders = [], chunkSize) {
+function makePlugin(files, excludedFolders = [], chunkSize, userIgnored = []) {
+	const ignored = new Set(userIgnored);
 	const plugin = {
-		app: { vault: { getFiles: () => files } },
+		app: {
+			// Obsidian's own "Excluded files" list feeds the same IGNORED flag as Crucible's
+			// excluded folders; getConfig exposes the raw list so a change to it shows up in
+			// the exclusion signature.
+			metadataCache: { isUserIgnored: path => ignored.has(path) },
+			vault: {
+				getFiles: () => files,
+				getConfig: key => (key === 'userIgnoreFilters' ? [...ignored] : undefined),
+			},
+		},
 		settings: { excludedFolders },
 	};
 	return chunkSize === undefined ? [plugin, {}] : [plugin, { chunkSize }];
@@ -253,6 +263,55 @@ test('exclusion-signature invalidation: a settings change flips ignored flags wi
 	// A second call with unchanged settings must be a no-op (same signature).
 	const stable = index.getSnapshot();
 	assert.equal(stable, after);
+});
+
+// Obsidian's Settings -> Files & links -> "Excluded files" list feeds the same IGNORED flag
+// as Crucible's own excluded folders, so the palette deranks those paths instead of ignoring
+// the setting the way it used to (FileSuggest/FolderSuggest/folderPicker always honored it).
+// Deranked, not hidden: the row stays live and reachable by typing its exact name -- which is
+// the deliberate difference from SearchManager, where a user-ignored path is not indexed.
+test('Obsidian own excluded-files list deranks a palette row without removing it', () => {
+	const files = [candidate('Private/journal.md'), candidate('Daily/two.md')];
+	const [plugin, opts] = makePlugin(files, [], 10, ['Private/journal.md']);
+	const index = new FileOpenIndex(plugin, opts);
+	index.markLayoutReady();
+
+	const rows = liveRows(index.getSnapshot());
+	assert.deepEqual(rows.map(r => r.path), ['Daily/two.md', 'Private/journal.md'], 'still present, not filtered out');
+	assert.equal(rows.find(r => r.path === 'Private/journal.md').ignored, true);
+	assert.equal(rows.find(r => r.path === 'Daily/two.md').ignored, false);
+});
+
+// The signature has to cover Obsidian's list too. It is edited in Obsidian's own settings,
+// which fires no vault event and does not touch plugin.settings, so without it in the
+// fingerprint every IGNORED flag would stay stale until something else invalidated them.
+test('editing Obsidian own excluded-files list re-flags the snapshot', () => {
+	const files = [candidate('Private/journal.md'), candidate('Daily/two.md')];
+	const [plugin, opts] = makePlugin(files, [], 10, []);
+	const index = new FileOpenIndex(plugin, opts);
+	index.markLayoutReady();
+
+	assert.equal(liveRows(index.getSnapshot()).find(r => r.path === 'Private/journal.md').ignored, false);
+
+	const nowIgnored = new Set(['Private/journal.md']);
+	plugin.app.metadataCache.isUserIgnored = path => nowIgnored.has(path);
+	plugin.app.vault.getConfig = key => (key === 'userIgnoreFilters' ? [...nowIgnored] : undefined);
+
+	assert.equal(liveRows(index.getSnapshot()).find(r => r.path === 'Private/journal.md').ignored, true);
+});
+
+// Presence-guarded: vault.getConfig is undocumented, so an Obsidian build without it must
+// degrade to the previous signature rather than throw on every getSnapshot().
+test('a missing vault.getConfig leaves the exclusion signature usable', () => {
+	const files = [candidate('Daily/two.md')];
+	const [plugin, opts] = makePlugin(files, [], 10, []);
+	delete plugin.app.vault.getConfig;
+	const index = new FileOpenIndex(plugin, opts);
+	index.markLayoutReady();
+
+	const snapshot = index.getSnapshot();
+	assert.deepEqual(liveRows(snapshot).map(r => r.path), ['Daily/two.md']);
+	assert.equal(index.getSnapshot(), snapshot, 'signature stays stable across calls');
 });
 
 /* -------------------------------------------------------------------------- */

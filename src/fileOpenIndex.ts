@@ -234,10 +234,30 @@ export class FileOpenIndex {
 		// JSON-encoded rather than delimiter-joined: folder names can legally contain
 		// spaces or other "safe-looking" separators. This only needs to be a cheap,
 		// unambiguous fingerprint of the compiled prefix list, not human-readable.
-		return JSON.stringify(this.excludedPrefixes);
+		//
+		// Obsidian's own excluded-files list is part of the fingerprint because it is part of
+		// the flag (see isIgnoredPath). Without it, editing that list in Obsidian's settings
+		// would leave every IGNORED flag stale until something else invalidated the snapshot.
+		// The raw list is read through the undocumented `vault.getConfig`, presence-guarded the
+		// way `src/surround.ts` guards it; on an Obsidian build that lacks it the signature
+		// simply omits that component, degrading to the previous behaviour rather than throwing.
+		return JSON.stringify([this.excludedPrefixes, this.plugin.app.vault.getConfig?.('userIgnoreFilters') ?? null]);
 	}
 
+	/**
+	 * Ignored means *deranked*, not hidden — `rankScore` subtracts a flat penalty larger than
+	 * any tier gap, so these sort below every ordinary match but stay reachable by typing an
+	 * exact name.
+	 *
+	 * Two independent sources feed one flag: Crucible's own search-scope exclusions, and
+	 * Obsidian's Settings -> Files & links -> "Excluded files". The latter is what
+	 * `FileSuggest`/`FolderSuggest`/`folderPicker` already filter on, so before this the
+	 * palette was the one file-picking surface in the plugin that ignored it. Deranking rather
+	 * than filtering is the deliberate difference from `SearchManager.isExcludedFromIndex`,
+	 * which hides user-ignored files outright: a palette exists to reach a file you can name.
+	 */
 	private isIgnoredPath(path: string): boolean {
-		return isPathExcludedCompiled(this.excludedPrefixes, path);
+		return isPathExcludedCompiled(this.excludedPrefixes, path)
+			|| this.plugin.app.metadataCache.isUserIgnored(path);
 	}
 }
