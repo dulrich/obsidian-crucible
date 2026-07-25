@@ -1,10 +1,12 @@
 import { requestUrl } from 'obsidian';
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription } from '../types';
+import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription } from '../types';
 import {
 	HttpCallContext,
+	HttpListCallContext,
 	HttpProviderClient,
 	IMAGE_EXTRACTION_SYSTEM_PROMPT,
 	IMAGE_EXTRACTION_USER_PROMPT,
+	looksLikeCrossEncoder,
 	normalizeEmbedding,
 	normalizePrecision,
 	normalizeRawFinishReason,
@@ -124,6 +126,41 @@ export const ollamaClient: HttpProviderClient = {
 		};
 	},
 
+	// WP-C: enumerates every pulled model from `/api/tags`, then enriches each one with a per-model
+	// `POST /api/show` — the only route that reports `capabilities` (e.g. "embedding", "vision",
+	// surfaced here as `serverCapabilities` — see ProviderCatalogModel's doc comment for why the
+	// name is deliberately not `capabilities`) and the real `model_info['<arch>.embedding_length']`
+	// (per the plan's per-kind table: "a second /api/show gives capabilities and real
+	// embedding_length"). The per-model round trip is
+	// deliberate, not an oversight: `/api/tags` alone is a weak signal (id + quantization string
+	// only), and a typical local install has a handful of pulled models, not hundreds. Each `/api/show`
+	// call is best-effort — a failure for one model degrades that entry's capabilities/embeddingLength
+	// to `undefined` rather than failing the whole list, matching the resilience of the existing
+	// probeOllamaGgufFileType fallback below.
+	async listModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
+		const tagsResponse = await requestUrl({ url: `${baseUrl(ctx.provider)}/api/tags`, method: 'GET' });
+		if (tagsResponse.status !== 200) {
+			throw new Error(`Ollama tags API returned ${tagsResponse.status}: ${tagsResponse.text}`);
+		}
+		const tagsData = tagsResponse.json as { models?: OllamaTagEntry[] };
+		const models = tagsData.models ?? [];
+
+		const out: ProviderCatalogModel[] = [];
+		for (const entry of models) {
+			const id = entry.name ?? entry.model;
+			if (!id) continue;
+			const show = await probeOllamaShow(ctx.provider, id);
+			out.push({
+				id,
+				quantization: entry.details?.quantization_level,
+				serverCapabilities: show?.capabilities,
+				embeddingLength: show?.embeddingLength,
+				looksLikeCrossEncoder: looksLikeCrossEncoder(id, entry.details?.format),
+			});
+		}
+		return out;
+	},
+
 	async extractImage(ctx, base64): Promise<ProviderImageExtractionResult> {
 		const response = await requestUrl({
 			url: `${baseUrl(ctx.provider)}/api/chat`,
@@ -171,6 +208,47 @@ async function probeOllamaGgufFileType(ctx: HttpCallContext): Promise<string | u
 	} catch {
 		return undefined;
 	}
+}
+
+interface OllamaShowInfo {
+	capabilities?: string[];
+	embeddingLength?: number;
+}
+
+// listModels()'s per-model enrichment call. `capabilities` (e.g. ["completion", "embedding"]) is
+// ollama's own classification of what the model is for — the strongest capability signal any
+// provider kind offers via a list-shaped probe, per the WP-C plan's table. `embedding_length` is
+// arch-prefixed in `model_info` ("bert.embedding_length", "nomic-bert.embedding_length", ...), so
+// this scans for the suffix rather than assuming one fixed key, the same way probeOllamaGgufFileType
+// above reads a fixed key for the (always `general.*`-prefixed) file-type field. Best-effort: a
+// missing/unreachable/malformed response degrades to `undefined` fields, never throws — one model's
+// enrichment failing must not drop it from the whole list.
+async function probeOllamaShow(provider: Provider, modelName: string): Promise<OllamaShowInfo | undefined> {
+	try {
+		const response = await requestUrl({
+			url: `${baseUrl(provider)}/api/show`,
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ model: modelName }),
+		});
+		if (response.status !== 200) return undefined;
+		const data = response.json as { capabilities?: unknown; model_info?: Record<string, unknown> };
+		const capabilities = Array.isArray(data.capabilities)
+			? data.capabilities.filter((c): c is string => typeof c === 'string')
+			: undefined;
+		const embeddingLength = findOllamaEmbeddingLength(data.model_info);
+		return { capabilities, embeddingLength };
+	} catch {
+		return undefined;
+	}
+}
+
+function findOllamaEmbeddingLength(modelInfo: Record<string, unknown> | undefined): number | undefined {
+	if (!modelInfo) return undefined;
+	for (const [key, value] of Object.entries(modelInfo)) {
+		if (key.endsWith('.embedding_length') && typeof value === 'number') return value;
+	}
+	return undefined;
 }
 
 function normalizeOllamaFinishReason(raw: string | undefined): ProviderFinishReason {

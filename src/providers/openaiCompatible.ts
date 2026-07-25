@@ -1,10 +1,12 @@
 import { requestUrl } from 'obsidian';
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult } from '../types';
+import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult } from '../types';
 import {
 	HttpCallContext,
+	HttpListCallContext,
 	HttpProviderClient,
 	IMAGE_EXTRACTION_SYSTEM_PROMPT,
 	IMAGE_EXTRACTION_USER_PROMPT,
+	looksLikeCrossEncoder,
 	normalizeEmbedding,
 	normalizePrecision,
 	normalizeRawFinishReason,
@@ -45,7 +47,9 @@ function apiBaseUrl(provider: Provider): string {
 	return (provider.baseUrl || fallback).replace(/\/$/, '');
 }
 
-function authHeaders(ctx: HttpCallContext): Record<string, string> {
+// Structurally typed to `{ apiKey }` (not HttpCallContext specifically) so it also serves
+// listModels()'s modelId-free HttpListCallContext without a second header builder.
+function authHeaders(ctx: { apiKey: string }): Record<string, string> {
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	// Local servers may run without auth; only send the header when a key is present.
 	if (ctx.apiKey) headers['Authorization'] = `Bearer ${ctx.apiKey}`;
@@ -167,6 +171,18 @@ export const openAICompatibleClient: HttpProviderClient = {
 		return await fallbackModelsDescribeModel(ctx);
 	},
 
+	// WP-C: enumerates what the server offers, rather than probing one already-known id. Same
+	// two-tier shape as describeModel() above and the same reason — try LM Studio's native
+	// `/api/v0/models` first (richer: `type`/`arch`/`quantization`), fall back to the plain
+	// `{apiBaseUrl}/models` list every OpenAI-compatible server (including OpenRouter, which needs
+	// no API key here) implements. Unlike describeModel(), there is no ctx.modelId to filter
+	// against — this returns every entry the server reports.
+	async listModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
+		const native = await tryLmStudioNativeListModels(ctx);
+		if (native) return native;
+		return await fallbackModelsListModels(ctx);
+	},
+
 	// Primary rerank backend (WP-5): `POST {apiBaseUrl}/rerank`, verified against Infinity's
 	// actual Pydantic schemas (michaelf34/infinity:0.0.77-cpu) rather than guessed. The
 	// reranker is configured as its own provider entry — a different port from the embedder,
@@ -272,6 +288,12 @@ interface FallbackModelEntry {
 	// container) or "torch" (reranker container). It's the strongest identity Infinity offers
 	// since it has no per-model weights digest, so prefer it over `owned_by` when present.
 	backend?: string;
+	// OpenRouter-only fields (per the WP-C plan's per-kind table: "rich and currently 100% unread").
+	// Absent on OpenAI/LM Studio/Infinity — left undefined there, which is the correct, honest
+	// result rather than something to guess at.
+	context_length?: number;
+	architecture?: { input_modalities?: unknown };
+	supported_parameters?: unknown;
 }
 
 // Fallback for any server without LM Studio's native endpoint: the plain OpenAI-compatible
@@ -296,6 +318,80 @@ async function fallbackModelsDescribeModel(ctx: HttpCallContext): Promise<Provid
 		precision: undefined,
 		fingerprint: match?.backend ?? match?.owned_by,
 	};
+}
+
+// listModels() counterpart to tryLmStudioNativeDescribeModel above: same endpoint, same
+// HTTP-200-with-error-body trap handling (isNativeModelsBody), but returns every entry rather than
+// filtering to one ctx.modelId — there is none to filter by. `quantization` is carried through
+// verbatim (server casing, e.g. "F16"), NOT run through normalizePrecision — see
+// ProviderCatalogModel's doc comment in src/types.ts for why the catalog is display data, not the
+// normalized persisted key.
+async function tryLmStudioNativeListModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[] | null> {
+	let response;
+	try {
+		response = await requestUrl({ url: `${hostRootUrl(apiBaseUrl(ctx.provider))}/api/v0/models`, method: 'GET', headers: authHeaders(ctx) });
+	} catch {
+		return null;
+	}
+	if (response.status !== 200) return null;
+	let body: unknown;
+	try {
+		body = response.json;
+	} catch {
+		return null;
+	}
+	if (!isNativeModelsBody(body)) return null;
+
+	return body.data
+		.filter((entry): entry is LmStudioNativeModelEntry & { id: string } => typeof entry.id === 'string')
+		.map(entry => {
+			const quant = entry.quantization ?? entry.quant;
+			return {
+				id: entry.id,
+				type: entry.type,
+				arch: entry.arch,
+				quantization: quant,
+				looksLikeCrossEncoder: looksLikeCrossEncoder(entry.id, entry.arch),
+			};
+		});
+}
+
+// listModels() counterpart to fallbackModelsDescribeModel above: the plain OpenAI-compatible
+// `/models` list, unfiltered. Serves three different response shapes through one mapping —
+// OpenAI/LM Studio's `id`+`owned_by`, Infinity's added `backend`, and OpenRouter's
+// `context_length`/`architecture.input_modalities`/`supported_parameters` — by simply leaving
+// whichever fields a given server doesn't report as `undefined`. This is the "rich and currently
+// 100% unread" OpenRouter data the WP-C plan calls out; OpenRouter's `/models` needs no API key
+// (ProviderManager.listModels's httpListContext() does not enforce one), so this call succeeds even
+// for an OpenRouter provider with no stored key.
+async function fallbackModelsListModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
+	const response = await requestUrl({ url: `${apiBaseUrl(ctx.provider)}/models`, method: 'GET', headers: authHeaders(ctx) });
+	if (response.status !== 200) {
+		throw new Error(`${label(ctx.provider)} models API returned ${response.status}: ${response.text}`);
+	}
+	const body = response.json as { data?: FallbackModelEntry[] } | { error?: unknown };
+	if (body && typeof body === 'object' && 'error' in body) {
+		throw new Error(`${label(ctx.provider)} models API returned an error body`);
+	}
+	const list = (body as { data?: FallbackModelEntry[] }).data ?? [];
+	return list
+		.filter((entry): entry is FallbackModelEntry & { id: string } => typeof entry.id === 'string')
+		.map(entry => {
+			const inputModalities = Array.isArray(entry.architecture?.input_modalities)
+				? (entry.architecture.input_modalities as unknown[]).filter((v): v is string => typeof v === 'string')
+				: undefined;
+			const supportedParameters = Array.isArray(entry.supported_parameters)
+				? (entry.supported_parameters as unknown[]).filter((v): v is string => typeof v === 'string')
+				: undefined;
+			return {
+				id: entry.id,
+				ownedBy: entry.owned_by,
+				contextLength: typeof entry.context_length === 'number' ? entry.context_length : undefined,
+				inputModalities,
+				supportedParameters,
+				looksLikeCrossEncoder: looksLikeCrossEncoder(entry.id, entry.backend),
+			};
+		});
 }
 
 function normalizeChatCompletionFinishReason(raw: string | undefined): ProviderFinishReason {
