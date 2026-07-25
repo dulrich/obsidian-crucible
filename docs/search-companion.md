@@ -98,18 +98,33 @@ Do not store Supabase service-role keys in Obsidian settings. If a browser-acces
 
 ## Inference services (embeddings + reranking)
 
+**For choosing and configuring a model server generally — including the cross-encoder trap, the
+quantization hazard, and the provider-kind/base-URL rules — see [Local inference](local-inference.md).**
+This section covers only what this fleet runs.
+
 Semantic search and the opt-in reranker need a model server; the fleet declares one rather than
-leaving it as a thing you have to remember to start. Two CPU containers run beside
-`crucible-search`, each hosting one model:
+leaving it as a thing you have to remember to start. Four services sit beside `crucible-search`,
+one model each, in two pairs:
 
-| Service | Port | Model | Purpose |
-|---|---|---|---|
-| `crucible-embedder` | `127.0.0.1:4802` | `BAAI/bge-m3` (1024d) | `POST /v1/embeddings` — OpenAI-compatible |
-| `crucible-reranker` | `127.0.0.1:4803` | `BAAI/bge-reranker-v2-m3` | `POST /rerank` |
+| Service | Port | Model | Purpose | Profile |
+|---|---|---|---|---|
+| `crucible-embedder` | `127.0.0.1:4802` | `BAAI/bge-m3` (1024d, fp32 ONNX) | `POST /v1/embeddings` — OpenAI-compatible | `cpu-inference` |
+| `crucible-reranker` | `127.0.0.1:4803` | `BAAI/bge-reranker-v2-m3` (torch) | `POST /rerank` | `cpu-inference` |
+| `crucible-embed-gpu` | `127.0.0.1:4804` | `bge-m3` GGUF f16 | `POST /v1/embeddings` | `gpu-inference` |
+| `crucible-rerank-gpu` | `127.0.0.1:4805` | `bge-reranker-v2-m3` GGUF Q8_0 | `POST /rerank` | `gpu-inference` |
 
-Both run the [Infinity](https://github.com/michaelfeil/infinity) inference server
-(`michaelf34/infinity:0.0.77-cpu`). Like `crucible-search`, both publish to `127.0.0.1` only —
-the embedder's port also carries an unauthenticated, full-access inference API.
+The CPU pair runs the [Infinity](https://github.com/michaelfeil/infinity) inference server
+(`michaelf34/infinity:0.0.77-cpu`); the GPU pair runs `llama-server` (llama.cpp) on Vulkan, built
+and documented in [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md). Like
+`crucible-search`, all four publish to `127.0.0.1` only — an embedder port also carries an
+unauthenticated, full-access inference API.
+
+Both pairs sit behind compose profiles, so a bare `hc up` starts neither: the CPU pair is the
+reference implementation and the no-GPU fallback, and the GPU pair is started on demand by systemd
+socket activation rather than by compose. `4804`/`4805` are **socket** addresses that always
+listen; the containers' own published ports (`14804`/`14805`) are an implementation detail and
+nothing should be configured against them — a client pointed there bypasses the on-demand start
+and hits a stopped container.
 
 **The two engine flags differ on purpose.** The embedder runs `--engine optimum` (ONNX); the
 reranker runs `--engine torch`. `optimum` resolves ONNX weights from the HF repo, and
@@ -118,23 +133,40 @@ selection with `No onnx files found`, before downloading a byte, at any memory l
 does ship `onnx/model.onnx`, so the embedder keeps the faster ONNX path. Check which weights a
 repo actually publishes before aligning these.
 
-**Why CPU and not the GPU.** This box has an RX 9070 (gfx1201/RDNA4) and host ROCm 7.2.2, but
-GPU inference is currently impossible: the newest published AMD Infinity image ships torch
-`2.5.1+rocm6.2`, whose compiled arch list stops at `gfx1100`/`gfx942`, and `latest-amd` is five
-months *older* still. gfx1201 needs ROCm 6.4+. Worse, `torch.cuda.is_available()` returns `True`
-on that image and only fails at the first real kernel — so a naive GPU switch would pass the
-healthcheck and then die on the first embedding request. Do not attempt to force it with
-`HSA_OVERRIDE_GFX_VERSION`: that wedges the GPU hard enough to cost a reboot. Full findings,
-the hang signature, recovery paths, and a retest command for future images are in
+**Why the CPU pair is Infinity and the GPU pair is not.** ROCm is blocked on this box and the
+host is not the reason: host ROCm 7.2.2 supports gfx1201 (RX 9070 / RDNA4) fine, but the newest
+published AMD Infinity image ships torch `2.5.1+rocm6.2`, whose compiled arch list stops at
+`gfx1100`/`gfx942` (and `latest-amd` is five months *older* still); gfx1201 needs ROCm 6.4+.
+Worse, `torch.cuda.is_available()` returns `True` on that image and only fails at the first real
+kernel — so a naive GPU switch passes the healthcheck and then dies on the first embedding
+request. Do not attempt to force it with `HSA_OVERRIDE_GFX_VERSION`: that wedges the GPU hard
+enough to cost a desktop session. Full findings, the hang signature and recovery paths are in
 `context-control/references/rdna4-gpu-hang.md`.
+
+**Vulkan is not blocked**, which is why the GPU pair exists at all: RADV drives gfx1201 today, and
+llama.cpp's Vulkan backend runs both workloads on it. That path has its own silent-failure mode —
+a Vulkan loader with no usable hardware driver still enumerates the `llvmpipe` software
+rasteriser as a valid device, so a too-old Mesa yields a server that answers every request
+correctly and runs slower than the CPU containers it replaced. See
+[`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) for the base-image constraint and
+the startup assertion that catches it, and [Local inference](local-inference.md) for the general
+form of both traps.
+
+**Switching the embedder between these pairs is a deliberate re-embed, not a config change.** The
+fp32 ONNX vectors Infinity produces and the f16 GGUF vectors llama.cpp produces are the same model
+at the same width and *not* the same vector space — measured minimum cosine 0.9991, which looks
+negligible, against a top-10 rank overlap of 0.8182, which is one result in ten changing place.
+Schema 4's `embedding_space` models exactly this, so the coverage check notices and the vault
+re-embeds rather than silently mixing.
 
 **Why `bge-m3` is the recommended default.** `searchEmbeddingModel` is a plain user setting — the
 companion is dimension-agnostic and stores whatever width arrives, so nothing forces `bge-m3`
 specifically. It's recommended because Crucible ships publicly and no English-only assumption may
 be baked into the defaults, even though *this* vault measures 100.0% ASCII (13 of 52,257 chunks
 carry any non-Latin script, all incidental — a GitHub issue thread and two YouTube "about" pages).
-`bge-m3` is 1024d, multilingual, and has an 8,192-token context window that this vault's
-~1,800-character chunks never come close to truncating against. Cheaper monolingual alternatives,
+`bge-m3` is 1024d, multilingual, and has an 8,192-token context window that this vault's chunks
+never come close to truncating against — the chunker's cap is 1,800 characters
+(`chunkNote`'s `maxChars`) and the measured corpus *mean* is ~1,118. Cheaper monolingual alternatives,
 if multilingual recall isn't a requirement for a given vault: `nomic-embed-text` (768d) or
 `bge-small-en-v1.5` (384d) — both cut matrix size and per-query scan time roughly in proportion to
 dimension (see the scan-time table above).
@@ -145,9 +177,10 @@ dimension (see the scan-time table above).
 `/embeddings` to the configured base URL itself, so the base URL must include the `/v1` segment
 — the embedder is started with `--url-prefix /v1` specifically so this matches.
 
-**Reranker endpoint (for the WP-5 reranker client):** `POST http://127.0.0.1:4803/rerank` — no
-`/v1` prefix; Infinity's default route is unprefixed and the reranker container is not started
-with `--url-prefix`. Verified request/response shape:
+**Reranker endpoint:** `POST http://127.0.0.1:4803/rerank` — no `/v1` prefix; Infinity's default
+route is unprefixed and the reranker container is not started with `--url-prefix`. The GPU
+reranker on `4805` serves `/rerank` and `/v1/rerank` both, so either configured base URL works
+there. Verified request/response shape:
 
 ```
 POST /rerank
@@ -157,8 +190,15 @@ POST /rerank
 { "results": [ { "index": 0, "relevance_score": 0.93 }, ... ], "model": "...", "usage": {...} }
 ```
 
-**When they're down:** both carry `restart: unless-stopped` and a `/health` healthcheck, same
-as `crucible-search`. If the embedder is unreachable, `attachEmbeddings` catches the failure,
+**The two rerankers do not return the same scale.** Infinity returns sigmoid-normalised 0–1
+(`0.6047`); llama.cpp returns raw logits — negative and unbounded (`+1.66` relevant, `−11.03`
+irrelevant). Higher is better in both, so ordering and the strict parser are unaffected, but any
+threshold or test asserting a 0–1 range is wrong against the GPU pair.
+
+**When they're down:** the CPU pair carries `restart: unless-stopped` and a `/health` healthcheck,
+same as `crucible-search`; the GPU pair is instead started on demand by its socket and stopped
+again after 30 minutes idle, so "not running" is its normal resting state rather than a fault.
+If the embedder is unreachable, `attachEmbeddings` catches the failure,
 logs a debug-gated warning, and the index falls back to FTS-only for that flush — search stays
 functional, just without the vector rank, until the container comes back. If the reranker is
 unreachable, the explicit rerank action in the search modal fails with an error; it never blocks
