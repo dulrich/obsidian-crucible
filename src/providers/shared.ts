@@ -1,4 +1,4 @@
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult, ProviderRerankResultItem } from '../types';
+import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult, ProviderRerankResultItem } from '../types';
 import { logWarn } from '../log';
 
 // Everything a per-provider HTTP client needs to issue a request: the provider config, the
@@ -10,10 +10,22 @@ export interface HttpCallContext {
 	apiKey: string;
 }
 
+// Same as HttpCallContext, minus modelId — WP-C's list-models probe asks "what does the server
+// offer", not "what did it load for this one id", so there is no model id to carry. Deliberately a
+// distinct type rather than HttpCallContext with modelId set to '' or a sentinel: a sentinel value
+// could leak into a URL or request body if a caller mixed the two contexts up, where a missing
+// property is a compile error instead. `apiKey` may legitimately be empty here even for a keyed
+// provider kind (e.g. openrouter's `/models` needs no key) — see ProviderManager.listModels's
+// context builder for why it does not enforce the same "key required" check httpContext() does.
+export interface HttpListCallContext {
+	provider: Provider;
+	apiKey: string;
+}
+
 // Capability surface for an HTTP-backed provider. `complete` is required; `embed`, `extractImage`,
-// `rerank` and `describeModel` are present only on providers that support them, so ProviderManager
-// can throw a precise "not supported" by checking for the method rather than maintaining switch
-// arms.
+// `rerank`, `describeModel` and `listModels` are present only on providers that support them, so
+// ProviderManager can throw a precise "not supported" by checking for the method rather than
+// maintaining switch arms.
 export interface HttpProviderClient {
 	complete(ctx: HttpCallContext, system: string, user: string): Promise<ProviderCompletionResult>;
 	embed?(ctx: HttpCallContext, inputs: string[]): Promise<ProviderEmbeddingResult>;
@@ -23,6 +35,10 @@ export interface HttpProviderClient {
 	// requested id/settings string. See ProviderModelDescription (src/types.ts) for what each
 	// field means and why `precision` (not `fingerprint`) is the portable, persisted part.
 	describeModel?(ctx: HttpCallContext): Promise<ProviderModelDescription>;
+	// Enumerates what the server actually offers. See ProviderCatalogModel (src/types.ts) for the
+	// shape and the D2 boundary: this method's job ends at "here is what the server says" — it must
+	// never be the thing that writes a ProviderModel's capabilities/dimensions/variant.
+	listModels?(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]>;
 }
 
 export const IMAGE_EXTRACTION_SYSTEM_PROMPT = [
