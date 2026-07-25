@@ -26,6 +26,40 @@ const SEARCH_LINK_BOOST_SLOW_BUILD_MS = 50;
 // user-configurable yet.
 const SEARCH_SWEEP_QUERY_EXPANSION = 'articles prompt kits project description relevant source repo guide';
 
+// With semantic search on, every debounced keystroke now costs a provider round-trip to embed
+// the query *before* the companion is even called — on top of the ~27ms the 3-character gate
+// exists to keep companion search at. Two mitigations, both scoped to this SearchManager
+// instance (which the plugin holds as a long-lived singleton, so this outlives any one modal
+// and also benefits sweep mode reusing a query):
+//
+// 1. `queryEmbeddingCache` — keyed by trimmed query string. Typing "sustained attention"
+//    re-embeds a growing prefix on every debounce tick without it, and pressing Enter would
+//    re-embed the exact string type-ahead just embedded. Bounded FIFO eviction (oldest key
+//    dropped once the cache is full) rather than a true LRU or a TTL — simplest thing that
+//    can't grow without bound, and query strings during one session are a small, mostly-once
+//    set, so eviction quality barely matters.
+// 2. `embedQueryFailedAt` — once an embed attempt throws, every later `embedQuery` call (any
+//    query, not just the failing one) short-circuits to `undefined` without calling the
+//    provider again *for the length of the cooldown*. Without any suppression, a downed
+//    embedder would show one `Notice` per keystroke and stack a provider round-trip's worth of
+//    latency onto every debounce tick.
+//
+//    The cooldown is deliberately a window and NOT a latch-until-reload. Latching a failure is
+//    a mistake this repo has already made and documented: `markCompanionOffline` used to hold
+//    the availability gate for 5 minutes on a mid-operation failure, so one spurious timeout
+//    made every remaining batch job defer without ever asking the companion again (see the
+//    AGENTS.md quirk on the two search timeouts). The embedder is now a `restart:
+//    unless-stopped` fleet container, so a container restart or a model reload is a *normal*
+//    few-second blip — and a latch would turn that into "semantic is silently off until you
+//    happen to reload the plugin", with the single Notice long since dismissed. One minute
+//    bounds the cost of a genuine outage to one failed round-trip per minute while recovering
+//    from a blip on its own.
+//
+//    `embedQueryFailureNotified` is separate and *does* latch for the session: the retry is
+//    cheap to repeat, a toast is not.
+const SEARCH_QUERY_EMBEDDING_CACHE_LIMIT = 50;
+const SEARCH_QUERY_EMBED_RETRY_COOLDOWN_MS = 60_000;
+
 interface PreparedSearchFile {
 	file: TFile;
 	content: string;
@@ -38,6 +72,14 @@ export class SearchManager {
 	// link graph moved. See linkGraph() for why this cache is load-bearing rather than a
 	// micro-optimization.
 	private linkGraphCache: LinkGraph | null = null;
+
+	// See the block comment above SEARCH_QUERY_EMBEDDING_CACHE_LIMIT for why these exist and
+	// their lifetimes. Neither is reset by resetIndex()/settings changes — a stale cached
+	// embedding for a query string is harmless (worst case: one search runs semantic-off for a
+	// query it could now answer), so there is no invalidation path to wire up.
+	private readonly queryEmbeddingCache = new Map<string, number[] | undefined>();
+	private embedQueryFailedAt: number | null = null;
+	private embedQueryFailureNotified = false;
 
 	constructor(
 		private readonly app: App,
@@ -292,13 +334,41 @@ export class SearchManager {
 		if (!this.settings.searchSemanticEnabled) return undefined;
 		const ref = this.settings.searchEmbeddingModel;
 		if (!ref) return undefined;
-		try {
-			const embeddings = await this.embedTexts(ref, [query]);
-			return embeddings[0];
-		} catch (e) {
-			new Notice(`Search: semantic query disabled for this run (${String(e instanceof Error ? e.message : e)})`);
+		// Degrade silently while the embedder is in its post-failure cooldown — see the block
+		// comment above SEARCH_QUERY_EMBEDDING_CACHE_LIMIT. Checked before the cache lookup so
+		// a cooling-down run never re-attempts even a never-before-seen query string.
+		if (this.embedQueryFailedAt !== null && Date.now() - this.embedQueryFailedAt < SEARCH_QUERY_EMBED_RETRY_COOLDOWN_MS) {
 			return undefined;
 		}
+
+		const trimmed = query.trim();
+		if (!trimmed) return undefined;
+		if (this.queryEmbeddingCache.has(trimmed)) return this.queryEmbeddingCache.get(trimmed);
+
+		try {
+			const embeddings = await this.embedTexts(ref, [trimmed]);
+			const embedding = embeddings[0];
+			this.embedQueryFailedAt = null;
+			this.cacheQueryEmbedding(trimmed, embedding);
+			return embedding;
+		} catch (e) {
+			this.embedQueryFailedAt = Date.now();
+			// The retry is cheap to repeat once a minute; a toast per retry is not. So the
+			// notice fires once per session even though the attempt does not.
+			if (!this.embedQueryFailureNotified) {
+				this.embedQueryFailureNotified = true;
+				new Notice(`Search: semantic ranking unavailable, falling back to keyword search (${String(e instanceof Error ? e.message : e)})`);
+			}
+			return undefined;
+		}
+	}
+
+	private cacheQueryEmbedding(query: string, embedding: number[] | undefined): void {
+		if (this.queryEmbeddingCache.size >= SEARCH_QUERY_EMBEDDING_CACHE_LIMIT) {
+			const oldestKey: string | undefined = Array.from(this.queryEmbeddingCache.keys())[0];
+			if (oldestKey !== undefined) this.queryEmbeddingCache.delete(oldestKey);
+		}
+		this.queryEmbeddingCache.set(query, embedding);
 	}
 
 	private async embedTexts(ref: ProviderModelRef, texts: string[]): Promise<number[][]> {
