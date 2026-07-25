@@ -177,11 +177,14 @@ including all six search types, and only `youtube_metadata_fetch` reads it from 
   `OrchestrationAutoRunner.ts:127` before falling back to `getConfig(type).maxParallel`. This is a
   one-line runner change and keeps the `*JobConfig()` factories pure — do **not** thread `plugin`
   into `fileJobConfig` to add a getter, which would change every factory signature.
-- **Some types must stay serial and the UI has to say so.** `search_embed_missing` is deliberately
-  single-flight — the comment at `jobTypeConfig.ts:115-117` explains that two concurrent fan-outs
-  double the batch count for identical work. Decide between a `maxParallelFixed` marker on the
-  config or a documented per-type floor; either way the control must not silently offer a value the
-  type cannot honour.
+- **Some types must stay serial, and the UI says so with a pill — not a disabled input.**
+  `search_embed_missing` is deliberately single-flight; the comment at `jobTypeConfig.ts:115-117`
+  explains that two concurrent fan-outs double the batch count for identical work. Mark such types
+  with a `maxParallelFixed` (or equivalent) marker on the `JobTypeConfig`, and render a **`serial`
+  pill** in the concurrency column carrying the reason in its tooltip. Do **not** render a
+  greyed-out number input: a disabled control with no visible cause reads as a bug or as something
+  the user is failing to unlock, and a live-but-ignored input is worse still. The pill states the
+  constraint as a property of the job type, which is what it is.
 - **Name the real ceiling in the UI copy.** Raising `search_upsert_batch` concurrency issues
   concurrent upserts at a single-threaded companion over SQLite WAL, so returns flatten quickly and
   the global semaphore still caps total in-flight work. Show the effective value (override, config
@@ -458,7 +461,8 @@ Tests that must exist:
 9. **A per-type concurrency override is honoured by the drain loop** — the runner reads it live,
    falling back to the type's configured `maxParallel`.
 10. **A serial-pinned type refuses a concurrency override** (`search_embed_missing`), rather than
-    accepting a value it will not honour.
+    accepting a value it will not honour, and is surfaced as a `serial` pill rather than a disabled
+    input.
 11. **The global `orchestrationMaxConcurrent` cap still bounds the sum** when several types each
     have a raised per-type concurrency.
 12. **A probe never writes `model.capabilities` without Accept** (D2), including the
