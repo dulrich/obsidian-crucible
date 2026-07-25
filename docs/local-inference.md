@@ -7,12 +7,13 @@ at it, and — mostly — the ways this goes wrong *without producing an error*.
 That last part is the point of the guide. Local inference rarely fails loudly. It fails by
 answering every request correctly-shaped and quietly wrong, passing every guard on the way.
 
-> **About the numbers in this guide.** Figures marked **(provisional)** were measured on one
-> machine across several sessions with differing batch sizes and sample sets. They are the right
-> order of magnitude and the wrong thing to quote precisely. A single-protocol re-measurement is
-> planned (`runs/dispatch/esi-field-report-protocol.md`); this guide will be updated with the
-> results. Everything not marked provisional is a **structural fact** — a property of the
-> software, not a measurement — and does not depend on that re-run.
+> **About the numbers in this guide.** They were re-measured on 2026-07-25 under a single protocol
+> (`runs/dispatch/esi-field-report-protocol.md`), on one machine, and the run record — including
+> every raw result — is in `runs/measurements/esi-fr-2026-07-25/`. Throughput is a median of
+> repetitions, latency is p50/p95 over ≥100 requests, and quality is measured against ground truth
+> rather than against another server. A few figures marked **(provisional)** survive from earlier
+> ad-hoc sessions and say so where they appear. Anything stated without a number is a **structural
+> fact** — a property of the software, not a measurement.
 
 ---
 
@@ -84,10 +85,10 @@ They have opposite requirements, which is why splitting them across two servers 
 than untidy:
 
 - The embedder is a **throughput** problem. It processes tens of thousands of chunks once, then
-  goes nearly idle. Being 10× faster turns a coffee break into a pause.
-- The reranker is a **latency** problem. It runs 30 documents while a person watches. At 7 seconds
-  the button gets avoided; at 0.15 seconds it gets pressed without thinking. Same work, completely
-  different acceptability threshold.
+  goes nearly idle. Measured here, the GPU route turns a 3.9-hour backfill into 9 minutes.
+- The reranker is a **latency** problem. It runs 30 documents while a person watches. At 9.5
+  seconds the button gets avoided; at 0.28 seconds it gets pressed without thinking. Same work,
+  completely different acceptability threshold.
 
 You do not need both. Semantic search works with an embedder alone; reranking is opt-in.
 
@@ -111,11 +112,12 @@ universally right:
   healthcheck is up after a reboot, up after a crash, and visible to whatever manages the rest of
   your fleet. It costs resident RAM continuously and, on CPU, is several times slower.
 - **Speed and less resident memory** — `llama-server` on a GPU is dramatically faster
-  **(provisional: ~10× embedding, ~50× reranking)**, but a bare `llama-server` is a process you
+  (**measured: 25.7× embedding, 34× reranking** against the CPU container), but a bare
+  `llama-server` is a process you
   started. Making it as durable as the container means writing a unit for it. Socket activation
   gets both (always reachable, only resident when used) at the cost of a cold start on the first
-  request after idle **(provisional: ~1.3 s, comfortably inside Crucible's 5 s interactive
-  timeout)**.
+  request after idle (**measured 1,251 ms p50 / 1,283 ms p95 over 16 cold starts** — ~3.9×
+  headroom inside Crucible's 5 s interactive timeout).
 - **LM Studio** is the best place to *evaluate* models — it downloads and swaps them in a GUI, and
   it bundles the llama.cpp binaries you would otherwise build. It is the worst place to *depend*
   on one, because it is an application a person launches.
@@ -345,37 +347,56 @@ This also makes rerank scores non-comparable across servers. A logit of `−1.9`
 | **HTTP 200 with an error body** (LM Studio) | A capability probe based on status codes reports every endpoint as supported. Check the response *body*. |
 | **`torch.cuda.is_available()` returns `True` on a mismatched arch** | Container starts, healthcheck passes, and it dies on the first real request. A bad GPU configuration is indistinguishable from a good one until load. |
 | **`llvmpipe` — the Vulkan version of the same trap** | A Vulkan loader with no usable hardware driver still enumerates `llvmpipe`, a software rasteriser, as a completely valid device. `llama-server` starts, answers everything correctly, passes any port-is-open healthcheck, and runs **several times slower than the CPU it replaced**. A silent CPU fallback is a regression wearing the costume of a working service. Assert a hardware device type at startup and log what the engine resolved; do not infer it from "the server came up". |
-| **Request batch size** | Not an error — just 2.3× slower than it needs to be **(provisional; measured on CPU at 24 → 96, and Crucible caps at 96)**. |
+| **Request batch size** | Not an error — just slower than it needs to be. The 2.3× figure was measured on CPU at 24 → 96 and has not been re-measured on GPU, where the batch economics differ; Crucible caps at 96. |
 | **Quoting throughput from a different text length** | The same model on the same CPU measured 301 items/s over title-length strings and 20.1/s over realistic ~1,118-character vault chunks — **15× apart on sequence length alone**. A throughput number without a text length attached is not transferable. |
 | **Forcing `--pooling` on an embedding server** | No error; a future GGUF with different metadata silently yields well-formed vectors that mean something else. |
-| **Skipping the cold start** | With socket activation the first request after idle pays the model load. Fine inside a 5 s timeout **(provisional: ~1.3 s)** — but point a client at the container's own published port instead of the socket and you bypass the on-demand start entirely and hit a stopped container. |
+| **Skipping the cold start** | With socket activation the first request after idle pays the model load. Fine inside a 5 s timeout (measured 1,283 ms p95) — but point a client at the container's own published port instead of the socket and you bypass the on-demand start entirely and hit a stopped container. |
 
 ---
 
 ## 9. Measured numbers
 
-All **(provisional)** — one machine (Ryzen 9 7900X, RX 9070 / gfx1201 / RADV, 62 GB RAM), several
-sessions, differing batch sizes. Absolute throughput is hardware-specific; treat the ratios as
-more portable than the values, and both as pending re-measurement.
+One machine (Ryzen 9 7900X, RX 9070 / gfx1201 / RADV, 62 GB RAM). Throughput is the median of 5
+repetitions; latency is p50/p95 over ≥100 requests; text is real vault content averaging 1,163
+characters. Absolute values are hardware-specific — treat the ratios as more portable.
 
-| Workload | Infinity (CPU, fp32 ONNX) | llama.cpp Vulkan (GPU, f16 GGUF) | Ratio |
+**Embedding** (`bge-m3`, batch 96):
+
+| Runtime | chunks/s | vs CPU | full 52k-chunk vault |
 |---|---|---|---|
-| Embedding `bge-m3`, batch 96, ~1,118-char chunks | 8.5 chunks/s | 90.0 chunks/s | ~10.6× |
-| Reranking `bge-reranker-v2-m3`, 30 documents | 4.1 docs/s → **7.3 s** per click | **0.147 s** per click | ~50× |
-| Cold start after idle | n/a (always resident) | ~1.3 s | |
-| Warm request | | ~67 ms | |
+| llama.cpp container, GPU Vulkan, f16 | **95.0** | 25.7× | ~9 min |
+| LM Studio, GPU Vulkan, f16 | 51.7 | 14.0× | ~17 min |
+| Infinity, CPU, fp32 ONNX | 3.7 | 1× | ~3.9 h |
+| ollama, **CPU** (no `OLLAMA_VULKAN`) | 2.5 | 0.68× | ~5.8 h |
 
-Two caveats that matter more than the values:
+**Reranking** (`bge-reranker-v2-m3`, ~1,100-char documents):
 
+| Runtime | 8 docs | 30 docs | docs/s |
+|---|---|---|---|
+| llama.cpp container, GPU, Q8_0 | 76 ms | **280 ms** | 107 (flat) |
+| Infinity, CPU, torch | 1.81 s | **9.48 s** | 4.4 → 3.2 (degrades) |
+
+**Lifecycle** (socket-activated GPU container, 16 cold starts): cold **1,251 ms p50 / 1,283 ms
+p95**, range 1,241–1,283; warm 8.9 ms. Whether the cold start is triggered by a health probe or a
+real search changes it by 10 ms.
+
+Four things about these numbers matter more than the numbers:
+
+- **The reranking row is the decisive one.** At `searchRerankTopN: 30`, 9.5 seconds per click is
+  long enough that the button stops being pressed. 280 ms is not. And rerank latency is *exactly
+  linear* in document count on the GPU (~9.3 ms/doc, no batching economy), so `topN` is a
+  predictable dial — but on CPU the cost grows faster than linearly, so widening it is
+  disproportionately punishing there.
+- **A throughput number without a text length is not transferable.** Measured on this vault's own
+  chunks, the short quintiles run **2.2× faster** than the long ones — 6.7 vs 3.1 chunks/s from the
+  same sample on the same server in the same minute. Benchmarking "the first 96 chunks" of a
+  length-sorted sample overstates by ~60%.
+- **The same server name is not the same speed.** LM Studio and the purpose-built container run the
+  *same GGUF file* (verified by sha256) on the same GPU, and the container is 1.8× faster.
 - **Raw-endpoint rates are not backfill rates.** Crucible also reads, chunks and hashes locally on
-  the same thread. The CPU path measured 8.5 chunks/s at the endpoint and **5.8 end-to-end**. That
-  ~0.68 factor is the only end-to-end datapoint that exists, and it was inferred across two
-  sessions rather than measured as a pair — do not lean on it.
-- **A rate without a duration is not a rate.** These were short observations. Sustained-backfill
-  behaviour is unmeasured.
-
-The reranking row is the decisive one. At `searchRerankTopN: 30`, 7.3 seconds per click is long
-enough that the button gets avoided; 0.147 s is not.
+  the same thread. The often-quoted ~0.68 factor between the two remains a quotient of two
+  unrelated sessions — it has never been measured as a pair, and it cannot be measured from outside
+  the plugin. Do not lean on it.
 
 ---
 
