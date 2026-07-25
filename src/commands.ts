@@ -409,7 +409,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		available: () => {
 			const file = plugin.app.workspace.getActiveFile();
-			return file !== null && isSearchIndexablePath(file.path);
+			return file !== null && isSearchIndexablePath(file.path, plugin.settings.searchIndexExtensions);
 		},
 		run: () => {
 			const file = plugin.app.workspace.getActiveFile();

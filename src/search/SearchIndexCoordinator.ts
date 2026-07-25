@@ -35,7 +35,7 @@ export class SearchIndexCoordinator {
 	// Debounced: collapse a burst of edits to one index job, and back off longer for the note the
 	// user is actively typing in.
 	handleModify(file: TFile): void {
-		if (!isSearchIndexablePath(file.path)) return;
+		if (!isSearchIndexablePath(file.path, this.plugin.settings.searchIndexExtensions)) return;
 		const path = file.path;
 		const existing = this.debounceTimers.get(path);
 		if (existing) clearTimeout(existing);
@@ -44,7 +44,7 @@ export class SearchIndexCoordinator {
 		this.debounceTimers.set(path, setTimeout(() => {
 			this.debounceTimers.delete(path);
 			const current = this.plugin.app.vault.getAbstractFileByPath(path);
-			if (!(current instanceof TFile) || !isSearchIndexablePath(current.path)) return;
+			if (!(current instanceof TFile) || !isSearchIndexablePath(current.path, this.plugin.settings.searchIndexExtensions)) return;
 			// A mutating command/chain owns the note until it releases its lock; don't index underneath it.
 			if (this.plugin.noteLocks.isLocked(current.path) || this.isMaterializing()) return;
 			void this.enqueueAutomatic('search_upsert_file', current.path);
@@ -74,7 +74,7 @@ export class SearchIndexCoordinator {
 	}
 
 	private indexable(path: string): boolean {
-		return this.plugin.settings.searchEnabled && isSearchIndexablePath(path) && !isPathExcluded(this.plugin.settings, path, 'search');
+		return this.plugin.settings.searchEnabled && isSearchIndexablePath(path, this.plugin.settings.searchIndexExtensions) && !isPathExcluded(this.plugin.settings, path, 'search');
 	}
 
 	private async enqueueAutomatic(type: 'search_upsert_file' | 'search_delete_path', path: string, priority: JobPriority = 'low'): Promise<void> {

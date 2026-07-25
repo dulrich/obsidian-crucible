@@ -65,6 +65,12 @@ declare module 'obsidian' {
 		// Optional: an undocumented API whose presence and shape vary across Obsidian
 		// versions — accessed only through the SecretRegistry facade, which guards it.
 		secretStorage?: SecretStorage;
+		// Undocumented internal registry of view types by extension, absent from
+		// obsidian.d.ts. Presence-guarded in src/fileTypes.ts the same way secretStorage
+		// is guarded above — never accessed unconditionally.
+		viewRegistry?: {
+			typeByExtension?: Record<string, string>;
+		};
 		plugins: {
 			enabledPlugins: Set<string>;
 			disablePlugin(id: string): Promise<void>;
@@ -516,6 +522,11 @@ export interface CrucibleSettings {
 	searchIndexBatchSize: number;
 	searchIndexDebounceMs: number;
 	searchResultLimit: number;
+	// Which file types the search indexer ingests. Independent of
+	// crucibleFileOpenPaletteExtensions (the palette's "what can I open" set) — this is
+	// "what can FTS5 chunk", restricted in the UI to text-extractable categories.
+	// Defaults to exactly today's hardcoded SEARCH_EXTENSIONS so upgrade is a no-op.
+	searchIndexExtensions: string[];
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -663,4 +674,5 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	searchIndexBatchSize: 24,
 	searchIndexDebounceMs: 5000,
 	searchResultLimit: 12,
+	searchIndexExtensions: ['md', 'qmd', 'txt'],
 }
