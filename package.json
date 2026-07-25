@@ -11,6 +11,7 @@
 		"search:serve": "node scripts/search-companion.mjs",
 		"search:snapshot": "bash scripts/search-snapshot.sh",
 		"search:agreement": "node scripts/embedding-agreement.mjs",
+		"search:quality": "node scripts/embedding-quality.mjs",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"lint": "eslint . && stylelint \"**/*.css\""
 	},
