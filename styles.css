@@ -635,6 +635,17 @@ If your plugin does not need CSS, delete this file.
   flex: 0 0 auto;
 }
 
+/* Queue Monitor row actions. Buttons appended straight into the cell sit flush
+   against one another; here that puts a destructive Cancel hard against Run, which
+   is a misclick waiting to happen rather than merely untidy. Wrapping is allowed so
+   a narrow pane stacks the pair instead of overflowing the column. */
+.crucible-queue-action-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
 .crucible-ingestion-enqueue-intake:disabled,
 .crucible-ingestion-enqueue-intake[aria-busy="true"] {
   opacity: 0.7;
@@ -782,6 +793,14 @@ If your plugin does not need CSS, delete this file.
   text-align: right;
 }
 
+/* A pill occupies the numeric column but is a label, not a value: centred, because
+   flush-right it reads as having fallen out of the column rather than filling it. */
+.crucible-queue-type-cell.is-pill {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
 .crucible-ingestion-header-toggle {
   font-size: var(--font-ui-small);
   font-weight: normal;
@@ -804,16 +823,51 @@ If your plugin does not need CSS, delete this file.
   text-align: right;
 }
 
-/* States a pinned type's constraint as a property of the job type (reason in the
-   tooltip) rather than as a disabled input, which would read as a bug. */
-.crucible-queue-type-serial {
-  padding: 0 0.35rem;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-s);
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+/* N1 Console pill, neutral variants.
+   ---------------------------------------------------------------------------
+   The fleet pill taxonomy has three families: STATUS pills (ANSI hue label +
+   border + 5%-tint background), TAG pills (panel-2 fill), and NEUTRAL pills —
+   transparent background, border and label the same colour, same geometry as the
+   other two. Neutral is the family for non-semantic states: disabled, n/a,
+   counts-at-rest, and constraints like `serial`. A serial marker is emphatically
+   NOT a status pill: nothing is ok/warn/error about a job type that runs one at a
+   time, and borrowing a status hue would spend the reader's alarm budget on a
+   fact.
+
+   Two neutral variants exist and both are specified rather than left implicit:
+   `is-muted` (border + label --text-muted) and `is-contrast` (border + label
+   --text-normal), for when a neutral pill needs to carry more weight.
+
+   Geometry is the part that makes it read as a pill at all — a 99px radius, not a
+   corner rounding. Values follow the design system's neutral pill; they are
+   written against Obsidian's semantic vars (--text-muted, --text-normal) rather
+   than --n1-* tokens, because theme/theme.css maps N1 onto those names and plugin
+   views must stay reskinnable. Never reach for an --n1-* token from styles.css. */
+.crucible-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid currentcolor;
+  border-radius: 99px;
+  background: transparent;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.crucible-pill.is-muted {
+  color: var(--text-muted);
+}
+
+.crucible-pill.is-contrast {
+  color: var(--text-normal);
+}
+
+/* The pinned-concurrency pill states its reason in a tooltip, so it takes the help
+   cursor rather than looking inert. */
+.crucible-queue-type-cell .crucible-pill {
   cursor: help;
 }
 
