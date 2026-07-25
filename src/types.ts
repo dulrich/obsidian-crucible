@@ -527,6 +527,12 @@ export interface CrucibleSettings {
 	// "what can FTS5 chunk", restricted in the UI to text-extractable categories.
 	// Defaults to exactly today's hardcoded SEARCH_EXTENSIONS so upgrade is a no-op.
 	searchIndexExtensions: string[];
+	// WP-6: client-side link-adjacency boost applied to the companion's SearchResponse in
+	// SearchManager.search (src/search/linkGraph.ts) — the GBrain graph idea running on
+	// Obsidian's own metadataCache instead of a new edge store. Disabled means graph
+	// construction is skipped entirely, not built-then-multiplied-by-zero.
+	searchLinkBoostEnabled: boolean;
+	searchLinkBoostWeight: number;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -675,4 +681,11 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	searchIndexDebounceMs: 5000,
 	searchResultLimit: 12,
 	searchIndexExtensions: ['md', 'qmd', 'txt'],
+	searchLinkBoostEnabled: true,
+	// weight / (LINK_BOOST_RRF_K + linkRank): at rank 1 that's ~0.00082, which against the
+	// tightest realistic gap between adjacent top ranks (~0.00026, see linkGraph.ts) climbs
+	// a maximally-linked result ~3 positions — meaningful without being able to leapfrog a
+	// typical ~12-result list. See tests/linkGraph.test.mjs and the WP-6 report for the
+	// worked arithmetic.
+	searchLinkBoostWeight: 0.05,
 }
