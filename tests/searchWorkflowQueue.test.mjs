@@ -43,6 +43,7 @@ function makePlugin(overrides = {}) {
 		},
 		searchManager: {
 			companionAvailable: async () => true,
+			companionUnavailableReason: () => null,
 			markCompanionOffline: () => {},
 			health: async () => ({ ok: true }),
 			resetIndex: async () => {},
@@ -92,5 +93,24 @@ test('search upsert defers quietly while the companion is offline', async () => 
 
 	assert.equal(result.status, 'deferred');
 	assert.match(result.error, /Search companion not reachable/);
+	assert.equal(result.retryAfterMs, 30_000);
+});
+
+// A reachable companion serving an index schema this build cannot query is unavailable too,
+// but telling the user to go start the container would send them to restart something that
+// is already running and healthy. When the companion gave a reason, it wins.
+test('search upsert surfaces the companion reason instead of the not-reachable text', async () => {
+	const reason = 'Search companion index schema 1 is older than this build requires (2). Rebuild the index.';
+	const plugin = makePlugin({
+		searchManager: {
+			companionAvailable: async () => false,
+			companionUnavailableReason: () => reason,
+		},
+	});
+	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-2', params: { path: 'note.md' } }, { plugin });
+
+	assert.equal(result.status, 'deferred');
+	assert.equal(result.error, reason);
+	assert.doesNotMatch(result.error, /not reachable/);
 	assert.equal(result.retryAfterMs, 30_000);
 });

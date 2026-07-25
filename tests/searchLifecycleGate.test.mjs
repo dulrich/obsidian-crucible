@@ -102,3 +102,35 @@ test('CompanionAvailabilityGate.markOffline short-circuits subsequent checks', a
 	assert.equal(await gate.available(health), true);
 	assert.equal(checks, 1);
 });
+
+// An unavailable companion is not always a missing one. A reachable companion serving an
+// index schema this build cannot query reports ok:false with its own message; surfacing the
+// generic "not reachable, start the container" text there sends the user to restart
+// something already healthy. See searchDeferredResult in SearchIndexWorkflow.ts.
+test('CompanionAvailabilityGate keeps the reason a reachable-but-not-ok companion gave', async () => {
+	const gate = new CompanionAvailabilityGate();
+	const outdated = 'Search companion index schema 1 is older than this build requires (2).';
+
+	assert.equal(gate.lastUnavailableReason(), null);
+	assert.equal(await gate.available(async () => ({ ok: false, message: outdated })), false);
+	assert.equal(gate.lastUnavailableReason(), outdated);
+});
+
+test('CompanionAvailabilityGate reports no reason when nothing answered', async () => {
+	const gate = new CompanionAvailabilityGate();
+
+	assert.equal(await gate.available(async () => { throw new Error('ECONNREFUSED'); }), false);
+	assert.equal(gate.lastUnavailableReason(), null);
+});
+
+test('CompanionAvailabilityGate clears a stale reason once the companion comes back', async () => {
+	let now = 0;
+	const gate = new CompanionAvailabilityGate(() => now);
+
+	await gate.available(async () => ({ ok: false, message: 'schema too old' }));
+	assert.equal(gate.lastUnavailableReason(), 'schema too old');
+
+	now += SEARCH_OFFLINE_CACHE_MS + 1;
+	assert.equal(await gate.available(async () => ({ ok: true })), true);
+	assert.equal(gate.lastUnavailableReason(), null);
+});

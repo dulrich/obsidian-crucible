@@ -126,8 +126,14 @@ async function runSearchWorkflow(
 	}
 }
 
+// "Unavailable" is not always "not running": a reachable companion serving an index schema
+// this build cannot query is also unavailable, and the start-the-container instruction would
+// send the user to restart something already healthy. Prefer the companion's own reason when
+// it gave one; fall back to the not-reachable text only when nothing answered.
 function searchDeferredResult(plugin: WorkflowContext['plugin'], detail?: string): WorkflowResult {
-	const message = `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)`;
+	const reason = plugin.searchManager.companionUnavailableReason();
+	const message = reason
+		?? `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)`;
 	return {
 		status: 'deferred',
 		error: detail ? `${message} (${detail})` : message,
