@@ -34,21 +34,24 @@ Every check a careful person would write passes: the width matches, the vector i
 normalised, the id begins `text-embedding-`, and the server itself says it is an embedding model.
 No field in any local runtime's API distinguishes a cross-encoder from a bi-encoder.
 
-What actually happens, measured on one query against two relevant and two irrelevant documents
-**(provisional)**:
+What actually happens, measured over 61 Wikipedia articles in three languages — where the right
+answer is known, because an article's own translation is the one document that must rank first:
 
-| Document | `bge-m3` (real bi-encoder) | `bge-reranker-v2-m3` used as an embedder |
+| | `bge-m3` (real bi-encoder) | `bge-reranker-v2-m3` used as an embedder |
 |---|---|---|
-| relevant | 0.7593 | 0.9896 |
-| related | 0.7220 | **0.8477** — below *both* irrelevant documents |
-| irrelevant (bread recipe) | 0.3599 | 0.9715 |
-| irrelevant (arctic terns) | 0.2418 | 0.9815 |
-| **discrimination margin** | **0.3994** | **0.0080** |
+| finds the right document first, en→fr | **100.0%** | **19.7%** |
+| finds the right document first, en→ja | **98.4%** | **13.1%** |
+| worst true-match rank (of 61) | 2nd | **61st — dead last** |
+| gap between a real match and a stranger | **0.3513** | **0.0087** |
+| ranks a true match above an unrelated one? | yes | **no — inverted** |
 
-Everything bunches between 0.85 and 0.99 with no usable signal, and the ordering is not merely
-weak — it is partly **inverted**. A user who picks this model indexes their entire vault with
-vectors that cannot rank, and sees no error anywhere. The symptom is "search feels vague",
-attributed to anything but the embedder.
+Every similarity it returns lands between 0.92 and 0.94, whatever you feed it. The gap it leaves
+between a document's own translation and an unrelated article is **40× narrower** than the real
+embedder's, and the ordering is not merely weak — unrelated documents on a similar topic score
+*higher* than a document's own translation.
+
+A user who picks this model indexes their entire vault with vectors that cannot rank, and sees no
+error anywhere. The symptom is "search feels vague", attributed to anything but the embedder.
 
 **The same weights rank correctly through a real rerank endpoint.** It is the endpoint, not the
 model: a cross-encoder scores a *(query, document)* pair jointly and has no meaningful standalone
@@ -228,9 +231,17 @@ only at query time. Rerank availability is vendor-specific.
 Given §1, "it returns vectors" is not evidence. Four checks, in order of how much they buy:
 
 1. **Rank something you know the answer to.** Embed one query and three documents — one clearly
-   relevant, two clearly not — and check the ordering *and the spread*. A real bi-encoder puts
-   ~0.4 between relevant and irrelevant. Everything landing in a 0.85–0.99 band means the model is
-   not discriminating, whatever it claims to be.
+   relevant, two clearly not — and check the ordering *and the spread*. A healthy bi-encoder leaves
+   roughly **0.35** between a real match and an unrelated document. Everything landing in a
+   0.85–0.99 band means the model is not discriminating, whatever it claims to be.
+
+   **The sharpest version of this test costs nothing and needs no judgment: use a translation.**
+   Take any paragraph, get a translation of it into a language your model claims to support, and
+   embed both along with a dozen unrelated paragraphs. The translation shares almost no vocabulary
+   with the original, so only a model that has actually encoded *meaning* will rank it first — a
+   keyword-ish or broken embedding cannot fake it. `bge-m3` ranks it first 100% of the time
+   (en→fr); the reranker-as-embedder from §1 manages 19.7%, and once put it dead last of 61.
+   `scripts/embedding-quality.mjs` (`npm run search:quality`) automates exactly this.
 2. **Compare runtimes before you switch between them.** `scripts/embedding-agreement.mjs` embeds
    the same real chunks through two servers and reports minimum cosine and top-10 rank overlap.
    Run it whenever you change server, model file, quantization or llama.cpp build.
@@ -245,44 +256,62 @@ Given §1, "it returns vectors" is not evidence. Four checks, in order of how mu
 
 ## 6. Quantization, and why the same model name is not the same vector space
 
-**Numeric precision is part of the weights' identity.** `bge-m3` at fp32 and `bge-m3` at f16 are
-not the same weights, and they do not produce interchangeable vectors — even though the model
-name, the width (1024d) and the normalisation are identical.
+Changing engine, build or quantization does perturb the vectors. The question that matters is
+whether the perturbation is large enough to change what you *retrieve*, and the answer — measured
+against ground truth rather than against another server — is **no, until you go very low**.
 
-Measured across 150 real vault chunks **(provisional)**:
+Measured over 61 parallel Wikipedia articles in English, French and Japanese (11 topic clusters,
+183 documents). Ground truth is that an article and its translation say the same thing in almost
+no shared vocabulary, so a working multilingual embedder must rank the true translation first out
+of 61 candidates. "Spread" is mean translation similarity minus mean unrelated-pair similarity —
+how much room the model leaves between a real match and a stranger.
 
-| Arm | mean cos | median | **min** | top-10 rank overlap (mean / min) |
-|---|---|---|---|---|
-| ONNX fp32 vs GGUF f32 — **runtime only** | 1.0000 | 1.0000 | **1.0000** | 1.0000 / 1.0000 |
-| GGUF f32 vs GGUF f16 — **precision only** | 1.0000 | 1.0000 | 0.9991 | 0.9636 / **0.8182** |
+| Configuration | en→fr P@1 | en→ja P@1 | spread |
+|---|---|---|---|
+| Infinity, ONNX **fp32** | 100.0% | 98.4% | 0.3513 |
+| llama.cpp, GGUF **f32** | 100.0% | 98.4% | 0.3513 |
+| llama.cpp, GGUF **f16** | 100.0% | 98.4% | 0.3515 |
+| llama.cpp, GGUF **f16**, different conversion | 100.0% | 98.4% | 0.3515 |
+| llama.cpp, GGUF **Q8_0** | 100.0% | 98.4% | 0.3516 |
+| llama.cpp, GGUF **Q4_K_M** | 98.4% | 98.4% | 0.3358 |
+| llama.cpp, GGUF **Q2_K** (366 MB) | 100.0% | 100.0% | **0.2383** |
 
-Two conclusions, both structural:
+Three conclusions:
 
-1. **Runtime does not change the vector space.** ONNX Runtime and llama.cpp at identical precision
-   agreed to four decimal places on *every* chunk, with identical top-10 rankings. Moving the same
-   weights to a different host does not require a re-embed.
-2. **Precision does, and cosine badly understates it.** A 0.9991 minimum cosine reads as
-   negligible; the top-10 rank overlap falling to 0.8182 means **roughly one result in ten changes
-   place** — which is what a user experiences. Judged on mean cosine alone (1.0000 everywhere),
-   f16 and fp32 would have been declared interchangeable.
+1. **Runtime, build and conversion do not change retrieval.** Two engines, two llama.cpp builds and
+   two independent GGUF conversions land within 0.0003 of each other. Moving the same weights to a
+   different host does not require a re-embed. (They are not bit-identical — roughly one result in
+   a hundred shifts position — but the shift is numerical noise with no measurable quality cost.)
+2. **Quantization degrades *spread*, not *ranking*.** Down to Q8_0 nothing is measurable at all.
+   Q4_K_M costs one article out of 61. Even Q2_K still ranks the right translation first every
+   time — but unrelated documents drift from 0.44 to 0.59 similarity, squeezing the space. Ranking
+   reads order, so ranking survives; anything reading absolute scores does not.
+3. **No similarity threshold separates a match from a stranger, in any configuration.** Even at
+   100% P@1 the *worst* true translation scores below the *best* unrelated pair. Rank results;
+   never write "drop anything below 0.5".
 
-**This is why Crucible keys on an embedding space, not a model name.** Companion schema 4 added
-`chunks.embedding_space` = model id **plus** normalised precision (`bge-m3/f16`). The vector scan
-filters by it, and mixing two spaces in one vault is refused at upsert with a 4xx. Consequences:
+**Practical advice.** f16 is a fine default and Q8_0 is indistinguishable from it. Q4_K_M is a
+reasonable trade if you want the memory back. Below that you are buying disk space with
+discrimination, which matters most if you ever compare scores rather than order them. The larger
+risk by far is not quantization — it is picking a model that is not an embedder at all (§1) or one
+that does not cover your languages (§5).
 
-- Switching quantization is a **deliberate re-embed**, not a silent drift. Crucible's coverage
-  check notices; before this it did not, because the model *id* was unchanged.
+**Crucible keys on an embedding space, not a model name.** Companion schema 4 added
+`chunks.embedding_space` = model id plus normalised precision (`bge-m3/f16`); the vector scan
+filters by it, and mixing two spaces in one vault is refused at upsert with a 4xx. On the evidence
+above this is a conservative guard rather than a necessary one — it prevents a mix whose measured
+retrieval cost at f16-vs-f32 is nil — and it does **not** catch the failures that actually destroy
+retrieval, since a cross-encoder and a real embedder at the same width and precision occupy the
+same "space" by this definition. It is cheap and it fails closed, so it stays; do not read it as
+evidence that f16 and fp32 are meaningfully different.
+
+- Switching quantization triggers a re-embed. That is deliberate conservatism, not a correctness
+  requirement at the top of the ladder.
 - If your runtime cannot report its precision — Infinity cannot; it exposes only `backend` — the
-  space falls back to the bare model id, exactly as before, and nothing re-embeds. Declare it by
-  hand in the model row's **Embedding precision (fallback)** field if you are running two
-  precisions of one model.
+  space falls back to the bare model id and nothing re-embeds. Declare it by hand in the model
+  row's **Embedding precision (fallback)** field if you run two precisions of one model.
 - Spellings are normalised, so `Q4_K_M`, `q4_k_m` and GGUF `file_type: 15` are one space rather
   than three.
-
-**Practical advice.** Prefer **f16** for embedding models. They lose measurably more to aggressive
-quantization than chat models do, and the f16 file is small enough that Q4 buys little. The
-throughput and agreement cost of Q8_0 and Q4_K_M for *embedding* models is not yet measured here —
-it is an open item in the field-report protocol, not a settled recommendation.
 
 ---
 
@@ -309,7 +338,8 @@ This also makes rerank scores non-comparable across servers. A logit of `−1.9`
 | Trap | Symptom |
 |---|---|
 | **Cross-encoder as embedder** (§1) | No error ever. Vectors are the right width and normalised; retrieval is vague; on-topic documents can rank below unrelated ones. |
-| **Same name, different quantization** (§6) | No error. Search subtly reorders after a server or model-file change; ~1 result in 10 moves. |
+| **Same name, different quantization** (§6) | No error, and — measured — no retrieval cost either down to Q8_0. Roughly 1 result in 100 shifts position. The real cost appears below Q4: scores compress toward each other, so ordering survives but any absolute threshold stops meaning anything. |
+| **Trusting a similarity threshold** (§6) | No error. In *every* configuration measured, including ones that rank perfectly, the worst true match scores below the best unrelated pair — so a fixed cutoff drops real results and keeps junk. Rank; do not threshold. |
 | **Engine flag vs published weights** | Infinity `--engine optimum` dies at startup with `No onnx files found`, before downloading anything, at any memory limit — because the repo ships PyTorch weights only. Looks like a memory or network problem; it is neither. |
 | **Base-URL asymmetry** | 404s on `/embeddings` (missing `/v1`) or on `/v1/rerank` (extra `/v1` against a server that serves it unprefixed). |
 | **HTTP 200 with an error body** (LM Studio) | A capability probe based on status codes reports every endpoint as supported. Check the response *body*. |
