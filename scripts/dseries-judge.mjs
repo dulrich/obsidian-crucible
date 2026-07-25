@@ -38,7 +38,10 @@ const DEFAULT_RERANK_TOP_N = 30;
 
 const USAGE = `Usage: node scripts/dseries-judge.mjs <prepare|judge|report> [options]
 
-prepare  --queries <path>   S2 query set: JSON array of {id, text, source: "troublesome"|"fill"}
+prepare  --queries <path>   S2 query set: JSON array of
+                            {id, text, source: "troublesome"|"fill",
+                             targetPaths?: string[],   // known answer notes -> rank reporting
+                             answerable?: boolean}     // false = answer provably not in the vault
          --a <arm>          label:vaultId:mode[:runtimeSpec]   mode = fts | vector | rerank
          --b <arm>          the other arm
          --space <id>       embedding_space to send with query vectors (both arms)
@@ -152,6 +155,15 @@ async function runArm(arm, query, opts) {
 	};
 }
 
+// 1-based rank of the first result matching any known-good path, or null for "not in the list"
+// (which includes "no ground truth declared" — the two are distinguished by the caller having
+// targetPaths at all, never by conflating absent with missed).
+function targetRank(arm, targetPaths) {
+	if (!targetPaths?.length) return undefined;
+	const idx = arm.results.findIndex(r => targetPaths.includes(r.path));
+	return idx === -1 ? null : idx + 1;
+}
+
 async function prepare(opts) {
 	if (!opts.queries || !opts.a || !opts.b || !opts.out) throw new Error(`prepare needs --queries, --a, --b, --out\n\n${USAGE}`);
 	const armA = parseArm(opts.a);
@@ -162,6 +174,15 @@ async function prepare(opts) {
 		if (!q.id || !q.text) throw new Error(`Every query needs {id, text}: ${JSON.stringify(q)}`);
 		if (q.source !== 'troublesome' && q.source !== 'fill') {
 			throw new Error(`Query ${q.id}: source must be "troublesome" or "fill" — the two subgroups are reported separately, never pooled`);
+		}
+		// `answerable: false` means the vault provably does not contain what the query is looking
+		// for. Such a query still belongs in the set — "what does the system do when the answer is
+		// not there" is a real question, and the honest answer for a vector leg is "it returns ten
+		// confident irrelevant results" — but its preference judgments are a coin flip between two
+		// wrong answer sets, so pooling it into the troublesome rate would drag that rate toward
+		// 50% and understate the vector leg on the queries it can actually serve.
+		if (q.answerable === false && q.targetPaths?.length) {
+			throw new Error(`Query ${q.id}: answerable:false contradicts targetPaths`);
 		}
 	}
 	const seed = opts.seed ?? String(Date.now());
@@ -176,6 +197,11 @@ async function prepare(opts) {
 		process.stderr.write(`  ${q.id} …\r`);
 		const a = await runArm(armA, q, rerankOpts);
 		const b = await runArm(armB, q, rerankOpts);
+		// Where the answer note is known, the rank it lands at is ground truth and outranks any
+		// preference judgment as evidence — the same reason arm A4's translation pairs settled the
+		// cross-encoder question that a four-document demonstration could not.
+		a.targetRank = targetRank(a, q.targetPaths);
+		b.targetRank = targetRank(b, q.targetPaths);
 		pairs.push({ query: q, side: sideForQuery(seed, q.id), a, b, judgment: null });
 	}
 	process.stderr.write('\n');
@@ -368,13 +394,36 @@ function report(opts) {
 	console.log(`A = ${A} (${session.armA.vaultId}, ${session.armA.mode})`);
 	console.log(`B = ${B} (${session.armB.vaultId}, ${session.armB.mode})`);
 
-	const troublesome = session.pairs.filter(p => p.query.source === 'troublesome');
-	const fill = session.pairs.filter(p => p.query.source === 'fill');
+	const answerable = p => p.query.answerable !== false;
+	const troublesome = session.pairs.filter(p => p.query.source === 'troublesome' && answerable(p));
+	const unanswerable = session.pairs.filter(p => p.query.answerable === false);
+	const fill = session.pairs.filter(p => p.query.source === 'fill' && answerable(p));
 	// Never pooled: the troublesome queries are an observed failure of keyword retrieval and the
-	// population the vector leg exists to serve. Pooling lets easy fill queries mask them.
-	printSummary('TROUBLESOME subgroup (the user\'s own hard retrievals)', summarize(troublesome, A, B));
+	// population the vector leg exists to serve. Pooling lets easy fill queries mask them, and
+	// pooling the unanswerable ones drags the rate toward 50% from two wrong answer sets.
+	printSummary('TROUBLESOME subgroup (the user\'s own hard retrievals, answer present in vault)', summarize(troublesome, A, B));
 	printSummary('FILL subgroup', summarize(fill, A, B));
+	if (unanswerable.length) {
+		printSummary('UNANSWERABLE subgroup (answer provably NOT in the vault — read as behaviour, not quality)', summarize(unanswerable, A, B));
+	}
 	printSummary('All queries (context only — the subgroups above are the result)', summarize(session.pairs, A, B));
+
+	// Ground truth, where it exists, reported before and separately from preference: a rank is a
+	// fact, a preference is a judgment.
+	const withTruth = session.pairs.filter(p => p.query.targetPaths?.length);
+	if (withTruth.length) {
+		console.log(`\nGROUND TRUTH — rank of the known answer note (lower is better, "miss" = absent from top ${session.limit})`);
+		let hitA = 0, hitB = 0;
+		for (const p of withTruth) {
+			const ra = p.a.targetRank, rb = p.b.targetRank;
+			if (ra != null) hitA++;
+			if (rb != null) hitB++;
+			console.log(`  ${truncate(p.query.text, 52).padEnd(54)} ${A}: ${String(ra ?? 'miss').padStart(4)}   ${B}: ${String(rb ?? 'miss').padStart(4)}`);
+		}
+		console.log(`  ${'hit rate'.padEnd(54)} ${A}: ${hitA}/${withTruth.length}   ${B}: ${hitB}/${withTruth.length}`);
+		console.log(`  This is evidence of a different kind from the preference rates above. Where the two`);
+		console.log(`  disagree, the ranks are the stronger claim — cite them first.`);
+	}
 
 	console.log(`\nPer-query:`);
 	for (const p of session.pairs) {
@@ -405,8 +454,13 @@ function report(opts) {
 	if (opts.json) {
 		writeFileSync(opts.json, JSON.stringify({
 			session: opts.session, armA: session.armA, armB: session.armB, seed: session.seed,
-			troublesome: summarize(troublesome, A, B), fill: summarize(fill, A, B), all: summarize(session.pairs, A, B),
-			perQuery: session.pairs.map(p => ({ id: p.query.id, text: p.query.text, source: p.query.source, judgment: p.judgment })),
+			troublesome: summarize(troublesome, A, B), fill: summarize(fill, A, B),
+			unanswerable: summarize(unanswerable, A, B), all: summarize(session.pairs, A, B),
+			groundTruth: withTruth.map(p => ({ id: p.query.id, targetPaths: p.query.targetPaths, aRank: p.a.targetRank, bRank: p.b.targetRank })),
+			perQuery: session.pairs.map(p => ({
+				id: p.query.id, text: p.query.text, source: p.query.source,
+				answerable: p.query.answerable !== false, judgment: p.judgment,
+			})),
 			blindingNotes: notes,
 		}, null, 2) + '\n');
 		console.log(`\nWrote ${opts.json}`);
