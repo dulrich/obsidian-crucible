@@ -12,6 +12,7 @@ Crucible is a workflow plugin for Obsidian. It combines note materialization, te
 - [Tracked sources](tracked-sources.md): Tracked Blogs and YouTube registry note formats, required columns, optional columns, and accepted values.
 - [Ingestion dashboard](ingestion-dashboard.md): dashboard sections, actions, ignored IDs, and orphan cleanup behavior.
 - [Search companion](search-companion.md): local search service setup and API contract.
+- [GBrain evaluation](gbrain-evaluation.md): what was adopted, what was rejected, and why, from evaluating the GBrain retrieval/graph/synthesis platform.
 
 ## Quick Paths
 
