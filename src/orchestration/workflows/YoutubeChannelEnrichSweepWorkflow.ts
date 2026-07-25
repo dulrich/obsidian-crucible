@@ -32,6 +32,10 @@ export class YoutubeChannelEnrichSweepWorkflow implements Workflow {
 		let skipped = 0;
 		let pendingInChunk = 0;
 		for (const row of rows) {
+			// Per-channel: this loop can enqueue hundreds of jobs on a first-run sweep,
+			// and its whole purpose is to fan work out — stopping it is the single most
+			// valuable checkpoint in the workflow. Jobs already enqueued stay queued.
+			ctx.throwIfAborted();
 			if (!row.channelId) continue;
 			// Mirror the per-channel job's freshness check here so a fresh about.md
 			// doesn't even cost an enqueue + drain cycle.

@@ -60,6 +60,11 @@ export class ImageMetadataExtractWorkflow implements Workflow {
 			};
 		}
 
+		// Everything above is cheap local bookkeeping (sidecar lookups, a reuse scan);
+		// what follows is a vision-model call that can run for tens of seconds and
+		// cannot be interrupted once issued. So the one checkpoint that earns its place
+		// here is immediately before it — not at entry, which the runner already does.
+		ctx.throwIfAborted();
 		const bytes = await plugin.app.vault.readBinary(imageFile);
 		const result = await plugin.providerManager.extractImageMetadata(provider, model.id, bytes, imageMimeType(image.ext));
 		await writeImageMetadataSidecar(plugin.app, {

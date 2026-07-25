@@ -30,6 +30,13 @@ export class TranscriptRefinerWorkflow implements Workflow {
 		const leaf = plugin.app.workspace.getLeaf(false);
 		await leaf.openFile(file);
 
+		// Chain execution is the expensive part and is not itself instrumented (chain
+		// steps run through ChainManager, which has no signal today), so this is the
+		// last point at which a cancellation can prevent the model call rather than
+		// merely be noticed after it. Once the chain starts, an abort surfaces via the
+		// `failed` → `cancelled` reconciliation on the catch below.
+		ctx.throwIfAborted();
+
 		try {
 			await plugin.chainManager.executeChain(chain, undefined, file);
 		} catch (e) {

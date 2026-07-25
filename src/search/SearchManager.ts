@@ -111,6 +111,16 @@ export interface SearchIndexOptions {
 	 * complete having produced zero vectors and report success.
 	 */
 	requireEmbeddings?: boolean;
+	/**
+	 * Cooperative cancellation for the per-file loop.
+	 *
+	 * A rebuild batch is the longest-running thing in the queue and its loop lives here,
+	 * not in the workflow, so a checkpoint placed only around `indexFiles` would be
+	 * useless — a cancelled batch would still chunk and upsert all 100 of its files.
+	 * Checked per file, which is the natural item boundary; the signal is the plain Web
+	 * API one, so nothing in `src/search` needs to know about orchestration.
+	 */
+	signal?: AbortSignal;
 }
 
 // Everything that isn't already one of the two typed embedding errors becomes "the embedder
@@ -227,7 +237,12 @@ export class SearchManager {
 			await client.upsertChunks(batch);
 		};
 
+		const signal = options?.signal;
 		for (const file of files) {
+			// Reading + hashing every file in a batch is itself minutes of work on a large
+			// rebuild, so the prepare pass gets its own checkpoint rather than only the
+			// indexing pass below.
+			signal?.throwIfAborted();
 			const prepared = await this.prepareFile(file);
 			if (prepared) preparedFiles.push(prepared);
 		}
@@ -235,6 +250,12 @@ export class SearchManager {
 		const fileStates = await this.loadFileStates(client, preparedFiles.map(item => item.file.path));
 
 		for (const prepared of preparedFiles) {
+			// Buffered chunks from files already processed are deliberately NOT flushed on
+			// the way out: everything upserted so far is already in the index, and the ones
+			// still in the buffer belong to files the cancelled run will simply re-index on
+			// its next pass (the coverage-aware skip makes that cheap). Flushing a partial
+			// buffer would write chunks for a batch the user stopped.
+			signal?.throwIfAborted();
 			processedFiles++;
 			const stored = fileStates.get(prepared.file.path);
 			// Content hash alone is not enough to skip: it says the *text* is current, not that

@@ -64,6 +64,13 @@ function makePlugin(overrides = {}) {
 	};
 }
 
+// The full WorkflowContext shape. Cancellation widened it beyond `{ plugin }`, and
+// the search workflows now checkpoint through it, so a partial stub throws.
+// `runWorkflowWithTimeout` is what builds this in production.
+function makeCtx(plugin, signal = new AbortController().signal) {
+	return { plugin, signal, throwIfAborted: () => signal.throwIfAborted() };
+}
+
 test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing inline', async () => {
 	let resetCount = 0;
 	const plugin = makePlugin({
@@ -72,7 +79,7 @@ test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing
 			listIndexableFiles: () => Array.from({ length: 553 }, (_, i) => ({ path: `note-${i}.md` })),
 		},
 	});
-	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-1', params: {} }, { plugin });
+	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-1', params: {} }, makeCtx(plugin));
 
 	assert.equal(result.status, 'done');
 	assert.equal(resetCount, 1);
@@ -97,7 +104,7 @@ test('SearchRebuildWorkflow keeps a full-corpus rebuild to a few dozen job files
 			listIndexableFiles: () => Array.from({ length: CORPUS }, (_, i) => ({ path: `note-${i}.md` })),
 		},
 	});
-	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-2', params: {} }, { plugin });
+	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-2', params: {} }, makeCtx(plugin));
 
 	assert.equal(result.status, 'done');
 	assert.equal(plugin.enqueued.length, 55, '5,456 files at 100/batch is 55 jobs');
@@ -117,7 +124,7 @@ test('search upsert defers quietly while the companion is offline', async () => 
 			companionAvailable: async () => false,
 		},
 	});
-	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-1', params: { path: 'note.md' } }, { plugin });
+	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-1', params: { path: 'note.md' } }, makeCtx(plugin));
 
 	assert.equal(result.status, 'deferred');
 	assert.match(result.error, /Search companion not reachable/);
@@ -135,7 +142,7 @@ test('search upsert surfaces the companion reason instead of the not-reachable t
 			companionUnavailableReason: () => reason,
 		},
 	});
-	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-2', params: { path: 'note.md' } }, { plugin });
+	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-2', params: { path: 'note.md' } }, makeCtx(plugin));
 
 	assert.equal(result.status, 'deferred');
 	assert.equal(result.error, reason);

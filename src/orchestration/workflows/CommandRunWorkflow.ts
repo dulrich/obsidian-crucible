@@ -30,6 +30,10 @@ export class CommandRunWorkflow implements Workflow {
 			targetFile = file;
 		}
 
+		// Last point before dispatching into the internal-command registry, which has no
+		// signal of its own.
+		ctx.throwIfAborted();
+
 		const args = isStringRecord(params.args) ? params.args : {};
 		const result = await plugin.chainManager.executeInternalCommand(commandId, args, null, undefined, targetFile);
 		if (result === false) {

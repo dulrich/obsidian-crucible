@@ -7,7 +7,13 @@
 import type { JobLane } from './types';
 import { laneRank } from './lanes';
 
-export type MemoryJobStatus = 'pending' | 'running' | 'done' | 'failed';
+// `cancelled` mirrors the file backend's terminal bucket: a stopped entry must not
+// render or count as a failure.
+export type MemoryJobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+
+function isTerminal(status: MemoryJobStatus): boolean {
+	return status === 'done' || status === 'failed' || status === 'cancelled';
+}
 
 export interface MemoryJobEntry {
 	key: string;
@@ -16,6 +22,8 @@ export interface MemoryJobEntry {
 	status: MemoryJobStatus;
 	lane: JobLane;
 	error?: string;
+	/** Human-readable detail for a non-failure terminal state (today: cancelled). */
+	note?: string;
 	addedAt: number;
 	finishedAt?: number;
 }
@@ -179,11 +187,23 @@ export class MemoryJobQueue {
 		this.onChange(this.entries.size);
 	}
 
+	// Terminal, and distinct from markFailed on purpose: `error` is left unset so a
+	// cancelled entry never renders as a diagnostic, and the auto-source latch that
+	// markFailed can trip (no-api-key) has no counterpart here.
+	markCancelled(key: string, note?: string): void {
+		const entry = this.entries.get(key);
+		if (!entry) return;
+		entry.status = 'cancelled';
+		entry.note = note;
+		entry.finishedAt = Date.now();
+		this.onChange(this.entries.size);
+	}
+
 	sweepTerminal(): void {
 		const cutoff = Date.now() - this.retentionMs;
 		let changed = false;
 		for (const [key, entry] of this.entries) {
-			if (entry.status !== 'done' && entry.status !== 'failed') continue;
+			if (!isTerminal(entry.status)) continue;
 			if ((entry.finishedAt ?? 0) > cutoff) continue;
 			this.entries.delete(key);
 			changed = true;
@@ -197,6 +217,7 @@ function statusRank(status: MemoryJobStatus): number {
 		case 'running': return 0;
 		case 'pending': return 1;
 		case 'failed': return 2;
-		case 'done': return 3;
+		case 'cancelled': return 3;
+		case 'done': return 4;
 	}
 }

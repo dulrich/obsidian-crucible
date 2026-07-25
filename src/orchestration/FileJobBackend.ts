@@ -5,6 +5,7 @@ import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
+import { CancelJobOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
 import { defaultLaneForPriority, laneRank } from './lanes';
@@ -20,6 +21,9 @@ export class FileJobBackend implements JobBackend {
 	// between listFolder and move so two workers of this type can't claim the same job
 	// (claim + check happen synchronously, with no await between them).
 	private readonly claimed = new Set<string>();
+	// Runs currently executing, keyed by job id — the same key `runJob` takes, so
+	// `cancelJob(id)` addresses a job with the identifier the caller already has.
+	private readonly running = new RunningJobRegistry();
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(
@@ -82,6 +86,17 @@ export class FileJobBackend implements JobBackend {
 		if (!moved) return 'empty';
 		await this.execute(moved);
 		return 'ran';
+	}
+
+	// Cancels the running job with this id. A queued job is not running, so it
+	// answers 'not-running' — dropping queued work is a queue operation (removing the
+	// markdown file), not an abort of work in progress.
+	cancelJob(id: string): Promise<CancelJobOutcome> {
+		return this.running.cancel(id);
+	}
+
+	isCancelling(id: string): boolean {
+		return this.running.isCancelling(id);
 	}
 
 	// File types report "maybe": emptiness is checked lazily during the claim, so the
@@ -158,9 +173,15 @@ export class FileJobBackend implements JobBackend {
 			await this.failEntry(moved, `Workflow "${moved.job.type}" is disabled in settings`);
 			return;
 		}
+		// Registered for the whole of execute(), including the store moves that settle
+		// the job. `isCancelling` therefore stays true until the file has left
+		// running/, which is what keeps Orchestrator.scan()'s stale sweep from
+		// resurrecting a job that is still winding down.
+		const run = this.running.begin(moved.job.id);
+		let settlement: RunSettlement = 'completed';
 		try {
 			const result = await runWorkflowWithTimeout(
-				this.plugin, this.workflow, moved.job, resolveTimeoutMs(this.plugin, this.config),
+				this.plugin, this.workflow, moved.job, resolveTimeoutMs(this.plugin, this.config), run.signal,
 			);
 			if (result.outputPaths && result.outputPaths.length > 0) {
 				await this.store.setOutputPaths(moved.file, result.outputPaths);
@@ -173,6 +194,11 @@ export class FileJobBackend implements JobBackend {
 				await this.store.appendNotes(moved.file, result.notes);
 				if (result.notes.startsWith('Partial:')) await this.store.setPartial(moved.file, true);
 			}
+			if (result.status === 'cancelled') {
+				settlement = 'cancelled';
+				await this.cancelEntry(moved, result);
+				return;
+			}
 			if (result.status === 'failed') {
 				await this.failEntry(moved, result.error ?? 'Workflow returned failed status', result);
 				return;
@@ -183,7 +209,23 @@ export class FileJobBackend implements JobBackend {
 			routineJobNotice(this.plugin, this.type, `Orchestrate: ${moved.job.id} → done`);
 		} catch (e) {
 			await this.failEntry(moved, e instanceof Error ? e.message : String(e));
+		} finally {
+			run.finish(settlement);
 		}
+	}
+
+	// Terminal settle for a cancelled run. Deliberately not failEntry: no `error` is
+	// written (a cancellation is not a diagnostic), the job lands in cancelled/
+	// rather than failed/ so no failure-retry policy can pick it up, and the notice
+	// follows the routine-notice gate rather than the unconditional failure Notice.
+	private async cancelEntry(moved: { file: TFile; job: OrchestrationJob }, result: WorkflowResult): Promise<void> {
+		await this.store.move(moved.file, moved.job, 'cancelled');
+		void this.emitQueueUpdate();
+		routineJobNotice(
+			this.plugin,
+			this.type,
+			`Orchestrate: ${moved.job.id} → cancelled${result.notes ? ` (${result.notes})` : ''}`,
+		);
 	}
 
 	private async deferEntry(moved: { file: TFile; job: OrchestrationJob }, result: WorkflowResult): Promise<void> {

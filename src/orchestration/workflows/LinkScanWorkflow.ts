@@ -13,6 +13,11 @@ interface AggregateEntry {
 }
 
 export class LinkScanWorkflow implements Workflow {
+	// Two loops, both instrumented: a vault-wide read pass and a registry write pass.
+	// The read pass is pure aggregation into a local Map, so stopping in it costs
+	// nothing beyond the reads already done; the write pass creates/updates one
+	// link-record note per URL, and each is independent, so a partial pass is a
+	// consistent vault that the next run simply completes.
 	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
 		const app = plugin.app;
@@ -28,6 +33,7 @@ export class LinkScanWorkflow implements Workflow {
 		let scannedNotes = 0;
 
 		for (const file of app.vault.getMarkdownFiles()) {
+			ctx.throwIfAborted();
 			if (isExcluded(file.path, exclusions)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (fm && fm['type'] === 'link-record') continue;
@@ -57,6 +63,7 @@ export class LinkScanWorkflow implements Workflow {
 		const outputPaths: string[] = [];
 
 		for (const entry of aggregate.values()) {
+			ctx.throwIfAborted();
 			const result = await this.applyToRegistry(plugin, registryRoot, today, entry);
 			if (result.created) created++;
 			else updated++;
