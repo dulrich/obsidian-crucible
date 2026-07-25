@@ -1,8 +1,8 @@
 # Standalone stack for the Crucible search companion. Mirrors the block enrolled in the
 # context-control home-compose fleet (compose.home.yml), so `docker compose up` here and
-# `home-compose up crucible-search` there bring up the same service.
+# `home-compose up crucible-search` there bring up the same services.
 #
-# JSON API only, no UI. Unauthenticated with full index write access, so the published
+# JSON API only, no UI. Unauthenticated with full index write access, so every published
 # port is scoped to loopback rather than all interfaces.
 services:
   crucible-search:
@@ -12,7 +12,10 @@ services:
         GIT_SHA: ${CRUCIBLE_GIT_SHA:-unknown}
     container_name: crucible-search
     restart: unless-stopped
-    mem_limit: 512m
+    # 1g, not 512m: the vector leg holds one Float32Array of chunks x dim. At 1024d over the
+    # current 52,257-chunk index that is ~214MB resident on top of the Node baseline and
+    # SQLite's page cache. See plans/semantic-vector-leg-and-reranker.md.
+    mem_limit: 1g
     ports:
       - "127.0.0.1:4801:4801"
     environment:
@@ -27,5 +30,80 @@ services:
       timeout: 5s
       retries: 3
 
+  # Embeddings backend for Crucible's semantic search leg. Infinity (michaelfeil/infinity) is
+  # a text-embeddings-inference-style CPU server; Crucible's existing `openai-compatible`
+  # provider kind speaks its OpenAI-compatible /v1/embeddings endpoint as-is (zero plugin
+  # changes). --url-prefix /v1 makes the served path match that convention exactly; the
+  # provider's base URL must be configured as http://127.0.0.1:4802/v1 (the client appends
+  # "/embeddings" itself). mem_limit 4g: bge-m3 is a 568M-param XLM-RoBERTa-large model
+  # (~2.1GB fp32 weights + 20% overhead per HF's own memory-requirements estimate), and a
+  # same-family reranker was independently reported consuming 11GB CPU RAM under
+  # text-embeddings-inference's per-core tokenizer duplication (huggingface/text-embeddings-
+  # inference#280) — a failure mode this Infinity image does not share, but which sets the
+  # realistic ceiling to size against rather than the bare-weights figure. See
+  # plans/semantic-vector-leg-and-reranker.md WP-4 for the full trail.
+  crucible-embedder:
+    image: michaelf34/infinity:0.0.77-cpu
+    container_name: crucible-embedder
+    restart: unless-stopped
+    mem_limit: 4g
+    ports:
+      - "127.0.0.1:4802:4802"
+    command:
+      - "v2"
+      - "--model-id"
+      - "BAAI/bge-m3"
+      - "--port"
+      - "4802"
+      - "--device"
+      - "cpu"
+      - "--engine"
+      - "optimum"
+      - "--url-prefix"
+      - "/v1"
+    volumes:
+      - crucible-embedder-cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4802/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  # Reranking backend for WP-5's opt-in reranker. Same image, a second model, a second
+  # instance (these servers host one model each). No --url-prefix: Infinity's default is an
+  # unprefixed /rerank, and WP-5's provider client builds "{baseUrl}/rerank" directly — so the
+  # reranker provider's base URL is configured as http://127.0.0.1:4803 (no /v1 suffix).
+  # Verified request/response shape: POST /rerank {model, query, documents} ->
+  # {results:[{index, relevance_score}], ...}. mem_limit matches the embedder for the same
+  # architecture-family reasons above.
+  crucible-reranker:
+    image: michaelf34/infinity:0.0.77-cpu
+    container_name: crucible-reranker
+    restart: unless-stopped
+    mem_limit: 4g
+    ports:
+      - "127.0.0.1:4803:4803"
+    command:
+      - "v2"
+      - "--model-id"
+      - "BAAI/bge-reranker-v2-m3"
+      - "--port"
+      - "4803"
+      - "--device"
+      - "cpu"
+      - "--engine"
+      - "optimum"
+    volumes:
+      - crucible-reranker-cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4803/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
 volumes:
   crucible-search-data:
+  crucible-embedder-cache:
+  crucible-reranker-cache:

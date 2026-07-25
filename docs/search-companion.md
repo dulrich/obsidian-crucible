@@ -72,6 +72,47 @@ Expected setup shape:
 
 Do not store Supabase service-role keys in Obsidian settings. If a browser-accessible anon key is used, the companion still needs to enforce vault scoping and should avoid exposing write access directly from the plugin.
 
+## Inference services (embeddings + reranking)
+
+Semantic search and the opt-in reranker need a model server; the fleet declares one rather than
+leaving it as a thing you have to remember to start. Two CPU containers run beside
+`crucible-search`, each hosting one model:
+
+| Service | Port | Model | Purpose |
+|---|---|---|---|
+| `crucible-embedder` | `127.0.0.1:4802` | `BAAI/bge-m3` (1024d) | `POST /v1/embeddings` — OpenAI-compatible |
+| `crucible-reranker` | `127.0.0.1:4803` | `BAAI/bge-reranker-v2-m3` | `POST /rerank` |
+
+Both run the [Infinity](https://github.com/michaelfeil/infinity) inference server
+(`michaelf34/infinity:0.0.77-cpu`), started with `--device cpu --engine optimum`. Like
+`crucible-search`, both publish to `127.0.0.1` only — the embedder's port also carries an
+unauthenticated, full-access inference API.
+
+**Pointing Crucible at the embedder:** in the plugin's provider settings, add a provider of kind
+`openai-compatible` with base URL `http://127.0.0.1:4802/v1` (no API key required) and set
+`searchEmbeddingModel` to `BAAI/bge-m3` on that provider. The `openai-compatible` client appends
+`/embeddings` to the configured base URL itself, so the base URL must include the `/v1` segment
+— the embedder is started with `--url-prefix /v1` specifically so this matches.
+
+**Reranker endpoint (for the WP-5 reranker client):** `POST http://127.0.0.1:4803/rerank` — no
+`/v1` prefix; Infinity's default route is unprefixed and the reranker container is not started
+with `--url-prefix`. Verified request/response shape:
+
+```
+POST /rerank
+{ "model": "BAAI/bge-reranker-v2-m3", "query": "...", "documents": ["...", "..."] }
+
+200 OK
+{ "results": [ { "index": 0, "relevance_score": 0.93 }, ... ], "model": "...", "usage": {...} }
+```
+
+**When they're down:** both carry `restart: unless-stopped` and a `/health` healthcheck, same
+as `crucible-search`. If the embedder is unreachable, `attachEmbeddings` catches the failure,
+logs a debug-gated warning, and the index falls back to FTS-only for that flush — search stays
+functional, just without the vector rank, until the container comes back. If the reranker is
+unreachable, the explicit rerank action in the search modal fails with an error; it never blocks
+type-ahead search, which does not call it.
+
 ## API Contract
 
 - `GET /health`
