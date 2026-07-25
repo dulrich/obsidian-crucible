@@ -35,18 +35,39 @@ services:
   # provider kind speaks its OpenAI-compatible /v1/embeddings endpoint as-is (zero plugin
   # changes). --url-prefix /v1 makes the served path match that convention exactly; the
   # provider's base URL must be configured as http://127.0.0.1:4802/v1 (the client appends
-  # "/embeddings" itself). mem_limit 4g: bge-m3 is a 568M-param XLM-RoBERTa-large model
-  # (~2.1GB fp32 weights + 20% overhead per HF's own memory-requirements estimate), and a
-  # same-family reranker was independently reported consuming 11GB CPU RAM under
-  # text-embeddings-inference's per-core tokenizer duplication (huggingface/text-embeddings-
-  # inference#280) — a failure mode this Infinity image does not share, but which sets the
-  # realistic ceiling to size against rather than the bare-weights figure. See
-  # plans/semantic-vector-leg-and-reranker.md WP-4 for the full trail.
+  # "/embeddings" itself).
+  #
+  # mem_limit 12g, raised from 4g at bring-up after a MEASURED memcg OOM rather than an estimate:
+  # the container was killed four times at anon-rss 4,064,176kB under
+  # constraint=CONSTRAINT_MEMCG, and was still climbing when it hit the wall. That peak is not
+  # steady-state inference — it is optimum's one-time ONNX graph-optimization pass over bge-m3's
+  # onnx/model.onnx (568M-param XLM-RoBERTa-large), which holds the source graph and the
+  # optimized copy simultaneously. Measured steady state after that pass is ~5.0GiB.
+  #
+  # Why 12g and not 8g, which did boot: at 8g the cgroup's memory.peak came to rest at exactly
+  # 8589934592 — the limit, to the byte — with 11,121 memory.max reclaim events. It survived by
+  # reclaiming flat against the wall, not with headroom. That is fine until the cache volume is
+  # cleared or the model changes and the optimization pass reruns, at which point 8g is a coin
+  # flip. This is a ceiling, not a reservation: raising it costs nothing while nothing uses it.
+  # Do not trim back toward the bare-weights figure (~2.1GB fp32) — that number describes the
+  # wrong phase of startup, and 4g demonstrably does not boot at all.
+  #
+  # Diagnostic note for whoever hits this next: `docker inspect` reports OOMKilled=false and
+  # exit=0, because the kernel kills the infinity_emb child rather than PID 1 — Docker never
+  # sets the flag. dmesg is the only honest source.
+  # See plans/semantic-vector-leg-and-reranker.md WP-4 for the full trail.
+  #
+  # cpus 16 is throughput headroom, not correctness — sized for a 24-logical-core box. The
+  # full-vault backfill runs for hours and would otherwise saturate every core; measured
+  # embedding scaling is already near-flat past 12 threads (3.8/s at 1, 10.3/s at 4, 20.1/s at
+  # 12), so the ceiling costs little. Delete the line to let a backfill run flat out, or raise
+  # it on a larger box.
   crucible-embedder:
     image: michaelf34/infinity:0.0.77-cpu
     container_name: crucible-embedder
     restart: unless-stopped
-    mem_limit: 4g
+    mem_limit: 12g
+    cpus: 16
     ports:
       - "127.0.0.1:4802:4802"
     command:
@@ -77,11 +98,22 @@ services:
   # Verified request/response shape: POST /rerank {model, query, documents} ->
   # {results:[{index, relevance_score}], ...}. mem_limit matches the embedder for the same
   # architecture-family reasons above.
+  #
+  # --engine torch, NOT optimum, and this is not a tuning preference — it is the only engine
+  # that can load this model. optimum resolves ONNX weights from the HF repo, and
+  # BAAI/bge-reranker-v2-m3 publishes PyTorch weights only, so `--engine optimum` dies during
+  # engine selection with "ValueError: No onnx files found for BAAI/bge-reranker-v2-m3", before
+  # it downloads a single byte (the tell: a 56KB cache volume next to the embedder's 4.3GB).
+  # It fails identically at any mem_limit. The embedder above legitimately keeps optimum because
+  # bge-m3 DOES ship onnx/model.onnx — the two services differ here for a reason, so do not
+  # "align" them in either direction without checking which weights each repo actually
+  # publishes. Note the image bakes INFINITY_ENGINE=optimum into its env; the explicit CLI flag
+  # is what overrides it.
   crucible-reranker:
     image: michaelf34/infinity:0.0.77-cpu
     container_name: crucible-reranker
     restart: unless-stopped
-    mem_limit: 4g
+    mem_limit: 8g
     ports:
       - "127.0.0.1:4803:4803"
     command:
@@ -93,7 +125,7 @@ services:
       - "--device"
       - "cpu"
       - "--engine"
-      - "optimum"
+      - "torch"
     volumes:
       - crucible-reranker-cache:/app/.cache
     healthcheck:
