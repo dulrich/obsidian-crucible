@@ -34,7 +34,25 @@ node scripts/search-companion.mjs --port 4801 --host 127.0.0.1 --db /path/to/sea
 
 Or via environment: `CRUCIBLE_SEARCH_PORT`, `CRUCIBLE_SEARCH_HOST`, `CRUCIBLE_SEARCH_DB`. `CRUCIBLE_SEARCH_HOST` defaults to `127.0.0.1` (loopback-only) for the standalone path; only the container sets it to `0.0.0.0`, since a loopback bind inside a container is unreachable from the host even with a published port.
 
-The bundled companion script implements local SQLite FTS5/BM25. It accepts embedding vectors in the API payload and stores them as JSON, but does not rank with vectors yet. A future `sqlite-vec` implementation should keep the same endpoints and add vector/hybrid ranking behind `/v1/search`.
+The bundled companion script implements local SQLite FTS5/BM25 plus a vector leg: it stores embedding vectors as a `BLOB` (little-endian float32, not JSON — a BLOB reads straight into a `Float32Array` with zero parse, which matters once you're loading 52k+ chunks on wake) and ranks with them. `POST /v1/search` fuses three RRF lists — text, title, vector — rather than two, and `scoreVector`/`attribution.vectorRank` are populated whenever a query embedding arrives and the vault has vectors.
+
+**Why no `sqlite-vec` (or other vector extension), and why that's a measured decision, not a deferred TODO.** `sqlite-vec`'s `vec0` tables do exhaustive KNN — ANN indexing (IVF/HNSW) is roadmap, not shipped — so it would buy a large constant factor via SIMD/quantization, not a smaller complexity class, at the cost of the companion's most load-bearing invariant: dependency-free, one-file `COPY`, no `npm install`, no platform-and-arch-specific `.so`. Brute-force cosine over the full in-memory matrix already measures **13ms at 384d, 24ms at 768d, 33ms at 1024d** over 52,257 chunks (single-threaded JS, `Float32Array` full scan), and that scan is exactly linear:
+
+| chunks | ≈ notes | scan | resident |
+|---|---|---|---|
+| 52,257 (today) | 5,455 | 33ms | 0.21 GB |
+| 100,000 | 10,400 | 63ms | 0.41 GB |
+| 250,000 | 26,100 | **158ms** | 1.02 GB |
+| 500,000 | 52,200 | 316ms | 2.05 GB |
+| 1,000,000 | 104,400 | 631ms | 4.10 GB |
+
+Type-ahead has a 200ms debounce and the companion answers a 3-character FTS query in ~27ms today, so +33ms is invisible and +158ms starts to bite — the **interactive ceiling is ~250k chunks (~26,000 notes)**. Past that, the dependency-free escape hatches, in order, are: (1) shard the scan across `node:worker_threads` over a `SharedArrayBuffer` (the matrix is already one flat `Float32Array`), which buys roughly the same constant factor SIMD would; then (2), if resident memory becomes binding first (it does, around the same point), `int8` quantization with a float32 rescore of the top ~1000 cuts residency 4×. See the AGENTS.md quirk on the vector leg for the rest of the reasoning (dimension-agnostic contract, the full-matrix-scan requirement, why `int8` isn't used yet at this size) and `plans/semantic-vector-leg-and-reranker.md`'s "Why not `sqlite-vec` now" section for the full argument as originally worked through.
+
+### Schema and operational surface
+
+- **Schema version 3** is required (`SCHEMA_VERSION` in this script, `SEARCH_REQUIRED_SCHEMA_VERSION` in `src/search/types.ts`, bumped together). A companion reporting a lower `schemaVersion` is flagged `rebuildRequired` by the client — search still runs FTS-only, but says an index rebuild is required. The 2→3 migration is three additive `ALTER TABLE chunks ADD COLUMN` statements (`embedding BLOB`, `embedding_dim INTEGER`, `embedding_model TEXT`) — no drop/refill, no reindex needed on upgrade.
+- **`GET /health`** reports the vector leg's real state: `vectorAvailable` (the vault holds usable vectors at one consistent width), `vectorBackend` (which backend answered — `brute-force-js` today), `embeddedChunks`, `embeddingDim`, and `embeddingModel` (the model that produced them, when every embedded chunk agrees on it).
+- **`Search: embed missing vectors`** (command id `search-embed-missing`, in the `Search` command group) backfills vectors for already-indexed notes without touching the FTS index or calling `resetIndex()` — turning on semantic search after a vault is already indexed does not require a full rebuild. It fans out resumable batches, skips paths whose embedding coverage already matches the active model, and defers (rather than fails) on a transient embedder outage.
 
 Recommended plugin settings for the bundled local service:
 
@@ -87,6 +105,17 @@ Both run the [Infinity](https://github.com/michaelfeil/infinity) inference serve
 (`michaelf34/infinity:0.0.77-cpu`), started with `--device cpu --engine optimum`. Like
 `crucible-search`, both publish to `127.0.0.1` only — the embedder's port also carries an
 unauthenticated, full-access inference API.
+
+**Why `bge-m3` is the recommended default.** `searchEmbeddingModel` is a plain user setting — the
+companion is dimension-agnostic and stores whatever width arrives, so nothing forces `bge-m3`
+specifically. It's recommended because Crucible ships publicly and no English-only assumption may
+be baked into the defaults, even though *this* vault measures 100.0% ASCII (13 of 52,257 chunks
+carry any non-Latin script, all incidental — a GitHub issue thread and two YouTube "about" pages).
+`bge-m3` is 1024d, multilingual, and has an 8,192-token context window that this vault's
+~1,800-character chunks never come close to truncating against. Cheaper monolingual alternatives,
+if multilingual recall isn't a requirement for a given vault: `nomic-embed-text` (768d) or
+`bge-small-en-v1.5` (384d) — both cut matrix size and per-query scan time roughly in proportion to
+dimension (see the scan-time table above).
 
 **Pointing Crucible at the embedder:** in the plugin's provider settings, add a provider of kind
 `openai-compatible` with base URL `http://127.0.0.1:4802/v1` (no API key required) and set

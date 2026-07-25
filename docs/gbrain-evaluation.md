@@ -135,12 +135,32 @@ cost, since Obsidian already did the extraction work GBrain's typed-edge writer 
 
 This verdict is a snapshot, not a permanent ruling. Concretely, it's worth re-reading GBrain if:
 
-- **Semantic search stops being optional.** The companion already accepts and stores embedding
-  vectors in its payload but doesn't rank with them (`docs/search-companion.md`: "does not rank
-  with vectors yet"). If semantic recall moves from "stored but unused" to an actual requirement,
-  GBrain's embedding-provider matrix and its two reranker recipes (hosted ZeroEntropy, local
-  llama.cpp cross-encoder) become relevant prior art — not because the platform becomes worth
-  adopting, but because the recipes transfer.
+- **Semantic search stops being optional — this trigger has fired.** It was written when the
+  companion accepted and stored embedding vectors in its payload but didn't rank with them
+  (`docs/search-companion.md` used to say "does not rank with vectors yet"). It now does: the
+  companion stores vectors as a BLOB, builds an in-memory matrix, and `POST /v1/search` fuses a
+  third RRF list — text, title, vector — whenever a query embedding arrives and the vault has
+  vectors, on top of the existing weighted-BM25 pooling and title boost. Reranking landed too, as
+  GBrain's own shape suggested: a provider-level `rerank?()` capability (`POST {baseUrl}/rerank`
+  on `openai-compatible`, with an LLM-`complete()` fallback for providers with no native
+  endpoint) behind an explicit button in the search modal, never on the type-ahead path — so
+  per-keystroke latency stays untouched and whether reranking actually helps this corpus is
+  something to observe by clicking, not assume. See
+  `plans/semantic-vector-leg-and-reranker.md` for the full design and the AGENTS.md quirk on the
+  vector leg for the measured numbers behind it (scan cost, backfill throughput, the interactive
+  ceiling).
+
+  What this did **not** adopt, and the reasoning still holds: no `pgvector`/HNSW/ANN index — the
+  companion stays dependency-free SQLite doing brute-force cosine over a flat `Float32Array`,
+  which is fast enough at this vault's size (measured 33ms at 1024d over 52,257 chunks) and has a
+  documented, non-adopted escape hatch (worker-sharded scan, then `int8` quantization) rather than
+  a vector database. No query expansion. No synthesis cycle — `gbrain think`'s
+  cited-answer-plus-gap-analysis layer is still just a plausible future *agent* over
+  `src/providers.ts`/`src/agents.ts`, not something this work built. GBrain's embedding-provider
+  matrix and hosted-reranker recipe (ZeroEntropy `zerank-2`) were not consulted or needed — the
+  fleet's own Infinity-based embedder/reranker containers (`docs/search-companion.md`'s
+  "Inference services" section) covered the same ground with one CPU-only, dependency-light,
+  locally-hosted server.
 - **The vault outgrows FTS5 + a link boost.** No hard row-count threshold to give here — it's a
   qualitative call. The honest signal is ranking quality degrading in practice (relevant notes
   reliably missing from top results despite the adopted boosts), not a count crossing a line.
