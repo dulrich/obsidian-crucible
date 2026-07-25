@@ -4,7 +4,7 @@ import { ProviderManager } from '../providers';
 import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
 import { SearchServiceClient } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
-import { applyLinkBoost, buildLinkGraph } from './linkGraph';
+import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
 import { SearchChunk, SearchFileState, SearchHealth, SearchResponse } from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
@@ -34,6 +34,10 @@ interface PreparedSearchFile {
 
 export class SearchManager {
 	private readonly availability = new CompanionAvailabilityGate();
+	// Built lazily on the first boosted search and reused until the metadata cache says the
+	// link graph moved. See linkGraph() for why this cache is load-bearing rather than a
+	// micro-optimization.
+	private linkGraphCache: LinkGraph | null = null;
 
 	constructor(
 		private readonly app: App,
@@ -203,17 +207,39 @@ export class SearchManager {
 		if (!this.settings.searchLinkBoostEnabled || !this.settings.searchLinkBoostWeight) return response;
 		if (response.results.length === 0) return response;
 
+		return {
+			...response,
+			results: applyLinkBoost(response.results, this.linkGraph(), { weight: this.settings.searchLinkBoostWeight }),
+		};
+	}
+
+	/**
+	 * The boost's graph, rebuilt only when the metadata cache has moved since the last build.
+	 *
+	 * Rebuilding per search cost ~70ms on this vault — over the SEARCH_LINK_BOOST_SLOW_BUILD_MS
+	 * budget on its own, and more than the median companion round-trip for a typical query
+	 * (~5ms for an 8-character term). Once the modal searches as the user types, that would be
+	 * ~70ms of main-thread work per keystroke burst, which is the whole latency budget spent on
+	 * a graph that almost never changed between two keystrokes. Invalidation is driven by
+	 * `metadataCache.on('resolved')` in main.ts, which is exactly the event that fires when link
+	 * resolution has settled after an edit — so a stale graph can outlive an edit only until the
+	 * cache finishes resolving it, and the boost is a reordering nudge, never a filter.
+	 */
+	private linkGraph(): LinkGraph {
+		if (this.linkGraphCache) return this.linkGraphCache;
+
 		const start = performance.now();
-		const graph = buildLinkGraph(this.app);
+		this.linkGraphCache = buildLinkGraph(this.app);
 		const elapsed = performance.now() - start;
 		if (elapsed > SEARCH_LINK_BOOST_SLOW_BUILD_MS) {
 			logWarn('search', `link graph build took ${elapsed.toFixed(1)}ms, exceeding the ${SEARCH_LINK_BOOST_SLOW_BUILD_MS}ms budget`);
 		}
+		return this.linkGraphCache;
+	}
 
-		return {
-			...response,
-			results: applyLinkBoost(response.results, graph, { weight: this.settings.searchLinkBoostWeight }),
-		};
+	/** Drops the cached link graph; the next boosted search rebuilds it. */
+	invalidateLinkGraph(): void {
+		this.linkGraphCache = null;
 	}
 
 	async sweep(description: string, limit?: number): Promise<SearchResponse> {
