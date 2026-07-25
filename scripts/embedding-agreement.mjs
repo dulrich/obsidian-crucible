@@ -47,8 +47,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseRuntimeSpec, embedBatch, normalizeDefensively, newNormStats, dot } from './lib/embed-runtime.mjs';
 
-const NORM_TOLERANCE = 1e-4;
 const DEFAULT_SAMPLES = 200;
 const DEFAULT_QUERIES = 5;
 const DEFAULT_BATCH_SIZE = 16;
@@ -81,20 +81,6 @@ function parseArgs(argv) {
 		}
 	}
 	return out;
-}
-
-function parseRuntimeSpec(spec) {
-	const eq = spec.indexOf('=');
-	if (eq === -1) throw new Error(`Runtime spec must be label=url,model[,kind]: ${spec}`);
-	const label = spec.slice(0, eq);
-	const rest = spec.slice(eq + 1);
-	const parts = rest.split(',');
-	if (parts.length < 2) throw new Error(`Runtime spec must be label=url,model[,kind]: ${spec}`);
-	const [url, model, kind = 'openai'] = parts;
-	if (kind !== 'openai' && kind !== 'ollama') {
-		throw new Error(`Unknown runtime kind "${kind}" in spec: ${spec} (expected "openai" or "ollama")`);
-	}
-	return { label, url: url.replace(/\/+$/, ''), model, kind };
 }
 
 function findNewestSnapshot() {
@@ -226,84 +212,10 @@ function sampleChunks(dbPath, sampleCount, queryCount, mode = 'stratified') {
 	}
 }
 
-function l2Norm(vec) {
-	let sum = 0;
-	for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
-	return Math.sqrt(sum);
-}
-
-function normalizeDefensively(vec, stats) {
-	const norm = l2Norm(vec);
-	stats.total++;
-	if (norm === 0) {
-		stats.zero++;
-		return vec;
-	}
-	if (Math.abs(norm - 1) > NORM_TOLERANCE) {
-		stats.nonUnit++;
-	}
-	if (norm === 1) return vec;
-	const out = new Array(vec.length);
-	for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
-	return out;
-}
-
-function dot(a, b) {
-	let sum = 0;
-	const n = Math.min(a.length, b.length);
-	for (let i = 0; i < n; i++) sum += a[i] * b[i];
-	return sum;
-}
-
-async function embedOpenAICompatible(baseUrl, model, texts) {
-	const res = await fetch(`${baseUrl}/embeddings`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ model, input: texts }),
-	});
-	if (!res.ok) {
-		const body = await res.text().catch(() => '');
-		throw new Error(`POST ${baseUrl}/embeddings -> ${res.status}: ${body.slice(0, 300)}`);
-	}
-	const json = await res.json();
-	const data = Array.isArray(json.data) ? json.data : [];
-	if (data.length !== texts.length) {
-		throw new Error(`Expected ${texts.length} embeddings from ${baseUrl}, got ${data.length}`);
-	}
-	const out = new Array(texts.length);
-	for (const item of data) {
-		const idx = typeof item.index === 'number' ? item.index : data.indexOf(item);
-		out[idx] = item.embedding;
-	}
-	return out;
-}
-
-async function embedOllama(baseUrl, model, texts) {
-	const res = await fetch(`${baseUrl}/api/embed`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ model, input: texts }),
-	});
-	if (!res.ok) {
-		const body = await res.text().catch(() => '');
-		throw new Error(`POST ${baseUrl}/api/embed -> ${res.status}: ${body.slice(0, 300)}`);
-	}
-	const json = await res.json();
-	const embeddings = Array.isArray(json.embeddings) ? json.embeddings : [];
-	if (embeddings.length !== texts.length) {
-		throw new Error(`Expected ${texts.length} embeddings from ${baseUrl}, got ${embeddings.length}`);
-	}
-	return embeddings;
-}
-
 async function embedAllBatched(runtime, texts, batchSize, normStats) {
 	const vectors = [];
 	for (let i = 0; i < texts.length; i += batchSize) {
-		const batch = texts.slice(i, i + batchSize);
-		const raw = runtime.kind === 'ollama'
-			? await embedOllama(runtime.url, runtime.model, batch)
-			: await embedOpenAICompatible(runtime.url, runtime.model, batch);
-		for (const vec of raw) {
+		for (const vec of await embedBatch(runtime, texts.slice(i, i + batchSize))) {
 			vectors.push(normalizeDefensively(vec, normStats));
 		}
 		process.stderr.write(`  [${runtime.label}] embedded ${Math.min(i + batchSize, texts.length)}/${texts.length}\r`);
@@ -396,7 +308,7 @@ async function main() {
 
 	for (const runtime of args.runtimes) {
 		console.log(`\n== Embedding through ${runtime.label} (${runtime.kind}, ${runtime.url}, model=${runtime.model}) ==`);
-		const normStats = { total: 0, nonUnit: 0, zero: 0 };
+		const normStats = newNormStats();
 		normStatsAll.set(runtime.label, normStats);
 		const corpusVecs = await embedAllBatched(runtime, corpusTexts, args.batchSize, normStats);
 		const queryVecs = queryTexts.length > 0 ? await embedAllBatched(runtime, queryTexts, args.batchSize, normStats) : [];
