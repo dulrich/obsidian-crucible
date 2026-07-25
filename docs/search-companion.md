@@ -165,8 +165,12 @@ specifically. It's recommended because Crucible ships publicly and no English-on
 be baked into the defaults, even though *this* vault measures 100.0% ASCII (13 of 52,257 chunks
 carry any non-Latin script, all incidental — a GitHub issue thread and two YouTube "about" pages).
 `bge-m3` is 1024d, multilingual, and has an 8,192-token context window that this vault's chunks
-never come close to truncating against — the chunker's cap is 1,800 characters
-(`chunkNote`'s `maxChars`) and the measured corpus *mean* is ~1,118. Cheaper monolingual alternatives,
+never come close to truncating against. Measured over all 52,453 chunks: **mean 1,117 characters,
+median 1,320, max 1,999**. Note that 1,800 (`searchChunkMaxChars`) is a *target*, not a hard
+ceiling — `chunkText` prepends up to `searchChunkOverlapChars` (default 200) of overlap to a
+paragraph that already fits, so a chunk can reach `maxChars + overlapChars`; 143 chunks do exceed
+1,800. The mean sits well below the median because a long tail of very short chunks pulls it down
+(p5 is 43 characters). Cheaper monolingual alternatives,
 if multilingual recall isn't a requirement for a given vault: `nomic-embed-text` (768d) or
 `bge-small-en-v1.5` (384d) — both cut matrix size and per-query scan time roughly in proportion to
 dimension (see the scan-time table above).
