@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
-import { HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
+import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
+import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
 import { openAICompatibleClient } from './providers/openaiCompatible';
 import { anthropicClient } from './providers/anthropic';
 import { googleClient } from './providers/google';
@@ -30,13 +30,14 @@ const HTTP_PROVIDER_CLIENTS: Partial<Record<ProviderKind, HttpProviderClient>> =
 // union (rather than a string label) is what lets the CLI-provider rejection message below stay
 // a lookup instead of a ternary chain: adding a capability that forgets an entry here is a
 // compile error, not a wrong sentence at runtime.
-type OptionalHttpCapability = 'embed' | 'extractImage' | 'rerank' | 'describeModel';
+type OptionalHttpCapability = 'embed' | 'extractImage' | 'rerank' | 'describeModel' | 'listModels';
 
 const CLI_UNSUPPORTED_VERB: Record<OptionalHttpCapability, string> = {
 	embed: 'generate embeddings',
 	extractImage: 'extract image metadata',
 	rerank: 'rerank results',
 	describeModel: 'describe the loaded model',
+	listModels: 'list available models',
 };
 
 export class ProviderManager {
@@ -50,6 +51,13 @@ export class ProviderManager {
 	// for the session, not one per batch.
 	private readonly describeModelCache = new Map<string, Promise<ProviderModelDescription>>();
 	private readonly servedModelMismatchWarned = new Set<string>();
+	// Same shape as describeModelCache but keyed by provider id alone — a list probe has no modelId.
+	// Caches the *promise*, so concurrent callers share one in-flight request. Unlike
+	// describeModelCache it does NOT retain a settled rejection: listModels() eviction on failure is
+	// explained at the method below. clearModelListCache() is the escape hatch the WP-D "Clear
+	// cache" button should call alongside removing Provider.modelCatalog from settings — without
+	// it, a session-cached *successful* stale list would outlive an explicit user clear.
+	private readonly listModelsCache = new Map<string, Promise<ProviderCatalogModel[]>>();
 
 	constructor(app: App, private readonly secrets: SecretRegistry) {
 		this.app = app;
@@ -115,6 +123,45 @@ export class ProviderManager {
 			this.describeModelCache.set(key, cached);
 		}
 		return cached;
+	}
+
+	// Enumerates what the provider's server actually offers (WP-C). Unlike describeModel(), this
+	// has no modelId to key on — cached per provider id alone (see the field comment on
+	// listModelsCache). Per D2, this method's result is display-only data for a caller (WP-D's
+	// settings UI) to surface and let the user Accept — nothing in this file or in any
+	// HttpProviderClient.listModels() implementation may write to a ProviderModel's
+	// capabilities/embeddingDimensions/embeddingVariant.
+	// Deliberately UNLIKE describeModelCache in one respect: a rejection is evicted rather than
+	// cached. describeModel() runs unattended on the indexing path, where re-probing a dead server
+	// once per batch is pure waste, so caching its failure is right. listModels() is only ever
+	// reached from a user clicking "Fetch" — and a user who clicks Fetch, sees "server
+	// unreachable", starts their server, and clicks Fetch again means "try again". Caching the
+	// rejection would answer that second click with the first click's stale failure until they
+	// found the Clear-cache button or reloaded Obsidian. The promise is still cached while
+	// in flight, so concurrent callers share one request; only the settled failure is dropped.
+	async listModels(provider: Provider): Promise<ProviderCatalogModel[]> {
+		const client = this.requireCapability(provider, 'listModels', 'list available models');
+		let cached = this.listModelsCache.get(provider.id);
+		if (!cached) {
+			cached = client.listModels(await this.httpListContext(provider)).catch((err) => {
+				this.listModelsCache.delete(provider.id);
+				throw err;
+			});
+			this.listModelsCache.set(provider.id, cached);
+		}
+		return cached;
+	}
+
+	// Drops the session-cached list (including a cached failure) for one provider, or every
+	// provider when called with no id. The settings UI's "Clear cache" action should call this
+	// alongside removing Provider.modelCatalog from settings — otherwise a stale or failed
+	// session-cached promise would silently outlive an explicit user clear until Obsidian reloads.
+	clearModelListCache(providerId?: string): void {
+		if (providerId === undefined) {
+			this.listModelsCache.clear();
+			return;
+		}
+		this.listModelsCache.delete(providerId);
 	}
 
 	// Fire-and-forget wrapper around describeModel(), called from embed() purely for its side
@@ -204,5 +251,17 @@ export class ProviderManager {
 			throw new Error(`API key missing for provider "${provider.name || provider.id}" — re-enter it in Settings → AI.`);
 		}
 		return { provider, modelId, apiKey };
+	}
+
+	// Same idea as httpContext(), but deliberately does NOT throw when no key is stored. A list
+	// probe is triggered by a user clicking "Fetch" to see what's available, possibly *before* they
+	// have entered a key — and per the WP-C plan's per-kind table, openrouter's `/models` endpoint
+	// specifically needs no key at all. Rather than special-case openrouter, this lets every kind
+	// attempt the request with whatever key (or none) is on hand; a key-requiring server that gets
+	// none simply answers with its own 401/403, which listModels() surfaces as a normal thrown
+	// error instead of a pre-flight guess about which kinds need a key.
+	private async httpListContext(provider: Provider): Promise<HttpListCallContext> {
+		const apiKey = provider.kind === 'ollama' ? '' : await this.loadApiKey(provider.id);
+		return { provider, apiKey };
 	}
 }

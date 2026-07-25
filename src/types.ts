@@ -322,6 +322,57 @@ export interface ProviderModel {
 // modelHasCapability in settings/sections/ai.ts.
 export type ProviderModelCapability = 'chat' | 'embedding' | 'image-extraction' | 'rerank';
 
+// A single entry from a provider's model-list endpoint (WP-C — see
+// plans/queue-control-model-probing-vault-isolation.md). This is what a server *reports*, kept
+// deliberately separate from `ProviderModel`: nothing here is ever written into
+// `ProviderModel.capabilities` / `embeddingDimensions` / `embeddingVariant` by the probing layer
+// itself — per D2, only an explicit user Accept action (WP-D, settings UI) may copy a value across.
+// Fields are uneven on purpose, matching how uneven the underlying list endpoints are (see the
+// per-kind table in the WP-C plan section): most entries will have only `id` populated, and that is
+// the correct, honest result for a kind like plain OpenAI (ids only) rather than a reason to guess.
+//
+// `quantization` is the server's raw reported string (e.g. "F16", "Q4_K_M") — deliberately NOT run
+// through `normalizePrecision`. That normalizer exists to produce a *persisted, comparable* key
+// (`ProviderModel.embeddingVariant`); this catalog is surfaced-but-unapplied data a user reviews
+// before accepting, and showing them the server's own casing ("LM Studio reports: embeddings, F16")
+// is more legible than a lowercased token they never typed.
+//
+// `looksLikeCrossEncoder` carries the same warn-never-block suspicion as
+// `providers/shared.ts`'s `looksLikeCrossEncoder()` heuristic — the catalog may record it, but
+// nothing may gate on it (see that function's doc comment for why the distinction is undecidable
+// from server metadata alone).
+export interface ProviderCatalogModel {
+	id: string;
+	// openai-compatible (LM Studio native `/api/v0/models`)
+	type?: string;
+	arch?: string;
+	quantization?: string;
+	// openai / openai-compatible fallback (`/models`)
+	ownedBy?: string;
+	// openrouter (`/models`) — rich metadata, currently unread anywhere else in the codebase
+	contextLength?: number;
+	inputModalities?: string[];
+	supportedParameters?: string[];
+	// ollama (`/api/tags` + `/api/show`). Named `serverCapabilities`, deliberately NOT
+	// `capabilities` — that name is `ProviderModel.capabilities` above, the D2-protected field this
+	// whole probe layer must never write. Keeping the names visibly distinct is a small guardrail
+	// against a future edit mistaking "the server's own capability tags" for "the app's applied
+	// capability list."
+	serverCapabilities?: string[];
+	embeddingLength?: number;
+	looksLikeCrossEncoder?: boolean;
+}
+
+// Persisted catalog cache for a provider, following the currency/geocode precedent exactly
+// (`CurrencyCache` above): stamped at fetch time, no TTL, invalidated only by an explicit
+// Clear-cache action. Populated by `ProviderManager.listModels()`; the settings UI (WP-D) is the
+// only writer that stores it onto `Provider.modelCatalog` and the only place a fetched entry may
+// be copied into a `ProviderModel`.
+export interface ProviderModelCatalog {
+	fetchedAt: string;
+	models: ProviderCatalogModel[];
+}
+
 export interface Provider {
 	id: string;
 	name: string;
@@ -336,6 +387,9 @@ export interface Provider {
 	timeoutSeconds?: number;
 	cliRunArtifactsEnabled?: boolean;
 	cliRunDirectory?: string;
+	// Session-cached model list from the provider's own list endpoint (WP-C). See
+	// ProviderModelCatalog's doc comment for the D2 boundary this field sits behind.
+	modelCatalog?: ProviderModelCatalog;
 }
 
 export interface FxPair {
