@@ -9,6 +9,8 @@ import { addWarningIcon, mountSecretControl } from "../shared";
 import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea, bindDropdown } from "../bind";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 import type { JobType } from "../../orchestration/types";
+import { TEXT_EXTRACTABLE_CATEGORIES, deriveFileTypeGroups } from "../../fileTypes";
+import { renderExtensionCheckboxGroups } from "./commands";
 
 interface WorkflowMeta {
 	id: string;
@@ -228,7 +230,7 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 
 	// --- Search ---
 	new Setting(containerEl).setName('Search').setHeading();
-	containerEl.createEl('p', { text: 'Vault search indexes Markdown, QMD, and text notes through the orchestration queue. The local SQLite companion service owns storage and ranking.' });
+	containerEl.createEl('p', { text: 'Vault search indexes the file types checked below through the orchestration queue. The local SQLite companion service owns storage and ranking.' });
 	const searchGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 
 	bindToggle(searchGroup, {
@@ -287,6 +289,17 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			await save();
 			tab.display();
 		}));
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	renderExtensionCheckboxGroups(tab, searchGroup, {
+		groups: deriveFileTypeGroups(tab.app).filter(g => TEXT_EXTRACTABLE_CATEGORIES.includes(g.category)),
+		heading: 'Indexable file extensions',
+		description: 'Only text-extractable types are offered here — indexing an image or audio file into FTS5 is meaningless, so this list is a subset of the file-open palette\'s extension checkboxes (Commands settings). Unchecked types are skipped by every indexer path: automatic edit triggers, "Search: rebuild index", and "Search: reindex active note."',
+		get: () => s.searchIndexExtensions,
+		set: (extensions) => { s.searchIndexExtensions = extensions; },
+		emptyMeansAll: false,
+		warning: 'Changing this list does not retroactively re-index or prune existing entries — run "Search: rebuild index" afterward so the companion\'s index matches the new selection.',
+	}, save);
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindNumber(searchGroup, {

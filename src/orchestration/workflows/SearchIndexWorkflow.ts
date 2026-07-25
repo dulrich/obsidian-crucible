@@ -36,7 +36,7 @@ export class SearchUpsertFileWorkflow implements Workflow {
 		const { plugin } = ctx;
 		const path = stringParam(job, 'path') || stringParam(job, 'targetPath');
 		if (!path) return Promise.resolve({ status: 'failed', error: 'Missing params.path' });
-		if (!isSearchIndexablePath(path)) return Promise.resolve({ status: 'done', notes: `Skipped non-indexable path: ${path}` });
+		if (!isSearchIndexablePath(path, plugin.settings.searchIndexExtensions)) return Promise.resolve({ status: 'done', notes: `Skipped non-indexable path: ${path}` });
 		return runSearchWorkflow(plugin, async () => {
 			const file = plugin.app.vault.getAbstractFileByPath(path);
 			if (!(file instanceof TFile)) {
@@ -61,7 +61,7 @@ export class SearchUpsertBatchWorkflow implements Workflow {
 		return runSearchWorkflow(plugin, async () => {
 			const files = paths
 				.map(path => plugin.app.vault.getAbstractFileByPath(path))
-				.filter((file): file is TFile => file instanceof TFile && isSearchIndexablePath(file.path));
+				.filter((file): file is TFile => file instanceof TFile && isSearchIndexablePath(file.path, plugin.settings.searchIndexExtensions));
 			const batchIndex = numberParam(job, 'batchIndex');
 			const batchCount = numberParam(job, 'batchCount');
 			const progress = new SearchJobProgress(plugin, job);

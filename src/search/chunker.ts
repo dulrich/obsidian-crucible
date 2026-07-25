@@ -2,7 +2,14 @@ import { SearchChunk, SearchDocumentMetadata } from './types';
 
 const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/;
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
-const SEARCH_EXTENSIONS = new Set(['md', 'qmd', 'txt']);
+
+/**
+ * Default indexable extensions — exactly the pre-WP-4 hardcoded set, kept as the default
+ * parameter below so upgrade behavior is unchanged for any caller that doesn't yet pass
+ * the settings-driven list, and so the existing `isSearchIndexablePath('x.md')`-style
+ * tests keep passing unmodified.
+ */
+const DEFAULT_SEARCH_EXTENSIONS = ['md', 'qmd', 'txt'];
 
 export interface BuildChunksInput {
 	vaultId: string;
@@ -16,9 +23,22 @@ export interface BuildChunksInput {
 	overlapChars: number;
 }
 
-export function isSearchIndexablePath(path: string): boolean {
-	const ext = path.split('.').pop()?.toLowerCase() ?? '';
-	return SEARCH_EXTENSIONS.has(ext);
+/**
+ * `chunker.ts` is a pure, settings-free module (unit-tested by bundling it standalone —
+ * see `tests/searchChunker.test.mjs`), so the indexable-extensions list is threaded in
+ * rather than imported from plugin state. Every real caller passes
+ * `plugin.settings.searchIndexExtensions`; the default here only covers call sites (and
+ * tests) that don't have settings in scope.
+ */
+export function isSearchIndexablePath(path: string, extensions: string[] = DEFAULT_SEARCH_EXTENSIONS): boolean {
+	const filename = path.split('/').pop() ?? '';
+	const dot = filename.lastIndexOf('.');
+	if (!(dot > 0 && dot < filename.length - 1)) return false;
+	const ext = filename.slice(dot + 1).toLowerCase();
+	// Unlike the palette's extension filter, an empty list here means "index nothing" —
+	// a user can legitimately uncheck every indexable type. Only an *omitted* argument
+	// (call sites with no settings in scope, and legacy tests) falls back to the default.
+	return extensions.some(candidate => candidate.toLowerCase() === ext);
 }
 
 export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {

@@ -137,7 +137,7 @@ export class SearchManager {
 	}
 
 	private async prepareFile(file: TFile): Promise<PreparedSearchFile | null> {
-		if (!isSearchIndexablePath(file.path) || isPathExcluded(this.settings, file.path, 'search')) return null;
+		if (!isSearchIndexablePath(file.path, this.settings.searchIndexExtensions) || isPathExcluded(this.settings, file.path, 'search')) return null;
 		const content = await this.app.vault.read(file);
 		return {
 			file,
@@ -171,7 +171,7 @@ export class SearchManager {
 	}
 
 	async deletePath(path: string): Promise<void> {
-		if (!isSearchIndexablePath(path) || isPathExcluded(this.settings, path, 'search')) return;
+		if (!isSearchIndexablePath(path, this.settings.searchIndexExtensions) || isPathExcluded(this.settings, path, 'search')) return;
 		await this.client().deletePath(path);
 	}
 
@@ -193,7 +193,7 @@ export class SearchManager {
 	}
 
 	listIndexableFiles(): TFile[] {
-		return this.app.vault.getFiles().filter(file => isSearchIndexablePath(file.path) && !isPathExcluded(this.settings, file.path, 'search'));
+		return this.app.vault.getFiles().filter(file => isSearchIndexablePath(file.path, this.settings.searchIndexExtensions) && !isPathExcluded(this.settings, file.path, 'search'));
 	}
 
 	private async attachEmbeddings(chunks: SearchChunk[]): Promise<void> {
