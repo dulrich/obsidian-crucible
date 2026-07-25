@@ -38,17 +38,9 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseRuntimeSpec, embedBatch, normalizeDefensively, dot } from './lib/embed-runtime.mjs';
 
 const DEFAULT_BATCH_SIZE = 16;
-
-function parseRuntimeSpec(spec) {
-	const eq = spec.indexOf('=');
-	const label = spec.slice(0, eq);
-	const rest = spec.slice(eq + 1).split(',');
-	const [url, model, kind = 'openai'] = rest;
-	if (!label || !url || !model) throw new Error(`Bad runtime spec: ${spec}`);
-	return { label, url: url.replace(/\/$/, ''), model, kind };
-}
 
 function parseArgs(argv) {
 	const out = { dataset: null, batchSize: DEFAULT_BATCH_SIZE, json: null, runtimes: [] };
@@ -64,43 +56,10 @@ function parseArgs(argv) {
 	return out;
 }
 
-async function embedBatch(runtime, texts) {
-	const isOllama = runtime.kind === 'ollama';
-	const url = isOllama ? `${runtime.url}/api/embed` : `${runtime.url}/embeddings`;
-	const body = isOllama
-		? { model: runtime.model, input: texts }
-		: { model: runtime.model, input: texts };
-	const res = await fetch(url, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify(body),
-	});
-	if (!res.ok) throw new Error(`${runtime.label}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
-	const j = await res.json();
-	if (isOllama) return j.embeddings;
-	// Sort by index: the OpenAI shape does not promise input order.
-	return j.data.slice().sort((a, b) => a.index - b.index).map(d => d.embedding);
-}
-
-function normalize(vec) {
-	let s = 0;
-	for (const v of vec) s += v * v;
-	const n = Math.sqrt(s);
-	if (n === 0) return vec.slice();
-	return vec.map(v => v / n);
-}
-
-function dot(a, b) {
-	let s = 0;
-	for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-	return s;
-}
-
 async function embedAll(runtime, texts, batchSize) {
 	const out = [];
 	for (let i = 0; i < texts.length; i += batchSize) {
-		const vecs = await embedBatch(runtime, texts.slice(i, i + batchSize));
-		for (const v of vecs) out.push(normalize(v));
+		for (const v of await embedBatch(runtime, texts.slice(i, i + batchSize))) out.push(normalizeDefensively(v));
 		process.stdout.write('.');
 	}
 	return out;
