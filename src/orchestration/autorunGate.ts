@@ -1,3 +1,4 @@
+import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobType } from './types';
 
 // The per-type queue-control model (settings.orchestrationJobTypeControls) and the
@@ -24,6 +25,8 @@ export interface JobTypeControl {
 	autoRun?: boolean;
 	/** Overrides the type's configured cooloff between job starts (ms). */
 	minIntervalMsOverride?: number;
+	/** Overrides the type's configured worker count for the drain. Ignored by types that declare themselves serial. */
+	maxParallelOverride?: number;
 }
 
 export type JobTypeControlsMap = Partial<Record<JobType, JobTypeControl>>;
@@ -73,6 +76,35 @@ export function readTypeMinIntervalOverride(map: JobTypeControlsMap | undefined,
 	return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? ms : undefined;
 }
 
+/** The per-type worker-count override, or undefined when unset/invalid. Floored at 1. */
+export function readTypeMaxParallelOverride(map: JobTypeControlsMap | undefined, type: JobType): number | undefined {
+	const n = readTypeControl(map, type).maxParallelOverride;
+	return typeof n === 'number' && Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined;
+}
+
+/**
+ * THE worker count for `type`: the per-type override when there is one, else the
+ * type's configured default, floored at 1.
+ *
+ * A type carrying `maxParallelFixed` is pinned to its configured value and ignores
+ * any override — the constraint is a property of the job type, not a preference. The
+ * drain loop and the Queue Configuration table both call this, so the number shown is
+ * by construction the number used.
+ *
+ * Note this is the *per-type* count. The global `orchestrationMaxConcurrent`
+ * semaphore still bounds total in-flight jobs across all types, so raising one type
+ * above the global cap buys nothing.
+ */
+export function resolveMaxParallel(
+	config: Pick<JobTypeConfig, 'maxParallel' | 'maxParallelFixed'>,
+	map: JobTypeControlsMap | undefined,
+	type: JobType,
+): number {
+	const configured = Math.max(1, config.maxParallel);
+	if (config.maxParallelFixed) return configured;
+	return readTypeMaxParallelOverride(map, type) ?? configured;
+}
+
 // Merge a patch into one type's control entry, normalizing a missing/garbage map.
 // A field explicitly present-but-undefined in the patch clears that field, and an
 // entry with nothing left is dropped, so the map only ever holds real overrides.
@@ -91,7 +123,11 @@ export function setTypeControl(
 		if (patch.minIntervalMsOverride === undefined) delete entry.minIntervalMsOverride;
 		else entry.minIntervalMsOverride = patch.minIntervalMsOverride;
 	}
-	if (entry.autoRun === undefined && entry.minIntervalMsOverride === undefined) delete next[type];
+	if ('maxParallelOverride' in patch) {
+		if (patch.maxParallelOverride === undefined) delete entry.maxParallelOverride;
+		else entry.maxParallelOverride = patch.maxParallelOverride;
+	}
+	if (entry.autoRun === undefined && entry.minIntervalMsOverride === undefined && entry.maxParallelOverride === undefined) delete next[type];
 	else next[type] = entry;
 	return next;
 }

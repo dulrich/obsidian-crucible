@@ -107,6 +107,64 @@ test('dequeueIfPending removes only pending entries', () => {
 	assert.equal(queue.getEntry('b'), null);
 });
 
+// --- the queued half of the single Cancel verb ------------------------------
+
+test('cancelIfPending stops only pending entries, and marks rather than deletes', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {});
+	queue.enqueue('b', {});
+	queue.claimNext(); // 'a' → running
+
+	assert.equal(queue.cancelIfPending('a', 'stopped'), false, 'a running entry is aborted, not dropped');
+	assert.equal(queue.getEntry('a').status, 'running');
+
+	assert.equal(queue.cancelIfPending('b', 'stopped'), true);
+	const cancelled = queue.getEntry('b');
+	assert.equal(cancelled.status, 'cancelled', 'the entry stays, terminal — it is not deleted');
+	assert.equal(cancelled.note, 'stopped');
+	assert.equal(cancelled.error, undefined, 'a cancellation is not a diagnostic');
+	assert.equal(queue.getPendingCount(), 1, 'only the running entry still counts as in flight');
+});
+
+test('a cancelled entry suppresses its own auto-source re-seed until it is swept', () => {
+	// Retention 0 so the sweep at the end of the test is immediate; the suppression
+	// being tested is refill's, and refill never sweeps regardless of the window.
+	const { queue } = makeQueue(0);
+	queue.setAutoSource(() => [{ key: 'seeded', params: {} }]);
+	queue.setAutoSourceEnabled(true);
+	assert.equal(queue.getEntry('seeded').status, 'pending');
+
+	assert.equal(queue.cancelIfPending('seeded'), true);
+	queue.refill();
+	assert.equal(queue.getEntry('seeded').status, 'cancelled',
+		'refill skips a tracked key, so an enabled source cannot instantly undo the cancel');
+
+	// The suppression is not permanent, which is exactly why the UI copy says cleared
+	// items can come back: once retention expires the source may offer the key again.
+	queue.sweepTerminal();
+	assert.equal(queue.getEntry('seeded'), null);
+	queue.refill();
+	assert.equal(queue.getEntry('seeded').status, 'pending', 'after the sweep the source re-seeds it');
+});
+
+test('clearPending cancels every pending entry with exactly one change event', () => {
+	const { queue, changes } = makeQueue();
+	for (let i = 0; i < 5; i++) queue.enqueue(`k${i}`, {});
+	queue.claimNext(); // 'k0' → running, untouched by a clear
+	changes.length = 0;
+
+	assert.equal(queue.clearPending('bulk'), 4);
+	assert.equal(changes.length, 1,
+		'one user action must not fan out into N queue-changed events (each one kicks a drain)');
+	assert.equal(queue.getEntry('k0').status, 'running');
+	for (let i = 1; i < 5; i++) assert.equal(queue.getEntry(`k${i}`).status, 'cancelled');
+	assert.equal(queue.getPendingCount(), 1);
+
+	changes.length = 0;
+	assert.equal(queue.clearPending(), 0, 'nothing pending');
+	assert.equal(changes.length, 0, 'a no-op clear emits nothing at all');
+});
+
 test('sweepTerminal drops terminal entries past the retention window', () => {
 	const { queue } = makeQueue(0); // retention 0 → terminal entries immediately stale
 	queue.enqueue('a', {});

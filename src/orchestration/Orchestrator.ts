@@ -5,8 +5,8 @@ import { Workflow } from './workflows/Workflow';
 import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
-import { JobBackend, RunOutcome, resolveTimeoutMs } from './JobBackend';
-import type { CancelJobOutcome } from './cancellation';
+import { JobBackend, RunOutcome, emitQueueChanged, resolveTimeoutMs } from './JobBackend';
+import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
 import type CruciblePlugin from '../main';
@@ -111,6 +111,33 @@ export class Orchestrator {
 	// True while a cancelled run of `type` is still settling.
 	isCancelling(type: JobType, key: string): boolean {
 		return this.backends.get(type)?.isCancelling(key) ?? false;
+	}
+
+	// Removes one queued (not running) job, mirroring runJob's dispatch. `'failed'`
+	// means the job is still queued (JobStore.move rolled back), so no caller may
+	// report it cancelled — or report it missing.
+	async removeQueuedJob(type: JobType, key: string): Promise<RemoveQueuedOutcome> {
+		const backend = this.backends.get(type);
+		if (!backend) return 'not-queued';
+		const outcome = await backend.removeQueued(key);
+		if (outcome === 'removed') await emitQueueChanged(this.plugin, this.store);
+		return outcome;
+	}
+
+	// Removes every queued job — of one type, or of all types when `type` is omitted.
+	// Running jobs are untouched.
+	//
+	// The emit is here, once, rather than in the backends: `orchestration-queue-updated`
+	// costs every listener a full listFolder re-read plus a kickAll(), so clearing a
+	// 400-job rebuild queue through a per-item emit would be 400 of each for one click.
+	async clearQueued(type?: JobType): Promise<number> {
+		const backends = type
+			? [this.backends.get(type)].filter((b): b is JobBackend => !!b)
+			: Array.from(this.backends.values());
+		let cleared = 0;
+		for (const backend of backends) cleared += await backend.clearQueued();
+		if (cleared > 0) await emitQueueChanged(this.plugin, this.store);
+		return cleared;
 	}
 
 	hasPending(type: JobType): boolean {

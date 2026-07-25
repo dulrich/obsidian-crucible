@@ -9,8 +9,20 @@ import { coerceVideoId } from './utils/youtubeApi';
 // implemented as getters so they track live settings.
 export interface JobTypeConfig {
 	persistence: 'file' | 'memory';
-	/** Per-type worker count for the drain (default 1). */
+	/** Per-type worker count for the drain (default 1). A per-type user override wins unless `maxParallelFixed` is set. */
 	maxParallel: number;
+	/**
+	 * Marks the type as pinned to `maxParallel`, with the reason. Set it and the
+	 * per-type concurrency override no longer applies, and the Queue Configuration
+	 * table renders a `serial` pill carrying this string as its tooltip instead of a
+	 * number input.
+	 *
+	 * The point is that the constraint becomes a *property the UI can read* rather
+	 * than a comment above a config factory. A greyed-out input with no stated cause
+	 * reads as a bug, and a live-but-ignored one is worse; a pill that explains itself
+	 * states the constraint as what it actually is — a fact about the job type.
+	 */
+	maxParallelFixed?: string;
 	/** Per-type cooloff between job starts, via a shared MinIntervalGate. 0 = none. */
 	minIntervalMs: number;
 	/**
@@ -112,11 +124,16 @@ export function searchRebuildJobConfig(): JobTypeConfig {
 	return fileJobConfig(() => 'search-rebuild');
 }
 
-// One backfill fan-out at a time: the job only enqueues batches, and two concurrent fan-outs
-// would double the batch count for exactly the same work (the batches are idempotent, so the
-// duplicates would drain as no-ops, but they'd still be written to the queue as job files).
+// One backfill fan-out at a time. Expressed as `maxParallelFixed` rather than only as a
+// comment, so the Queue Configuration table can show the constraint (a `serial` pill with
+// this reason as its tooltip) instead of silently ignoring a number the user typed.
 export function searchEmbedMissingJobConfig(): JobTypeConfig {
-	return fileJobConfig(() => 'search-embed-missing');
+	return {
+		...fileJobConfig(() => 'search-embed-missing'),
+		maxParallelFixed: 'One backfill fan-out at a time: this job only enqueues batches, and two concurrent fan-outs '
+			+ 'would double the batch count for exactly the same work. The duplicate batches are idempotent and would '
+			+ 'drain as no-ops, but they would still be written to the queue as job files.',
+	};
 }
 
 export function searchBatchJobConfig(): JobTypeConfig {

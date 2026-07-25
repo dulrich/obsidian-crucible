@@ -26,6 +26,8 @@ const {
 	typeAutorunEnabled,
 	readTypeAutorun,
 	readTypeMinIntervalOverride,
+	readTypeMaxParallelOverride,
+	resolveMaxParallel,
 	setTypeControl,
 	migrateJobTypeControls,
 } = await import(pathToFileURL(outfile).href);
@@ -165,6 +167,54 @@ test('setTypeControl does not mutate its input map', () => {
 	const start = { blogs_tracker: { autoRun: true } };
 	setTypeControl(start, 'blogs_tracker', { autoRun: false });
 	assert.deepEqual(start, { blogs_tracker: { autoRun: true } });
+});
+
+// --- per-type concurrency: the override, and the types that refuse one ---
+
+test('readTypeMaxParallelOverride takes whole worker counts of 1 or more and rejects the rest', () => {
+	assert.equal(readTypeMaxParallelOverride({ search_upsert_batch: { maxParallelOverride: 4 } }, 'search_upsert_batch'), 4);
+	assert.equal(readTypeMaxParallelOverride({ search_upsert_batch: { maxParallelOverride: 3.7 } }, 'search_upsert_batch'), 3,
+		'a fractional worker count floors rather than being discarded');
+	for (const bad of [0, -2, Number.NaN, Number.POSITIVE_INFINITY, '4', null]) {
+		assert.equal(readTypeMaxParallelOverride({ search_upsert_batch: { maxParallelOverride: bad } }, 'search_upsert_batch'), undefined,
+			`rejects ${String(bad)}`);
+	}
+	assert.equal(readTypeMaxParallelOverride(undefined, 'search_upsert_batch'), undefined);
+});
+
+test('resolveMaxParallel prefers the override, falls back to the config default, and floors at 1', () => {
+	const config = { maxParallel: 1 };
+	assert.equal(resolveMaxParallel(config, { search_upsert_batch: { maxParallelOverride: 6 } }, 'search_upsert_batch'), 6);
+	assert.equal(resolveMaxParallel(config, {}, 'search_upsert_batch'), 1, 'no override ⇒ the configured default');
+	assert.equal(resolveMaxParallel({ maxParallel: 4 }, {}, 'youtube_channel_enrich'), 4);
+	assert.equal(resolveMaxParallel({ maxParallel: 0 }, undefined, 'chain_run'), 1, 'never fewer than one worker');
+});
+
+test('a maxParallelFixed type ignores an override rather than obeying it', () => {
+	const serial = { maxParallel: 1, maxParallelFixed: 'one fan-out at a time' };
+	assert.equal(
+		resolveMaxParallel(serial, { search_embed_missing: { maxParallelOverride: 8 } }, 'search_embed_missing'),
+		1,
+		'the constraint is a property of the job type, not a user preference to be overridden',
+	);
+	// The override may still be stored (a type could stop being fixed later); what
+	// must never happen is the drain acting on it while the marker is present.
+	assert.equal(readTypeMaxParallelOverride({ search_embed_missing: { maxParallelOverride: 8 } }, 'search_embed_missing'), 8);
+});
+
+test('setTypeControl round-trips and clears a worker-count override, dropping an emptied entry', () => {
+	let map = setTypeControl({}, 'search_upsert_batch', { maxParallelOverride: 4 });
+	assert.deepEqual(map, { search_upsert_batch: { maxParallelOverride: 4 } });
+
+	map = setTypeControl(map, 'search_upsert_batch', { autoRun: true });
+	assert.deepEqual(map, { search_upsert_batch: { maxParallelOverride: 4, autoRun: true } },
+		'the two overrides are independent fields on one entry');
+
+	map = setTypeControl(map, 'search_upsert_batch', { maxParallelOverride: undefined });
+	assert.deepEqual(map, { search_upsert_batch: { autoRun: true } });
+
+	map = setTypeControl(map, 'search_upsert_batch', { autoRun: undefined });
+	assert.deepEqual(map, {}, 'an entry with nothing left is dropped, not left as an empty object');
 });
 
 // --- one-shot migration from orchestrationJobTypeAutorun ---

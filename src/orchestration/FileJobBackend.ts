@@ -4,8 +4,8 @@ import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
-import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
-import { CancelJobOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
+import { JobBackend, RunOutcome, emitQueueChanged, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
+import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
 import { defaultLaneForPriority, laneRank } from './lanes';
@@ -97,6 +97,63 @@ export class FileJobBackend implements JobBackend {
 
 	isCancelling(id: string): boolean {
 		return this.running.isCancelling(id);
+	}
+
+	// Removes one queued job of this type. A job a worker has already claimed reads as
+	// `not-queued` here — it is on its way to running/, where `cancelJob` addresses it.
+	async removeQueued(id: string): Promise<RemoveQueuedOutcome> {
+		await this.store.ensureFolders();
+		const queued = await this.store.listFolder('queued');
+		const entry = queued.find(e => e.job.type === this.type && e.job.id === id && !this.claimed.has(e.file.path));
+		return entry ? this.retire(entry) : 'not-queued';
+	}
+
+	// Reads the queue from the store, not from anything a UI rendered: the monitor
+	// caps its table at 100 rows while a search rebuild enqueues hundreds of jobs, and
+	// a clear that only cleared what was on screen would be a quiet lie. No emit —
+	// the Orchestrator emits once for the whole clear (see JobBackend.clearQueued).
+	async clearQueued(): Promise<number> {
+		await this.store.ensureFolders();
+		const queued = await this.store.listFolder('queued');
+		let removed = 0;
+		for (const entry of queued) {
+			if (entry.job.type !== this.type || this.claimed.has(entry.file.path)) continue;
+			// A job the store refused stays queued and is simply not counted — one bad
+			// job must not abort the clear for the several hundred behind it.
+			if (await this.retire(entry) === 'removed') removed++;
+		}
+		return removed;
+	}
+
+	// Retires one queued job into cancelled/.
+	//
+	// Two deliberate choices. (1) It takes `claimed` — the same synchronous guard
+	// claimNext/claimById take — so a job can never be moved out from under a worker
+	// that is between listFolder and its own move. (2) It *moves* rather than deletes:
+	// in this store the folder is what records a job's state, so a job stopped before
+	// it ran belongs in the same cancelled/ bucket WP-A settles aborted runs into,
+	// where it stays auditable and cannot be picked up by any future failure-retry
+	// policy. Moving also inherits JobStore.move's rollback invariant — a frontmatter
+	// write failure renames the file back and rethrows, leaving the job fully queued,
+	// which is exactly the case this must report as `'failed'` rather than swallow.
+	private async retire(entry: { file: TFile; job: OrchestrationJob }): Promise<RemoveQueuedOutcome> {
+		this.claimed.add(entry.file.path);
+		try {
+			const moved = await this.store.move(entry.file, entry.job, 'cancelled');
+			try {
+				await this.store.appendNotes(moved.file, CANCELLED_BEFORE_RUN);
+			} catch (err) {
+				// The bucket already records the outcome; a missing note is cosmetic, and
+				// re-reporting failure here would claim a job moved when it did move.
+				logError(`failed to note the cancellation of queued job ${entry.job.id}`, err);
+			}
+			return 'removed';
+		} catch (err) {
+			logError(`failed to cancel queued job ${entry.job.id}; it stays queued`, err);
+			return 'failed';
+		} finally {
+			this.claimed.delete(entry.file.path);
+		}
 	}
 
 	// File types report "maybe": emptiness is checked lazily during the claim, so the
@@ -275,18 +332,8 @@ export class FileJobBackend implements JobBackend {
 		}
 	}
 
-	private async emitQueueUpdate(): Promise<void> {
-		const bus = this.plugin.ingestionEvents;
-		if (!bus) return;
-		try {
-			const [queued, running] = await Promise.all([
-				this.store.listFolder('queued'),
-				this.store.listFolder('running'),
-			]);
-			bus.emit('orchestration-queue-updated', { queued: queued.length, running: running.length });
-		} catch (err) {
-			logError('failed to emit orchestration-queue-updated', err);
-		}
+	private emitQueueUpdate(): Promise<void> {
+		return emitQueueChanged(this.plugin, this.store);
 	}
 
 	private emitTrackerEvent(result: WorkflowResult, status: 'done' | 'failed'): void {
