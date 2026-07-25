@@ -6,9 +6,9 @@ import { commandAvailabilityHelp } from "../../commandAvailability";
 import { getCommandHotkeyLabel } from "../../utils";
 import { CommandSuggest, getCommandSuggestDisplayName } from "../../suggesters";
 import { CrucibleCommandPaletteFilterMode, CrucibleCommandPaletteHintCharsetMode, CrucibleFileOpenIgnoredFolderMode } from "../../types";
-import { formatExtensionFilter, parseExtensionFilter } from "../../fileOpenRanking";
+import { FileTypeGroup, commitSelectedExtensions, deriveFileTypeGroups, resolveSelectedExtensions } from "../../fileTypes";
 import { SearchWithContainer } from "../shared";
-import { bindToggle, bindDropdown, bindText, bindNumber } from "../bind";
+import { bindToggle, bindDropdown, bindText, bindNumber, Save } from "../bind";
 
 function getChainOnlyCommandList(): { id: string, name: string }[] {
 	return [
@@ -192,14 +192,103 @@ function renderCrucibleFileOpenPaletteSettings(tab: CrucibleSettingTab, containe
 
 	group.createEl('hr', { cls: 'crucible-row-divider' });
 
-	bindText(group, {
-		name: 'Openable file extensions',
-		desc: 'Comma- or space-separated extensions. Leave blank to include every vault file.',
-		placeholder: 'md, canvas, pdf',
-		get: () => formatExtensionFilter(s.crucibleFileOpenPaletteExtensions),
-		set: (v) => { s.crucibleFileOpenPaletteExtensions = parseExtensionFilter(v); },
-		width: 'pi-width-wide',
+	renderExtensionCheckboxGroups(tab, group, {
+		groups: deriveFileTypeGroups(tab.app),
+		heading: 'Openable file extensions',
+		description: 'Every category checked (or every box cleared) means every vault file is openable. Uncheck a category or individual extension to exclude it.',
+		get: () => s.crucibleFileOpenPaletteExtensions,
+		set: (extensions) => { s.crucibleFileOpenPaletteExtensions = extensions; },
+		emptyMeansAll: true,
 	}, save);
+}
+
+export interface ExtensionCheckboxGroupsSpec {
+	groups: FileTypeGroup[];
+	heading: string;
+	description: string;
+	get: () => string[];
+	set: (extensions: string[]) => void;
+	/**
+	 * When true (the file-open palette's Set A semantics), an empty stored array renders
+	 * every box checked, and checking every box collapses the stored value back to `[]`
+	 * so future extensions stay included automatically. When false (the search
+	 * indexer's Set B semantics — see settings/sections/orchestration.ts), empty means
+	 * "nothing selected" and there is no collapse-to-empty shortcut.
+	 */
+	emptyMeansAll: boolean;
+	warning?: string;
+}
+
+/**
+ * Shared renderer for a grouped file-extension checkbox grid: one row per category with
+ * a "select all in category" toggle, followed by a row holding the extension
+ * checkboxes (reusing the existing `.crucible-checkbox-grid` / `.crucible-checkbox-grid-item`
+ * classes already used by src/settings/sections/localize.ts and triggers.ts).
+ *
+ * Exported so settings/sections/orchestration.ts's Set B (search-indexable types) reuses
+ * the same rendering logic over a different, independent settings key and category
+ * subset — the two extension sets share this presentation helper but never share state.
+ */
+export function renderExtensionCheckboxGroups(
+	tab: CrucibleSettingTab,
+	containerEl: HTMLElement,
+	spec: ExtensionCheckboxGroupsSpec,
+	save: Save,
+): void {
+	const allExtensions = spec.groups.flatMap(g => g.extensions);
+
+	const currentSelection = (): Set<string> => resolveSelectedExtensions(spec.get(), allExtensions, spec.emptyMeansAll);
+
+	const commit = (selected: Set<string>): void => {
+		spec.set(commitSelectedExtensions(selected, allExtensions, spec.emptyMeansAll));
+	};
+
+	new Setting(containerEl).setName(spec.heading).setDesc(spec.description);
+	if (spec.warning) {
+		containerEl.createEl('p', { text: spec.warning, cls: 'crucible-setting-warning' });
+	}
+
+	spec.groups.forEach((group) => {
+		containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+		const selected = currentSelection();
+		const allChecked = group.extensions.length > 0 && group.extensions.every(ext => selected.has(ext));
+
+		const categoryHeading = new Setting(containerEl)
+			.setName(group.category)
+			.setDesc(`${group.extensions.length} extension${group.extensions.length === 1 ? '' : 's'}`);
+		categoryHeading.addToggle(toggle => {
+			toggle
+				.setTooltip(allChecked ? `Uncheck all ${group.category}` : `Check all ${group.category}`)
+				.setValue(allChecked)
+				.onChange(async (checked) => {
+					const next = currentSelection();
+					for (const ext of group.extensions) {
+						if (checked) next.add(ext); else next.delete(ext);
+					}
+					commit(next);
+					await save();
+					tab.refreshDisplay();
+				});
+		});
+
+		const gridRow = new Setting(containerEl).setName('').setDesc('');
+		const grid = gridRow.controlEl.createDiv({ cls: 'crucible-checkbox-grid' });
+		for (const ext of group.extensions) {
+			const itemLabel = grid.createEl('label', { cls: 'crucible-checkbox-grid-item' });
+			const cb = itemLabel.createEl('input', { type: 'checkbox' });
+			cb.checked = selected.has(ext);
+			itemLabel.createSpan({ text: ext });
+			cb.addEventListener('change', () => {
+				void (async () => {
+					const next = currentSelection();
+					if (cb.checked) next.add(ext); else next.delete(ext);
+					commit(next);
+					await save();
+					tab.refreshDisplay();
+				})();
+			});
+		}
+	});
 }
 
 function renderCrucibleCommandPaletteSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
