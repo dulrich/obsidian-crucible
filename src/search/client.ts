@@ -81,6 +81,9 @@ export class SearchServiceClient {
 			query: options.query,
 			limit: options.limit,
 			queryEmbedding: options.queryEmbedding,
+			// Which space the query vector lives in. Without it the companion cannot tell a
+			// mixed index apart from a single-space one, and would score across both.
+			embeddingSpace: options.embeddingSpace,
 			filters: options.filters,
 		});
 		const response = normalizeSearchResponse(json);
@@ -235,6 +238,7 @@ function normalizeFileStates(value: unknown): Map<string, SearchFileState> {
 			hasEmbeddings: typeof row.hasEmbeddings === 'boolean' ? row.hasEmbeddings : undefined,
 			embeddedChunkCount: typeof row.embeddedChunkCount === 'number' && Number.isFinite(row.embeddedChunkCount) ? row.embeddedChunkCount : undefined,
 			embeddingModel: typeof row.embeddingModel === 'string' && row.embeddingModel ? row.embeddingModel : undefined,
+			embeddingSpace: typeof row.embeddingSpace === 'string' && row.embeddingSpace ? row.embeddingSpace : undefined,
 		});
 	}
 	return out;

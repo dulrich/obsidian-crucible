@@ -260,7 +260,7 @@ INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 
 	// Content is rebuilt losslessly from `chunks`, and prefix queries now work.
 	const outcome = search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['Legacy.md']);
-	assert.equal(SCHEMA_VERSION, 3);
+	assert.equal(SCHEMA_VERSION, 4);
 });
 
 // End-to-end sign check: a companion payload run through the real client normalizer must
