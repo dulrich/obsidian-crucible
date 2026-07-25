@@ -1,5 +1,5 @@
 import { App } from 'obsidian';
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderRerankResult, providerModality } from './types';
+import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
 import { HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
 import { openAICompatibleClient } from './providers/openaiCompatible';
 import { anthropicClient } from './providers/anthropic';
@@ -7,6 +7,7 @@ import { googleClient } from './providers/google';
 import { ollamaClient } from './providers/ollama';
 import { ProviderCompletionOptions, runCliCompletion } from './providers/cli';
 import type { SecretRegistry } from './secretRegistry';
+import { logWarn } from './log';
 
 export { CLI_DEFAULT_TIMEOUT_SECONDS } from './providers/cli';
 export type { ProviderCompletionOptions } from './providers/cli';
@@ -29,16 +30,26 @@ const HTTP_PROVIDER_CLIENTS: Partial<Record<ProviderKind, HttpProviderClient>> =
 // union (rather than a string label) is what lets the CLI-provider rejection message below stay
 // a lookup instead of a ternary chain: adding a capability that forgets an entry here is a
 // compile error, not a wrong sentence at runtime.
-type OptionalHttpCapability = 'embed' | 'extractImage' | 'rerank';
+type OptionalHttpCapability = 'embed' | 'extractImage' | 'rerank' | 'describeModel';
 
 const CLI_UNSUPPORTED_VERB: Record<OptionalHttpCapability, string> = {
 	embed: 'generate embeddings',
 	extractImage: 'extract image metadata',
 	rerank: 'rerank results',
+	describeModel: 'describe the loaded model',
 };
 
 export class ProviderManager {
 	app: App;
+
+	// Session-lifetime caches (this instance lives for the plugin's lifetime — see main.ts). Both
+	// exist to satisfy the same constraint: describeModel() runs on the indexing path via embed(),
+	// and must not add an HTTP round-trip per batch. Caching the *promise* (not just the resolved
+	// value) means concurrent embed() calls for the same provider+model share one in-flight
+	// request, and a rejected probe stays cached too — a broken metadata endpoint costs one probe
+	// for the session, not one per batch.
+	private readonly describeModelCache = new Map<string, Promise<ProviderModelDescription>>();
+	private readonly servedModelMismatchWarned = new Set<string>();
 
 	constructor(app: App, private readonly secrets: SecretRegistry) {
 		this.app = app;
@@ -75,7 +86,62 @@ export class ProviderManager {
 		}
 		if (inputs.length === 0) return { embeddings: [] };
 		const client = this.requireCapability(provider, 'embed', 'embeddings');
-		return await client.embed(await this.httpContext(provider, modelId), inputs);
+		// Best-effort, cached probe of what the server actually loaded (WP-2). This is the
+		// mechanism behind the cross-encoder-as-embedder warning: each client's describeModel()
+		// checks the served model id/arch against the reranker heuristic and warns (once per
+		// session, never throws) internally. Awaited (not fire-and-forget) so the warning is
+		// guaranteed to have run before the first batch indexes — but the cache above means this
+		// is a one-time cost per provider+model for the whole session, not a round trip per batch,
+		// and a probe failure never propagates to the embed() caller (see probeModelForSideEffects).
+		await this.probeModelForSideEffects(provider, modelId);
+		const result = await client.embed(await this.httpContext(provider, modelId), inputs);
+		this.warnOnServedModelMismatch(provider, modelId, result.servedModel);
+		return result;
+	}
+
+	// Asks the provider's HTTP client what it actually loaded for modelId — see
+	// HttpProviderClient.describeModel and ProviderModelDescription for the shape and why
+	// `precision` (not `fingerprint`) is the part WP-3 persists as a comparable key. Results are
+	// cached per (provider, modelId) for the session; see the field comment on describeModelCache.
+	async describeModel(provider: Provider, modelId: string): Promise<ProviderModelDescription> {
+		if (!modelId) {
+			throw new Error(`No model selected for provider "${provider.name || provider.id}"`);
+		}
+		const client = this.requireCapability(provider, 'describeModel', 'model introspection');
+		const key = `${provider.id}::${modelId}`;
+		let cached = this.describeModelCache.get(key);
+		if (!cached) {
+			cached = client.describeModel(await this.httpContext(provider, modelId));
+			this.describeModelCache.set(key, cached);
+		}
+		return cached;
+	}
+
+	// Fire-and-forget wrapper around describeModel(), called from embed() purely for its side
+	// effects (populating the session cache, letting the client warn on a cross-encoder-shaped
+	// model). A describeModel failure — unreachable metadata endpoint, unsupported server,
+	// transient network error — must never propagate to the embed() caller; it just means
+	// precision/fingerprint stay unavailable for this session, which downstream code already
+	// treats as a clean unknown.
+	private async probeModelForSideEffects(provider: Provider, modelId: string): Promise<void> {
+		if (!HTTP_PROVIDER_CLIENTS[provider.kind]?.describeModel) return;
+		try {
+			await this.describeModel(provider, modelId);
+		} catch {
+			/* diagnostic only — see method comment */
+		}
+	}
+
+	// The embed response's own echoed `model` field (LM Studio/OpenAI-compatible and ollama both
+	// send one) can legitimately differ from the requested id — a server may resolve an alias or
+	// serve a dated revision — so this warns rather than throws, and only once per (provider,
+	// modelId) per session so a hot indexing loop doesn't spam it per batch.
+	private warnOnServedModelMismatch(provider: Provider, requestedModelId: string, servedModel: string | undefined): void {
+		if (!servedModel || servedModel === requestedModelId) return;
+		const key = `${provider.id}::${requestedModelId}`;
+		if (this.servedModelMismatchWarned.has(key)) return;
+		this.servedModelMismatchWarned.add(key);
+		logWarn(`Provider "${provider.name || provider.id}" echoed a different served model ("${servedModel}") than requested ("${requestedModelId}") for embeddings — the server may have resolved an alias or a different revision.`);
 	}
 
 	async extractImageMetadata(provider: Provider, modelId: string, imageBytes: ArrayBuffer, mimeType: string): Promise<ProviderImageExtractionResult> {
