@@ -20,6 +20,11 @@ data.json
 vault
 .crucible/
 
+# Search index snapshots. scripts/search-snapshot.sh defaults to writing
+# ./search-backup-<date>.sqlite in the current directory, which is ~385MB
+# against the live index — never something to commit.
+search-backup-*.sqlite
+
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
 
