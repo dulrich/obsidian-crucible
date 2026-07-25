@@ -210,6 +210,9 @@ export default class CruciblePlugin extends Plugin {
 		this.registerView(SOURCE_EVAL_DASHBOARD_VIEW_TYPE, (leaf) => new SourceEvalDashboardView(leaf, this));
 		this.registerEvent(this.app.metadataCache.on('resolved', () => {
 			this.searchIndexCoordinator.markMetadataResolved();
+			// The link-boost graph is derived from resolvedLinks/frontmatterLinks, so this is
+			// the one event that means "the graph moved". Cheap: it only clears a field.
+			this.searchManager.invalidateLinkGraph();
 		}));
 		this.app.workspace.onLayoutReady(() => {
 			this.searchIndexCoordinator.markLayoutReady();
