@@ -44,6 +44,7 @@
 // With --db omitted, the newest ./search-backup-*.sqlite in the current directory is used.
 
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -51,13 +52,14 @@ const NORM_TOLERANCE = 1e-4;
 const DEFAULT_SAMPLES = 200;
 const DEFAULT_QUERIES = 5;
 const DEFAULT_BATCH_SIZE = 16;
+const QUINTILES = 5;
 const TOP_K = 10;
 const QUERY_TEXT_MAX_CHARS = 150;
 const WORST_TEXT_PREVIEW_CHARS = 80;
 const WORST_N = 3;
 
 function parseArgs(argv) {
-	const out = { db: null, samples: DEFAULT_SAMPLES, queries: DEFAULT_QUERIES, batchSize: DEFAULT_BATCH_SIZE, runtimes: [] };
+	const out = { db: null, samples: DEFAULT_SAMPLES, queries: DEFAULT_QUERIES, batchSize: DEFAULT_BATCH_SIZE, sampling: 'stratified', runtimes: [] };
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === '--db') {
@@ -68,6 +70,8 @@ function parseArgs(argv) {
 			out.queries = Number(argv[++i]);
 		} else if (arg === '--batch-size') {
 			out.batchSize = Number(argv[++i]);
+		} else if (arg === '--sampling') {
+			out.sampling = argv[++i];
 		} else if (arg === '--help' || arg === '-h') {
 			out.help = true;
 		} else if (arg.includes('=')) {
@@ -108,13 +112,102 @@ function findNewestSnapshot() {
 	return candidates[0].full;
 }
 
-function sampleChunks(dbPath, sampleCount, queryCount) {
+// Deterministic, length-stratified selection key. `ORDER BY RANDOM()` was correct for a one-off
+// diagnostic but is not reproducible, and `node:sqlite` exposes no seed hook — so a re-run of the
+// same snapshot drew a different sample and no two arms of a comparison were measured on the same
+// texts. Hashing the chunk id gives a stable pseudo-random order derivable from the snapshot
+// alone (no seed to record, no state to carry), and stratifying by length quintile stops a draw
+// from over-weighting short chunks, which is the confound that made `enrich`'s 301 events/s
+// untransferable in the first place. See runs/dispatch/esi-field-report-protocol.md sample S1.
+function selectionHash(id) {
+	return createHash('sha256').update(id).digest('hex');
+}
+
+// Cut points at the 20th/40th/60th/80th percentile of the length distribution; index 0..4.
+function quintileBounds(lengths) {
+	const sorted = [...lengths].sort((a, b) => a - b);
+	const bounds = [];
+	for (let i = 1; i < QUINTILES; i++) {
+		bounds.push(sorted[Math.min(sorted.length - 1, Math.floor((sorted.length * i) / QUINTILES))]);
+	}
+	return bounds;
+}
+
+function quintileOf(len, bounds) {
+	for (let i = 0; i < bounds.length; i++) {
+		if (len <= bounds[i]) return i;
+	}
+	return QUINTILES - 1;
+}
+
+function describeLengths(lengths) {
+	const sorted = [...lengths].sort((a, b) => a - b);
+	const at = f => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * f))];
+	const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+	return { n: sorted.length, mean, p5: at(0.05), p50: at(0.5), p95: at(0.95), min: sorted[0], max: sorted[sorted.length - 1] };
+}
+
+// Draws `total` ids stratified across length quintiles, each quintile ordered by selection hash.
+// A quintile with fewer members than its share does not silently shrink the sample: the shortfall
+// is refilled from the hash-ordered remainder, so the caller always gets `total` when the corpus
+// has that many rows at all.
+function stratifiedIds(meta, total) {
+	const bounds = quintileBounds(meta.map(r => r.len));
+	const buckets = Array.from({ length: QUINTILES }, () => []);
+	for (const row of meta) buckets[quintileOf(row.len, bounds)].push(row);
+	for (const bucket of buckets) bucket.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+
+	const picked = [];
+	const base = Math.floor(total / QUINTILES);
+	const remainder = total % QUINTILES;
+	for (let i = 0; i < QUINTILES; i++) {
+		picked.push(...buckets[i].slice(0, base + (i < remainder ? 1 : 0)));
+	}
+	if (picked.length < total) {
+		const taken = new Set(picked.map(r => r.id));
+		const spare = meta
+			.filter(r => !taken.has(r.id))
+			.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+		picked.push(...spare.slice(0, total - picked.length));
+	}
+	// Global hash order across the whole draw, so the corpus/query split below is itself stable
+	// and independent of how the quintiles happened to fill.
+	picked.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+	return { picked, bounds };
+}
+
+function sampleChunks(dbPath, sampleCount, queryCount, mode = 'stratified') {
 	const db = new DatabaseSync(dbPath, { readOnly: true });
 	try {
 		const total = queryCount + sampleCount;
-		const rows = db
-			.prepare('SELECT id, path, text FROM chunks WHERE LENGTH(text) >= 40 ORDER BY RANDOM() LIMIT ?')
-			.all(total);
+		let rows;
+		let bounds = null;
+		let lengthStats = null;
+
+		if (mode === 'random') {
+			rows = db
+				.prepare('SELECT id, path, text FROM chunks WHERE LENGTH(text) >= 40 ORDER BY RANDOM() LIMIT ?')
+				.all(total);
+		} else {
+			const meta = db
+				.prepare('SELECT id, LENGTH(text) AS len FROM chunks WHERE LENGTH(text) >= 40')
+				.all()
+				.map(r => ({ id: r.id, len: r.len, hash: selectionHash(r.id) }));
+			if (meta.length === 0) throw new Error('No corpus chunks sampled — snapshot may be empty.');
+			lengthStats = describeLengths(meta.map(r => r.len));
+			const drawn = stratifiedIds(meta, Math.min(total, meta.length));
+			bounds = drawn.bounds;
+			// Fetch text only for the drawn ids. Reading every row's text to sample 205 of them
+			// would pull ~58MB off disk for nothing.
+			const byId = new Map();
+			const get = db.prepare('SELECT id, path, text FROM chunks WHERE id = ?');
+			for (const row of drawn.picked) {
+				const full = get.get(row.id);
+				if (full) byId.set(row.id, full);
+			}
+			rows = drawn.picked.map(r => byId.get(r.id)).filter(Boolean);
+		}
+
 		if (rows.length < total) {
 			console.error(`WARNING: requested ${total} chunks (samples+queries) but only ${rows.length} chunks with length >= 40 exist in ${dbPath}.`);
 		}
@@ -127,7 +220,7 @@ function sampleChunks(dbPath, sampleCount, queryCount) {
 			path: row.path,
 			text: row.text.slice(0, QUERY_TEXT_MAX_CHARS),
 		}));
-		return { corpus, queries };
+		return { corpus, queries, bounds, lengthStats, mode };
 	} finally {
 		db.close();
 	}
@@ -267,7 +360,7 @@ function printTable(rows, columns) {
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	if (args.help || args.runtimes.length === 0) {
-		console.log('Usage: node scripts/embedding-agreement.mjs [--db path] [--samples 200] [--queries 5] [--batch-size 16] label=url,model[,kind] [label=url,model[,kind] ...]');
+		console.log('Usage: node scripts/embedding-agreement.mjs [--db path] [--samples 200] [--queries 5] [--batch-size 16] [--sampling stratified|random] label=url,model[,kind] [label=url,model[,kind] ...]');
 		process.exit(args.help ? 0 : 1);
 	}
 	if (args.runtimes.length < 2) {
@@ -276,10 +369,22 @@ async function main() {
 	if (!Number.isFinite(args.samples) || args.samples <= 0) throw new Error('--samples must be a positive number');
 	if (!Number.isFinite(args.queries) || args.queries < 0) throw new Error('--queries must be a non-negative number');
 	if (!Number.isFinite(args.batchSize) || args.batchSize <= 0) throw new Error('--batch-size must be a positive number');
+	if (args.sampling !== 'stratified' && args.sampling !== 'random') {
+		throw new Error(`--sampling must be "stratified" or "random" (got "${args.sampling}")`);
+	}
 
 	const dbPath = args.db ? resolve(args.db) : findNewestSnapshot();
 	console.log(`Sampling from snapshot: ${dbPath}`);
-	const { corpus, queries } = sampleChunks(dbPath, args.samples, args.queries);
+	const { corpus, queries, bounds, lengthStats } = sampleChunks(dbPath, args.samples, args.queries, args.sampling);
+	if (args.sampling === 'stratified') {
+		console.log(`Sampling: stratified by length quintile, ordered by sha256(chunkId) — reproducible from this snapshot alone.`);
+		console.log(`Quintile bounds (chars): ${bounds.join(' / ')}`);
+		// Publishing the distribution is the point, not decoration: gap G17 exists because the
+		// corpus mean (~1,118) and the chunker's 1,800-char cap had been quoted interchangeably.
+		console.log(`Corpus length distribution over ${lengthStats.n} chunks: min ${lengthStats.min}, p5 ${lengthStats.p5}, p50 ${lengthStats.p50}, mean ${Math.round(lengthStats.mean)}, p95 ${lengthStats.p95}, max ${lengthStats.max}`);
+	} else {
+		console.log('Sampling: RANDOM — not reproducible. Use the default --sampling stratified for anything that will be reported.');
+	}
 	console.log(`Sampled ${corpus.length} corpus chunks and ${queries.length} query chunks (mean corpus text length ${Math.round(mean(corpus.map(c => c.text.length)))} chars).`);
 
 	const corpusTexts = corpus.map(c => c.text);
