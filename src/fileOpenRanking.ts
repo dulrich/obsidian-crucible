@@ -379,7 +379,7 @@ export interface NarrowState {
 }
 
 export function createNarrowState(): NarrowState {
-	return { frames: [], version: -1, filterSig: ' ' };
+	return { frames: [], version: -1, filterSig: '\0' };
 }
 
 export interface SelectFileOpenOptions {
