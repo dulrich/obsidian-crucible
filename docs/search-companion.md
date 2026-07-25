@@ -50,7 +50,13 @@ Type-ahead has a 200ms debounce and the companion answers a 3-character FTS quer
 
 ### Schema and operational surface
 
-- **Schema version 3** is required (`SCHEMA_VERSION` in this script, `SEARCH_REQUIRED_SCHEMA_VERSION` in `src/search/types.ts`, bumped together). A companion reporting a lower `schemaVersion` is flagged `rebuildRequired` by the client — search still runs FTS-only, but says an index rebuild is required. The 2→3 migration is three additive `ALTER TABLE chunks ADD COLUMN` statements (`embedding BLOB`, `embedding_dim INTEGER`, `embedding_model TEXT`) — no drop/refill, no reindex needed on upgrade.
+- **Schema version 5** is required (`SCHEMA_VERSION` in this script, `SEARCH_REQUIRED_SCHEMA_VERSION` in `src/search/types.ts`, bumped together). A companion reporting a lower `schemaVersion` is flagged `rebuildRequired` by the client. Every migration runs automatically on companion startup and none of them re-reads a note or recomputes a vector:
+  - **2→3** — three additive `ALTER TABLE chunks ADD COLUMN` statements (`embedding BLOB`, `embedding_dim INTEGER`, `embedding_model TEXT`).
+  - **3→4** — one additive `ALTER TABLE chunks ADD COLUMN embedding_space TEXT`, backfilled from `embedding_model` so an index written before the column existed keeps exactly its current vector identity.
+  - **4→5** — `chunks` moves from `PRIMARY KEY (id)` to `PRIMARY KEY (vault_id, id)`. SQLite cannot `ALTER` a primary key, so this is a **lossless table rebuild, not a reindex**: create the replacement table, `INSERT ... SELECT` every column (and the `rowid`) across, drop, rename, then drop and refill `chunks_fts` from `chunks` in the same transaction. The copy cannot lose a row because the new key is strictly weaker than the old one — a table that enforced `id` unique across the whole database necessarily satisfies `(vault_id, id)` unique. Embeddings ride across untouched.
+
+  **Upgrading to schema 5 means updating the plugin and rebuilding the companion image together.** Between the two, `/health` reports `ok: false` and search is *unavailable*, not degraded — the client refuses an index it cannot rely on rather than serving it silently. Rebuild the container in the same landing as the plugin update.
+- **Vault isolation.** Chunk ids are only unique *within* a vault: `stableChunkId` folds the vault id into its hash, and every companion statement keys on `(vault_id, id)` or `(vault_id, path)` — the upsert's conflict target, the `chunks_fts` delete, the vector-leg hydration, and the FTS→`chunks` join. Before schema 5 the first two keyed on `id` alone, so two vaults sharing one companion re-labelled and then destroyed each other's rows with no error anywhere. `tests/searchVaultIsolation.test.mjs` is the regression barrier; do not reintroduce an `id`-only chunk statement.
 - **`GET /health`** reports the vector leg's real state: `vectorAvailable` (the vault holds usable vectors at one consistent width), `vectorBackend` (which backend answered — `brute-force-js` today), `embeddedChunks`, `embeddingDim`, and `embeddingModel` (the model that produced them, when every embedded chunk agrees on it).
 - **`Search: embed missing vectors`** (command id `search-embed-missing`, in the `Search` command group) backfills vectors for already-indexed notes without touching the FTS index or calling `resetIndex()` — turning on semantic search after a vault is already indexed does not require a full rebuild. It fans out resumable batches, skips paths whose embedding coverage already matches the active model, and defers (rather than fails) on a transient embedder outage.
 
@@ -167,4 +173,4 @@ type-ahead search, which does not call it.
 - `POST /v1/files/state`
 - `POST /v1/search`
 
-All mutation/search requests include `vaultId` so multiple vaults can share one companion database.
+All mutation/search requests include `vaultId` so multiple vaults can share one companion database. That sharing is only actually safe from **schema 5** onwards — see the `4→5` migration above. An implementation of this contract must key chunk storage on `vaultId + chunkId`, never on `chunkId` alone.
