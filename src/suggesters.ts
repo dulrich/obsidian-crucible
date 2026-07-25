@@ -4,8 +4,9 @@ import { Currency, fetchCurrencies } from "./orchestration/utils/fx";
 import { GeoResult, geocodeLocation } from "./orchestration/utils/weather";
 import { loadConfiguredChannels } from "./orchestration/utils/feedIntake";
 import type { ChannelEntry } from "./orchestration/utils/youtube";
-import { CurrencyCache, GeocodeCacheEntry } from "./types";
+import { CurrencyCache, GeocodeCacheEntry, ProviderCatalogModel } from "./types";
 import { buildRanges, compileQuery, scoreCompiledText, ScoreResult } from "./rankScore";
+import { filterCatalogModelsForQuery } from "./settings/modelCapabilities";
 
 /** One scored candidate, held only long enough to build the bounded top-K result. */
 interface ScoredCandidate<T> {
@@ -405,6 +406,62 @@ export class LocationSuggest extends AbstractInputSuggest<GeoResult> {
 	selectSuggestion(result: GeoResult): void {
 		this.inputEl.value = result.label;
 		void this.onChoose(result);
+		this.close();
+	}
+}
+
+/**
+ * WP-D — the model id field's probe-first-with-manual-fallback control. Mirrors `CurrencySuggest`
+ * exactly in one respect (a synchronous cache lookup rendered as suggestions) and departs from it
+ * in another: the currency/geocode suggesters fetch-and-cache lazily from inside `getSuggestions`,
+ * but here `listModels()` fires only from the settings pane's explicit "Fetch models" button (D2
+ * rule 1) — this class only ever reads the already-persisted `Provider.modelCatalog` via
+ * `getCatalog`, synchronously, so it never issues a network request per keystroke.
+ *
+ * Critically, this class does NOT own the input's value — it only decorates it with a dropdown.
+ * `AbstractInputSuggest` never intercepts typing itself; the underlying `TextComponent`'s own
+ * `onChange` (wired by the caller, exactly as before this class existed) keeps firing on every
+ * keystroke regardless of whether anything here matches. That is what makes "free text survives"
+ * true by construction: an id absent from the catalog — or a catalog that's empty because the
+ * probe was never run, came back empty, or the server is unreachable — simply produces no
+ * suggestions, and the text field behaves exactly as it always did.
+ */
+export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogModel> {
+	public inputEl: HTMLInputElement;
+	private getCatalog: () => ProviderCatalogModel[];
+	private onChoose?: (entry: ProviderCatalogModel) => void;
+
+	constructor(
+		app: App,
+		inputEl: HTMLInputElement,
+		getCatalog: () => ProviderCatalogModel[],
+		onChoose?: (entry: ProviderCatalogModel) => void,
+	) {
+		super(app, inputEl);
+		this.inputEl = inputEl;
+		this.getCatalog = getCatalog;
+		this.onChoose = onChoose;
+	}
+
+	getSuggestions(inputStr: string): ProviderCatalogModel[] {
+		// Substring filter (`filterCatalogModelsForQuery`), not `prepareFuzzySearch` like the
+		// other suggesters here — deliberately, so the "an id absent from the catalog is never
+		// forced to match" guarantee is unit-testable without bundling Obsidian's fuzzy matcher.
+		// Model ids are short and typically typed near-verbatim (often via copy-paste from a
+		// server's own listing), so substring matching costs little in practice.
+		return filterCatalogModelsForQuery(this.getCatalog(), inputStr).slice(0, 100);
+	}
+
+	renderSuggestion(entry: ProviderCatalogModel, el: HTMLElement): void {
+		el.createDiv({ text: entry.id });
+		const aux = [entry.type, entry.quantization].filter((v): v is string => !!v).join(' · ');
+		if (aux) el.createDiv({ text: aux, cls: "suggestion-aux" });
+	}
+
+	selectSuggestion(entry: ProviderCatalogModel): void {
+		this.inputEl.value = entry.id;
+		this.inputEl.dispatchEvent(new Event("input"));
+		if (this.onChoose) this.onChoose(entry);
 		this.close();
 	}
 }
