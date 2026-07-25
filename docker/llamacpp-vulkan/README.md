@@ -41,23 +41,23 @@ Then point Crucible at the **socket** ports, not the container ports:
 | Setting | Value |
 |---|---|
 | Embedding provider kind | `openai-compatible` |
-| Embedding base URL | `http://127.0.0.1:4812/v1` — the `/v1` is required; the client appends `/embeddings` |
-| Rerank base URL | `http://127.0.0.1:4813` — **no** `/v1`; the client appends `/rerank` |
+| Embedding base URL | `http://127.0.0.1:4804/v1` — the `/v1` is required; the client appends `/embeddings` |
+| Rerank base URL | `http://127.0.0.1:4805` — **no** `/v1`; the client appends `/rerank` |
 | Rerank model capability | **Rerank**, never Embedding — see below |
 
 ## How the on-demand lifecycle works
 
 ```
-Crucible ──► 127.0.0.1:4812  (systemd socket, always listening, costs nothing)
+Crucible ──► 127.0.0.1:4804  (systemd socket, always listening, costs nothing)
                   │  first connection
                   ▼
              crucible-embed.service
                   ├─ ExecStartPre  crucible-inference-ctl up …   docker compose up + wait /health
-                  ├─ ExecStart     systemd-socket-proxyd --exit-idle-time=30min ──► 127.0.0.1:14812
+                  ├─ ExecStart     systemd-socket-proxyd --exit-idle-time=30min ──► 127.0.0.1:14804
                   └─ ExecStopPost  crucible-inference-ctl down … docker compose stop
 ```
 
-The socket is the address of record; the container's published port (`14812`/`14813`) is an
+The socket is the address of record; the container's published port (`14804`/`14805`) is an
 implementation detail and nothing should be configured against it — pointing a client there
 bypasses the on-demand start and hits a stopped container.
 

@@ -7,7 +7,7 @@ After=crucible-rerank.socket
 [Service]
 # Starts the container and blocks until it answers /health -- see the helper's header for why
 # "docker compose up -d returned" is not the same as "ready".
-ExecStartPre=/home/_shared_code/obsidian-crucible/docker/llamacpp-vulkan/systemd/crucible-inference-ctl up crucible-rerank-gpu 14813
+ExecStartPre=/home/_shared_code/obsidian-crucible/docker/llamacpp-vulkan/systemd/crucible-inference-ctl up crucible-rerank-gpu 14805
 # The proxy is the unit's main process, so when it exits on idle the service stops and
 # ExecStopPost puts the container away. --exit-idle-time is therefore the whole idle policy.
 #
@@ -15,7 +15,7 @@ ExecStartPre=/home/_shared_code/obsidian-crucible/docker/llamacpp-vulkan/systemd
 # plus a GGUF load), and Crucible's interactive client gives health and search only 5 seconds
 # before it declares the companion unreachable. A working session should not pay that more than
 # once, while an idle desktop still gets its VRAM back well before anyone sits down to a game.
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=30min 127.0.0.1:14813
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=30min 127.0.0.1:14805
 ExecStopPost=/home/_shared_code/obsidian-crucible/docker/llamacpp-vulkan/systemd/crucible-inference-ctl down crucible-rerank-gpu
 # The container outlives any single proxy restart, so a failed proxy should not thrash it.
 Restart=no
