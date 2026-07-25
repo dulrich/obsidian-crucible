@@ -13,7 +13,21 @@ import {
 export { SearchServiceUnavailableError } from './types';
 export { SEARCH_REQUIRED_SCHEMA_VERSION } from './types';
 
+// Health probes and searches are interactive: a companion that has not answered in 5s is
+// treated as down so the UI stops waiting on it.
 const SEARCH_SERVICE_TIMEOUT_MS = 5000;
+
+/**
+ * Indexing-path requests get a far longer budget than interactive ones.
+ *
+ * An upsert carries hundreds of chunks and is issued from the same main thread that
+ * synchronously chunks the batch's files, so this timeout races that local work, not just
+ * the server's. Applying the interactive 5s here declared a demonstrably healthy companion
+ * unreachable partway through a rebuild (measured server-side cost of a 500-chunk flush:
+ * ~53ms), which then latched the whole queue offline and stalled it. Reads on this path
+ * (`/v1/files/state`) scale with batch size for the same reason.
+ */
+const SEARCH_SERVICE_INDEX_TIMEOUT_MS = 60_000;
 
 export class SearchServiceClient {
 	constructor(private readonly baseUrl: string, private readonly vaultId: string) {}
@@ -33,7 +47,7 @@ export class SearchServiceClient {
 	}
 
 	async resetIndex(): Promise<void> {
-		await this.post('/v1/index/reset', { vaultId: this.vaultId });
+		await this.post('/v1/index/reset', { vaultId: this.vaultId }, SEARCH_SERVICE_INDEX_TIMEOUT_MS);
 	}
 
 	async upsertChunks(chunks: SearchChunk[]): Promise<void> {
@@ -41,14 +55,14 @@ export class SearchServiceClient {
 		await this.post('/v1/chunks/upsert', {
 			vaultId: this.vaultId,
 			chunks,
-		});
+		}, SEARCH_SERVICE_INDEX_TIMEOUT_MS);
 	}
 
 	async deletePath(path: string): Promise<void> {
 		await this.post('/v1/chunks/delete', {
 			vaultId: this.vaultId,
 			paths: [path],
-		});
+		}, SEARCH_SERVICE_INDEX_TIMEOUT_MS);
 	}
 
 	async fileStates(paths: string[]): Promise<Map<string, SearchFileState>> {
@@ -57,7 +71,7 @@ export class SearchServiceClient {
 		const json = await this.post('/v1/files/state', {
 			vaultId: this.vaultId,
 			paths: uniquePaths,
-		});
+		}, SEARCH_SERVICE_INDEX_TIMEOUT_MS);
 		return normalizeFileStates(json);
 	}
 
@@ -75,15 +89,15 @@ export class SearchServiceClient {
 		return { ...response, rebuildRequired: true, message: response.message || outdated };
 	}
 
-	private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
-		const response = await this.request(path, 'POST', JSON.stringify(body));
+	private async post(path: string, body: Record<string, unknown>, timeoutMs = SEARCH_SERVICE_TIMEOUT_MS): Promise<unknown> {
+		const response = await this.request(path, 'POST', JSON.stringify(body), timeoutMs);
 		return response.json;
 	}
 
 	// Single choke point for companion I/O. Timeouts, connection failures, and 5xx all mean
 	// "the companion isn't answering" → SearchServiceUnavailableError (retryable). A 4xx is a
 	// genuine request bug and stays a plain Error so it surfaces instead of retrying forever.
-	private async request(path: string, method: string, body?: string): Promise<RequestUrlResponse> {
+	private async request(path: string, method: string, body?: string, timeoutMs = SEARCH_SERVICE_TIMEOUT_MS): Promise<RequestUrlResponse> {
 		let response: RequestUrlResponse;
 		try {
 			response = await withTimeout(requestUrl({
@@ -91,7 +105,7 @@ export class SearchServiceClient {
 				method,
 				headers: body ? { 'Content-Type': 'application/json' } : undefined,
 				body,
-			}), SEARCH_SERVICE_TIMEOUT_MS, `Search service ${path} timed out`);
+			}), timeoutMs, `Search service ${path} timed out after ${timeoutMs}ms`);
 		} catch (e) {
 			if (e instanceof SearchServiceUnavailableError) throw e;
 			throw new SearchServiceUnavailableError(`Search service ${path} unreachable: ${e instanceof Error ? e.message : String(e)}`);
