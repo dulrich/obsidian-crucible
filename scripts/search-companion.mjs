@@ -23,7 +23,13 @@ import { fileURLToPath } from 'node:url';
 // `embedding_dim` + `embedding_model` and the vector leg started reading them. The client's
 // half of that contract is SEARCH_REQUIRED_SCHEMA_VERSION in `src/search/types.ts` — the two
 // are bumped together, always.
-export const SCHEMA_VERSION = 3;
+//
+// Bumped to 4 for `embedding_space`: the model id alone cannot distinguish two runtimes
+// serving the same weights at different numeric precision (measured: fp32 vs f16 agree to
+// 0.9991 cosine yet only 0.8182 top-10 rank overlap), and the vector scan now filters on it.
+// The migration backfills `embedding_space = embedding_model`, so an index built before this
+// column existed keeps exactly its current identity and nothing re-embeds.
+export const SCHEMA_VERSION = 4;
 export const SERVICE_VERSION = 'dev-fts-rrf-vector';
 
 // bm25() takes one weight per column, including the UNINDEXED ones (they never match, so
@@ -69,6 +75,23 @@ const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 
 const FTS_REFILL_SQL = `INSERT INTO chunks_fts (id, vault_id, path, title, heading, text)
 SELECT id, vault_id, path, title, heading, text FROM chunks`;
+
+// The whole reason schema 4 costs nothing. An index built before `embedding_space` existed
+// identified its vectors by model id alone, and the client's space id degrades to exactly that
+// bare model id whenever the runtime reports no precision (Infinity, the live embedder, always
+// does). So copying `embedding_model` across preserves the existing identity byte for byte:
+// coverage still matches, the upsert guard still passes, and not one of the already-embedded
+// chunks re-embeds. A migration that instead left the column NULL — or wrote a new default —
+// would silently invalidate every vector in the index and trigger a full re-embed.
+//
+// Run on every startup rather than only when the ALTER fires, because a *client* older than
+// schema 4 talking to a schema-4 companion writes rows with a model and no space; this heals
+// them under the same rule instead of leaving them permanently unattributed. Writes are also
+// defaulted at insert time (see prepareChunkEmbedding), so this only ever catches rows that
+// predate the running binary.
+export const BACKFILL_EMBEDDING_SPACE_SQL = `UPDATE chunks
+SET embedding_space = embedding_model
+WHERE embedding_space IS NULL AND embedding IS NOT NULL AND embedding_model IS NOT NULL`;
 
 // One pooled query replaces the old two-query shape (ranked chunks + a second full
 // `COUNT(*) MATCH` just for `total`, which doubled FTS work on every search):
@@ -131,7 +154,8 @@ CREATE TABLE IF NOT EXISTS chunks (
   metadata_json TEXT NOT NULL,
   embedding BLOB,
   embedding_dim INTEGER,
-  embedding_model TEXT
+  embedding_model TEXT,
+  embedding_space TEXT
 );
 ${FTS_TABLE_SQL};
 CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
@@ -149,6 +173,8 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	if (!chunkColumns.includes('embedding')) db.exec('ALTER TABLE chunks ADD COLUMN embedding BLOB');
 	if (!chunkColumns.includes('embedding_dim')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_dim INTEGER');
 	if (!chunkColumns.includes('embedding_model')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_model TEXT');
+	if (!chunkColumns.includes('embedding_space')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_space TEXT');
+	db.exec(BACKFILL_EMBEDDING_SPACE_SQL);
 	db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
 	return migrateFtsSchema(db);
 }
@@ -259,17 +285,29 @@ export function normalizeEmbedding(values) {
 	return floats;
 }
 
+// Trimmed non-empty string, or null. The one place "no value" is decided for both the model id
+// and the space id, so `''`, `'   '` and a missing field cannot mean three different things.
+function optionalId(value) {
+	return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
 // Validation for one inbound chunk embedding. Returns null when the chunk carries none
 // (FTS-only indexing stays the default), throws HttpError(400) on anything malformed.
-export function prepareChunkEmbedding(embedding, model) {
+//
+// `space` is the vector-space identity — model id plus normalized precision when the runtime
+// could report one (`bge-m3/f16`), the bare model id when it could not. It defaults to the model
+// id for exactly that reason: a client that sends no space is asserting today's semantics, which
+// *are* "the space is the model", and that default is what makes the schema-4 migration and an
+// older client both land on the same identity rather than two.
+export function prepareChunkEmbedding(embedding, model, space) {
 	if (embedding === undefined || embedding === null) return null;
 	if (!Array.isArray(embedding) && !ArrayBuffer.isView(embedding)) {
 		throw new HttpError(400, 'chunk.embedding must be an array of numbers');
 	}
 	if (embedding.length === 0) throw new HttpError(400, 'chunk.embedding must not be empty');
 	const floats = normalizeEmbedding(embedding);
-	const modelId = typeof model === 'string' && model.trim() !== '' ? model.trim() : null;
-	return { bytes: encodeEmbedding(floats), dim: floats.length, model: modelId };
+	const modelId = optionalId(model);
+	return { bytes: encodeEmbedding(floats), dim: floats.length, model: modelId, space: optionalId(space) ?? modelId };
 }
 
 // ── The vector backend seam ──────────────────────────────────────────────────────────────
@@ -283,65 +321,115 @@ export function prepareChunkEmbedding(embedding, model) {
 //
 // Contract:
 //   name                                   → string, which backend is answering (/health)
-//   stats(vaultId?)                        → { count, dim, model }; cheap, never builds a matrix
-//   knn(vaultId, queryVector, k)           → [{ id, path, score }] descending, length ≤ k
+//   stats(vaultId?, space?)                → { count, dim, model, spaces, unlabelledCount };
+//                                            cheap, never builds a matrix
+//   knn(vaultId, queryVector, k, space?)   → [{ id, path, score }] descending, length ≤ k
 //   invalidate(vaultId?)                   → drop cached state (every vault when omitted)
+//
+// `space` narrows both to one embedding space; omitted means "every vector in the vault", which
+// is correct only when the vault holds exactly one space — deciding that is resolveScanSpace's
+// job, not the backend's.
 //
 // `stats` is cached and invalidated with the matrix because /v1/search consults it on every
 // request to report `semanticAvailable` honestly, and an uncached COUNT over `chunks` would
 // cost more than the FTS query it accompanies.
 export function createVectorBackend(db) {
+	// `(? IS NULL OR embedding_space = ?)` is the space filter on every statement below: bind
+	// null and the statement is the vault-wide form it was before schema 4, bind a space and it
+	// is scoped, with no second prepared statement to keep in sync.
 	const selectVectors = db.prepare(
-		'SELECT id, path, embedding, embedding_dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL ORDER BY rowid',
+		'SELECT id, path, embedding, embedding_dim, embedding_space FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL AND (? IS NULL OR embedding_space = ?) ORDER BY rowid',
 	);
-	const statsVault = db.prepare(
-		'SELECT COUNT(*) AS count, MIN(embedding_dim) AS min_dim, MAX(embedding_dim) AS max_dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL',
+	// Grouped by space rather than a flat COUNT/MIN/MAX, so one query answers both "how big is
+	// this matrix" and "how many distinct spaces is this index holding" — the latter being what
+	// makes a mixed index visible instead of inferred.
+	const groupsVault = db.prepare(
+		'SELECT embedding_space AS space, COUNT(*) AS count, MIN(embedding_dim) AS min_dim, MAX(embedding_dim) AS max_dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL AND (? IS NULL OR embedding_space = ?) GROUP BY embedding_space',
 	);
-	const statsAll = db.prepare(
-		'SELECT COUNT(*) AS count, MIN(embedding_dim) AS min_dim, MAX(embedding_dim) AS max_dim FROM chunks WHERE embedding IS NOT NULL',
+	const groupsAll = db.prepare(
+		'SELECT embedding_space AS space, COUNT(*) AS count, MIN(embedding_dim) AS min_dim, MAX(embedding_dim) AS max_dim FROM chunks WHERE embedding IS NOT NULL AND (? IS NULL OR embedding_space = ?) GROUP BY embedding_space',
 	);
 	const modelVault = db.prepare(
-		'SELECT embedding_model AS model, COUNT(*) AS count FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL GROUP BY embedding_model ORDER BY count DESC LIMIT 1',
+		'SELECT embedding_model AS model, COUNT(*) AS count FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL AND (? IS NULL OR embedding_space = ?) GROUP BY embedding_model ORDER BY count DESC LIMIT 1',
 	);
 	const modelAll = db.prepare(
-		'SELECT embedding_model AS model, COUNT(*) AS count FROM chunks WHERE embedding IS NOT NULL GROUP BY embedding_model ORDER BY count DESC LIMIT 1',
+		'SELECT embedding_model AS model, COUNT(*) AS count FROM chunks WHERE embedding IS NOT NULL AND (? IS NULL OR embedding_space = ?) GROUP BY embedding_model ORDER BY count DESC LIMIT 1',
 	);
 
+	// Two-level caches: vault → space → value. Nesting (rather than one composite string key)
+	// buys two things. The keys are `null` for "all vaults"/"no space filter" — a real Map key,
+	// so there is no in-band sentinel string to collide with a real vault id or to smuggle a
+	// control character into this file, which has happened here before. And invalidating a vault
+	// is one delete of its whole inner map, so a write can never leave a matrix built for one
+	// space alive under another — the silent version of the very bug the space filter fixes.
 	const statsCache = new Map();
 	const matrixCache = new Map();
-	const cacheKey = vaultId => (typeof vaultId === 'string' && vaultId !== '' ? vaultId : '\0all');
+	const vaultKey = vaultId => (typeof vaultId === 'string' && vaultId !== '' ? vaultId : null);
+	const spaceKey = space => (typeof space === 'string' && space !== '' ? space : null);
 
-	function readStats(vaultId) {
-		const key = cacheKey(vaultId);
-		const cached = statsCache.get(key);
-		if (cached) return cached;
-		const scoped = typeof vaultId === 'string' && vaultId !== '';
-		const row = scoped ? statsVault.get(vaultId) : statsAll.get();
-		const count = Number(row?.count ?? 0);
-		const minDim = row?.min_dim === null || row?.min_dim === undefined ? null : Number(row.min_dim);
-		const maxDim = row?.max_dim === null || row?.max_dim === undefined ? null : Number(row.max_dim);
-		// A vault holding two widths cannot be scanned as one matrix. The upsert guard makes
-		// that unreachable, but reporting dim: null (→ unavailable) is the safe answer if a
-		// database ever arrives in that state, rather than scoring across two vector spaces.
-		const dim = count > 0 && minDim !== null && minDim === maxDim ? minDim : null;
-		const modelRow = count > 0 ? (scoped ? modelVault.get(vaultId) : modelAll.get()) : null;
-		const stats = { count, dim, model: modelRow?.model ?? null };
-		statsCache.set(key, stats);
-		return stats;
+	function cached(cache, vaultId, space, build) {
+		const outer = vaultKey(vaultId);
+		let inner = cache.get(outer);
+		if (!inner) {
+			inner = new Map();
+			cache.set(outer, inner);
+		}
+		const key = spaceKey(space);
+		let value = inner.get(key);
+		if (value === undefined) {
+			value = build();
+			inner.set(key, value);
+		}
+		return value;
+	}
+
+	function readStats(vaultId, space) {
+		return cached(statsCache, vaultId, space, () => {
+			const scoped = vaultKey(vaultId) !== null;
+			const filter = spaceKey(space);
+			const rows = scoped ? groupsVault.all(vaultId, filter, filter) : groupsAll.all(filter, filter);
+			let count = 0;
+			let minDim = null;
+			let maxDim = null;
+			let unlabelledCount = 0;
+			const spaces = [];
+			for (const row of rows) {
+				const groupCount = Number(row.count ?? 0);
+				count += groupCount;
+				const low = row.min_dim === null || row.min_dim === undefined ? null : Number(row.min_dim);
+				const high = row.max_dim === null || row.max_dim === undefined ? null : Number(row.max_dim);
+				if (low !== null) minDim = minDim === null ? low : Math.min(minDim, low);
+				if (high !== null) maxDim = maxDim === null ? high : Math.max(maxDim, high);
+				if (typeof row.space === 'string' && row.space !== '') spaces.push(row.space);
+				else unlabelledCount += groupCount;
+			}
+			spaces.sort();
+			// A vault holding two widths cannot be scanned as one matrix. The upsert guard makes
+			// that unreachable, but reporting dim: null (→ unavailable) is the safe answer if a
+			// database ever arrives in that state, rather than scoring across two vector spaces.
+			const dim = count > 0 && minDim !== null && minDim === maxDim ? minDim : null;
+			const modelRow = count > 0 ? (scoped ? modelVault.get(vaultId, filter, filter) : modelAll.get(filter, filter)) : null;
+			return { count, dim, model: modelRow?.model ?? null, spaces, unlabelledCount };
+		});
 	}
 
 	// One Float32Array of count × dim, plus parallel id/path arrays. Built lazily on the
 	// first vector search for a vault and dropped wholesale on any write that touches it —
 	// rebuilt rather than patched, which is simpler and cannot drift.
-	function buildMatrix(vaultId) {
-		const stats = readStats(vaultId);
+	//
+	// Scoped to `space` when one is given, and the row filter is in SQL, not a post-filter in
+	// JS: scoring a query against vectors from another space is the failure this whole work
+	// package exists to remove, so those rows must never reach the matrix in the first place.
+	function buildMatrix(vaultId, space) {
+		const stats = readStats(vaultId, space);
 		if (stats.count === 0 || !stats.dim) return { count: 0, dim: 0, ids: [], paths: [], matrix: null, model: null };
 		const dim = stats.dim;
 		const matrix = new Float32Array(stats.count * dim);
 		const ids = [];
 		const paths = [];
 		let row = 0;
-		for (const record of selectVectors.all(vaultId)) {
+		const filter = spaceKey(space);
+		for (const record of selectVectors.all(vaultId, filter, filter)) {
 			const blob = record.embedding;
 			if (!blob || blob.length !== dim * 4 || Number(record.embedding_dim) !== dim) continue;
 			writeEmbeddingInto(matrix, row * dim, blob instanceof Uint8Array ? blob : new Uint8Array(blob), dim);
@@ -352,20 +440,14 @@ export function createVectorBackend(db) {
 		return { count: row, dim, ids, paths, matrix, model: stats.model };
 	}
 
-	function ensureMatrix(vaultId) {
-		const key = cacheKey(vaultId);
-		let state = matrixCache.get(key);
-		if (!state) {
-			state = buildMatrix(vaultId);
-			matrixCache.set(key, state);
-		}
-		return state;
+	function ensureMatrix(vaultId, space) {
+		return cached(matrixCache, vaultId, space, () => buildMatrix(vaultId, space));
 	}
 
 	return {
 		name: 'brute-force-js',
-		stats(vaultId) {
-			return readStats(vaultId);
+		stats(vaultId, space) {
+			return readStats(vaultId, space);
 		},
 		invalidate(vaultId) {
 			if (vaultId === undefined) {
@@ -373,11 +455,12 @@ export function createVectorBackend(db) {
 				matrixCache.clear();
 				return;
 			}
-			statsCache.delete(cacheKey(vaultId));
-			matrixCache.delete(cacheKey(vaultId));
+			// Drops every space's entry for this vault, not just the one that was written.
+			statsCache.delete(vaultKey(vaultId));
+			matrixCache.delete(vaultKey(vaultId));
 			// The unscoped (/health) stats view covers every vault, so any write invalidates it.
-			statsCache.delete(cacheKey(undefined));
-			matrixCache.delete(cacheKey(undefined));
+			statsCache.delete(null);
+			matrixCache.delete(null);
 		},
 		// Brute force over the FULL matrix — every chunk in the vault, not the FTS candidate
 		// pool. Reranking FTS candidates by vector similarity cannot surface a note that
@@ -385,8 +468,8 @@ export function createVectorBackend(db) {
 		// Measured 13ms at 384d / 33ms at 1024d over 52,257 chunks; the interactive ceiling
 		// is ~250k chunks, past which the move is worker sharding (see the plan), not int8 —
 		// int8 measured *slower* in scalar JS at this size, 19.6ms vs 12.4ms at 384d.
-		knn(vaultId, queryVector, k) {
-			const state = ensureMatrix(vaultId);
+		knn(vaultId, queryVector, k, space) {
+			const state = ensureMatrix(vaultId, space);
 			if (state.count === 0) return [];
 			const dim = state.dim;
 			if (!queryVector || queryVector.length !== dim) {
@@ -583,6 +666,78 @@ export function fuseSearchRows(rows, options = {}) {
 	}));
 }
 
+// Which embedding space — if any — this request's vector scan may cover.
+//
+// The rule the whole feature turns on: a query vector may only ever be scored against vectors
+// produced in the same space. Two same-width spaces in one vault used to load into one matrix
+// and get cosine-scored against each other, with nothing anywhere reporting it.
+//
+// Returns `{ space, note, skip }`:
+//   space  → bind as the scan's filter; null means "no filter needed", which is only ever
+//            returned when the vault holds exactly one space (or reports none at all)
+//   skip   → answer with keywords alone; `note` says why. Never an error: failing a whole
+//            search over a transient model switch is worse than answering without vectors,
+//            exactly as the query-width mismatch already decided.
+//   note   → also set on the non-skip mixed-index path, because a scan that silently covered
+//            only part of the index would be the quiet half of the same bug.
+//
+// A backend reporting no `spaces` at all (a test double, an older seam implementation) is
+// treated as single-space rather than unusable: unknown must not disable semantic search.
+export function resolveScanSpace(stats, requested) {
+	const spaces = Array.isArray(stats?.spaces) ? stats.spaces.filter(space => typeof space === 'string' && space !== '') : [];
+	const unlabelled = Number(stats?.unlabelledCount ?? 0) > 0;
+	const distinct = spaces.length + (unlabelled ? 1 : 0);
+	const want = typeof requested === 'string' && requested.trim() !== '' ? requested.trim() : null;
+	const listed = () => (unlabelled ? [...spaces, '(unattributed)'] : spaces).map(space => `"${space}"`).join(', ');
+
+	if (distinct === 0) return { space: null, note: null, skip: false };
+
+	if (distinct === 1) {
+		// Unattributed vectors: legitimate for an index written before this column existed and
+		// not yet restarted through the migration. There is no way to prove they share the
+		// query's space, so a request that names one degrades rather than assuming.
+		if (unlabelled) {
+			if (!want) return { space: null, note: null, skip: false };
+			return {
+				space: null,
+				skip: true,
+				note: `this vault's vectors carry no embedding-space attribution, so they cannot be matched against a query embedded in "${want}"; semantic ranking skipped until the index is rebuilt`,
+			};
+		}
+		const only = spaces[0];
+		if (want && want !== only) {
+			return {
+				space: null,
+				skip: true,
+				note: `this vault is indexed in embedding space "${only}" but the query was embedded in "${want}"; semantic ranking skipped`,
+			};
+		}
+		// One space, and either the query agrees or predates the field: scan it all, exactly as
+		// before schema 4.
+		return { space: null, note: null, skip: false };
+	}
+
+	if (!want) {
+		return {
+			space: null,
+			skip: true,
+			note: `this vault holds ${distinct} embedding spaces (${listed()}) and the query named none, so no scan can be scored honestly; semantic ranking skipped until the index is rebuilt`,
+		};
+	}
+	if (!spaces.includes(want)) {
+		return {
+			space: null,
+			skip: true,
+			note: `this vault holds ${distinct} embedding spaces (${listed()}), none of them "${want}"; semantic ranking skipped`,
+		};
+	}
+	return {
+		space: want,
+		skip: false,
+		note: `this vault holds ${distinct} embedding spaces (${listed()}); semantic ranking covered only "${want}"`,
+	};
+}
+
 // The vector leg: a scan of the whole matrix, pooled to one score per path, hydrated for
 // any path the FTS pool never produced. It is deliberately a separate query fused in JS —
 // cosine does not belong inside the FTS SQL, where `MATERIALIZED` and the bm25/snippet
@@ -594,7 +749,7 @@ export function fuseSearchRows(rows, options = {}) {
 // failure this feature has to avoid, while failing the whole search over it would be worse
 // than answering with keywords.
 function runVectorLeg(db, options) {
-	const outcome = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null };
+	const outcome = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null };
 	const vectors = options.vectors;
 	if (!vectors) return outcome;
 	const stats = vectors.stats(options.vaultId);
@@ -606,14 +761,24 @@ function runVectorLeg(db, options) {
 	const queryEmbedding = options.queryEmbedding;
 	if (!Array.isArray(queryEmbedding) && !ArrayBuffer.isView(queryEmbedding)) return outcome;
 	if (queryEmbedding.length === 0) return outcome;
-	if (queryEmbedding.length !== stats.dim) {
-		outcome.note = `query embedding is ${queryEmbedding.length}-dimensional but this vault is indexed at ${stats.dim}; semantic ranking skipped`;
+
+	// Space before width: a mixed index can hold a space this query has no business scanning at
+	// all, and the width it would be compared against is the *scanned* space's, not the vault's.
+	const resolved = resolveScanSpace(stats, options.embeddingSpace);
+	outcome.space = resolved.space;
+	outcome.note = resolved.note;
+	if (resolved.skip) return outcome;
+	const scanStats = resolved.space ? vectors.stats(options.vaultId, resolved.space) : stats;
+	outcome.dim = scanStats.dim;
+
+	if (queryEmbedding.length !== scanStats.dim) {
+		outcome.note = `query embedding is ${queryEmbedding.length}-dimensional but this vault is indexed at ${scanStats.dim}; semantic ranking skipped`;
 		return outcome;
 	}
 
 	let hits;
 	try {
-		hits = vectors.knn(options.vaultId, queryEmbedding, options.poolSize);
+		hits = vectors.knn(options.vaultId, queryEmbedding, options.poolSize, resolved.space);
 	} catch (e) {
 		outcome.note = `${e instanceof Error ? e.message : String(e)}; semantic ranking skipped`;
 		return outcome;
@@ -685,6 +850,7 @@ export function runSearch(db, options) {
 		vaultId,
 		vectors: options.vectors,
 		queryEmbedding: options.queryEmbedding,
+		embeddingSpace: options.embeddingSpace,
 		poolSize,
 		hydrate: options.hydrate,
 		knownPaths: new Set(rows.map(row => row.path)),
@@ -712,6 +878,7 @@ export function runSearch(db, options) {
 		semanticAvailable: vector.available,
 		embeddingDim: vector.dim,
 		embeddingModel: vector.model,
+		embeddingSpace: vector.space,
 		note: vector.note,
 	};
 }
@@ -728,8 +895,8 @@ export function createRequestHandler(db, options = {}) {
 	// seam doing its job.
 	const vectors = options.vectors ?? createVectorBackend(db);
 	const upsertChunk = db.prepare(`
-INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model, embedding_space)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   vault_id = excluded.vault_id,
   path = excluded.path,
@@ -742,9 +909,14 @@ ON CONFLICT(id) DO UPDATE SET
   metadata_json = excluded.metadata_json,
   embedding = excluded.embedding,
   embedding_dim = excluded.embedding_dim,
-  embedding_model = excluded.embedding_model
+  embedding_model = excluded.embedding_model,
+  embedding_space = excluded.embedding_space
 `);
 	const selectVaultEmbeddingDim = db.prepare('SELECT embedding_dim AS dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL LIMIT 1');
+	// The space twin of selectVaultEmbeddingDim, and read at the same moment for the same reason.
+	// `embedding_space IS NOT NULL` skips unattributed legacy rows rather than reading their NULL
+	// as a conflicting space: they carry no claim to contradict.
+	const selectVaultEmbeddingSpace = db.prepare('SELECT embedding_space AS space FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL AND embedding_space IS NOT NULL LIMIT 1');
 	const hydrateChunk = db.prepare(HYDRATE_CHUNK_SQL);
 	const deleteFtsById = db.prepare('DELETE FROM chunks_fts WHERE id = ?');
 	const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
@@ -770,7 +942,10 @@ SELECT
   SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded_count,
   SUM(CASE WHEN embedding IS NOT NULL AND embedding_model IS NOT NULL THEN 1 ELSE 0 END) AS embedded_labelled_count,
   COUNT(DISTINCT embedding_model) AS embedding_model_count,
-  MAX(embedding_model) AS embedding_model
+  MAX(embedding_model) AS embedding_model,
+  SUM(CASE WHEN embedding IS NOT NULL AND embedding_space IS NOT NULL THEN 1 ELSE 0 END) AS embedded_spaced_count,
+  COUNT(DISTINCT embedding_space) AS embedding_space_count,
+  MAX(embedding_space) AS embedding_space
 FROM chunks
 WHERE vault_id = ? AND path = ?
 GROUP BY path, content_hash
@@ -797,6 +972,13 @@ LIMIT 1
 					embeddedChunks: stats.count,
 					embeddingDim: stats.dim,
 					embeddingModel: stats.model,
+					// Distinct spaces across every vault, so a mixed index is *visible* here
+					// rather than inferred from searches that quietly went keyword-only. More
+					// than one entry — or any unattributed vectors alongside attributed ones —
+					// means some search will degrade; see resolveScanSpace.
+					embeddingSpaces: stats.spaces ?? [],
+					embeddingSpace: (stats.spaces ?? []).length === 1 && !stats.unlabelledCount ? stats.spaces[0] : null,
+					unattributedEmbeddedChunks: stats.unlabelledCount ?? 0,
 				});
 			}
 			if (req.method === 'POST' && url.pathname === '/v1/index/reset') {
@@ -844,7 +1026,8 @@ LIMIT 1
 					const embeddedCount = Number(row.embedded_count ?? 0);
 					const labelledCount = Number(row.embedded_labelled_count ?? 0);
 					const modelCount = Number(row.embedding_model_count ?? 0);
-					// Additive fields only — no on-disk schema change, so SCHEMA_VERSION stays put.
+					const spacedCount = Number(row.embedded_spaced_count ?? 0);
+					const spaceCount = Number(row.embedding_space_count ?? 0);
 					files.push({
 						path: row.path,
 						contentHash: row.content_hash || undefined,
@@ -856,6 +1039,13 @@ LIMIT 1
 						embeddingModel: embeddedCount > 0 && modelCount === 1 && labelledCount === embeddedCount && row.embedding_model
 							? String(row.embedding_model)
 							: undefined,
+						// Same fail-closed conjunction as embeddingModel, deliberately — at least one
+						// embedded chunk, exactly one distinct non-null value, and every embedded
+						// chunk labelled. Anything else reports undefined, which the client reads as
+						// "unknown" and therefore re-embeds rather than trusting.
+						embeddingSpace: embeddedCount > 0 && spaceCount === 1 && spacedCount === embeddedCount && row.embedding_space
+							? String(row.embedding_space)
+							: undefined,
 					});
 				}
 				return json(res, 200, { ok: true, files });
@@ -864,10 +1054,18 @@ LIMIT 1
 				const body = await readJson(req);
 				const chunks = Array.isArray(body.chunks) ? body.chunks : [];
 				const touchedVaults = new Set();
-				// Width consistency, enforced once per vault per request. Mixing two vector
-				// spaces inside one index is the failure mode that produces confidently wrong
-				// rankings with no error anywhere, and nothing downstream can detect it — so
-				// the write is refused here, atomically (the throw rolls the whole batch back).
+				// Width *and* space consistency, enforced once per vault per request. Mixing two
+				// vector spaces inside one index is the failure mode that produces confidently
+				// wrong rankings with no error anywhere — and width alone does not catch it:
+				// bge-m3 is 1024d under every quantization, so an fp32 index and a Q4 re-index
+				// pass a width check unchanged. Both are refused here, atomically (the throw
+				// rolls the whole batch back).
+				//
+				// Deliberately *not* also a per-batch space check, unlike `batchDim`. A mixed-width
+				// batch cannot be stored coherently at all, whereas chunks disagreeing about their
+				// producing model inside one batch is a state /v1/files/state already reports
+				// fail-closed (it answers `undefined`, so the client re-embeds) and the scan filter
+				// already survives. Refusing it here would only delete that defence's test coverage.
 				const checkedVaults = new Set();
 				let batchDim = null;
 				db.exec('BEGIN');
@@ -893,7 +1091,11 @@ LIMIT 1
 						}
 						touchedVaults.add(vaultId);
 
-						const embedding = prepareChunkEmbedding(chunk.embedding, chunk.embeddingModel ?? body.embeddingModel);
+						const embedding = prepareChunkEmbedding(
+							chunk.embedding,
+							chunk.embeddingModel ?? body.embeddingModel,
+							chunk.embeddingSpace ?? body.embeddingSpace,
+						);
 						if (embedding) {
 							if (batchDim === null) batchDim = embedding.dim;
 							else if (embedding.dim !== batchDim) {
@@ -902,11 +1104,16 @@ LIMIT 1
 							if (!checkedVaults.has(vaultId)) {
 								// Read *after* this path's rows were cleared, so re-embedding a
 								// vault that holds exactly one path is allowed while a genuine
-								// mix (other paths still at the old width) is refused.
+								// mix (other paths still at the old width, or in the old space)
+								// is refused.
 								const existing = selectVaultEmbeddingDim.get(vaultId);
 								const existingDim = existing?.dim === null || existing?.dim === undefined ? null : Number(existing.dim);
 								if (existingDim && existingDim !== embedding.dim) {
 									throw new HttpError(400, `vault "${vaultId}" is indexed with ${existingDim}-dimension embeddings; refusing a ${embedding.dim}-dimension vector. Reset the index before changing the embedding model.`);
+								}
+								const existingSpace = optionalId(selectVaultEmbeddingSpace.get(vaultId)?.space);
+								if (existingSpace && embedding.space && existingSpace !== embedding.space) {
+									throw new HttpError(400, `vault "${vaultId}" is indexed in embedding space "${existingSpace}"; refusing a vector from "${embedding.space}". Two spaces in one index cannot be compared, so reset the index before changing the embedding model or its precision.`);
 								}
 								checkedVaults.add(vaultId);
 							}
@@ -926,6 +1133,7 @@ LIMIT 1
 							embedding ? embedding.bytes : null,
 							embedding ? embedding.dim : null,
 							embedding ? embedding.model : null,
+							embedding ? embedding.space : null,
 						);
 						deleteFtsById.run(id);
 						insertFts.run(id, vaultId, path, title, heading, text);
@@ -951,6 +1159,10 @@ LIMIT 1
 					// Read at last: the client has been sending this field since the search
 					// modal shipped and the companion has been dropping it on the floor.
 					queryEmbedding: body.queryEmbedding,
+					// Which vector space the query embedding was produced in. Absent from an
+					// older client, which is why "no space named" still scans a single-space
+					// vault rather than refusing.
+					embeddingSpace: body.embeddingSpace,
 					hydrate: hydrateChunk,
 				});
 				const response = {

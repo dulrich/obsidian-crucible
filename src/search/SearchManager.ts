@@ -1,11 +1,13 @@
 import { App, Notice, TFile } from 'obsidian';
-import { CrucibleSettings, ProviderModelRef } from '../types';
+import { CrucibleSettings, Provider, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
+import { normalizePrecision } from '../providers/shared';
 import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
 import { SearchServiceClient } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
 import {
+	embeddingSpaceId,
 	SearchChunk,
 	SearchEmbeddingMismatchError,
 	SearchEmbeddingUnavailableError,
@@ -195,6 +197,11 @@ export class SearchManager {
 		if (requireEmbeddings && !this.activeEmbeddingModelId()) {
 			throw new Error('Search: cannot backfill embeddings — semantic search is off or no embedding model is configured (Crucible → Settings → Orchestrate → Search).');
 		}
+		// Resolved once for the whole operation: it is what both halves of the vector contract are
+		// measured against — which space stored vectors must already be in to count as covered,
+		// and which space the ones produced here are stamped with. Deriving it can probe the
+		// runtime, so it must not sit inside the per-file loop.
+		const activeSpace = await this.activeEmbeddingSpaceId();
 		const client = this.client();
 		let buffer: SearchChunk[] = [];
 		let processedFiles = 0;
@@ -207,7 +214,7 @@ export class SearchManager {
 			const batch = buffer;
 			buffer = [];
 			try {
-				const embedded = await this.attachEmbeddings(batch);
+				const embedded = await this.attachEmbeddings(batch, activeSpace);
 				// A provider that returns fewer vectors than texts fails just as silently as one
 				// that throws, so the strict path checks the count rather than only the throw.
 				if (requireEmbeddings && embedded < batch.length) {
@@ -234,7 +241,7 @@ export class SearchManager {
 			// the vectors are. Turning semantic search on, or changing the embedding model, leaves
 			// every already-indexed file with a matching hash and no usable vectors — which is how
 			// "enable semantic later" used to be a silent no-op repairable only by resetIndex().
-			if (stored && stored.contentHash === prepared.contentHash && this.embeddingCoverageSatisfied(stored)) {
+			if (stored && stored.contentHash === prepared.contentHash && this.embeddingCoverageSatisfied(stored, activeSpace)) {
 				if (onProgress && (processedFiles === preparedFiles.length || processedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
 					await onProgress(processedFiles, totalChunks);
 				}
@@ -325,20 +332,80 @@ export class SearchManager {
 	}
 
 	/**
+	 * The vector space vectors should currently be produced in, or null when vectors are not part
+	 * of the contract at all — the same null, for the same load-bearing reason, as
+	 * `activeEmbeddingModelId`.
+	 *
+	 * Async because deriving it may probe the runtime (WP-2's `describeModel`), so callers resolve
+	 * it *once* per operation rather than per file: `indexFiles` hoists it above the loop, and
+	 * `search()` resolves it alongside the query embedding. The probe is cached per provider+model
+	 * for the session inside `ProviderManager`, so this is not a round-trip per call either way.
+	 */
+	private async activeEmbeddingSpaceId(): Promise<string | null> {
+		const modelId = this.activeEmbeddingModelId();
+		if (!modelId) return null;
+		return embeddingSpaceId(modelId, await this.activeEmbeddingPrecision(modelId));
+	}
+
+	/**
+	 * Numeric precision for the space id, in strict precedence: what the runtime says it loaded,
+	 * then what the user declared on the model, then nothing.
+	 *
+	 * The probe wins because it describes the weights actually running; the declared variant is
+	 * the fallback for runtimes that cannot self-report (Infinity, vLLM, TEI, plain llama.cpp);
+	 * and "nothing" is a first-class answer that degrades the space id to the bare model id.
+	 *
+	 * Both sides go through `normalizePrecision` — the one normalizer — so a hand-typed `Q4_K_M`
+	 * and a probed `q4_k_m` are the same space rather than two, which is the difference between
+	 * no re-embed and a full one.
+	 */
+	private async activeEmbeddingPrecision(modelId: string): Promise<string | undefined> {
+		const ref = this.settings.searchEmbeddingModel;
+		if (!ref) return undefined;
+		const provider = this.settings.providers.find(p => p.id === ref.providerId);
+		const declared = normalizePrecision(provider?.models.find(m => m.id === ref.modelId)?.embeddingVariant);
+		if (!provider) return declared;
+		return (await this.probeEmbeddingPrecision(provider, modelId)) ?? declared;
+	}
+
+	/**
+	 * Best-effort `describeModel` probe. Every failure mode — a provider kind with no probe, an
+	 * injected manager without the method, an unreachable metadata endpoint — is a clean unknown,
+	 * never an error and never a guess: an unknown precision degrades the space id to the bare
+	 * model id, which is exactly today's behaviour.
+	 */
+	private async probeEmbeddingPrecision(provider: Provider, modelId: string): Promise<string | undefined> {
+		if (typeof this.providerManager.describeModel !== 'function') return undefined;
+		try {
+			const description = await this.providerManager.describeModel(provider, modelId);
+			return normalizePrecision(description.precision);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
 	 * Does the companion's stored state satisfy the *vector* half of "this file is up to date"?
 	 *
-	 * Three ways to answer no, all of which today produce no error anywhere: the path has no
-	 * vectors, it has only some (an interrupted backfill), or the vectors were produced by a
-	 * different model — mixing two vector spaces is the failure mode that yields confidently
-	 * wrong rankings. Unknown coverage (an older companion that omits the fields) also answers
-	 * no: re-indexing a file that did not need it is a wasted read, skipping one that did is a
-	 * permanent gap.
+	 * Three ways to answer no, all of which produce no error anywhere: the path has no vectors, it
+	 * has only some (an interrupted backfill), or its vectors are in a different vector space —
+	 * mixing two spaces is the failure mode that yields confidently wrong rankings. Unknown
+	 * coverage (an older companion that omits the fields) also answers no: re-indexing a file that
+	 * did not need it is a wasted read, skipping one that did is a permanent gap.
+	 *
+	 * The comparison is on the *space*, not the model id, because the model id cannot distinguish
+	 * the same weights at two precisions — and a re-index in a genuinely different space is
+	 * exactly what has to be detected. It costs nothing on an existing index: with no precision
+	 * known the active space id *is* the bare model id, which is what the companion's schema-4
+	 * migration wrote into every already-embedded chunk.
+	 *
+	 * `activeSpace` is resolved once by the caller rather than looked up here, because deriving it
+	 * may probe the runtime and this runs once per file.
 	 */
-	private embeddingCoverageSatisfied(stored: SearchFileState): boolean {
-		const active = this.activeEmbeddingModelId();
-		if (!active) return true;
+	private embeddingCoverageSatisfied(stored: SearchFileState, activeSpace: string | null): boolean {
+		if (!activeSpace) return true;
 		if (stored.hasEmbeddings !== true) return false;
-		return stored.embeddingModel === active;
+		return stored.embeddingSpace === activeSpace;
 	}
 
 	private async loadFileStates(client: SearchServiceClient, paths: string[]): Promise<Map<string, SearchFileState>> {
@@ -357,10 +424,14 @@ export class SearchManager {
 
 	async search(query: string, limit?: number): Promise<SearchResponse> {
 		const queryEmbedding = await this.embedQuery(query);
+		// Only when there is a vector to place — a keyword-only search has no space, and asking
+		// for one would probe the runtime on a path that has already decided not to embed.
+		const embeddingSpace = queryEmbedding ? (await this.activeEmbeddingSpaceId()) ?? undefined : undefined;
 		const response = await this.client().search({
 			query,
 			limit: limit ?? this.settings.searchResultLimit,
 			queryEmbedding,
+			embeddingSpace,
 		});
 		return this.boostSearchResponse(response);
 	}
@@ -475,11 +546,12 @@ export class SearchManager {
 	 * compares against the batch size.
 	 *
 	 * Stamping the model per chunk is what makes a later model switch detectable at all: the
-	 * companion stores it in `chunks.embedding_model` and reports it through /v1/files/state,
-	 * so `embeddingCoverageSatisfied` can tell "embedded under the model we're using now" from
-	 * "embedded under some other one".
+	 * companion stores it in `chunks.embedding_model` and reports it through /v1/files/state.
+	 * The *space* is stamped alongside it and is the one coverage actually compares — the model id
+	 * cannot tell fp32 weights from Q4 ones, which is the whole gap this closes. Both are stored:
+	 * the model id stays the answer to "which weights family", the space to "which vector space".
 	 */
-	private async attachEmbeddings(chunks: SearchChunk[]): Promise<number> {
+	private async attachEmbeddings(chunks: SearchChunk[], activeSpace: string | null): Promise<number> {
 		if (!this.settings.searchSemanticEnabled || chunks.length === 0) return 0;
 		const ref = this.settings.searchEmbeddingModel;
 		if (!ref) return 0;
@@ -493,6 +565,7 @@ export class SearchManager {
 			if (!chunk || !embedding) continue;
 			chunk.embedding = embedding;
 			if (modelId) chunk.embeddingModel = modelId;
+			if (activeSpace) chunk.embeddingSpace = activeSpace;
 			embedded++;
 		}
 		return embedded;

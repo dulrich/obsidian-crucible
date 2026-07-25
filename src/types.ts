@@ -297,6 +297,20 @@ export interface ProviderModel {
 	label: string;
 	capabilities?: ProviderModelCapability[];
 	embeddingDimensions?: number;
+	/**
+	 * Manual numeric-precision tag for the vector-space id, used *only* when the runtime cannot
+	 * report its own — a fallback, never the primary mechanism (see `ProviderModelDescription`).
+	 *
+	 * This is not a niche case: Infinity's `/v1/models` exposes no dtype at all, and vLLM, TEI and
+	 * plain llama.cpp servers commonly do not either, so on many installs this is the only way the
+	 * space id can distinguish an fp32 index from a Q4 one. A probed precision always wins over
+	 * this; leaving it empty preserves today's behaviour exactly (the space id degrades to the
+	 * bare model id, and nothing re-embeds).
+	 *
+	 * Normalized through `normalizePrecision` before use, so `Q4_K_M` typed here and `q4_k_m`
+	 * probed from another runtime are one space rather than two.
+	 */
+	embeddingVariant?: string;
 }
 
 // Note the asymmetry with HttpProviderClient's optional-capability methods: those describe what a

@@ -334,6 +334,21 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					t.inputEl.step = '1';
 					t.inputEl.addClass('pi-width-half');
 				});
+
+			new Setting(modelRow)
+				.setName('Embedding precision (fallback)')
+				.setDesc('Only needed when the server cannot report what it loaded — Crucible asks first, and a reported value always wins. The same weights at a different precision are a different vector space, so setting this when it matters (e.g. f16 vs fp32) keeps the two from being mixed. Leave empty unless you know: changing it re-embeds the vault.')
+				.addText(t => {
+					t.setPlaceholder('e.g. f16, fp32, q4_k_m')
+						.setValue(model.embeddingVariant ?? '')
+						.onChange(async (v) => {
+							const trimmed = v.trim();
+							if (trimmed) model.embeddingVariant = trimmed;
+							else delete model.embeddingVariant;
+							await tab.plugin.saveSettings();
+						});
+					t.inputEl.addClass('pi-width-half');
+				});
 		});
 	}
 

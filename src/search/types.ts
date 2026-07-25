@@ -72,6 +72,45 @@ export interface SearchChunk {
 	// model weights, so serving `bge-m3` from Ollama and then from a TEI container is the same
 	// space and must not force a full re-embed, while switching to `nomic-embed-text` must.
 	embeddingModel?: string;
+	/**
+	 * Which vector space `embedding` lives in — the identity that decides whether two vectors may
+	 * be compared at all. See `embeddingSpaceId`.
+	 *
+	 * Separate from `embeddingModel` because they answer different questions: the model id says
+	 * *which weights family*, the space id says *which vector space*, and the model id alone
+	 * cannot express the second. Two engines serving "bge-m3" at fp32 and at Q4 report the same
+	 * model id and the same 1024 width, so nothing else in the system can tell them apart.
+	 *
+	 * The companion stores it in `chunks.embedding_space`, reports it through /v1/files/state,
+	 * and — the load-bearing part — filters the vector scan by it.
+	 */
+	embeddingSpace?: string;
+}
+
+/**
+ * The vector-space identity of a model at a given numeric precision.
+ *
+ * `bge-m3` + `f16` → `bge-m3/f16`; `bge-m3` + nothing → `bge-m3`.
+ *
+ * The no-precision fall-through is not a corner case, it is the live path — Infinity (the
+ * current embedder) exposes no dtype at all, so `precision` is `undefined` on every probe — and
+ * it is doing two jobs at once. It preserves the `SearchChunk.embeddingModel` principle above
+ * (same weights on a different host stay one space), and it makes the schema-4 migration free:
+ * the companion backfills `embedding_space = embedding_model`, which is exactly what this
+ * returns when no precision is known, so every already-embedded chunk stays covered and nothing
+ * re-embeds.
+ *
+ * Hence the guards: an absent, blank, or non-string precision must yield the bare model id, never
+ * a trailing `/`, never the literal string `"undefined"`. Either would be a *different* space id
+ * from the migration's, which would silently re-embed the entire vault.
+ *
+ * The result is an opaque key — compared for equality, never parsed back apart — so a model id
+ * that already contains a slash (`BAAI/bge-m3`, which is what the live index holds) is fine.
+ */
+export function embeddingSpaceId(modelId: string, precision?: string): string {
+	const model = modelId.trim();
+	const tag = typeof precision === 'string' ? precision.trim() : '';
+	return tag ? `${model}/${tag}` : model;
 }
 
 // The companion index schema this plugin build knows how to query. Bumped to 2 when
@@ -83,7 +122,10 @@ export interface SearchChunk {
 // (additive ALTERs, plus the FTS rebuild), so the only mismatch that can survive is an older
 // companion binary/image — which is why this constant and the companion's SCHEMA_VERSION are
 // always bumped in the same change.
-export const SEARCH_REQUIRED_SCHEMA_VERSION = 3;
+// Bumped to 4 for `chunks.embedding_space`. An older companion binary cannot store it or filter
+// the scan by it, so it would load vectors from two spaces into one matrix and cosine-score them
+// against each other — precisely the silent failure that column exists to remove.
+export const SEARCH_REQUIRED_SCHEMA_VERSION = 4;
 
 export interface SearchHealth {
 	ok: boolean;
@@ -161,11 +203,29 @@ export interface SearchFileState {
 	 * vectors of unknown origin.
 	 */
 	embeddingModel?: string;
+	/**
+	 * The single vector space behind this path's vectors, under exactly the same fail-closed
+	 * conjunction as `embeddingModel` — at least one embedded chunk, one distinct non-null value,
+	 * every embedded chunk labelled — and `undefined` otherwise.
+	 *
+	 * This, not `embeddingModel`, is what `embeddingCoverageSatisfied` compares: it is the
+	 * identity that decides whether stored vectors can be scored against ones produced now.
+	 * `undefined` also covers an older companion that omits the field entirely, and re-embeds
+	 * rather than trusting — skipping a file that needed work is a silent permanent gap, while
+	 * re-indexing one that did not costs a read.
+	 */
+	embeddingSpace?: string;
 }
 
 export interface SearchQueryOptions {
 	query: string;
 	limit: number;
 	queryEmbedding?: number[];
+	/**
+	 * The vector space `queryEmbedding` was produced in. The companion scans only vectors from
+	 * this space; a vault holding more than one degrades to keyword-only with an explanation
+	 * rather than scoring across spaces. Omitted when there is no query embedding to place.
+	 */
+	embeddingSpace?: string;
 	filters?: Record<string, unknown>;
 }
