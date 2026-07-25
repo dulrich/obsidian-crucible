@@ -1,62 +1,121 @@
-import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, prepareFuzzySearch, renderResults, Command, getAllTags } from "obsidian";
+import { TAbstractFile, TFile, TFolder, AbstractInputSuggest, App, SearchResult, prepareFuzzySearch, renderResults, Command, getAllTags } from "obsidian";
 import type CruciblePlugin from "./main";
 import { Currency, fetchCurrencies } from "./orchestration/utils/fx";
 import { GeoResult, geocodeLocation } from "./orchestration/utils/weather";
 import { loadConfiguredChannels } from "./orchestration/utils/feedIntake";
 import type { ChannelEntry } from "./orchestration/utils/youtube";
 import { CurrencyCache, GeocodeCacheEntry } from "./types";
+import { buildRanges, compileQuery, scoreCompiledText, ScoreResult } from "./rankScore";
+
+/** One scored candidate, held only long enough to build the bounded top-K result. */
+interface ScoredCandidate<T> {
+    item: T;
+    result: ScoreResult;
+}
+
+/**
+ * Bounded top-K selection via a size-`limit` min-heap keyed on `result.score`
+ * (descending — see `SCORE_HIGHER_IS_BETTER` in `rankScore.ts`), so ranking
+ * 47,000 candidates down to the 100 shown costs `O(n log limit)` rather than
+ * sorting every admitted match. Ties are broken by shortest path, then
+ * shallowest depth, mirroring the palette's tiebreak.
+ */
+function selectTopScored<T>(items: T[], limit: number, score: (item: T) => ScoreResult | null, path: (item: T) => string): ScoredCandidate<T>[] {
+    if (limit <= 0) return [];
+    const heap: ScoredCandidate<T>[] = [];
+    for (const item of items) {
+        const result = score(item);
+        if (result === null) continue;
+        if (heap.length < limit) {
+            heap.push({ item, result });
+            if (heap.length === limit) heapify(heap);
+        } else if (result.score > heap[0]!.result.score) {
+            heap[0] = { item, result };
+            siftDown(heap, 0, heap.length);
+        }
+    }
+    heap.sort((a, b) => {
+        if (a.result.score !== b.result.score) return b.result.score - a.result.score;
+        const aPath = path(a.item);
+        const bPath = path(b.item);
+        if (aPath.length !== bPath.length) return aPath.length - bPath.length;
+        return pathDepth(aPath) - pathDepth(bPath);
+    });
+    return heap;
+}
+
+function heapify<T>(heap: ScoredCandidate<T>[]): void {
+    for (let i = (heap.length >> 1) - 1; i >= 0; i--) siftDown(heap, i, heap.length);
+}
+
+/** Min-heap sift, ordered by `result.score` ascending (the root is the current worst). */
+function siftDown<T>(heap: ScoredCandidate<T>[], index: number, size: number): void {
+    let i = index;
+    for (;;) {
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        let smallest = i;
+        if (l < size && heap[l]!.result.score < heap[smallest]!.result.score) smallest = l;
+        if (r < size && heap[r]!.result.score < heap[smallest]!.result.score) smallest = r;
+        if (smallest === i) return;
+        const tmp = heap[i]!;
+        heap[i] = heap[smallest]!;
+        heap[smallest] = tmp;
+        i = smallest;
+    }
+}
+
+function pathDepth(path: string): number {
+    return path.split('/').length;
+}
 
 export abstract class FileSystemSuggest extends AbstractInputSuggest<TAbstractFile> {
     public inputEl: HTMLInputElement;
+    /** Loaded once per suggester instance — the instance is short-lived (one settings-tab input). */
+    private itemsCache: TAbstractFile[] | null = null;
+    /** Score + highlight ranges computed while ranking, reused by `renderSuggestion`. */
+    private matchCache = new Map<string, SearchResult>();
 
     constructor(app: App, inputEl: HTMLInputElement) {
         super(app, inputEl);
         this.inputEl = inputEl;
     }
 
-    abstract getItems(): TAbstractFile[];
+    abstract loadItems(): TAbstractFile[];
+
+    private getItems(): TAbstractFile[] {
+        if (this.itemsCache === null) this.itemsCache = this.loadItems();
+        return this.itemsCache;
+    }
 
     getSuggestions(inputStr: string): TAbstractFile[] {
         const items = this.getItems();
-        
+        this.matchCache.clear();
+
         if (!inputStr) {
             return items
-                .sort((a, b) => (a.path.length - b.path.length) || (a.path.split('/').length - b.path.split('/').length))
+                .slice()
+                .sort((a, b) => (a.path.length - b.path.length) || (pathDepth(a.path) - pathDepth(b.path)))
                 .slice(0, 100);
         }
 
-        const fuzzySearch = prepareFuzzySearch(inputStr);
-        const results = items
-            .map(item => ({ item, result: fuzzySearch(item.path) }))
-            .filter(res => res.result !== null)
-            .sort((a, b) => {
-                if (a.result!.score !== b.result!.score) {
-                    return a.result!.score - b.result!.score;
-                }
-                if (a.item.path.length !== b.item.path.length) {
-                    return a.item.path.length - b.item.path.length;
-                }
-                const aDepth = a.item.path.split('/').length;
-                const bDepth = b.item.path.split('/').length;
-                return aDepth - bDepth;
-            })
-            .map(res => res.item);
-
-        return results.slice(0, 100);
+        const compiled = compileQuery(inputStr);
+        const winners = selectTopScored(items, 100, item => scoreCompiledText(compiled, item.path), item => item.path);
+        for (const winner of winners) {
+            this.matchCache.set(winner.item.path, {
+                score: winner.result.score,
+                matches: buildRanges(compiled, winner.item.path),
+            });
+        }
+        return winners.map(w => w.item);
     }
 
     renderSuggestion(file: TAbstractFile, el: HTMLElement): void {
-        const inputStr = this.inputEl ? this.inputEl.value : "";
-        
-        if (inputStr) {
-            const fuzzySearch = prepareFuzzySearch(inputStr);
-            const result = fuzzySearch(file.path);
-            if (result) {
-                renderResults(el, file.path, result);
-                return;
-            }
+        const cached = this.matchCache.get(file.path);
+        if (cached) {
+            renderResults(el, file.path, cached);
+            return;
         }
-        
         el.setText(file.path);
     }
 
@@ -72,7 +131,7 @@ export class FolderSuggest extends FileSystemSuggest {
         super(app, inputEl);
     }
 
-    getItems(): TAbstractFile[] {
+    loadItems(): TAbstractFile[] {
         const files = this.app.vault.getAllLoadedFiles();
         return files.filter(f => {
             if (!(f instanceof TFolder)) return false;
@@ -86,7 +145,7 @@ export class FileSuggest extends FileSystemSuggest {
         super(app, inputEl);
     }
 
-    getItems(): TAbstractFile[] {
+    loadItems(): TAbstractFile[] {
         const files = this.app.vault.getAllLoadedFiles();
         return files.filter(f => {
             if (!(f instanceof TFile) || f.extension !== 'md') return false;
