@@ -1,7 +1,8 @@
 import type CruciblePlugin from '../main';
 import type { JobTypeConfig } from './jobTypeConfig';
 import type { OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
-import type { Workflow } from './workflows/Workflow';
+import type { Workflow, WorkflowContext } from './workflows/Workflow';
+import { CancelJobOutcome, applyCancellation, cancelledResultFor } from './cancellation';
 
 export type RunOutcome = 'ran' | 'empty' | 'disabled';
 
@@ -24,6 +25,24 @@ export interface JobBackend {
 	 * cannot double-run a job a worker already claimed. `empty` if not found/claimable.
 	 */
 	runJob(key: string): Promise<RunOutcome>;
+	/**
+	 * Request cooperative cancellation of the *running* job identified by `key` (the
+	 * same key `runJob` takes) and await its settlement. Mirrors `runJob`'s shape so
+	 * a caller that can run one job can stop that same job.
+	 *
+	 * Resolves only once the run has settled and its job has left the `running`
+	 * bucket, which is what lets a UI show an honest "Stopping…" → "Stopped"
+	 * transition. See `CancelJobOutcome` for what each answer means; note that a
+	 * *queued* job answers `'not-running'` — removing queued work is a queue
+	 * operation, not an abort.
+	 */
+	cancelJob(key: string): Promise<CancelJobOutcome>;
+	/**
+	 * True while a run for `key` has been signalled to cancel and has not finished
+	 * settling. Stale recovery consults this so a cancelled-but-still-settling job
+	 * isn't bounced `running → queued` and re-run.
+	 */
+	isCancelling(key: string): boolean;
 	/** Whether work is (or might be) waiting. File types answer "maybe" (always true). */
 	hasPending(): boolean;
 	/** Pull fresh candidates in (memory types only); no-op otherwise. */
@@ -37,23 +56,51 @@ export function resolveTimeoutMs(plugin: CruciblePlugin, config: JobTypeConfig):
 	return Math.max(0, plugin.settings.orchestrationAutorunTimeoutSeconds) * 1000;
 }
 
-// Bounds a workflow run by `timeoutMs`. On timeout the race rejects and the caller
-// marks the job failed; the abandoned workflow promise keeps running in the
-// background (no AbortController), but any note-lock it holds is scoped to a leaf
-// operation and releases when that operation settles.
+// Runs a workflow under `signal` and bounds it by `timeoutMs`.
+//
+// The two interruptions are different animals and both are needed:
+//
+//   * `signal` is *cooperative* — the workflow stops at its next checkpoint. It is
+//     the mechanism a user's Cancel drives, and the run is awaited to completion so
+//     everything it holds (the note lock above all) unwinds through its own
+//     `finally` blocks.
+//   * `timeoutMs` is the *backstop* — the race rejects and the caller settles the
+//     job while the abandoned workflow promise keeps running in the background.
+//     It is what stops a workflow with no checkpoint from pinning a queue slot
+//     forever after it has been cancelled.
+//
+// An entry checkpoint is applied here, centrally, so every registered workflow gets
+// "don't start work that was cancelled between claim and dispatch" for free and no
+// workflow has to open with a boilerplate check. Per-iteration checkpoints are the
+// part that must be placed by hand, and only in the loop-shaped workflows.
 export async function runWorkflowWithTimeout(
 	plugin: CruciblePlugin,
 	workflow: Workflow,
 	job: OrchestrationJob,
 	timeoutMs: number,
+	signal: AbortSignal,
 ): Promise<WorkflowResult> {
-	if (timeoutMs <= 0) return workflow.run(job, { plugin });
+	const ctx: WorkflowContext = { plugin, signal, throwIfAborted: () => signal.throwIfAborted() };
+	try {
+		signal.throwIfAborted();
+		const result = timeoutMs <= 0
+			? await workflow.run(job, ctx)
+			: await raceWorkflowTimeout(workflow.run(job, ctx), timeoutMs);
+		return applyCancellation(result, signal.aborted);
+	} catch (e) {
+		const cancelled = cancelledResultFor(e, signal);
+		if (cancelled) return cancelled;
+		throw e;
+	}
+}
+
+async function raceWorkflowTimeout(run: Promise<WorkflowResult>, timeoutMs: number): Promise<WorkflowResult> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_resolve, reject) => {
 		timer = setTimeout(() => reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
 	});
 	try {
-		return await Promise.race([workflow.run(job, { plugin }), timeout]);
+		return await Promise.race([run, timeout]);
 	} finally {
 		if (timer) clearTimeout(timer);
 	}

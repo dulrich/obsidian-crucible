@@ -59,7 +59,7 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 			};
 		}
 
-		await this.canonicalizeDetectedIds(plugin);
+		await this.canonicalizeDetectedIds(ctx);
 
 		const diffMode = this.diffMode(plugin);
 		const hostRules = this.source.buildHostRules?.(entries);
@@ -71,6 +71,12 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 			hostRules,
 			feedSeenExtraSkipPrefixes(plugin, this.source),
 		);
+
+		// Last checkpoint before the network phase. The fetch itself is not
+		// interruptible — `requestUrl` takes no signal — so a cancellation arriving
+		// mid-fetch is only observed once every feed has settled. That is the honest
+		// bound, not a gap to be papered over with more checks in here.
+		ctx.throwIfAborted();
 
 		const fetchSettled = await rateLimitedAllSettled(
 			entries,
@@ -102,6 +108,9 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 				if (!entry || !settled || settled.status === 'rejected') continue;
 				const entryName = this.source.entryName(entry);
 				for (const item of settled.value) {
+					// Per-item: each call writes a `_blog_metadata` note, so this loop is
+					// the second-longest stretch of vault work in the workflow.
+					ctx.throwIfAborted();
 					await this.source.persistItemMetadata(plugin, item, entryName, itemMetadataIndex);
 				}
 			}
@@ -148,9 +157,15 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 		await plugin.app.vault.create(path, this.source.exampleTable);
 	}
 
-	protected async canonicalizeDetectedIds(plugin: Plugin): Promise<void> {
-		const app = plugin.app;
+	// Vault-wide frontmatter pass — every markdown file, with a write per detected id.
+	// The single longest non-network stretch in both the tracker and the consolidate
+	// variant, so it carries a per-file checkpoint. Each file's write is independent,
+	// so stopping part-way leaves a consistent (just partial) vault; the next run
+	// resumes it, since already-canonicalized files are skipped.
+	protected async canonicalizeDetectedIds(ctx: WorkflowContext): Promise<void> {
+		const app = ctx.plugin.app;
 		for (const file of app.vault.getMarkdownFiles()) {
+			ctx.throwIfAborted();
 			if (file.path.startsWith(this.source.queueScanSkipPrefix)) continue;
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
@@ -166,6 +181,11 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 		}
 	}
 
+	// Deliberately NOT checkpointed, though it loops. This is the commit phase: every
+	// feed has already been fetched and diffed, and the intake note is the only record
+	// of that work. Aborting here would discard the whole run's result to save a few
+	// hundred milliseconds of string building. Checkpoints belong before expensive
+	// work, not in the middle of writing down what the expensive work found.
 	protected async writeIntakeNote(
 		plugin: Plugin,
 		outcomes: FeedOutcome<Entry, Item>[],
@@ -299,7 +319,8 @@ export class FeedTrackerConsolidateWorkflow<Entry, Item> extends FeedTrackerWork
 		const { plugin } = ctx;
 		const app = plugin.app;
 
-		await this.canonicalizeDetectedIds(plugin);
+		await this.canonicalizeDetectedIds(ctx);
+		ctx.throwIfAborted();
 		const configuredEntries = await loadConfiguredFeedEntries(app, plugin, this.source);
 		const hostRules = this.source.buildHostRules?.(
 			Array.from(configuredEntries.values(), v => v.entry),

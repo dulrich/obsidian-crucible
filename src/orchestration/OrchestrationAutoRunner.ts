@@ -1,6 +1,7 @@
 import type CruciblePlugin from '../main';
 import type { Orchestrator } from './Orchestrator';
 import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob } from './types';
+import type { CancelJobOutcome } from './cancellation';
 import { Semaphore } from './utils/semaphore';
 import { computeShouldDrain, readTypeAutorun, readTypeMinIntervalOverride } from './autorunGate';
 
@@ -66,6 +67,14 @@ export class OrchestrationAutoRunner {
 		} finally {
 			this.globalSem.release();
 		}
+	}
+
+	// Cancel one running job. Deliberately *not* gated on `disposed` and deliberately
+	// not taking a global semaphore slot: cancelling is a signal, not work, and the
+	// moment the runner is being torn down is precisely when a caller most wants an
+	// in-flight job told to stop. Resolves once the run has settled.
+	cancelJob(type: JobType, key: string): Promise<CancelJobOutcome> {
+		return this.orchestrator.cancelJob(type, key);
 	}
 
 	// Manual drain of a single type, ignoring the auto-run gate: runs everything

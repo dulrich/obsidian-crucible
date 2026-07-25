@@ -46,6 +46,11 @@ export class DailyBriefLiteWorkflow implements Workflow {
 			};
 		}
 
+		// Bounded fan-out over a handful of configured pairs/locations rather than a
+		// loop, so one checkpoint before the network phase is the whole of the useful
+		// instrumentation — none of the requests can be interrupted once issued.
+		ctx.throwIfAborted();
+
 		const fxResults = await Promise.allSettled(fxPairs.map(p => fetchFxRate(p.base, p.quote)));
 		const weatherResults = await Promise.allSettled(locations.map(loc => fetchWeather(loc, tz)));
 

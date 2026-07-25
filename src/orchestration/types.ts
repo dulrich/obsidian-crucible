@@ -1,4 +1,9 @@
-export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
+// `cancelled` is a terminal bucket of its own, deliberately not a flavour of
+// `failed`: a cancelled job must not read as a diagnostic failure, and must not be
+// eligible for any retry policy applied to failures. Its queue folder is
+// `cancelled/` — the folder is the source of truth for a file job's bucket, so a
+// distinct state needs a distinct folder.
+export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export type JobType =
 	| 'daily_brief_lite'
@@ -53,7 +58,14 @@ export interface OrchestrationJob {
 export type WorkflowFailureReason = 'no-api-key';
 
 export interface WorkflowResult {
-	status: 'done' | 'failed' | 'deferred';
+	/**
+	 * `cancelled` means the run observed a cancellation request and stopped — a
+	 * terminal state distinct from `failed` on purpose (see `JobStatus`). Workflows
+	 * rarely return it directly; it is normally produced by `runWorkflowWithTimeout`
+	 * from a thrown `JobCancelledError` or by `applyCancellation` reconciling a
+	 * result that arrived after the signal fired.
+	 */
+	status: 'done' | 'failed' | 'deferred' | 'cancelled';
 	outputPaths?: string[];
 	error?: string;
 	/** Typed cause for `status: 'failed'`, when the workflow can name one. */
@@ -67,5 +79,6 @@ export interface ScanReport {
 	running: number;
 	done: number;
 	failed: number;
+	cancelled: number;
 	recovered: number;
 }

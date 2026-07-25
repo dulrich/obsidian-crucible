@@ -1,6 +1,6 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
-import type { MemoryJobEntry, MemoryJobQueue, MemoryJobSeed } from './MemoryJobQueue';
+import type { MemoryJobEntry, MemoryJobQueue, MemoryJobSeed, MemoryJobStatus } from './MemoryJobQueue';
 import type { JobType } from './types';
 import { youtubeMetadataDedupeKey } from './jobTypeConfig';
 
@@ -10,7 +10,12 @@ import { youtubeMetadataDedupeKey } from './jobTypeConfig';
 // the Orchestrator owns. (Replaces the old standalone EnrichmentQueueService.)
 const ENRICHMENT_JOB_TYPE: JobType = 'youtube_metadata_fetch';
 
-export type EnrichmentItemStatus = 'pending' | 'running' | 'done' | 'failed';
+// Aliased rather than re-declared: this is a pass-through of the queue entry's own
+// status (`toEnrichmentEntry` copies it verbatim), so a second hand-written union
+// could only ever drift. It gained `cancelled` when cooperative cancellation landed;
+// every consumer narrows with `=== 'pending' | 'running'` rather than switching
+// exhaustively, so a cancelled entry simply stops counting as in-flight.
+export type EnrichmentItemStatus = MemoryJobStatus;
 
 export interface EnrichmentQueueItem {
 	videoId: string;

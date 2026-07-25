@@ -6,6 +6,7 @@ import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
 import { JobBackend, RunOutcome, resolveTimeoutMs } from './JobBackend';
+import type { CancelJobOutcome } from './cancellation';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
 import type CruciblePlugin from '../main';
@@ -99,6 +100,19 @@ export class Orchestrator {
 		return backend ? backend.runJob(key) : Promise.resolve('empty');
 	}
 
+	// Cooperative cancellation of one running job, mirroring runJob's dispatch. The
+	// promise resolves once the run has settled, so a caller can distinguish "stopped"
+	// from "finished before it could be stopped" instead of guessing.
+	cancelJob(type: JobType, key: string): Promise<CancelJobOutcome> {
+		const backend = this.backends.get(type);
+		return backend ? backend.cancelJob(key) : Promise.resolve<CancelJobOutcome>('not-running');
+	}
+
+	// True while a cancelled run of `type` is still settling.
+	isCancelling(type: JobType, key: string): boolean {
+		return this.backends.get(type)?.isCancelling(key) ?? false;
+	}
+
 	hasPending(type: JobType): boolean {
 		return this.backends.get(type)?.hasPending() ?? false;
 	}
@@ -114,6 +128,7 @@ export class Orchestrator {
 		const running = await this.store.listFolder('running');
 		const done = await this.store.listFolder('done');
 		const failed = await this.store.listFolder('failed');
+		const cancelled = await this.store.listFolder('cancelled');
 
 		// Re-home file-backed jobs whose type has since become memory-persistence
 		// (e.g. youtube_metadata_fetch after it folded into the unified in-memory
@@ -125,6 +140,9 @@ export class Orchestrator {
 		let migrated = 0;
 		for (const entry of [...queued, ...running]) {
 			if (this.getConfig(entry.job.type).persistence !== 'memory') continue;
+			// Never re-home a job this process is still winding down — its own execute()
+			// is about to move the file, and racing that would lose the settle.
+			if (this.isCancelling(entry.job.type, entry.job.id)) continue;
 			await this.backends.get(entry.job.type)?.enqueue(entry.job.params ?? {});
 			await this.store.appendNotes(entry.file, 'Re-homed to the in-memory queue (type is now memory-persistence).');
 			await this.store.move(entry.file, entry.job, 'done');
@@ -136,6 +154,12 @@ export class Orchestrator {
 		const now = Date.now();
 		for (const entry of running) {
 			if (migratedPaths.has(entry.file.path)) continue;
+			// A cancelled job is still in running/ until its execute() finishes moving it
+			// to cancelled/, and a long workflow's `updated` stamp can already be past the
+			// stale cutoff by then. Bouncing it running → queued here would resurrect
+			// exactly the work the user just stopped, so cancellation wins over recovery:
+			// the run is alive, the sweep's premise ("no live timer owns this") is false.
+			if (this.isCancelling(entry.job.type, entry.job.id)) continue;
 			const updatedRaw = entry.job.updated ?? entry.job.created;
 			const updatedAt = Date.parse(updatedRaw);
 			const cutoff = now - staleRunningMsForTimeout(resolveTimeoutMs(this.plugin, this.getConfig(entry.job.type)));
@@ -153,11 +177,13 @@ export class Orchestrator {
 			running: running.length - recovered - runningMigrated,
 			done: done.length + migrated,
 			failed: failed.length,
+			cancelled: cancelled.length,
 			recovered,
 		};
 
 		const summary =
 			`Orchestrate: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
+			(report.cancelled > 0 ? `, cancelled ${report.cancelled}` : '') +
 			(recovered > 0 ? `, recovered ${recovered}` : '') +
 			(migrated > 0 ? `, re-homed ${migrated}` : '');
 		if (options.notify ?? true) new Notice(summary);

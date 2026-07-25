@@ -4,6 +4,7 @@ import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
+import { CancelJobOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { MemoryJobEntry, MemoryJobQueue } from './MemoryJobQueue';
 import { defaultLaneForPriority } from './lanes';
 import { logWarn } from '../log';
@@ -15,6 +16,8 @@ import { logWarn } from '../log';
 export class MemoryJobBackend implements JobBackend {
 	readonly drainsWithoutAutorun = true;
 	private readonly queue: MemoryJobQueue;
+	// Keyed by memory entry key — the same key `runJob` takes.
+	private readonly running = new RunningJobRegistry();
 
 	constructor(
 		private readonly plugin: CruciblePlugin,
@@ -60,13 +63,28 @@ export class MemoryJobBackend implements JobBackend {
 		return this.runEntry(entry);
 	}
 
+	// Cancels the running entry with this key. A *pending* entry answers
+	// 'not-running': removing it from the queue is `dequeueIfPending`, not an abort.
+	cancelJob(key: string): Promise<CancelJobOutcome> {
+		return this.running.cancel(key);
+	}
+
+	isCancelling(key: string): boolean {
+		return this.running.isCancelling(key);
+	}
+
 	private async runEntry(entry: MemoryJobEntry): Promise<RunOutcome> {
 		const job = this.synthJob(entry.key, entry.params, entry.lane);
+		const run = this.running.begin(entry.key);
+		let settlement: RunSettlement = 'completed';
 		try {
 			const result = await runWorkflowWithTimeout(
-				this.plugin, this.workflow, job, resolveTimeoutMs(this.plugin, this.config),
+				this.plugin, this.workflow, job, resolveTimeoutMs(this.plugin, this.config), run.signal,
 			);
-			if (result.status === 'failed') {
+			if (result.status === 'cancelled') {
+				settlement = 'cancelled';
+				this.queue.markCancelled(entry.key, result.notes);
+			} else if (result.status === 'failed') {
 				const error = result.error ?? 'Workflow returned failed status';
 				this.queue.markFailed(entry.key, error);
 				logWarn('job', this.type, entry.key, 'failed:', error);
@@ -83,8 +101,12 @@ export class MemoryJobBackend implements JobBackend {
 			const error = e instanceof Error ? e.message : String(e);
 			this.queue.markFailed(entry.key, error);
 			logWarn('job', this.type, entry.key, 'threw:', error);
+		} finally {
+			this.queue.sweepTerminal();
+			// Settled last, so a caller awaiting cancelJob() observes the entry already
+			// in its terminal state rather than racing the bookkeeping above.
+			run.finish(settlement);
 		}
-		this.queue.sweepTerminal();
 		return 'ran';
 	}
 

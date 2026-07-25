@@ -31,11 +31,16 @@ const SEARCH_REBUILD_ENQUEUE_YIELD_EVERY = 10;
 export class SearchRebuildWorkflow implements Workflow {
 	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		return runSearchWorkflow(plugin, async () => {
+		return runSearchWorkflow(ctx, async () => {
 			await plugin.searchManager.resetIndex();
 			const indexableFiles = plugin.searchManager.listIndexableFiles();
 			const batches = chunk(indexableFiles.map(file => file.path), SEARCH_REBUILD_BATCH_FILES);
 			for (let i = 0; i < batches.length; i++) {
+				// Per-batch checkpoint: each iteration is a real vault write, so stopping
+				// here stops the queue filling with work the user just cancelled. The
+				// batches already enqueued stay queued — cancelling the coordinator does
+				// not retract them; that is a bulk queue operation, not an abort.
+				ctx.throwIfAborted();
 				const paths = batches[i] ?? [];
 				await plugin.orchestrator.enqueue('search_upsert_batch', {
 					paths,
@@ -79,7 +84,7 @@ export class SearchRebuildWorkflow implements Workflow {
 export class SearchEmbedMissingWorkflow implements Workflow {
 	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
-		return runSearchWorkflow(plugin, async () => {
+		return runSearchWorkflow(ctx, async () => {
 			// Refuse up front rather than enqueueing dozens of batches that each discover the
 			// same misconfiguration. A backfill against no embedder must not silently become an
 			// expensive re-index that produces zero vectors.
@@ -92,6 +97,7 @@ export class SearchEmbedMissingWorkflow implements Workflow {
 			const indexableFiles = plugin.searchManager.listIndexableFiles();
 			const batches = chunk(indexableFiles.map(file => file.path), SEARCH_REBUILD_BATCH_FILES);
 			for (let i = 0; i < batches.length; i++) {
+				ctx.throwIfAborted();
 				const paths = batches[i] ?? [];
 				await plugin.orchestrator.enqueue('search_upsert_batch', {
 					paths,
@@ -116,7 +122,7 @@ export class SearchUpsertFileWorkflow implements Workflow {
 		const path = stringParam(job, 'path') || stringParam(job, 'targetPath');
 		if (!path) return Promise.resolve({ status: 'failed', error: 'Missing params.path' });
 		if (!isSearchIndexablePath(path, plugin.settings.searchIndexExtensions)) return Promise.resolve({ status: 'done', notes: `Skipped non-indexable path: ${path}` });
-		return runSearchWorkflow(plugin, async () => {
+		return runSearchWorkflow(ctx, async () => {
 			const file = plugin.app.vault.getAbstractFileByPath(path);
 			if (!(file instanceof TFile)) {
 				await plugin.searchManager.deletePath(path);
@@ -137,7 +143,7 @@ export class SearchUpsertBatchWorkflow implements Workflow {
 		const { plugin } = ctx;
 		const paths = stringArrayParam(job, 'paths');
 		if (paths.length === 0) return Promise.resolve({ status: 'failed', error: 'Missing params.paths' });
-		return runSearchWorkflow(plugin, async () => {
+		return runSearchWorkflow(ctx, async () => {
 			const files = paths
 				.map(path => plugin.app.vault.getAbstractFileByPath(path))
 				.filter((file): file is TFile => file instanceof TFile && isSearchIndexablePath(file.path, plugin.settings.searchIndexExtensions));
@@ -149,9 +155,12 @@ export class SearchUpsertBatchWorkflow implements Workflow {
 			const requireEmbeddings = booleanParam(job, 'requireEmbeddings');
 			const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
 			try {
+				// The signal goes *into* indexFiles rather than being checked around it:
+				// the per-file loop lives there, so this is the only placement that can
+				// stop a batch part-way instead of after all 100 of its files.
 				const result = await plugin.searchManager.indexFiles(files, (done, chunkCount) =>
 					progress.update(`${label}: ${done} / ${files.length} files indexed, ${chunkCount} chunks`),
-				{ requireEmbeddings });
+				{ requireEmbeddings, signal: ctx.signal });
 				return {
 					status: 'done',
 					outputPaths: files.map(file => file.path),
@@ -180,7 +189,7 @@ export class SearchDeletePathWorkflow implements Workflow {
 		const { plugin } = ctx;
 		const path = stringParam(job, 'path') || stringParam(job, 'oldPath');
 		if (!path) return Promise.resolve({ status: 'failed', error: 'Missing params.path' });
-		return runSearchWorkflow(plugin, async () => {
+		return runSearchWorkflow(ctx, async () => {
 			await plugin.searchManager.deletePath(path);
 			return { status: 'done', notes: `Removed ${path} from search index.` };
 		});
@@ -192,7 +201,7 @@ export class SearchSweepWorkflow implements Workflow {
 		const { plugin } = ctx;
 		const description = stringParam(job, 'description');
 		if (!description) return Promise.resolve({ status: 'failed', error: 'Missing params.description' });
-		return runSearchWorkflow(plugin, async () => {
+		return runSearchWorkflow(ctx, async () => {
 			const response: SearchResponse = await plugin.searchManager.sweep(description);
 			return {
 				status: 'done',
@@ -207,14 +216,21 @@ export class SearchSweepWorkflow implements Workflow {
 // mid-flight companion outage into a quiet retryable deferral. Each workflow above is then just
 // its core operation.
 async function runSearchWorkflow(
-	plugin: WorkflowContext['plugin'],
+	ctx: WorkflowContext,
 	run: () => Promise<WorkflowResult>,
 ): Promise<WorkflowResult> {
+	const { plugin } = ctx;
 	if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
+	// The availability probe is a network round-trip, so re-check afterwards rather
+	// than committing to work a cancellation arrived during.
 	if (!(await plugin.searchManager.companionAvailable())) return searchDeferredResult(plugin);
+	ctx.throwIfAborted();
 	try {
 		return await run();
 	} catch (e) {
+		// A JobCancelledError is not a companion outage — it must reach
+		// runWorkflowWithTimeout untouched, or a cancelled search job would settle as a
+		// retryable deferral and re-run.
 		if (e instanceof SearchServiceUnavailableError) {
 			// The thrown message becomes the gate's reason, so searchDeferredResult picks it up
 			// as the primary text — passing it again as `detail` would just print it twice.
