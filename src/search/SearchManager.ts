@@ -64,8 +64,12 @@ export class SearchManager {
 		return this.availability.lastUnavailableReason();
 	}
 
-	markCompanionOffline(): void {
-		this.availability.markOffline();
+	// Called when an in-flight operation threw, not when a probe said "down" — so this takes
+	// the short transient backoff, and carries the thrown message forward as the reason.
+	// Without the reason the deferral falls back to "not reachable at <url>. Start it with
+	// home-compose up", which points the user at a container that is already healthy.
+	markCompanionOffline(reason?: string): void {
+		this.availability.markTransientFailure(reason ?? null);
 	}
 
 	async resetIndex(): Promise<void> {

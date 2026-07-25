@@ -76,35 +76,39 @@ test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing
 
 	assert.equal(result.status, 'done');
 	assert.equal(resetCount, 1);
-	assert.equal(plugin.enqueued.length, 3);
-	assert.deepEqual(plugin.enqueued.map(job => job.type), ['search_upsert_batch', 'search_upsert_batch', 'search_upsert_batch']);
-	assert.deepEqual(plugin.enqueued.map(job => job.params.paths.length), [250, 250, 53]);
-	assert.deepEqual(plugin.enqueued.map(job => job.options.priority), ['low', 'low', 'low']);
-	assert.deepEqual(plugin.enqueued.map(job => job.options.lane), ['background', 'background', 'background']);
-	assert.deepEqual(plugin.enqueued.map(job => job.params.batchIndex), [0, 1, 2]);
-	assert.ok(plugin.enqueued.every(job => job.params.batchCount === 3));
+	assert.equal(plugin.enqueued.length, 6);
+	assert.ok(plugin.enqueued.every(job => job.type === 'search_upsert_batch'));
+	assert.deepEqual(plugin.enqueued.map(job => job.params.paths.length), [100, 100, 100, 100, 100, 53]);
+	assert.ok(plugin.enqueued.every(job => job.options.priority === 'low'));
+	assert.ok(plugin.enqueued.every(job => job.options.lane === 'background'));
+	assert.deepEqual(plugin.enqueued.map(job => job.params.batchIndex), [0, 1, 2, 3, 4, 5]);
+	assert.ok(plugin.enqueued.every(job => job.params.batchCount === 6));
 });
 
-// The whole point of raising the batch size: a full-vault rebuild must not create thousands
-// of durable job files in one synchronous burst. At the real vault scale this asserts the
-// job-file count stays in the hundreds, which is what makes the queue drainable at
-// maxParallel: 1.
-test('SearchRebuildWorkflow keeps a 42k-file rebuild to a few hundred job files', async () => {
+// Sized against the measured corpus, not the vault's raw markdown count: ~37,000 of this
+// vault's ~42,000 .md files are the queue's own job files under the search-excluded
+// `_crucible/`, leaving ~5,500 genuinely indexable. The batch size has to keep the job count
+// well clear of the 25-era job spam (which was ~220 jobs at this scale) while staying fine
+// enough that one failed batch doesn't lose a big slice of progress.
+test('SearchRebuildWorkflow keeps a full-corpus rebuild to a few dozen job files', async () => {
+	const CORPUS = 5_456;
 	const plugin = makePlugin({
 		searchManager: {
-			listIndexableFiles: () => Array.from({ length: 42_000 }, (_, i) => ({ path: `note-${i}.md` })),
+			listIndexableFiles: () => Array.from({ length: CORPUS }, (_, i) => ({ path: `note-${i}.md` })),
 		},
 	});
 	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-2', params: {} }, { plugin });
 
 	assert.equal(result.status, 'done');
-	assert.equal(plugin.enqueued.length, 168, '42,000 files at 250/batch is 168 jobs — it was 1,680 at the old batch size of 25');
+	assert.equal(plugin.enqueued.length, 55, '5,456 files at 100/batch is 55 jobs');
 	// Every file is still covered exactly once, in order: batching must not drop a tail.
 	const allPaths = plugin.enqueued.flatMap(job => job.params.paths);
-	assert.equal(allPaths.length, 42_000);
-	assert.equal(new Set(allPaths).size, 42_000);
+	assert.equal(allPaths.length, CORPUS);
+	assert.equal(new Set(allPaths).size, CORPUS);
 	assert.equal(allPaths[0], 'note-0.md');
-	assert.equal(allPaths[41_999], 'note-41999.md');
+	assert.equal(allPaths[CORPUS - 1], `note-${CORPUS - 1}.md`);
+	// The tail batch is the remainder, not a padded or dropped one.
+	assert.equal(plugin.enqueued.at(-1).params.paths.length, CORPUS % 100);
 });
 
 test('search upsert defers quietly while the companion is offline', async () => {

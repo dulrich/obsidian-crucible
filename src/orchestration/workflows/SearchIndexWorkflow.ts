@@ -11,14 +11,19 @@ const SEARCH_RETRY_AFTER_MS = 30_000;
  * queue root, claimed and moved through JobStore — so the batch size sets how many vault
  * writes a full rebuild costs before a single file is indexed.
  *
- * At the original 25, a ~42,000-file vault meant **1,680 job files created in one
- * synchronous loop**, then drained at `maxParallel: 1` — roughly 5,000 vault operations of
- * pure queue bookkeeping. 250 makes that ~168 jobs. The upper bound is the companion's
- * request-body cap, which the batch does not approach: SearchManager buffers chunks and
+ * At the original 25 this was far too small, but the 250 that replaced it was sized against
+ * a vault file count that turned out to be inflated ~7.7x: the "~42,000 markdown files"
+ * figure counted the queue's own job files under `_crucible/`, which is search-excluded. The
+ * real indexable corpus is ~5,500 files, so 250 produced only ~22 jobs — coarse enough that
+ * a single failed batch loses 250 files of progress and the queue reports almost nothing
+ * while it works. 100 gives ~55 jobs: still two orders of magnitude off the 25-era job spam,
+ * with finer progress and cheaper retries.
+ *
+ * Batch size drives job-file count, not request size: SearchManager buffers chunks and
  * flushes every SEARCH_UPSERT_FLUSH_CHUNKS (500) regardless of how many files a batch
- * carries, so batch size drives job-file count, not request size.
+ * carries, so the companion's request-body cap is nowhere near in play.
  */
-const SEARCH_REBUILD_BATCH_FILES = 250;
+const SEARCH_REBUILD_BATCH_FILES = 100;
 
 /** Enqueues between macrotask yields, so kicking off a rebuild can't freeze the UI thread. */
 const SEARCH_REBUILD_ENQUEUE_YIELD_EVERY = 10;
@@ -139,8 +144,10 @@ async function runSearchWorkflow(
 		return await run();
 	} catch (e) {
 		if (e instanceof SearchServiceUnavailableError) {
-			plugin.searchManager.markCompanionOffline();
-			return searchDeferredResult(plugin, e.message);
+			// The thrown message becomes the gate's reason, so searchDeferredResult picks it up
+			// as the primary text — passing it again as `detail` would just print it twice.
+			plugin.searchManager.markCompanionOffline(e.message);
+			return searchDeferredResult(plugin);
 		}
 		throw e;
 	}

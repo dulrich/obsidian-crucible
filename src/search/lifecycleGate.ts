@@ -3,6 +3,20 @@ import type { SearchHealth } from './types';
 export const SEARCH_ONLINE_CACHE_MS = 30_000;
 export const SEARCH_OFFLINE_CACHE_MS = 5 * 60_000;
 
+/**
+ * Backoff for a failure seen *mid-operation* rather than by a health probe.
+ *
+ * A probe that asked the companion and got no usable answer is strong evidence it is down,
+ * and re-probing on every queued job would be wasteful — hence the five-minute
+ * SEARCH_OFFLINE_CACHE_MS. A request that threw partway through an operation is much weaker
+ * evidence: the companion may be healthy and merely slow, or that one request may have
+ * failed on its own merits. Latching those for the full offline window turned a single
+ * hiccup into a five-minute stall of every queued job — during a rebuild, each Obsidian
+ * reload then drained exactly one more batch. A short backoff instead lets the next job
+ * re-probe for real, which either recovers immediately or escalates to the full window.
+ */
+export const SEARCH_TRANSIENT_OFFLINE_MS = 5_000;
+
 export type SearchHealthCheck = () => Promise<SearchHealth | null>;
 
 // Caches companion availability so a flurry of index/search calls makes at most one health
@@ -41,10 +55,22 @@ export class CompanionAvailabilityGate {
 		}
 	}
 
-	// Record a failure observed outside a health probe (e.g. an upsert that threw
-	// SearchServiceUnavailableError) so subsequent calls short-circuit to offline.
+	// A probe answered (or failed to answer) and said the companion is unusable: back off for
+	// the full window before asking again.
 	markOffline(reason: string | null = null): void {
-		this.offlineUntil = this.now() + SEARCH_OFFLINE_CACHE_MS;
+		this.setOffline(reason, SEARCH_OFFLINE_CACHE_MS);
+	}
+
+	// Record a failure observed outside a health probe (e.g. an upsert that threw
+	// SearchServiceUnavailableError) so subsequent calls short-circuit — but only briefly,
+	// and keeping the reason so the deferral says what actually went wrong instead of the
+	// generic "not reachable, go start the container" text. See SEARCH_TRANSIENT_OFFLINE_MS.
+	markTransientFailure(reason: string | null = null): void {
+		this.setOffline(reason, SEARCH_TRANSIENT_OFFLINE_MS);
+	}
+
+	private setOffline(reason: string | null, durationMs: number): void {
+		this.offlineUntil = this.now() + durationMs;
 		this.onlineUntil = 0;
 		this.unavailableReason = reason;
 	}
