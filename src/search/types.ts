@@ -60,6 +60,9 @@ export interface SearchScoreAttribution {
 	textRank?: number;
 	titleRank?: number;
 	titleBoost?: number;
+	// Rank in the vector (cosine) list of the third RRF leg — undefined when this row never
+	// entered that list (no vectors indexed, or no query embedding arrived).
+	vectorRank?: number;
 	rrf?: number;
 	pooledChunks?: number;
 	boosts?: Record<string, number>;

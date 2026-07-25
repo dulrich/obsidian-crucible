@@ -68,6 +68,76 @@ test('SearchServiceClient parses total and hasMore', async () => {
 	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).limit, 12);
 });
 
+// `mode`/`semanticAvailable` must be whatever the client derived from the payload, not a
+// literal baked into the fixture — that is the whole point of the companion computing them
+// instead of hardcoding, and a test that never reads them back can't catch a regression to
+// hardcoded values on either side.
+test('SearchServiceClient reads mode and semanticAvailable from the payload, not a fixed literal', async () => {
+	globalThis.__searchClientThrow = undefined;
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	globalThis.__searchClientResponse = { status: 200, json: { mode: 'fts', semanticAvailable: false, results: [] } };
+	const ftsOnly = await client.search({ query: 'x', limit: 1 });
+	assert.equal(ftsOnly.mode, 'fts');
+	assert.equal(ftsOnly.semanticAvailable, false);
+
+	globalThis.__searchClientResponse = { status: 200, json: { mode: 'hybrid', semanticAvailable: true, results: [] } };
+	const hybrid = await client.search({ query: 'x', limit: 1 });
+	assert.equal(hybrid.mode, 'hybrid');
+	assert.equal(hybrid.semanticAvailable, true);
+
+	// A payload omitting both fields entirely (an older companion, or a stubbed test double)
+	// must not be coerced to a truthy/falsy guess — both stay undefined.
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const omitted = await client.search({ query: 'x', limit: 1 });
+	assert.equal(omitted.mode, undefined);
+	assert.equal(omitted.semanticAvailable, undefined);
+});
+
+// A vector-only hit is a genuinely new row shape from WP-1: no bm25 match (attribution.textRank
+// is null, not a fabricated rank), a snippet synthesised from the chunk head instead of an FTS
+// match, and its vector rank/score. The failure mode this guards is silent: the row exists on
+// the companion but `normalizeSearchResponse`'s trailing `.filter(row => row.path && row.snippet)`
+// could drop it with no error anywhere if either field went missing on the way through.
+test('a vector-only result survives normalization intact', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: {
+			mode: 'hybrid',
+			semanticAvailable: true,
+			results: [{
+				chunkId: 'sem-1',
+				path: 'Semantic.md',
+				title: 'Semantic',
+				snippet: 'gardening lawnmower rhubarb entirely unrelated prose',
+				score: 0.031,
+				scoreVector: 0.987,
+				scoreRrf: 0.031,
+				attribution: {
+					base: -0,
+					textRank: null,
+					titleRank: null,
+					vectorRank: 2,
+					rrf: 0.031,
+					pooledChunks: 1,
+				},
+			}],
+		},
+	};
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const response = await client.search({ query: 'sustained attention', limit: 10 });
+
+	assert.equal(response.results.length, 1, 'the vector-only row must not be dropped by the trailing filter');
+	const row = response.results[0];
+	assert.equal(row.path, 'Semantic.md');
+	assert.ok(row.snippet.length > 0);
+	assert.equal(row.scoreVector, 0.987);
+	assert.equal(row.attribution.vectorRank, 2);
+	assert.equal(row.attribution.textRank, undefined, 'a null textRank normalizes to undefined, not 0 or a fabricated rank');
+});
+
 test('SearchServiceClient parses file states by path', async () => {
 	globalThis.__searchClientThrow = undefined;
 	globalThis.__searchClientRequests = [];
