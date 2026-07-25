@@ -12,6 +12,7 @@ const STATUS_FOLDER: Record<JobStatus, string> = {
 	running: 'running',
 	done: 'done',
 	failed: 'failed',
+	cancelled: 'cancelled',
 };
 
 const PRIORITY_RANK: Record<JobPriority, number> = {
@@ -26,6 +27,7 @@ export interface QueuePaths {
 	running: string;
 	done: string;
 	failed: string;
+	cancelled: string;
 }
 
 export interface EnqueueOptions {
@@ -50,6 +52,7 @@ export class JobStore {
 			running: `${root}/running`,
 			done: `${root}/done`,
 			failed: `${root}/failed`,
+			cancelled: `${root}/cancelled`,
 		};
 	}
 
@@ -63,6 +66,10 @@ export class JobStore {
 		await ensureFolder(this.app, p.running);
 		await ensureFolder(this.app, p.done);
 		await ensureFolder(this.app, p.failed);
+		// Cancelled jobs get their own bucket rather than sharing failed/: the folder
+		// is what determines a job's state, so "cancelled is not a failure" has to be
+		// expressed as a folder or it isn't expressed at all.
+		await ensureFolder(this.app, p.cancelled);
 	}
 
 	async enqueue(type: JobType, options: EnqueueOptions = {}): Promise<OrchestrationJob> {

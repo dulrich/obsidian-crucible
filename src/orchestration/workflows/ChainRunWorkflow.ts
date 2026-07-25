@@ -33,6 +33,13 @@ export class ChainRunWorkflow implements Workflow {
 			file = found;
 		}
 
+		// Same shape as TranscriptRefinerWorkflow: ChainManager has no signal, so the
+		// only place a cancellation can still prevent work is before the chain starts.
+		// Note the catch below turns everything into `failed` — including an abort that
+		// unwinds out of a chain step — which is exactly why `applyCancellation`
+		// rewrites `failed` to `cancelled` when the signal has fired.
+		ctx.throwIfAborted();
+
 		try {
 			await plugin.chainManager.executeChain(chain, undefined, file);
 		} catch (e) {
