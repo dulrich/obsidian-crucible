@@ -150,8 +150,29 @@ export class SearchManager {
 		return this.buildPreparedFileChunks(prepared);
 	}
 
+	/**
+	 * The single "does this path belong in the search index" predicate — every indexing path
+	 * goes through it, so the three conditions can't drift apart.
+	 *
+	 * The third condition is Obsidian's own Settings -> Files & links -> "Excluded files"
+	 * list. Honoring it here is deliberate: `FileSuggest`/`FolderSuggest`/`folderPicker`
+	 * already filter on `isUserIgnored`, so search was the odd surface out. Note the split
+	 * with the file-open palette, which *deranks* user-ignored files rather than hiding them
+	 * (`FileOpenIndex.isIgnoredPath`) — a path you can still reach by typing its exact name is
+	 * useful; a search hit you did not ask for is not.
+	 *
+	 * Index-time only, exactly like `isPathExcluded`: adding a path to either exclusion list
+	 * stops future indexing but does not retroactively purge rows already in the companion's
+	 * database. Run `Orchestrate: Search rebuild index` to drop them.
+	 */
+	private isExcludedFromIndex(path: string): boolean {
+		return !isSearchIndexablePath(path, this.settings.searchIndexExtensions)
+			|| isPathExcluded(this.settings, path, 'search')
+			|| this.app.metadataCache.isUserIgnored(path);
+	}
+
 	private async prepareFile(file: TFile): Promise<PreparedSearchFile | null> {
-		if (!isSearchIndexablePath(file.path, this.settings.searchIndexExtensions) || isPathExcluded(this.settings, file.path, 'search')) return null;
+		if (this.isExcludedFromIndex(file.path)) return null;
 		const content = await this.app.vault.read(file);
 		return {
 			file,
@@ -185,7 +206,7 @@ export class SearchManager {
 	}
 
 	async deletePath(path: string): Promise<void> {
-		if (!isSearchIndexablePath(path, this.settings.searchIndexExtensions) || isPathExcluded(this.settings, path, 'search')) return;
+		if (this.isExcludedFromIndex(path)) return;
 		await this.client().deletePath(path);
 	}
 
@@ -251,7 +272,7 @@ export class SearchManager {
 	}
 
 	listIndexableFiles(): TFile[] {
-		return this.app.vault.getFiles().filter(file => isSearchIndexablePath(file.path, this.settings.searchIndexExtensions) && !isPathExcluded(this.settings, file.path, 'search'));
+		return this.app.vault.getFiles().filter(file => !this.isExcludedFromIndex(file.path));
 	}
 
 	private async attachEmbeddings(chunks: SearchChunk[]): Promise<void> {

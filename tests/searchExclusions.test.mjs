@@ -51,8 +51,15 @@ const settings = {
 	providers: [],
 };
 
+/** Obsidian's Settings -> Files & links -> "Excluded files" list, as the metadata cache exposes it. */
+function metadataCache(userIgnored = []) {
+	const ignored = new Set(userIgnored);
+	return { isUserIgnored: path => ignored.has(path) };
+}
+
 test('SearchManager listIndexableFiles excludes configured search folders', () => {
 	const app = {
+		metadataCache: metadataCache(),
 		vault: {
 			getFiles: () => [
 				{ path: '_crucible/orchestration/queue/job.md' },
@@ -65,8 +72,46 @@ test('SearchManager listIndexableFiles excludes configured search folders', () =
 	assert.deepEqual(manager.listIndexableFiles().map(file => file.path), ['daily/note.md']);
 });
 
+// Obsidian's own excluded-files list is honored on the search side by *hiding*, which is the
+// deliberate counterpart to the file-open palette deranking the same paths (see
+// FileOpenIndex.isIgnoredPath). Before this, search was the one file surface in the plugin
+// that ignored the setting while FileSuggest/FolderSuggest/folderPicker all respected it.
+test('SearchManager listIndexableFiles excludes paths on Obsidian own excluded-files list', () => {
+	const app = {
+		metadataCache: metadataCache(['private/journal.md']),
+		vault: {
+			getFiles: () => [
+				{ path: 'private/journal.md' },
+				{ path: 'daily/note.md' },
+			],
+		},
+	};
+	const manager = new SearchManager(app, settings, {});
+	assert.deepEqual(manager.listIndexableFiles().map(file => file.path), ['daily/note.md']);
+});
+
+test('SearchManager indexFile skips a user-ignored path before reading it', async () => {
+	const app = {
+		metadataCache: metadataCache(['private/journal.md']),
+		vault: {
+			read: async () => {
+				throw new Error('user-ignored file should not be read');
+			},
+		},
+	};
+	const manager = new SearchManager(app, settings, {});
+	const count = await manager.indexFile({
+		path: 'private/journal.md',
+		basename: 'journal',
+		extension: 'md',
+		stat: { mtime: 1 },
+	});
+	assert.equal(count, 0);
+});
+
 test('SearchManager indexFile skips search-excluded paths before reading', async () => {
 	const app = {
+		metadataCache: metadataCache(),
 		vault: {
 			read: async () => {
 				throw new Error('excluded file should not be read');
