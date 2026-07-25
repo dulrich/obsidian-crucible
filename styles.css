@@ -810,6 +810,15 @@ If your plugin does not need CSS, delete this file.
   color: var(--text-success);
 }
 
+/* Roughly double Obsidian's default 700px modal cap. A result row carries a path, a snippet
+   and a verbose explain line, none of which fit legibly in the default width. Width and
+   max-width are both set to a literal rather than overriding Obsidian's --modal-* custom
+   properties, so this holds regardless of what a theme sets those to. */
+.modal.crucible-search-modal-shell {
+  width: min(94vw, 1200px);
+  max-width: min(94vw, 1200px);
+}
+
 .crucible-search-modal {
   display: flex;
   flex-direction: column;
@@ -847,20 +856,39 @@ If your plugin does not need CSS, delete this file.
 }
 
 .crucible-search-result {
-  padding: 0.6rem 0;
+  padding: 0.6rem 0.5rem;
   border-top: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.crucible-search-result:hover {
+  background-color: var(--background-modifier-hover);
 }
 
 .crucible-search-result-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.75rem;
-  align-items: baseline;
+  align-items: center;
 }
 
 .crucible-search-result-title {
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+
+/* Hidden until the row is hovered or holds focus, so a dozen results read as a list of notes
+   rather than a wall of buttons. Focus-within keeps them reachable by keyboard. */
+.crucible-search-result-actions {
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0;
+}
+
+.crucible-search-result:hover .crucible-search-result-actions,
+.crucible-search-result-actions:focus-within {
+  opacity: 1;
 }
 
 .crucible-search-result-score,
@@ -869,8 +897,13 @@ If your plugin does not need CSS, delete this file.
   font-size: 0.82em;
 }
 
+/* The explain line is its own full-width row and wraps: as a nowrap column it set the
+   modal's width. Monospace keeps the numeric columns scannable down the result list. */
 .crucible-search-result-score {
-  white-space: nowrap;
+  margin-top: 0.35rem;
+  font-family: var(--font-monospace);
+  font-size: 0.75em;
+  overflow-wrap: anywhere;
 }
 
 .crucible-search-result-meta {
