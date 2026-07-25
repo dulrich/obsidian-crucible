@@ -152,12 +152,16 @@ correctly and runs slower than the CPU containers it replaced. See
 the startup assertion that catches it, and [Local inference](local-inference.md) for the general
 form of both traps.
 
-**Switching the embedder between these pairs is a deliberate re-embed, not a config change.** The
-fp32 ONNX vectors Infinity produces and the f16 GGUF vectors llama.cpp produces are the same model
-at the same width and *not* the same vector space — measured minimum cosine 0.9991, which looks
-negligible, against a top-10 rank overlap of 0.8182, which is one result in ten changing place.
-Schema 4's `embedding_space` models exactly this, so the coverage check notices and the vault
-re-embeds rather than silently mixing.
+**Switching the embedder between these pairs triggers a re-embed, and that is conservatism rather
+than a correctness requirement.** Schema 4's `embedding_space` treats Infinity's fp32 ONNX vectors
+and llama.cpp's f16 GGUF vectors as different spaces, so the coverage check notices and the vault
+re-embeds rather than silently mixing. Re-measured in July 2026 with adequate statistical power,
+the two are **retrievally identical**: over 61 parallel Wikipedia articles both score en→fr P@1
+100% and en→ja 98.4% with discrimination spread 0.3513 vs 0.3515, and the small rank churn between
+them (mean top-10 Jaccard 0.9939) is matched exactly by two *builds of the same engine loading a
+byte-identical file*. See `runs/measurements/esi-fr-2026-07-25/` for the full result and
+[Local inference](local-inference.md) §6 for what it means in practice. The guard stays because it
+is cheap and fails closed — do not read it as evidence that the two pairs disagree.
 
 **Why `bge-m3` is the recommended default.** `searchEmbeddingModel` is a plain user setting — the
 companion is dimension-agnostic and stores whatever width arrives, so nothing forces `bge-m3`
@@ -173,7 +177,12 @@ paragraph that already fits, so a chunk can reach `maxChars + overlapChars`; 143
 (p5 is 43 characters). Cheaper monolingual alternatives,
 if multilingual recall isn't a requirement for a given vault: `nomic-embed-text` (768d) or
 `bge-small-en-v1.5` (384d) — both cut matrix size and per-query scan time roughly in proportion to
-dimension (see the scan-time table above).
+dimension (see the scan-time table above). **That caveat is measured, and it is understated:**
+`nomic-embed-text` (Q4_K_M) scores en→fr 95.1% and en→ja **85.2%** against `bge-m3`'s 100% / 98.4%,
+with a discrimination spread of 0.1064 against 0.3513 — a **3.3× narrower** band between a real
+match and an unrelated document on the same corpus. The cost is not only non-English recall; it is
+less room between right and wrong answers everywhere. Quantization, by contrast, is nearly free
+down to Q8_0 — see [Local inference](local-inference.md) §6.
 
 **Pointing Crucible at the embedder:** in the plugin's provider settings, add a provider of kind
 `openai-compatible` with base URL `http://127.0.0.1:4802/v1` (no API key required) and set
