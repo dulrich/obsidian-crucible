@@ -464,45 +464,6 @@ export function buildFileOpenMatch(query: string, path: string, score = 0): File
 	return { score, matches: buildRanges(compiled, path) };
 }
 
-/**
- * Legacy adapter kept only so `src/fileOpenPalette.ts` keeps compiling until WP-2
- * replaces it with the snapshot lifecycle. It rebuilds a snapshot on every call, which
- * is exactly the O(N)-per-keystroke cost this rewrite exists to remove.
- *
- * NOT deprecated via a `@deprecated` tag on purpose — `fileOpenPalette.ts` is the sole
- * caller and the repo's `no-deprecated` lint rule would fail the gate on a file WP-2
- * owns. Treat this as deprecated anyway: use `buildFileOpenSnapshot` +
- * `selectFileOpenItems`, and delete this adapter together with `RankFileOpenOptions`.
- */
-export function rankFileOpenItems(options: RankFileOpenOptions): FileOpenItem[] {
-	const snapshot = buildFileOpenSnapshot(options.files, { isIgnoredPath: options.isIgnoredPath });
-	return selectFileOpenItems(snapshot, options.query, null, {
-		extensions: options.extensions,
-		ignoredFolderMode: options.ignoredFolderMode,
-		createMissing: options.createMissing,
-		limit: options.limit,
-	});
-}
-
-export interface RankFileOpenOptions {
-	files: FileOpenCandidate[];
-	query: string;
-	extensions: string[];
-	ignoredFolderMode: CrucibleFileOpenIgnoredFolderMode;
-	createMissing: boolean;
-	isIgnoredPath: (path: string) => boolean;
-	limit?: number;
-	/**
-	 * Accepted and **ignored** — this is no longer an injection point. An
-	 * injected lower-is-better double is precisely what certified the inverted sort that
-	 * shipped, so the scorer now lives in `./rankScore` and cannot be replaced. The
-	 * parameter survives only so the pre-WP-2 `fileOpenPalette.ts` call site still
-	 * type-checks; the `unknown` return type is the tell that nothing reads it. Delete
-	 * this field together with `rankFileOpenItems`.
-	 */
-	scorePath?: (query: string, path: string) => unknown;
-}
-
 export function normalizeExtensionFilter(extensions: string[]): Set<string> {
 	const normalized = extensions
 		.map(normalizeExtension)
