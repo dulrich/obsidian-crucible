@@ -52,6 +52,12 @@ export class SearchManager {
 
 	// Flip the shared cache to offline when an in-flight operation fails with
 	// SearchServiceUnavailableError, so the next call defers without a fresh probe.
+	// Why the companion is unavailable, when it told us — see
+	// CompanionAvailabilityGate.lastUnavailableReason. Null means it never answered.
+	companionUnavailableReason(): string | null {
+		return this.availability.lastUnavailableReason();
+	}
+
 	markCompanionOffline(): void {
 		this.availability.markOffline();
 	}
