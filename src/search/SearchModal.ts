@@ -1,6 +1,6 @@
 import { App, Modal, Notice, Setting, TFile, setIcon } from 'obsidian';
 import type CruciblePlugin from '../main';
-import { SearchResult } from './types';
+import { SearchResult, SearchScoreAttribution } from './types';
 
 export class VaultSearchModal extends Modal {
 	private inputEl: HTMLInputElement;
@@ -50,7 +50,10 @@ export class VaultSearchModal extends Modal {
 			const response = this.sweepMode
 				? await this.plugin.searchManager.sweep(query)
 				: await this.plugin.searchManager.search(query);
-			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false));
+			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false, response.rebuildRequired === true));
+			// The full reason rides along as a tooltip so the status line stays short but the
+			// stale-index condition is never silent.
+			this.statusEl.setAttr('title', response.rebuildRequired && response.message ? response.message : null);
 			this.renderResults(response.results);
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
@@ -99,17 +102,32 @@ export class VaultSearchModal extends Modal {
 	}
 }
 
-function formatSearchStatus(visible: number, total: number | undefined, mode: string | undefined, ftsOnly: boolean): string {
+function formatSearchStatus(visible: number, total: number | undefined, mode: string | undefined, ftsOnly: boolean, rebuildRequired = false): string {
 	const count = typeof total === 'number' && total > visible
 		? `Showing ${visible} of ${total}`
 		: `${visible} results`;
-	return `${count}${mode ? ` · ${mode}` : ''}${ftsOnly ? ' · FTS only' : ''}`;
+	return `${count}${mode ? ` · ${mode}` : ''}${ftsOnly ? ' · FTS only' : ''}${rebuildRequired ? ' · index rebuild required' : ''}`;
 }
 
+// The per-stage explain line: base score, the ranks that were fused, every boost that
+// fired, and the fused value. Ranking is meant to be tunable by observation, so this stays
+// verbose rather than pretty.
 function formatScore(result: SearchResult): string {
-	const parts = [`${result.score.toFixed(3)}`];
+	const parts = [`${result.score.toFixed(4)}`];
 	if (typeof result.scoreText === 'number') parts.push(`text ${result.scoreText.toFixed(3)}`);
 	if (typeof result.scoreVector === 'number') parts.push(`vec ${result.scoreVector.toFixed(3)}`);
-	if (typeof result.scoreRrf === 'number') parts.push(`rrf ${result.scoreRrf.toFixed(3)}`);
+	if (typeof result.scoreRrf === 'number') parts.push(`rrf ${result.scoreRrf.toFixed(4)}`);
+	parts.push(...formatAttribution(result.attribution));
 	return parts.join(' · ');
+}
+
+function formatAttribution(attribution: SearchScoreAttribution | undefined): string[] {
+	if (!attribution) return [];
+	const parts: string[] = [];
+	if (typeof attribution.textRank === 'number') parts.push(`text #${attribution.textRank}`);
+	if (typeof attribution.titleRank === 'number') parts.push(`title #${attribution.titleRank}`);
+	if (typeof attribution.titleBoost === 'number' && attribution.titleBoost > 0) parts.push(`title +${attribution.titleBoost.toFixed(2)}`);
+	if (typeof attribution.pooledChunks === 'number' && attribution.pooledChunks > 1) parts.push(`${attribution.pooledChunks} chunks`);
+	for (const [name, value] of Object.entries(attribution.boosts ?? {})) parts.push(`${name} +${value.toFixed(2)}`);
+	return parts;
 }
