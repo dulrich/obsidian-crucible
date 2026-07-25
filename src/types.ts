@@ -225,6 +225,30 @@ export interface ProviderCompletionResult {
 export interface ProviderEmbeddingResult {
 	embeddings: number[][];
 	dimensions?: number;
+	// The server's own echoed `model` field for this response (LM Studio/OpenAI-compatible
+	// `/v1/embeddings` and ollama `/api/embed` both include one) — not necessarily identical to
+	// the requested model id, since a server may resolve an alias or serve a dated revision.
+	// Populated opportunistically by each HTTP client; ProviderManager.embed() warns (once per
+	// session, never throws) on disagreement rather than failing the call, since legitimate
+	// resolution is common and this is a diagnostic signal, not a guard.
+	servedModel?: string;
+}
+
+// Normalized answer to "what did the server actually load?" — see
+// HttpProviderClient.describeModel (src/providers/shared.ts). `precision` is the portable part:
+// WP-3 folds it into a persisted vector-space key, so two runtimes serving byte-identical weights
+// must normalize to the identical `precision` token (see normalizePrecision in
+// src/providers/shared.ts) or an index would needlessly split into two "spaces". `fingerprint` is
+// the strongest host-specific identity a runtime can offer (ollama's weights-blob digest, LM
+// Studio's quant-bearing served id, Infinity's backend name) and is evidence for diagnosis only —
+// deliberately excluded from the key, because keying on a host-specific hash would force a
+// re-embed every time identical weights moved between hosts. Any field may be `undefined`: a
+// runtime that cannot self-report precision (Infinity today) legitimately returns
+// `precision: undefined`, and that must stay a clean unknown rather than a guess.
+export interface ProviderModelDescription {
+	servedModel?: string;
+	precision?: string;
+	fingerprint?: string;
 }
 
 export interface ProviderImageExtractionResult {
