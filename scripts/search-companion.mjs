@@ -29,7 +29,14 @@ import { fileURLToPath } from 'node:url';
 // 0.9991 cosine yet only 0.8182 top-10 rank overlap), and the vector scan now filters on it.
 // The migration backfills `embedding_space = embedding_model`, so an index built before this
 // column existed keeps exactly its current identity and nothing re-embeds.
-export const SCHEMA_VERSION = 4;
+//
+// Bumped to 5 when `chunks` moved from `PRIMARY KEY (id)` to `PRIMARY KEY (vault_id, id)`.
+// A chunk id was never vault-qualified, so two vaults sharing one companion collided on it:
+// the upsert conflicted on `id` alone and re-labelled the other vault's row, its file then
+// vanished from that vault's `/v1/files/state`, and a reset of *either* vault took both
+// vaults' rows with it. Reproduced, not inferred. Every statement that keyed on `id` alone is
+// now `(vault_id, id)`; see migrateChunksPrimaryKey for the rebuild.
+export const SCHEMA_VERSION = 5;
 export const SERVICE_VERSION = 'dev-fts-rrf-vector';
 
 // bm25() takes one weight per column, including the UNINDEXED ones (they never match, so
@@ -61,7 +68,11 @@ export const RRF_VECTOR_WEIGHT = 1.0;
 // Hydration for a path the vector scan found but the FTS pool never returned. Those rows
 // have no bm25 score and no FTS snippet (they did not match), so the snippet is built from
 // the chunk text — see makeTextSnippet.
-const HYDRATE_CHUNK_SQL = 'SELECT id, path, title, heading, text, metadata_json FROM chunks WHERE id = ?';
+//
+// Scoped by `(vault_id, id)`, like every other chunk statement since schema 5. A chunk id is
+// only unique *within* a vault, so an id-only lookup here could hydrate another vault's chunk
+// into this vault's results — a cross-vault content leak, not merely a wrong snippet.
+const HYDRATE_CHUNK_SQL = 'SELECT id, path, title, heading, text, metadata_json FROM chunks WHERE vault_id = ? AND id = ?';
 
 const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   id UNINDEXED,
@@ -115,7 +126,7 @@ WITH matched AS MATERIALIZED (
          snippet(chunks_fts, 5, '', '', '...', 18) AS snippet,
          bm25(chunks_fts, ${BM25_WEIGHTS.map(weight => weight.toFixed(1)).join(', ')}) AS score_text
   FROM chunks_fts
-  JOIN chunks c ON c.id = chunks_fts.id
+  JOIN chunks c ON c.id = chunks_fts.id AND c.vault_id = chunks_fts.vault_id
   WHERE chunks_fts.vault_id = ? AND chunks_fts MATCH ?
 ),
 pooled AS (
@@ -137,12 +148,22 @@ ORDER BY score_text, path
 LIMIT ?
 `;
 
-export function createSchema(db) {
-	db.exec(`
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-CREATE TABLE IF NOT EXISTS chunks (
-  id TEXT PRIMARY KEY,
+// The canonical `chunks` shape, parameterized by table name so the primary-key migration
+// builds its replacement table from the same declaration the fresh-database path uses —
+// there is no second copy of this to drift.
+//
+// `PRIMARY KEY (vault_id, id)` is the schema-5 fix. A chunk id is derived from the note's
+// path/ordinal/heading and is therefore only ever unique *within* a vault; keying on `id`
+// alone made two vaults sharing one companion destroy each other's rows. `id`/`vault_id`
+// carry explicit NOT NULL because SQLite does not enforce it for PRIMARY KEY columns of a
+// rowid table.
+//
+// `extraColumnSql` carries forward any column the current shape no longer declares — today
+// only `embedding_json`, left behind by schema 1/2 — so the rebuild stays lossless instead
+// of quietly dropping it.
+export function chunksTableSql(name, extraColumnSql = '') {
+	return `CREATE TABLE IF NOT EXISTS ${name} (
+  id TEXT NOT NULL,
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
   content_hash TEXT NOT NULL DEFAULT '',
@@ -155,8 +176,22 @@ CREATE TABLE IF NOT EXISTS chunks (
   embedding BLOB,
   embedding_dim INTEGER,
   embedding_model TEXT,
-  embedding_space TEXT
-);
+  embedding_space TEXT,${extraColumnSql}
+  PRIMARY KEY (vault_id, id)
+)`;
+}
+
+// Declaration order of the canonical columns; doubles as the migration's copy manifest.
+const CHUNKS_COLUMNS = [
+	'id', 'vault_id', 'path', 'content_hash', 'title', 'heading', 'text',
+	'mtime', 'ordinal', 'metadata_json', 'embedding', 'embedding_dim', 'embedding_model', 'embedding_space',
+];
+
+export function createSchema(db) {
+	db.exec(`
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+${chunksTableSql('chunks')};
 ${FTS_TABLE_SQL};
 CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 `);
@@ -176,7 +211,67 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	if (!chunkColumns.includes('embedding_space')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_space TEXT');
 	db.exec(BACKFILL_EMBEDDING_SPACE_SQL);
 	db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
-	return migrateFtsSchema(db);
+	// Order matters: the additive ALTERs above must have run first, or the rebuild's
+	// INSERT ... SELECT would name columns a schema-1 table does not have yet. The PK rebuild
+	// recreates chunks_fts itself, so migrateFtsSchema finds a prefix-carrying table and
+	// reports false — hence the `||` rather than returning only its result.
+	const pkMigrated = migrateChunksPrimaryKey(db);
+	const ftsMigrated = migrateFtsSchema(db);
+	return pkMigrated || ftsMigrated;
+}
+
+// Schema 4 → 5: `chunks` keyed by `(vault_id, id)` instead of `id` alone.
+//
+// SQLite cannot ALTER a primary key, so this is the standard rebuild: create the replacement,
+// INSERT ... SELECT every column across, drop, rename. It is a **rebuild, not a reindex** —
+// no chunk text is re-read and no vector is recomputed, so an index with embeddings keeps
+// every one of them.
+//
+// Why the copy cannot lose a row: the new key is strictly *weaker* than the old one. The old
+// table enforced `id` unique across the whole database, which implies `(vault_id, id)` unique,
+// so no two source rows can collide on the new key regardless of what the data happens to
+// look like. That is a proof from the old constraint, not an observation about today's ids.
+//
+// `rowid` rides across explicitly so the vector matrix's `ORDER BY rowid` build order is
+// unchanged by the migration, and chunks_fts is dropped and refilled from `chunks` in the
+// same transaction (the `migrateFtsSchema` precedent, and what makes "chunks_fts is exactly
+// derived from chunks" true by construction on the other side of a primary-key change —
+// which is the invariant the newly `(vault_id, id)`-scoped FTS delete relies on).
+//
+// Returns true when a migration actually ran.
+export function migrateChunksPrimaryKey(db) {
+	const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'").get();
+	const sql = typeof row?.sql === 'string' ? row.sql : '';
+	if (!sql) return false;
+	if (/PRIMARY\s+KEY\s*\(\s*vault_id\s*,\s*id\s*\)/i.test(sql)) return false;
+
+	const extras = db.prepare('PRAGMA table_info(chunks)').all().filter(column => !CHUNKS_COLUMNS.includes(column.name));
+	const extraColumnSql = extras.map(column => {
+		const notNull = column.notnull ? ' NOT NULL' : '';
+		const dflt = column.dflt_value === null || column.dflt_value === undefined ? '' : ` DEFAULT ${column.dflt_value}`;
+		return `\n  ${column.name} ${column.type || 'TEXT'}${notNull}${dflt},`;
+	}).join('');
+	const columnList = [...CHUNKS_COLUMNS, ...extras.map(column => column.name)].join(', ');
+
+	db.exec('BEGIN');
+	try {
+		db.exec('DROP TABLE IF EXISTS chunks_migrated');
+		db.exec(chunksTableSql('chunks_migrated', extraColumnSql));
+		db.exec(`INSERT INTO chunks_migrated (rowid, ${columnList}) SELECT rowid, ${columnList} FROM chunks`);
+		db.exec('DROP TABLE chunks');
+		db.exec('ALTER TABLE chunks_migrated RENAME TO chunks');
+		// Dropped with the old table; recreated by the same statements createSchema uses.
+		db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path)');
+		db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
+		db.exec('DROP TABLE IF EXISTS chunks_fts');
+		db.exec(FTS_TABLE_SQL);
+		db.exec(FTS_REFILL_SQL);
+		db.exec('COMMIT');
+	} catch (e) {
+		db.exec('ROLLBACK');
+		throw e;
+	}
+	return true;
 }
 
 // `CREATE VIRTUAL TABLE IF NOT EXISTS` is a no-op against a database whose chunks_fts was
@@ -803,7 +898,7 @@ function runVectorLeg(db, options) {
 	const hydrate = options.hydrate ?? db.prepare(HYDRATE_CHUNK_SQL);
 	for (const [path, chunkId] of bestChunk) {
 		if (known.has(path)) continue;
-		const row = hydrate.get(chunkId);
+		const row = hydrate.get(options.vaultId, chunkId);
 		if (!row) continue;
 		outcome.rows.push({
 			id: row.id,
@@ -894,11 +989,15 @@ export function createRequestHandler(db, options = {}) {
 	// take over without touching a single line of the request handling below — that is the
 	// seam doing its job.
 	const vectors = options.vectors ?? createVectorBackend(db);
+	// Every statement below is keyed by `(vault_id, id)` or `(vault_id, path)`, never by `id`
+	// alone. `ON CONFLICT(vault_id, id)` is the load-bearing half: under the old `ON
+	// CONFLICT(id)` an upsert from vault B silently re-labelled vault A's row as B's, which is
+	// how one vault's index destroyed another's. `vault_id` is no longer in the SET list
+	// because it is now part of the conflict key and can only ever equal `excluded.vault_id`.
 	const upsertChunk = db.prepare(`
 INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model, embedding_space)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-  vault_id = excluded.vault_id,
+ON CONFLICT(vault_id, id) DO UPDATE SET
   path = excluded.path,
   content_hash = excluded.content_hash,
   title = excluded.title,
@@ -918,7 +1017,10 @@ ON CONFLICT(id) DO UPDATE SET
 	// as a conflicting space: they carry no claim to contradict.
 	const selectVaultEmbeddingSpace = db.prepare('SELECT embedding_space AS space FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL AND embedding_space IS NOT NULL LIMIT 1');
 	const hydrateChunk = db.prepare(HYDRATE_CHUNK_SQL);
-	const deleteFtsById = db.prepare('DELETE FROM chunks_fts WHERE id = ?');
+	// Vault-scoped like its `chunks` counterpart: an id-only delete here would evict another
+	// vault's FTS row for a colliding id, leaving that vault's chunk searchable nowhere while
+	// its `chunks` row still existed — the silent half of the same bug.
+	const deleteFtsById = db.prepare('DELETE FROM chunks_fts WHERE vault_id = ? AND id = ?');
 	const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
 	const deleteByPath = db.prepare('DELETE FROM chunks WHERE vault_id = ? AND path = ?');
 	const selectIdsByPath = db.prepare('SELECT id FROM chunks WHERE vault_id = ? AND path = ?');
@@ -1003,7 +1105,7 @@ LIMIT 1
 				db.exec('BEGIN');
 				try {
 					for (const path of paths) {
-						for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(row.id);
+						for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(vaultId, row.id);
 						deleteByPath.run(vaultId, path);
 					}
 					db.exec('COMMIT');
@@ -1085,7 +1187,7 @@ LIMIT 1
 						// The first chunk seen for a (vaultId, path) clears every existing row
 						// for that path: an upsert is a full replace, not a merge.
 						if (!clearedPaths.has(pathKey)) {
-							for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(row.id);
+							for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(vaultId, row.id);
 							deleteByPath.run(vaultId, path);
 							clearedPaths.add(pathKey);
 						}
@@ -1135,7 +1237,7 @@ LIMIT 1
 							embedding ? embedding.model : null,
 							embedding ? embedding.space : null,
 						);
-						deleteFtsById.run(id);
+						deleteFtsById.run(vaultId, id);
 						insertFts.run(id, vaultId, path, title, heading, text);
 					}
 					db.exec('COMMIT');

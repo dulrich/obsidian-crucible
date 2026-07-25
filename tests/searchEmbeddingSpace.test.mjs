@@ -217,6 +217,13 @@ test('the schema-3 → 4 migration backfills the space from the model id and lea
 	// The backfill is idempotent: a second startup rewrites nothing.
 	db.exec(BACKFILL_EMBEDDING_SPACE_SQL);
 	assert.equal(db.prepare("SELECT COUNT(*) AS n FROM chunks WHERE embedding_space = 'bge-m3'").get().n, 2);
+	// The same startup also carried this schema-3 fixture through the 4 -> 5 primary-key
+	// rebuild. The fixture above deliberately keeps `id TEXT PRIMARY KEY`, so asserting the
+	// composite key here is the check that a real pre-schema-5 index arrives keyed by vault.
+	assert.match(
+		db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'").get().sql,
+		/PRIMARY KEY \(vault_id, id\)/,
+	);
 	db.close();
 });
 
@@ -273,7 +280,7 @@ test('after the migration, an already-embedded vault is still fully covered: not
 });
 
 test('SCHEMA_VERSION and SEARCH_REQUIRED_SCHEMA_VERSION move together, or an older binary silently mixes spaces', () => {
-	assert.equal(SCHEMA_VERSION, 4);
+	assert.equal(SCHEMA_VERSION, 5);
 	assert.equal(SEARCH_REQUIRED_SCHEMA_VERSION, SCHEMA_VERSION);
 });
 
@@ -709,7 +716,7 @@ test('/health reports the distinct spaces present, so a mixed index is visible r
 	const db = makeMixedSpaceDb();
 	await withServer(db, async call => {
 		const health = (await call('GET', '/health')).json;
-		assert.equal(health.schemaVersion, 4);
+		assert.equal(health.schemaVersion, SCHEMA_VERSION);
 		assert.deepEqual(health.embeddingSpaces, ['bge-m3/fp32', 'bge-m3/q4_k_m']);
 		// No single space to name, which is exactly the state worth noticing.
 		assert.equal(health.embeddingSpace, null);

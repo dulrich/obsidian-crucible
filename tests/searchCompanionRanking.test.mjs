@@ -225,7 +225,7 @@ test('titleMatchScore ranks exact over prefix over substring over partial', () =
 	assert.equal(titleMatchScore(['widget.md'], { title: 'Widget md', path: 'a/Widget.md' }), 1);
 });
 
-test('a schema-1 index migrates to the prefix FTS table and gains the schema-3 embedding columns', () => {
+test('a schema-1 index migrates to the prefix FTS table, the embedding columns, and the composite key', () => {
 	const db = new DatabaseSync(':memory:');
 	// The schema-1 bootstrap, verbatim: no prefix= option, and embeddings still in a JSON
 	// TEXT column.
@@ -257,10 +257,21 @@ INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 
 	assert.ok(columns.includes('embedding_json'));
 	const sql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'").get().sql;
 	assert.match(sql, /prefix\s*=/);
+	// Schema 5: `chunks` is rebuilt with the composite key. The fixture above deliberately keeps
+	// the schema-1 `id TEXT PRIMARY KEY` — it is the migration's *input*, not a stale copy of the
+	// current shape — so this asserts the rebuild reached it, and the legacy `embedding_json`
+	// column asserted above proves the rebuild carried unknown columns across rather than
+	// dropping them.
+	const chunksSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks'").get().sql;
+	assert.match(chunksSql, /PRIMARY KEY \(vault_id, id\)/);
+	assert.doesNotMatch(chunksSql, /id TEXT PRIMARY KEY/);
+	// No temporary table left behind, and the row survived the rebuild.
+	assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'chunks_migrated'").get().n, 0);
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks').get().n, 1);
 	// Content is rebuilt losslessly from `chunks`, and prefix queries now work.
 	const outcome = search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['Legacy.md']);
-	assert.equal(SCHEMA_VERSION, 4);
+	assert.equal(SCHEMA_VERSION, 5);
 });
 
 // End-to-end sign check: a companion payload run through the real client normalizer must
