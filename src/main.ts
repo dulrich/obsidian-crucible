@@ -45,6 +45,7 @@ import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
+import { FileOpenIndex } from './fileOpenIndex';
 import { SearchDeletePathWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
 import { localizedImageInfo } from './orchestration/utils/imageMetadata';
@@ -117,6 +118,7 @@ export default class CruciblePlugin extends Plugin {
 	enrichmentQueue: EnrichmentQueueAdapter;
 	searchManager: SearchManager;
 	searchIndexCoordinator: SearchIndexCoordinator;
+	fileOpenIndex: FileOpenIndex;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	triggers: TriggerRegistry;
 	private tocComponent: TableOfContentsUI | null = null;
@@ -162,6 +164,7 @@ export default class CruciblePlugin extends Plugin {
 		this.providerManager = new ProviderManager(this.app, this.secretRegistry);
 		this.searchManager = new SearchManager(this.app, this.settings, this.providerManager);
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
+		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 		this.jobStore = new JobStore(this);
 		this.orchestrator = new Orchestrator(this, this.jobStore);
@@ -210,6 +213,7 @@ export default class CruciblePlugin extends Plugin {
 		}));
 		this.app.workspace.onLayoutReady(() => {
 			this.searchIndexCoordinator.markLayoutReady();
+			this.fileOpenIndex.markLayoutReady();
 			void this.orchestrator.scan({ notify: false });
 			void this.warnOnMissingSecrets();
 		});
@@ -226,6 +230,9 @@ export default class CruciblePlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('create', (file) => {
 			void this.handleFileCreate(file);
 			this.searchIndexCoordinator.handleCreate(file);
+			if (file instanceof TFile) {
+				this.fileOpenIndex.handleCreate({ path: file.path, extension: file.extension, mtime: file.stat.mtime });
+			}
 		}));
 
 		const debouncedLint = debounce(async (file: TFile) => {
@@ -242,6 +249,7 @@ export default class CruciblePlugin extends Plugin {
 
 		this.register(() => this.autoLocalizeScheduler.clear());
 		this.register(() => this.searchIndexCoordinator.dispose());
+		this.register(() => this.fileOpenIndex.dispose());
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (file instanceof TFile && file.extension === 'md') {
@@ -263,12 +271,16 @@ export default class CruciblePlugin extends Plugin {
 				void this.attachmentLocalizer.onNoteRename(file, oldPath);
 			}
 			this.searchIndexCoordinator.handleRename(file, oldPath);
+			if (file instanceof TFile) {
+				this.fileOpenIndex.handleRename({ path: file.path, extension: file.extension, mtime: file.stat.mtime }, oldPath);
+			}
 		}));
 
 		this.registerEvent(this.app.vault.on('delete', (file) => {
 			this.autoLocalizeScheduler.cancel(file.path);
 			void this.attachmentLocalizer.onNoteDelete(file.path);
 			this.searchIndexCoordinator.handleDelete(file.path);
+			this.fileOpenIndex.handleDelete(file.path);
 		}));
 
 		this.registerEvent(
