@@ -1,7 +1,7 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, ProviderModelCapability, providerModality } from "../../types";
+import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, providerModality } from "../../types";
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
 import { FileSuggest, FolderSuggest } from "../../suggesters";
@@ -16,6 +16,7 @@ import {
 	sortByNameWithEmptyLast,
 } from "../shared";
 import { bindText, bindToggle, bindDropdown, bindSearch } from "../bind";
+import { modelHasCapability, setModelCapability } from "../modelCapabilities";
 
 export function renderAiSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	if (tab.editingProviderIndex !== -1) {
@@ -357,19 +358,6 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 		await tab.plugin.saveSettings();
 		tab.display();
 	}));
-}
-
-function modelHasCapability(model: ProviderModel, capability: ProviderModelCapability): boolean {
-	if (!model.capabilities || model.capabilities.length === 0) return capability === 'chat';
-	return model.capabilities.includes(capability);
-}
-
-function setModelCapability(model: ProviderModel, capability: ProviderModelCapability, enabled: boolean): void {
-	const defaults: ProviderModelCapability[] = ['chat'];
-	const next = new Set<ProviderModelCapability>(model.capabilities && model.capabilities.length > 0 ? model.capabilities : defaults);
-	if (enabled) next.add(capability);
-	else next.delete(capability);
-	model.capabilities = Array.from(next);
 }
 
 function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
