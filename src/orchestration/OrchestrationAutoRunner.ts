@@ -1,9 +1,9 @@
 import type CruciblePlugin from '../main';
 import type { Orchestrator } from './Orchestrator';
 import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob } from './types';
-import type { CancelJobOutcome } from './cancellation';
+import type { CancelJobOutcome, StopJobOutcome } from './cancellation';
 import { Semaphore } from './utils/semaphore';
-import { computeShouldDrain, readTypeAutorun, readTypeMinIntervalOverride } from './autorunGate';
+import { computeShouldDrain, readTypeAutorun, readTypeMinIntervalOverride, resolveMaxParallel } from './autorunGate';
 
 const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
 
@@ -77,6 +77,33 @@ export class OrchestrationAutoRunner {
 		return this.orchestrator.cancelJob(type, key);
 	}
 
+	// THE Cancel verb the UI calls: one action over the queue's two mechanisms.
+	//
+	// Order is not arbitrary. Abort first — `cancelJob` answers 'not-running'
+	// immediately for anything that isn't executing, so trying it costs nothing and
+	// asking removal first could delete a job the drain has already started. Then
+	// removal, which answers `false` for a job that is running. Exactly one of the two
+	// can succeed for a given key.
+	//
+	// The second `cancelJob` covers the one real race: a drain claiming the job in the
+	// window between the two calls. Without it that job reports 'not-found' — "there's
+	// nothing there" — about a job the user can still see running in the table.
+	async stopJob(type: JobType, key: string): Promise<StopJobOutcome> {
+		const running = await this.orchestrator.cancelJob(type, key);
+		if (running !== 'not-running') return running;
+		const removal = await this.orchestrator.removeQueuedJob(type, key);
+		if (removal !== 'not-queued') return removal === 'removed' ? 'removed' : 'failed';
+		const claimedMeanwhile = await this.orchestrator.cancelJob(type, key);
+		return claimedMeanwhile === 'not-running' ? 'not-found' : claimedMeanwhile;
+	}
+
+	// Bulk clear of queued work (all types, or one). Like cancelJob, deliberately not
+	// gated on `disposed` and taking no semaphore slot: emptying a queue is a signal,
+	// not work, and teardown is a moment a caller may well want it.
+	clearQueued(type?: JobType): Promise<number> {
+		return this.orchestrator.clearQueued(type);
+	}
+
 	// Manual drain of a single type, ignoring the auto-run gate: runs everything
 	// currently queued for `type` (no auto-source refill happens when the type's
 	// auto-run is off, so this drains only what is already enqueued). Used by the
@@ -133,7 +160,14 @@ export class OrchestrationAutoRunner {
 	private async drainType(type: JobType, mode: 'auto' | 'manual'): Promise<void> {
 		this.draining.set(type, mode);
 		try {
-			const workerCount = Math.max(1, this.orchestrator.getConfig(type).maxParallel);
+			// Read live, exactly like the per-type rate override below: a settings change
+			// takes effect on the next drain without re-registering anything. A type that
+			// declares itself serial (maxParallelFixed) ignores the override — see
+			// resolveMaxParallel, which the Queue Configuration table also reads, so the
+			// number displayed is by construction the number used.
+			const workerCount = resolveMaxParallel(
+				this.orchestrator.getConfig(type), this.plugin.settings.orchestrationJobTypeControls, type,
+			);
 			await Promise.all(Array.from({ length: workerCount }, () => this.typeWorker(type)));
 		} finally {
 			this.draining.delete(type);

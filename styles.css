@@ -736,32 +736,50 @@ If your plugin does not need CSS, delete this file.
   font-size: var(--font-ui-small);
 }
 
+/* Queue Configuration is ONE full-width table, not a grid of per-type cards: fixed
+   column tracks so every control sits at the same x whatever the type name's length,
+   plus a single header row that names the units. The header is why the two-column
+   breakpoint is gone — five tracks including a 28-character monospace type name do
+   not fit in half the 52rem clamp, and headers repeated per column read worse than
+   one wider table. Rows are `display: contents` so their cells land directly in these
+   tracks. */
 .crucible-queue-type-controls {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.5rem 0.75rem;
-  padding: 0 0.75rem 0.5rem;
+  grid-template-columns: minmax(0, 1fr) auto auto 5rem 5rem;
+  align-items: center;
+  gap: 0 0.75rem;
+  padding: 0 0.75rem 0.25rem;
   font-size: var(--font-ui-small);
 
-  /* Clamp on wide displays: cards stay readable rather than sprawling full-width. */
+  /* Clamp on wide displays: the table stays readable rather than sprawling full-width. */
   max-width: 52rem;
 }
 
-/* Two-up above a comfortable width; capped at 2 columns (never wider). */
-@media (width >= 640px) {
-  .crucible-queue-type-controls {
-    grid-template-columns: 1fr 1fr;
-  }
+.crucible-queue-type-header,
+.crucible-queue-type-control {
+  display: contents;
 }
 
-.crucible-queue-type-control {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.35rem 0.5rem;
-  padding: 0.25rem 0.5rem;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-s);
+.crucible-queue-type-th {
+  padding: 0.15rem 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.crucible-queue-type-control > * {
+  min-width: 0;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* Numeric columns are right-justified — header and cell alike — so the digits line
+   up down the column instead of drifting with each value's width. */
+.crucible-queue-type-th.is-numeric,
+.crucible-queue-type-cell.is-numeric {
+  text-align: right;
 }
 
 .crucible-ingestion-header-toggle {
@@ -771,17 +789,39 @@ If your plugin does not need CSS, delete this file.
 
 .crucible-queue-type-name {
   font-family: var(--font-monospace);
+  overflow-wrap: anywhere;
 }
 
-.crucible-queue-type-toggle,
-.crucible-queue-type-rate {
+.crucible-queue-type-toggle {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
 }
 
-.crucible-queue-type-rate input {
-  width: 3.5rem;
+/* Track-sized, not a literal width: the column decides how wide a numeric input is. */
+.crucible-queue-type-num {
+  width: 100%;
+  text-align: right;
+}
+
+/* States a pinned type's constraint as a property of the job type (reason in the
+   tooltip) rather than as a disabled input, which would read as a bug. */
+.crucible-queue-type-serial {
+  padding: 0 0.35rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  cursor: help;
+}
+
+.crucible-queue-type-hint {
+  max-width: 52rem;
+  padding: 0.35rem 0.75rem 0.5rem;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
 }
 
 .crucible-queue-type-autorun {

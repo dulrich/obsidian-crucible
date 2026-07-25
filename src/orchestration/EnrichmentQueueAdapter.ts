@@ -67,10 +67,11 @@ export class EnrichmentQueueAdapter {
 		return queue.enqueue(youtubeMetadataDedupeKey(params), params, { title: item.title, channelName: item.channelName });
 	}
 
-	/** Cancel by queue key (EnrichmentQueueEntry.key), not videoId — per-note entries key on the path. */
-	dequeueIfPending(key: string): boolean {
-		return this.queue?.dequeueIfPending(key) ?? false;
-	}
+	// No cancel passthrough here on purpose. Cancelling an enrichment entry is not a
+	// video-shaped operation and never was: it goes through the queue's one Cancel verb
+	// (OrchestrationAutoRunner.stopJob → MemoryJobBackend.removeQueued/cancelJob) like
+	// every other job type, so the memory queue cannot drift into having its own
+	// differently-behaved cancel button.
 
 	/** Looks up the STANDALONE entry for a video (uncaptured list); per-note entries key on the path. */
 	getEntry(videoId: string): EnrichmentQueueEntry | null {

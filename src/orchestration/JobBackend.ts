@@ -1,8 +1,10 @@
 import type CruciblePlugin from '../main';
+import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
 import type { OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow, WorkflowContext } from './workflows/Workflow';
-import { CancelJobOutcome, applyCancellation, cancelledResultFor } from './cancellation';
+import { CancelJobOutcome, RemoveQueuedOutcome, applyCancellation, cancelledResultFor } from './cancellation';
+import { logError } from '../log';
 
 export type RunOutcome = 'ran' | 'empty' | 'disabled';
 
@@ -43,10 +45,56 @@ export interface JobBackend {
 	 * isn't bounced `running → queued` and re-run.
 	 */
 	isCancelling(key: string): boolean;
+	/**
+	 * Remove one *queued* job by key — the other half of the single Cancel verb, for
+	 * work that has not started. Takes the same claim guard the drain takes, so a job
+	 * can never be retired out from under a worker that is about to run it.
+	 *
+	 * `'failed'` is the case worth keeping distinct: `JobStore.move` rolls its rename
+	 * back and rethrows when the frontmatter write fails, so a throw means the job
+	 * *stayed queued*. The caller must not report success — and must not report it as
+	 * missing either, because it is still sitting in the queue.
+	 *
+	 * Deliberately does NOT emit `orchestration-queue-updated`; see `clearQueued`.
+	 */
+	removeQueued(key: string): Promise<RemoveQueuedOutcome>;
+	/**
+	 * Remove every *queued* job of this type, returning how many left the queue.
+	 * Running jobs are untouched — stopping those is `cancelJob`.
+	 *
+	 * Two invariants a reimplementation keeps getting wrong:
+	 *
+	 *  * It operates on the backend's own view of the queue, never on whatever a UI
+	 *    happens to be rendering (the Queue Monitor caps its table at 100 rows while
+	 *    a search rebuild enqueues hundreds of jobs).
+	 *  * It emits **nothing**. `orchestration-queue-updated` triggers a full
+	 *    `listFolder` re-read in every listener plus `OrchestrationAutoRunner.kickAll()`,
+	 *    so a per-item emit over a several-hundred-job clear is that many re-reads and
+	 *    that many kicks. The Orchestrator emits once for the whole operation instead.
+	 */
+	clearQueued(): Promise<number>;
 	/** Whether work is (or might be) waiting. File types answer "maybe" (always true). */
 	hasPending(): boolean;
 	/** Pull fresh candidates in (memory types only); no-op otherwise. */
 	refill(): void;
+}
+
+// The single "the file queue changed" emit, with the current bucket counts.
+// Exported (rather than staying private to FileJobBackend) because bulk operations
+// have to emit exactly once for the whole batch: every listener answers this event
+// with a full listFolder re-read, and the autorunner answers it with kickAll().
+export async function emitQueueChanged(plugin: CruciblePlugin, store: JobStore): Promise<void> {
+	const bus = plugin.ingestionEvents;
+	if (!bus) return;
+	try {
+		const [queued, running] = await Promise.all([
+			store.listFolder('queued'),
+			store.listFolder('running'),
+		]);
+		bus.emit('orchestration-queue-updated', { queued: queued.length, running: running.length });
+	} catch (err) {
+		logError('failed to emit orchestration-queue-updated', err);
+	}
 }
 
 // Resolves the effective per-run timeout: a per-type override if set, else the

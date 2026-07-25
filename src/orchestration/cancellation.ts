@@ -52,6 +52,41 @@ export function isJobCancelledError(error: unknown): error is JobCancelledError 
  */
 export type CancelJobOutcome = 'cancelled' | 'completed' | 'not-running';
 
+/**
+ * How the one user-facing Cancel action resolved.
+ *
+ * Cancel is a single verb over two mechanisms — a *running* job is aborted
+ * cooperatively (`CancelJobOutcome`), a *queued* one is removed from the queue —
+ * and the union is deliberately flat so a caller never has to know which mechanism
+ * applied before it can render an answer.
+ *
+ * - `cancelled` — a running job observed the signal and stopped.
+ * - `completed` — a running job settled before it observed the signal. The honest
+ *   copy is "finished before it could be stopped", *never* "stopped": with no
+ *   reachable checkpoint (or with the work already done) this is the truth, and
+ *   papering over it would claim the queue obeyed an instruction it did not.
+ * - `removed` — the job was queued and never ran; it left the queue.
+ * - `failed` — the job is queued and *stayed* queued: the store refused the move and
+ *   rolled it back. Reporting this as `not-found` would be the same species of lie as
+ *   reporting `completed` as "stopped" — the job is still right there.
+ * - `not-found` — nothing under that key is queued or running any more.
+ */
+export type StopJobOutcome = 'cancelled' | 'completed' | 'removed' | 'failed' | 'not-found';
+
+/**
+ * How removing one *queued* job resolved. Deliberately three-valued rather than a
+ * boolean: "it wasn't queued" and "it is queued and I could not move it" lead to
+ * different, both-honest answers, and a boolean collapses them into a shrug.
+ */
+export type RemoveQueuedOutcome = 'removed' | 'not-queued' | 'failed';
+
+/**
+ * The note both backends record on a job stopped before it ever ran. Lives here
+ * rather than in either backend so the file and memory halves of one Cancel button
+ * cannot end up describing the same user action differently.
+ */
+export const CANCELLED_BEFORE_RUN = 'Cancelled from the queue monitor before it ran.';
+
 /** How a run settled, as reported back by the backend that executed it. */
 export type RunSettlement = 'cancelled' | 'completed';
 

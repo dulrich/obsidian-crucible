@@ -1,11 +1,46 @@
-import { TFile } from 'obsidian';
+import { Notice, TFile } from 'obsidian';
 import type { JobType, OrchestrationJob } from '../../orchestration/types';
+import type { StopJobOutcome } from '../../orchestration/cancellation';
+import { ConfirmModal } from '../../confirmModal';
 import { renderSortableTable } from '../render/sortableTable';
 import { renderFileLink } from '../render/cells';
 import { formatDateTime } from '../render/format';
 import type { DashboardHost, SectionContext } from '../render/types';
 
 const QUEUE_MONITOR_RENDER_LIMIT = 100;
+
+// How each outcome of the single Cancel action reads. The row itself is gone by the
+// time the answer arrives (the table refreshes), so the answer has to travel as a
+// Notice rather than as button text.
+//
+// `completed` is the row this table exists to get right. Cancellation is cooperative
+// — a workflow stops at its next checkpoint and never mid-request — so a job with no
+// reachable checkpoint, or one that simply finished during the round trip, really did
+// run to completion. Reporting that as "Stopped" would tell the user the queue obeyed
+// an instruction it did not, and would hide the one behaviour they most need to
+// understand about Cancel.
+const STOP_OUTCOME_NOTICE: Record<StopJobOutcome, string> = {
+	cancelled: 'Stopped.',
+	completed: 'Finished before it could be stopped.',
+	removed: 'Removed from the queue before it ran.',
+	// The store rolled the move back, so the job is still queued — saying "no longer
+	// queued" here would be the same lie in a different costume.
+	failed: 'Could not cancel that job; it is still queued.',
+	'not-found': 'That job is no longer queued or running.',
+};
+
+// One paragraph, deliberately: ConfirmModal renders its message as a single <p>, so a
+// blank line here would collapse to a space rather than split it.
+//
+// The auto-refill sentence is not padding. Clearing an in-memory entry stops it from
+// suppressing its own auto-source seed once the cancelled entry is forgotten, so with
+// auto-enqueue on the item genuinely comes back — and a user who was not told that
+// reads it as the clear having been ignored.
+const CLEAR_QUEUED_CONFIRM =
+	'Every queued job is removed: file-backed jobs move to the queue\'s cancelled folder, in-memory entries are '
+	+ 'marked cancelled. Jobs already running are not affected — stop those with Cancel on their row. '
+	+ 'One caveat: while auto-enqueue is on, cleared in-memory entries can be re-added by their source about a '
+	+ 'minute later, so turn the source off as well if you want them to stay gone.';
 
 function fileJobTargetPath(job: OrchestrationJob): string | undefined {
 	const path = job.params?.targetPath ?? job.params?.path;
@@ -56,6 +91,34 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	const runNextBtn = controls.createEl('button', { text: 'Run next', cls: 'crucible-ingestion-run-next' });
 	runNextBtn.addEventListener('click', () => {
 		void host.plugin.orchestrationAutoRunner?.runOnce();
+	});
+
+	// Queue-wide clear. Reads the queue from the store rather than from the table (the
+	// table caps at 100 rows while a search rebuild enqueues hundreds), and confirms
+	// first — the established precedent is that bulk destructive actions confirm and
+	// single-row ones don't.
+	const clearBtn = controls.createEl('button', { text: 'Clear queued', cls: 'mod-warning' });
+	clearBtn.title = 'Remove every queued job across all types. Running jobs keep running.';
+	clearBtn.addEventListener('click', () => {
+		void (async () => {
+			const confirmed = await new ConfirmModal(host.app, {
+				title: 'Clear all queued jobs?',
+				message: CLEAR_QUEUED_CONFIRM,
+				confirmText: 'Clear queued',
+				destructive: true,
+			}).openAndAwait();
+			if (!confirmed) return;
+			clearBtn.disabled = true;
+			try {
+				const cleared = (await host.plugin.orchestrationAutoRunner?.clearQueued()) ?? 0;
+				new Notice(cleared > 0
+					? `Cleared ${cleared} queued job${cleared === 1 ? '' : 's'}.`
+					: 'Nothing was queued.');
+			} finally {
+				clearBtn.disabled = false;
+			}
+			await host.refresh('queueMonitor');
+		})();
 	});
 
 	controls.createSpan({
@@ -243,14 +306,52 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 						})();
 					});
 				}
-				// Memory-queue pending entries also have a Cancel action.
-				if (r.source === 'memory' && r.status === 'queued') {
-					const cancel = td.createEl('button', { text: 'Cancel' });
-					cancel.addEventListener('click', () => {
-						host.plugin.enrichmentQueue?.dequeueIfPending(r.key);
-					});
-				}
+				renderCancelAction(host, td, r.type as JobType, r.key, r.status);
 			},
 		},
 	], rows, ctx, { limit: QUEUE_MONITOR_RENDER_LIMIT });
+}
+
+// ONE Cancel button for both mechanisms — aborting a running job and dropping a
+// queued one — because from the user's side they are one intention. The transitional
+// copy is what makes that honest: a queued job goes immediately, a running one stops
+// at its next checkpoint, and the button says which is happening.
+//
+// Nothing here gates the rest of the table on the cancel promise. With the autorun
+// timeout disabled and a checkpoint-poor workflow, that promise resolves only when
+// the work naturally finishes — unbounded, not hung. So the awaiting lives entirely
+// inside one row's button, and a row that sits at "Stopping…" for a long job is
+// correct behaviour that should read as such.
+function renderCancelAction(
+	host: DashboardHost,
+	td: HTMLElement,
+	type: JobType,
+	key: string,
+	status: 'queued' | 'running',
+): void {
+	// Re-derived at render time rather than held in a closure, so the state survives
+	// the table's own live refreshes (queue events refresh this section continuously,
+	// which would otherwise reset a "Stopping…" button to "Cancel" every few seconds).
+	if (host.plugin.orchestrator.isCancelling(type, key)) {
+		const pending = td.createEl('button', { text: 'Stopping…' });
+		pending.disabled = true;
+		pending.title = 'Stop requested. Cancellation is cooperative: the job stops at its next checkpoint, and any '
+			+ 'request already in flight has to finish first.';
+		return;
+	}
+
+	const cancel = td.createEl('button', { text: 'Cancel' });
+	cancel.title = status === 'running'
+		? 'Stop this job. It stops at its next checkpoint — a request already in flight finishes first — so a long job '
+			+ 'can take a while to acknowledge.'
+		: 'Drop this job from the queue before it runs.';
+	cancel.addEventListener('click', () => {
+		void (async () => {
+			cancel.disabled = true;
+			cancel.setText(status === 'running' ? 'Stopping…' : 'Cancelling…');
+			const outcome = (await host.plugin.orchestrationAutoRunner?.stopJob(type, key)) ?? 'not-found';
+			new Notice(STOP_OUTCOME_NOTICE[outcome]);
+			await host.refresh('queueMonitor');
+		})();
+	});
 }

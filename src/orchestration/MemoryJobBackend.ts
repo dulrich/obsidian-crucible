@@ -4,7 +4,7 @@ import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
-import { CancelJobOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
+import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { MemoryJobEntry, MemoryJobQueue } from './MemoryJobQueue';
 import { defaultLaneForPriority } from './lanes';
 import { logWarn } from '../log';
@@ -64,13 +64,25 @@ export class MemoryJobBackend implements JobBackend {
 	}
 
 	// Cancels the running entry with this key. A *pending* entry answers
-	// 'not-running': removing it from the queue is `dequeueIfPending`, not an abort.
+	// 'not-running': dropping it from the queue is `removeQueued`, not an abort.
 	cancelJob(key: string): Promise<CancelJobOutcome> {
 		return this.running.cancel(key);
 	}
 
 	isCancelling(key: string): boolean {
 		return this.running.isCancelling(key);
+	}
+
+	// The queued half of Cancel for a memory type: a pending entry is stopped by
+	// marking it cancelled, which also keeps the auto-source from immediately
+	// re-seeding the key (see MemoryJobQueue.cancelIfPending). There is no store to
+	// refuse the write here, so this path never answers 'failed'.
+	async removeQueued(key: string): Promise<RemoveQueuedOutcome> {
+		return this.queue.cancelIfPending(key, CANCELLED_BEFORE_RUN) ? 'removed' : 'not-queued';
+	}
+
+	async clearQueued(): Promise<number> {
+		return this.queue.clearPending(CANCELLED_BEFORE_RUN);
 	}
 
 	private async runEntry(entry: MemoryJobEntry): Promise<RunOutcome> {
