@@ -1219,3 +1219,39 @@ If your plugin does not need CSS, delete this file.
     grid-template-columns: 1fr;
   }
 }
+
+/* WP-D — probe-first provider model configuration (plans/queue-control-model-probing-vault-isolation.md,
+   D2). Appended rather than interleaved with the settings-group rules above: WP-B is editing this
+   same file in parallel, and keeping additions at the end keeps that rebase mechanical. */
+
+/* D2 rule 4's "the UI makes clear which values are user-set versus probe-accepted" marking, next
+   to a field's name whenever its current value came from an Accept rather than the user. */
+.crucible-probe-accepted-badge {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background-color: var(--background-modifier-success);
+  color: var(--text-success);
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
+/* The warn-never-block looksLikeCrossEncoder advisory — never disables or hides the model it's
+   attached to, just sits alongside it. */
+.crucible-inline-warning {
+  margin: 0.35rem 0 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 3px solid var(--text-warning);
+  background-color: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+/* Fetch models / Clear cache status line — surfaces "no models reported" vs "could not reach the
+   server" as read text rather than a spinner that just stops. */
+.crucible-probe-status {
+  margin-top: 0.25rem;
+}
