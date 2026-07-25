@@ -10,6 +10,7 @@ initiative-title: Obsidian Crucible
 pending-plans:
   - "[[semantic-vector-leg-and-reranker]]"
   - "[[embedding-space-identity-and-runtime-bakeoff]]"
+  - "[[queue-control-model-probing-vault-isolation]]"
 initiative-status: active
 initiative-cadence: as-needed
 ---
