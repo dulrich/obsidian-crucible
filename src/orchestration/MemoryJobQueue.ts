@@ -88,6 +88,10 @@ export class MemoryJobQueue {
 		return true;
 	}
 
+	// Forgets a pending entry outright. Distinct from `cancelIfPending`, which is what
+	// a user's Cancel uses: deleting hands the key straight back to the auto-source,
+	// whereas a terminal entry suppresses its own re-seed until the retention window
+	// expires. Use this one only when the entry should be re-offerable immediately.
 	dequeueIfPending(key: string): boolean {
 		const entry = this.entries.get(key);
 		if (!entry || entry.status !== 'pending') return false;
@@ -197,6 +201,37 @@ export class MemoryJobQueue {
 		entry.note = note;
 		entry.finishedAt = Date.now();
 		this.onChange(this.entries.size);
+	}
+
+	// Cancels a *pending* entry — the queued half of the single Cancel verb. Marks it
+	// terminal rather than deleting it (which is what `dequeueIfPending` does), for one
+	// reason that matters: `refill` skips any key already tracked in any state, so a
+	// terminal entry keeps suppressing its own auto-source seed. Deleting it hands the
+	// key straight back to an enabled auto-source, which re-adds the item on the very
+	// next refill and makes the user's Cancel look ignored. The suppression is not
+	// permanent — `sweepTerminal` reaps the entry after `retentionMs`, after which the
+	// source may legitimately offer it again. The UI copy says so.
+	cancelIfPending(key: string, note?: string): boolean {
+		const entry = this.entries.get(key);
+		if (!entry || entry.status !== 'pending') return false;
+		this.markCancelled(key, note);
+		return true;
+	}
+
+	// Cancels every pending entry, with a SINGLE onChange for the whole batch: each
+	// onChange emits `enrichment-queue-updated` and kicks a drain, so a per-entry call
+	// would fan one user action into N of both.
+	clearPending(note?: string): number {
+		let cancelled = 0;
+		for (const entry of this.entries.values()) {
+			if (entry.status !== 'pending') continue;
+			entry.status = 'cancelled';
+			entry.note = note;
+			entry.finishedAt = Date.now();
+			cancelled++;
+		}
+		if (cancelled > 0) this.onChange(this.entries.size);
+		return cancelled;
 	}
 
 	sweepTerminal(): void {

@@ -591,6 +591,17 @@ export default class CruciblePlugin extends Plugin {
 		await this.saveSettings();
 	}
 
+	// Set or clear (workers === undefined) a per-type worker-count override. Same shape
+	// as the rate override on purpose: the drain loop reads it live when it starts a
+	// drain, so persisting is all that's needed — no re-registration, no restart. A
+	// type declaring `maxParallelFixed` ignores it (resolveMaxParallel), and the global
+	// orchestrationMaxConcurrent semaphore still caps total in-flight work.
+	async setJobTypeMaxParallel(type: JobType, workers: number | undefined): Promise<void> {
+		this.settings.orchestrationJobTypeControls = setTypeControl(this.settings.orchestrationJobTypeControls, type, { maxParallelOverride: workers });
+		await this.saveSettings();
+		this.orchestrationAutoRunner?.kickDrainType(type);
+	}
+
 	// Auto-ENQUEUE (source) control for enrichment: whether metadata jobs are
 	// automatically created (the capture event trigger and the Uncaptured Videos
 	// auto-source both read this flag). This is ORTHOGONAL to draining — executing
