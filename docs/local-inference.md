@@ -292,11 +292,32 @@ Three conclusions:
    100% P@1 the *worst* true translation scores below the *best* unrelated pair. Rank results;
    never write "drop anything below 0.5".
 
-**Practical advice.** f16 is a fine default and Q8_0 is indistinguishable from it. Q4_K_M is a
-reasonable trade if you want the memory back. Below that you are buying disk space with
-discrimination, which matters most if you ever compare scores rather than order them. The larger
-risk by far is not quantization — it is picking a model that is not an embedder at all (§1) or one
-that does not cover your languages (§5).
+**Quantization buys memory, and only memory.** Measured on the same GPU with everything else
+pinned:
+
+| `bge-m3` | VRAM resident | retrieval | throughput |
+|---|---|---|---|
+| f16 | 974 MB | 100% / 98.4% | 48.2 chunks/s |
+| Q8_0 | 670 MB (**−31%**) | identical | 49.7 |
+| Q4_K_M | 537 MB (**−45%**) | −1 article of 61 | 45.5 |
+| Q2_K | 466 MB (−52%) | identical P@1, spread 0.35 → 0.24 | 48.4 |
+
+Throughput is flat across the whole ladder — this workload is compute-bound, so a smaller file does
+not make it faster. The same holds for the reranker: FP16, Q8_0 and Q4_K_M rank identically
+(concordance 0.890–0.899) at 326–356 ms per 30 documents.
+
+**Practical advice.** If VRAM is not your binding constraint, the quantization choice does not
+matter — use f16. If it is, go to **Q4_K_M** and get 45% of the model's residency back for
+essentially nothing; both models resident drops from ~1.7 GB to ~1.0 GB, which is the difference
+between fitting and not on an 8 GB card shared with a desktop. Below Q4 you are trading
+discrimination for disk you have already saved, which bites only if something reads absolute scores
+rather than ordering them.
+
+Note that **file size is not a proxy for VRAM**: an f32 GGUF occupies *less* than its file (1,575 MB
+from 2,274 MB) while Q2_K occupies *more* (466 MB from 366 MB). Measure the card, not the disk.
+
+The larger risk by far is not quantization — it is picking a model that is not an embedder at all
+(§1) or one that does not cover your languages (§5).
 
 **Crucible keys on an embedding space, not a model name.** Companion schema 4 added
 `chunks.embedding_space` = model id plus normalised precision (`bge-m3/f16`); the vector scan
