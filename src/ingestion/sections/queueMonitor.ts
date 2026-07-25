@@ -289,6 +289,10 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			key: 'action',
 			label: 'Action',
 			render: (r, td) => {
+				// The cell lays its buttons out itself. Appended bare they sit flush against
+				// each other, which on a destructive action next to a Run button is not just
+				// untidy — it invites the wrong click.
+				td.addClass('crucible-queue-action-cell');
 				// Per-job Run: execute this one queued job now, ignoring the auto-run
 				// gate (for "auto off / deep queue, run this one"). Running rows have no
 				// Run — they're already in flight.
@@ -340,7 +344,11 @@ function renderCancelAction(
 		return;
 	}
 
-	const cancel = td.createEl('button', { text: 'Cancel' });
+	// mod-warning: Cancel destroys queued work or stops work in progress, and it sits
+	// immediately beside Run. It carries the danger semantic for the same reason the
+	// queue-wide Clear does — the two destructive controls in this view should read as
+	// destructive at a glance, not only once the tooltip is open.
+	const cancel = td.createEl('button', { text: 'Cancel', cls: 'mod-warning' });
 	cancel.title = status === 'running'
 		? 'Stop this job. It stops at its next checkpoint — a request already in flight finishes first — so a long job '
 			+ 'can take a while to acknowledge.'

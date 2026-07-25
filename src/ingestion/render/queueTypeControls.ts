@@ -120,18 +120,24 @@ function renderTypeControl(
 }
 
 function renderConcurrencyCell(plugin: CruciblePlugin, row: HTMLElement, type: JobType): void {
-	const cell = row.createDiv({ cls: 'crucible-queue-type-cell is-numeric' });
 	const config = plugin.orchestrator.getConfig(type);
 	const cap = Math.max(1, plugin.settings.orchestrationMaxConcurrent || 1);
 
 	// A pinned type states the constraint as what it is — a property of the job type,
 	// carrying its own reason — rather than as a disabled input, which reads as a bug
 	// or as something the user is failing to unlock.
+	//
+	// The cell is centred, not `is-numeric`. Right-justification exists so digits line
+	// up down the column; a pill is a label, not a digit, and flush-right it reads as
+	// having fallen out of the column rather than as occupying it.
 	if (config.maxParallelFixed) {
-		const pill = cell.createSpan({ cls: 'crucible-queue-type-serial', text: 'serial' });
+		const cell = row.createDiv({ cls: 'crucible-queue-type-cell is-pill' });
+		const pill = cell.createSpan({ cls: 'crucible-pill is-muted', text: 'serial' });
 		pill.title = `This type always runs one job at a time. ${config.maxParallelFixed}`;
 		return;
 	}
+
+	const cell = row.createDiv({ cls: 'crucible-queue-type-cell is-numeric' });
 
 	const input = cell.createEl('input', { type: 'number', cls: 'crucible-queue-type-num' });
 	input.min = '1';
