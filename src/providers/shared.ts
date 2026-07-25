@@ -1,4 +1,4 @@
-import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult } from '../types';
+import { Provider, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderRerankResult, ProviderRerankResultItem } from '../types';
 
 // Everything a per-provider HTTP client needs to issue a request: the provider config, the
 // resolved model id, and the API key (already loaded + validated by ProviderManager). Each
@@ -9,13 +9,14 @@ export interface HttpCallContext {
 	apiKey: string;
 }
 
-// Capability surface for an HTTP-backed provider. `complete` is required; `embed` and
-// `extractImage` are present only on providers that support them, so ProviderManager can throw
-// a precise "not supported" by checking for the method rather than maintaining switch arms.
+// Capability surface for an HTTP-backed provider. `complete` is required; `embed`, `extractImage`
+// and `rerank` are present only on providers that support them, so ProviderManager can throw a
+// precise "not supported" by checking for the method rather than maintaining switch arms.
 export interface HttpProviderClient {
 	complete(ctx: HttpCallContext, system: string, user: string): Promise<ProviderCompletionResult>;
 	embed?(ctx: HttpCallContext, inputs: string[]): Promise<ProviderEmbeddingResult>;
 	extractImage?(ctx: HttpCallContext, base64: string, mimeType: string): Promise<ProviderImageExtractionResult>;
+	rerank?(ctx: HttpCallContext, query: string, documents: string[]): Promise<ProviderRerankResult>;
 }
 
 export const IMAGE_EXTRACTION_SYSTEM_PROMPT = [
@@ -41,6 +42,92 @@ export function normalizeEmbedding(value: unknown): number[] {
 		throw new Error('Embedding response contained invalid numeric values');
 	}
 	return out;
+}
+
+// Validates + normalizes the `{ results: [{ index, relevance_score }, ...] }` shape shared by
+// both rerank backends: the native `/rerank` endpoint's raw JSON, and the fallback LLM-as-
+// reranker's structured completion (see parseRerankCompletionText below, which asks the model
+// to emit this exact wire shape so both paths converge on one parser).
+//
+// Deliberately strict rather than degrading: a missing `results` array, a non-numeric score, an
+// out-of-range/duplicate `index`, or a result count that doesn't match `documentCount` all throw
+// instead of silently truncating or half-applying the response. Silent truncation is exactly the
+// failure this repo has been bitten by before (see the banned-diagnostics/raw-NUL AGENTS.md
+// quirks for the general pattern of "a partial-looking success is worse than a loud failure") — a caller
+// that receives fewer results than documents has no principled way to guess which document went
+// missing, so guessing is not an option.
+export function normalizeRerankResults(raw: unknown, documentCount: number): ProviderRerankResultItem[] {
+	if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { results?: unknown }).results)) {
+		throw new Error('Rerank response did not include a results array');
+	}
+	const rawResults = (raw as { results: unknown[] }).results;
+	if (rawResults.length !== documentCount) {
+		throw new Error(`Rerank response returned ${rawResults.length} results for ${documentCount} documents`);
+	}
+	const seen = new Set<number>();
+	const out: ProviderRerankResultItem[] = [];
+	for (const entry of rawResults) {
+		if (!entry || typeof entry !== 'object') {
+			throw new Error('Rerank response contained a malformed result entry');
+		}
+		const index = (entry as { index?: unknown }).index;
+		const relevanceScore = (entry as { relevance_score?: unknown }).relevance_score;
+		if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= documentCount) {
+			throw new Error(`Rerank response contained an out-of-range or non-integer index: ${String(index)}`);
+		}
+		if (seen.has(index)) throw new Error(`Rerank response contained a duplicate index: ${index}`);
+		if (typeof relevanceScore !== 'number' || !Number.isFinite(relevanceScore)) {
+			throw new Error(`Rerank response contained a non-numeric relevance_score for index ${index}`);
+		}
+		seen.add(index);
+		out.push({ index, relevanceScore });
+	}
+	return out;
+}
+
+// System prompt for the fallback backend (C in the WP-5 brief): a provider with no native
+// `/rerank` endpoint (plain Ollama, a chat-only CLI provider, ...) scores candidates through the
+// existing complete() path instead. Asking for the identical `{results:[{index,relevance_score}]}`
+// shape the native backend returns means both backends converge on normalizeRerankResults above —
+// one parser, one set of invariants, rather than a second bespoke format to validate.
+export const RERANK_FALLBACK_SYSTEM_PROMPT = [
+	'You are a relevance-scoring function for a personal knowledge-base search result set.',
+	'You will be given a query and a numbered list of documents (snippets, not full notes).',
+	'Score how relevant each document is to the query, from 0.0 (irrelevant) to 1.0 (highly relevant).',
+	'Respond with ONLY compact JSON of this exact shape, no other text, no markdown fences:',
+	'{"results":[{"index":0,"relevance_score":0.0},{"index":1,"relevance_score":0.0}]}',
+	'Include exactly one entry per document, covering every index from 0 to N-1 exactly once, in any order.',
+].join('\n');
+
+export function buildRerankFallbackUserPrompt(query: string, documents: string[]): string {
+	const numbered = documents.map((doc, i) => `[${i}] ${doc}`).join('\n\n');
+	return `Query: ${query}\n\nDocuments:\n${numbered}`;
+}
+
+// Parses the fallback backend's free-form completion text into the same normalized shape a
+// native `/rerank` response produces. Tries the raw text first (models that obey "no markdown
+// fences" return bare JSON), then a bare `{...}` slice, then a fenced ```json block — the same
+// three-candidate strategy parseImageExtractionJson already uses for a different capability's
+// LLM-structured-output problem. Throws with the parser's own message on total failure rather
+// than fabricating scores or silently dropping documents; the caller surfaces that to the user
+// as a failed rerank, not a corrupted or partial one.
+export function parseRerankCompletionText(rawText: string, documentCount: number): ProviderRerankResultItem[] {
+	const candidates = [
+		rawText.trim(),
+		extractJsonObject(rawText),
+		extractFencedJson(rawText),
+	].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+
+	let lastError: unknown = new Error('empty response');
+	for (const candidate of candidates) {
+		try {
+			return normalizeRerankResults(JSON.parse(candidate), documentCount);
+		} catch (e) {
+			lastError = e;
+		}
+	}
+	const reason = lastError instanceof Error ? lastError.message : String(lastError);
+	throw new Error(`Rerank fallback response was not usable: ${reason}`);
 }
 
 export function parseImageExtractionResult(rawText: string, finishReason: ProviderFinishReason, rawFinishReason: string | undefined): ProviderImageExtractionResult {
