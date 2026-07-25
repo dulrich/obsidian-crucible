@@ -1,10 +1,10 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { Setting } from "obsidian";
+import { Notice, Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderKind, ProviderModel, providerModality } from "../../types";
+import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderCatalogModel, ProviderKind, ProviderModel, providerModality } from "../../types";
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
-import { FileSuggest, FolderSuggest } from "../../suggesters";
+import { FileSuggest, FolderSuggest, ProviderModelSuggest } from "../../suggesters";
 import {
 	PROVIDER_KIND_LABELS,
 	SearchWithContainer,
@@ -16,7 +16,23 @@ import {
 	sortByNameWithEmptyLast,
 } from "../shared";
 import { bindText, bindToggle, bindDropdown, bindSearch } from "../bind";
-import { modelHasCapability, setModelCapability } from "../modelCapabilities";
+import {
+	acceptCatalogSuggestion,
+	applyFetchedCatalog,
+	catalogEntrySummaryTokens,
+	catalogSuggestionHasChanges,
+	clearAcceptedMarker,
+	clearProviderModelCatalog,
+	crossEncoderWarningText,
+	deriveCatalogSuggestion,
+	formatProbeStatusText,
+	getOrCreateProbeState,
+	getProbeStatus,
+	modelHasCapability,
+	resetCatalogField,
+	setModelCapability,
+	setProbeStatus,
+} from "../modelCapabilities";
 
 export function renderAiSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	if (tab.editingProviderIndex !== -1) {
@@ -257,15 +273,25 @@ function mountProviderApiKeyControl(tab: CrucibleSettingTab, containerEl: HTMLEl
 	});
 }
 
+// The "<Provider kind> reports: ..." provenance line under a surfaced suggestion — D2 rule 2
+// ("show it inline as a suggestion with its provenance"). Kept here (not in modelCapabilities.ts)
+// because it needs PROVIDER_KIND_LABELS, which is UI copy, not probe logic.
+function buildProvenanceText(provider: Provider, entry: ProviderCatalogModel): string {
+	const label = PROVIDER_KIND_LABELS[provider.kind] ?? provider.kind;
+	const tokens = catalogEntrySummaryTokens(entry);
+	return tokens.length > 0 ? `${label} reports: ${tokens.join(', ')}` : `${label} reports this model, but no further metadata.`;
+}
+
 function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElement, provider: Provider) {
 	new Setting(containerEl).setName('Models').setHeading();
 	containerEl.createEl('p', {
-		text: 'Configure one or more models. Agents bind to a (provider, model) pair, and chain steps can override via {{model}}.',
+		text: 'Configure one or more models. Agents bind to a (provider, model) pair, and chain steps can override via {{model}}. Use Fetch models to pull the server\'s own model list and suggest capabilities and metadata — nothing is applied to a model until you press Accept.',
 		cls: 'mod-muted',
 	});
 
 	const list = containerEl.createDiv({ cls: 'crucible-settings-group' });
 	const models = provider.models ?? (provider.models = []);
+	const catalogModels = provider.modelCatalog?.models ?? [];
 
 	if (models.length === 0) {
 		list.createDiv({ text: 'No models configured.', cls: 'crucible-empty-state' });
@@ -273,13 +299,21 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 		models.forEach((model, modelIndex) => {
 			if (modelIndex > 0) list.createEl('hr', { cls: 'crucible-row-divider' });
 			const modelRow = list.createDiv({ cls: 'crucible-provider-model-row' });
+			const probeState = getOrCreateProbeState(model);
+
 			new Setting(modelRow)
 				.setName('Model')
-				.addText(t => t
-					.setPlaceholder(modelIdPlaceholder(provider.kind))
-					.setValue(model.id)
-					.onChange(async (v) => { model.id = v; await tab.plugin.saveSettings(); })
-					.inputEl.addClass('pi-width-normal'))
+				.addText(t => {
+					t.setPlaceholder(modelIdPlaceholder(provider.kind))
+						.setValue(model.id)
+						.onChange(async (v) => { model.id = v; await tab.plugin.saveSettings(); })
+						.inputEl.addClass('pi-width-normal');
+					// Deferred to a macrotask: selectSuggestion() still needs to close its own
+					// popup after this callback returns, and a synchronous tab.display() here
+					// would tear down the settings pane's DOM (this input included) out from
+					// under that close() call.
+					new ProviderModelSuggest(tab.app, t.inputEl, () => catalogModels, () => { setTimeout(() => tab.display(), 0); });
+				})
 				.addText(t => t
 					.setPlaceholder('Display label (optional)')
 					.setValue(model.label)
@@ -293,71 +327,148 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 
 			const capabilities = new Setting(modelRow)
 				.setName('Capabilities');
+			if (probeState.accepted.capabilities) {
+				capabilities.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
+				capabilities.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
+					resetCatalogField(model, 'capabilities', probeState);
+					await tab.plugin.saveSettings();
+					tab.display();
+				}));
+			}
 			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Chat' });
 			capabilities
 				.addToggle(t => t
 					.setTooltip('Chat model')
 					.setValue(modelHasCapability(model, 'chat'))
-					.onChange(async (v) => { setModelCapability(model, 'chat', v); await tab.plugin.saveSettings(); }));
+					.onChange(async (v) => { setModelCapability(model, 'chat', v); clearAcceptedMarker(probeState, 'capabilities'); await tab.plugin.saveSettings(); }));
 			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Embedding' });
 			capabilities
 				.addToggle(t => t
 					.setTooltip('Embedding model')
 					.setValue(modelHasCapability(model, 'embedding'))
-					.onChange(async (v) => { setModelCapability(model, 'embedding', v); await tab.plugin.saveSettings(); }));
+					.onChange(async (v) => { setModelCapability(model, 'embedding', v); clearAcceptedMarker(probeState, 'capabilities'); await tab.plugin.saveSettings(); }));
 			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Image' });
 			capabilities
 				.addToggle(t => t
 					.setTooltip('Image extraction model')
 					.setValue(modelHasCapability(model, 'image-extraction'))
-					.onChange(async (v) => { setModelCapability(model, 'image-extraction', v); await tab.plugin.saveSettings(); }));
+					.onChange(async (v) => { setModelCapability(model, 'image-extraction', v); clearAcceptedMarker(probeState, 'capabilities'); await tab.plugin.saveSettings(); }));
 			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Rerank' });
 			capabilities
 				.addToggle(t => t
 					.setTooltip('Reranker model — a cross-encoder scoring (query, document) pairs, e.g. bge-reranker-v2-m3. Not an embedding model.')
 					.setValue(modelHasCapability(model, 'rerank'))
-					.onChange(async (v) => { setModelCapability(model, 'rerank', v); await tab.plugin.saveSettings(); }));
+					.onChange(async (v) => { setModelCapability(model, 'rerank', v); clearAcceptedMarker(probeState, 'capabilities'); await tab.plugin.saveSettings(); }));
 
-			new Setting(modelRow)
+			const dimsSetting = new Setting(modelRow)
 				.setName('Embedding dimensions')
-				.setDesc('Optional, but recommended for embedding models: indexing checks every sub-batch against it and stops on a mismatch, so a wrong-width model fails after ≤96 texts instead of after a whole flush has been embedded.')
-				.addText(t => {
-					t.setPlaceholder('Dims')
-						.setValue(model.embeddingDimensions ? String(model.embeddingDimensions) : '')
-						.onChange(async (v) => {
-							const n = Number(v.trim());
-							if (Number.isFinite(n) && n > 0) model.embeddingDimensions = Math.floor(n);
-							else delete model.embeddingDimensions;
-							await tab.plugin.saveSettings();
-						});
-					t.inputEl.type = 'number';
-					t.inputEl.min = '1';
-					t.inputEl.step = '1';
-					t.inputEl.addClass('pi-width-half');
-				});
+				.setDesc('Optional, but recommended for embedding models: indexing checks every sub-batch against it and stops on a mismatch, so a wrong-width model fails after ≤96 texts instead of after a whole flush has been embedded.');
+			if (probeState.accepted.embeddingDimensions) {
+				dimsSetting.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
+				dimsSetting.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
+					resetCatalogField(model, 'embeddingDimensions', probeState);
+					await tab.plugin.saveSettings();
+					tab.display();
+				}));
+			}
+			dimsSetting.addText(t => {
+				t.setPlaceholder('Dims')
+					.setValue(model.embeddingDimensions ? String(model.embeddingDimensions) : '')
+					.onChange(async (v) => {
+						const n = Number(v.trim());
+						if (Number.isFinite(n) && n > 0) model.embeddingDimensions = Math.floor(n);
+						else delete model.embeddingDimensions;
+						clearAcceptedMarker(probeState, 'embeddingDimensions');
+						await tab.plugin.saveSettings();
+					});
+				t.inputEl.type = 'number';
+				t.inputEl.min = '1';
+				t.inputEl.step = '1';
+				t.inputEl.addClass('pi-width-half');
+			});
 
-			new Setting(modelRow)
+			const variantSetting = new Setting(modelRow)
 				.setName('Embedding precision (fallback)')
-				.setDesc('Only needed when the server cannot report what it loaded — Crucible asks first, and a reported value always wins. The same weights at a different precision are a different vector space, so setting this when it matters (e.g. f16 vs fp32) keeps the two from being mixed. Leave empty unless you know: changing it re-embeds the vault.')
-				.addText(t => {
-					t.setPlaceholder('e.g. f16, fp32, q4_k_m')
-						.setValue(model.embeddingVariant ?? '')
-						.onChange(async (v) => {
-							const trimmed = v.trim();
-							if (trimmed) model.embeddingVariant = trimmed;
-							else delete model.embeddingVariant;
+				.setDesc('Only needed when the server cannot report what it loaded — Crucible asks first, and a reported value always wins. The same weights at a different precision are a different vector space, so setting this when it matters (e.g. f16 vs fp32) keeps the two from being mixed. Leave empty unless you know: changing it re-embeds the vault.');
+			if (probeState.accepted.embeddingVariant) {
+				variantSetting.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
+				variantSetting.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
+					resetCatalogField(model, 'embeddingVariant', probeState);
+					await tab.plugin.saveSettings();
+					tab.display();
+				}));
+			}
+			variantSetting.addText(t => {
+				t.setPlaceholder('e.g. f16, fp32, q4_k_m')
+					.setValue(model.embeddingVariant ?? '')
+					.onChange(async (v) => {
+						const trimmed = v.trim();
+						if (trimmed) model.embeddingVariant = trimmed;
+						else delete model.embeddingVariant;
+						clearAcceptedMarker(probeState, 'embeddingVariant');
+						await tab.plugin.saveSettings();
+					});
+				t.inputEl.addClass('pi-width-half');
+			});
+
+			// D2 rule 2 (Surface): only rendered when the current id matches a fetched catalog
+			// entry. Nothing here writes to `model` — the Accept button below is the only control
+			// in this row that does.
+			const catalogEntry = catalogModels.find(m => m.id === model.id);
+			if (catalogEntry) {
+				const warning = crossEncoderWarningText(catalogEntry);
+				if (warning) {
+					modelRow.createDiv({ cls: 'crucible-inline-warning', text: warning });
+				}
+
+				const suggestion = deriveCatalogSuggestion(catalogEntry);
+				if (catalogSuggestionHasChanges(model, suggestion)) {
+					new Setting(modelRow)
+						.setName('Probe suggestion')
+						.setDesc(buildProvenanceText(provider, catalogEntry))
+						.addButton(bt => bt.setButtonText('Accept').setCta().onClick(async () => {
+							acceptCatalogSuggestion(model, suggestion, probeState);
 							await tab.plugin.saveSettings();
-						});
-					t.inputEl.addClass('pi-width-half');
-				});
+							tab.display();
+						}));
+				}
+			}
 		});
 	}
 
-	new Setting(containerEl).addButton(bt => bt.setButtonText('Add model').onClick(async () => {
-		models.push({ id: '', label: '', capabilities: ['chat'] });
-		await tab.plugin.saveSettings();
-		tab.display();
-	}));
+	const catalogStatus = getProbeStatus(provider);
+	new Setting(containerEl)
+		.addButton(bt => bt.setButtonText('Add model').onClick(async () => {
+			models.push({ id: '', label: '', capabilities: ['chat'] });
+			await tab.plugin.saveSettings();
+			tab.display();
+		}))
+		.addButton(bt => bt.setButtonText('Fetch models').setTooltip('Query the provider\'s model-list endpoint. Nothing is applied automatically — review and Accept per model below.').onClick(async () => {
+			bt.setDisabled(true);
+			try {
+				const fetched = await tab.plugin.providerManager.listModels(provider);
+				applyFetchedCatalog(provider, fetched);
+				await tab.plugin.saveSettings();
+				setProbeStatus(provider, { state: 'ok', count: fetched.length });
+			} catch (err) {
+				setProbeStatus(provider, { state: 'error', reason: err instanceof Error ? err.message : String(err) });
+			}
+			// D2: await the probe before re-rendering — a single tab.display() after the promise
+			// settles, never one at loading start, so the model list never shows stale results
+			// while a fetch is still in flight.
+			tab.display();
+		}))
+		.addButton(bt => bt.setButtonText('Clear cache').setWarning().onClick(async () => {
+			clearProviderModelCatalog(provider, (id) => tab.plugin.providerManager.clearModelListCache(id));
+			setProbeStatus(provider, { state: 'idle' });
+			await tab.plugin.saveSettings();
+			new Notice('Model list cache cleared');
+			tab.display();
+		}));
+
+	if (catalogStatus.state !== 'idle') {
+		containerEl.createEl('p', { text: formatProbeStatusText(catalogStatus), cls: 'crucible-probe-status mod-muted' });
+	}
 }
 
 function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
