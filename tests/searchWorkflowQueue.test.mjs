@@ -69,7 +69,7 @@ test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing
 	const plugin = makePlugin({
 		searchManager: {
 			resetIndex: async () => { resetCount++; },
-			listIndexableFiles: () => Array.from({ length: 53 }, (_, i) => ({ path: `note-${i}.md` })),
+			listIndexableFiles: () => Array.from({ length: 553 }, (_, i) => ({ path: `note-${i}.md` })),
 		},
 	});
 	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-1', params: {} }, { plugin });
@@ -78,9 +78,33 @@ test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing
 	assert.equal(resetCount, 1);
 	assert.equal(plugin.enqueued.length, 3);
 	assert.deepEqual(plugin.enqueued.map(job => job.type), ['search_upsert_batch', 'search_upsert_batch', 'search_upsert_batch']);
-	assert.deepEqual(plugin.enqueued.map(job => job.params.paths.length), [25, 25, 3]);
+	assert.deepEqual(plugin.enqueued.map(job => job.params.paths.length), [250, 250, 53]);
 	assert.deepEqual(plugin.enqueued.map(job => job.options.priority), ['low', 'low', 'low']);
 	assert.deepEqual(plugin.enqueued.map(job => job.options.lane), ['background', 'background', 'background']);
+	assert.deepEqual(plugin.enqueued.map(job => job.params.batchIndex), [0, 1, 2]);
+	assert.ok(plugin.enqueued.every(job => job.params.batchCount === 3));
+});
+
+// The whole point of raising the batch size: a full-vault rebuild must not create thousands
+// of durable job files in one synchronous burst. At the real vault scale this asserts the
+// job-file count stays in the hundreds, which is what makes the queue drainable at
+// maxParallel: 1.
+test('SearchRebuildWorkflow keeps a 42k-file rebuild to a few hundred job files', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			listIndexableFiles: () => Array.from({ length: 42_000 }, (_, i) => ({ path: `note-${i}.md` })),
+		},
+	});
+	const result = await new SearchRebuildWorkflow().run({ id: 'rebuild-2', params: {} }, { plugin });
+
+	assert.equal(result.status, 'done');
+	assert.equal(plugin.enqueued.length, 168, '42,000 files at 250/batch is 168 jobs — it was 1,680 at the old batch size of 25');
+	// Every file is still covered exactly once, in order: batching must not drop a tail.
+	const allPaths = plugin.enqueued.flatMap(job => job.params.paths);
+	assert.equal(allPaths.length, 42_000);
+	assert.equal(new Set(allPaths).size, 42_000);
+	assert.equal(allPaths[0], 'note-0.md');
+	assert.equal(allPaths[41_999], 'note-41999.md');
 });
 
 test('search upsert defers quietly while the companion is offline', async () => {
