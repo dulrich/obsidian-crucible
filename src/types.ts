@@ -275,7 +275,14 @@ export interface ProviderModel {
 	embeddingDimensions?: number;
 }
 
-export type ProviderModelCapability = 'chat' | 'embedding' | 'image-extraction';
+// Note the asymmetry with HttpProviderClient's optional-capability methods: those describe what a
+// provider *kind* can do (does this client implement rerank()?), while these describe what a
+// specific configured model is *for*. Both are needed — an openai-compatible provider implements
+// rerank(), but only a cross-encoder model should be offered as the reranker, and offering a
+// bi-encoder like bge-m3 there (or a cross-encoder as the embedding model) produces silent
+// nonsense rather than an error. A model with no capabilities set is treated as chat-only; see
+// modelHasCapability in settings/sections/ai.ts.
+export type ProviderModelCapability = 'chat' | 'embedding' | 'image-extraction' | 'rerank';
 
 export interface Provider {
 	id: string;

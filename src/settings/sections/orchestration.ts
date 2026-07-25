@@ -79,6 +79,18 @@ function embeddingModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
 	return refs;
 }
 
+function rerankModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
+	const refs: ProviderModelRef[] = [];
+	for (const provider of tab.plugin.settings.providers) {
+		for (const model of provider.models ?? []) {
+			if (model.capabilities?.includes('rerank')) {
+				refs.push({ providerId: provider.id, modelId: model.id });
+			}
+		}
+	}
+	return refs;
+}
+
 function imageExtractionModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
 	const refs: ProviderModelRef[] = [];
 	for (const provider of tab.plugin.settings.providers) {
@@ -121,6 +133,12 @@ function describeRerankModel(tab: CrucibleSettingTab, ref: ProviderModelRef | un
 	const model = provider?.models.find(m => m.id === ref.modelId);
 	if (!provider || !model) return 'Selected reranker model is missing. The Rerank button stays hidden on the search modal.';
 	const providerName = provider.name || provider.kind;
+	// A selection made before the Rerank capability existed still works — nothing checks the flag
+	// at run time, only the Pick list filters on it. Say so rather than implying it is broken, but
+	// do flag it, because re-opening Pick would silently not list this model.
+	if (!model.capabilities?.includes('rerank')) {
+		return `${providerName} · ${model.label || model.id} — still in use, but not marked Rerank in Settings → AI, so it will not appear if you re-pick.`;
+	}
 	return `${providerName} · ${model.label || model.id}`;
 }
 
@@ -424,11 +442,12 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		.setName('Reranker model')
 		.setDesc(describeRerankModel(tab, s.searchRerankModel))
 		.addButton(bt => bt.setButtonText('Pick').onClick(() => {
-			if (tab.plugin.settings.providers.length === 0) {
-				new Notice('No providers configured. Add one in Settings → AI first.');
+			const refs = rerankModelRefs(tab);
+			if (refs.length === 0) {
+				new Notice('No rerank-capable models configured. Mark a provider model as Rerank first.');
 				return;
 			}
-			const options = buildModelPickerOptions(tab.plugin.settings.providers);
+			const options = buildModelPickerOptions(tab.plugin.settings.providers, refs);
 			new ModelPickerModal(tab.app, options, (ref) => {
 				s.searchRerankModel = ref;
 				void save();
