@@ -82,6 +82,9 @@ function makeFile(filePath) {
 
 function makeManager(contentByPath, client) {
 	const app = {
+		// Nothing on Obsidian's own excluded-files list; these fixtures test hashing, not
+		// exclusion. isExcludedFromIndex consults it for every candidate path.
+		metadataCache: { isUserIgnored: () => false },
 		vault: {
 			read: async (file) => contentByPath.get(file.path) ?? '',
 		},
