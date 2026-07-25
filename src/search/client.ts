@@ -1,16 +1,35 @@
 import { RequestUrlResponse, requestUrl } from 'obsidian';
-import { SearchChunk, SearchFileState, SearchHealth, SearchQueryOptions, SearchResponse, SearchServiceUnavailableError } from './types';
+import {
+	SEARCH_REQUIRED_SCHEMA_VERSION,
+	SearchChunk,
+	SearchFileState,
+	SearchHealth,
+	SearchQueryOptions,
+	SearchResponse,
+	SearchScoreAttribution,
+	SearchServiceUnavailableError,
+} from './types';
 
 export { SearchServiceUnavailableError } from './types';
+export { SEARCH_REQUIRED_SCHEMA_VERSION } from './types';
 
 const SEARCH_SERVICE_TIMEOUT_MS = 5000;
 
 export class SearchServiceClient {
 	constructor(private readonly baseUrl: string, private readonly vaultId: string) {}
 
+	// The schema check lives immediately around the health probe and the search response —
+	// the only two payloads that carry a schema version — and nowhere else, so there is one
+	// place to reason about "is this index queryable by this build".
 	async health(): Promise<SearchHealth> {
 		const response = await this.request('/health', 'GET');
-		return normalizeHealth(response.json);
+		const health = normalizeHealth(response.json);
+		const outdated = schemaOutdatedMessage(health.schemaVersion);
+		if (!outdated) return health;
+		// ok:false routes through CompanionAvailabilityGate, so auto-indexing defers instead
+		// of writing into an index this build cannot query correctly. Searching still works
+		// (degraded), and carries the same message on the response.
+		return { ...health, ok: false, rebuildRequired: true, message: outdated };
 	}
 
 	async resetIndex(): Promise<void> {
@@ -50,7 +69,10 @@ export class SearchServiceClient {
 			queryEmbedding: options.queryEmbedding,
 			filters: options.filters,
 		});
-		return normalizeSearchResponse(json);
+		const response = normalizeSearchResponse(json);
+		const outdated = schemaOutdatedMessage(response.schemaVersion);
+		if (!outdated) return response;
+		return { ...response, rebuildRequired: true, message: response.message || outdated };
 	}
 
 	private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
@@ -112,6 +134,41 @@ function normalizeHealth(value: unknown): SearchHealth {
 	};
 }
 
+// Returns the user-facing reason when the companion's index predates this build, or null
+// when it is current. An absent schemaVersion means "can't tell" — that is not evidence of
+// a stale index, so it is deliberately not treated as one.
+function schemaOutdatedMessage(schemaVersion: number | undefined): string | null {
+	if (typeof schemaVersion !== 'number' || !Number.isFinite(schemaVersion)) return null;
+	if (schemaVersion >= SEARCH_REQUIRED_SCHEMA_VERSION) return null;
+	return `Search index rebuild required: companion schema v${schemaVersion}, this build needs v${SEARCH_REQUIRED_SCHEMA_VERSION}`;
+}
+
+function numberField(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeAttribution(value: unknown): SearchScoreAttribution | undefined {
+	if (!value || typeof value !== 'object') return undefined;
+	const raw = value as Record<string, unknown>;
+	const boosts: Record<string, number> = {};
+	if (raw.boosts && typeof raw.boosts === 'object') {
+		for (const [key, entry] of Object.entries(raw.boosts as Record<string, unknown>)) {
+			const boost = numberField(entry);
+			if (boost !== undefined) boosts[key] = boost;
+		}
+	}
+	const attribution: SearchScoreAttribution = {
+		base: numberField(raw.base),
+		textRank: numberField(raw.textRank),
+		titleRank: numberField(raw.titleRank),
+		titleBoost: numberField(raw.titleBoost),
+		rrf: numberField(raw.rrf),
+		pooledChunks: numberField(raw.pooledChunks),
+		boosts: Object.keys(boosts).length > 0 ? boosts : undefined,
+	};
+	return Object.values(attribution).some(entry => entry !== undefined) ? attribution : undefined;
+}
+
 function normalizeSearchResponse(value: unknown): SearchResponse {
 	if (!value || typeof value !== 'object') return { results: [] };
 	const raw = value as Record<string, unknown>;
@@ -131,6 +188,7 @@ function normalizeSearchResponse(value: unknown): SearchResponse {
 				scoreVector: typeof row.scoreVector === 'number' ? row.scoreVector : undefined,
 				scoreRrf: typeof row.scoreRrf === 'number' ? row.scoreRrf : undefined,
 				metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : undefined,
+				attribution: normalizeAttribution(row.attribution),
 			};
 		}).filter(row => row.path && row.snippet),
 		total: typeof raw.total === 'number' && Number.isFinite(raw.total) ? raw.total : undefined,
@@ -138,6 +196,7 @@ function normalizeSearchResponse(value: unknown): SearchResponse {
 		mode: raw.mode === 'vector' || raw.mode === 'hybrid' || raw.mode === 'fts' ? raw.mode : undefined,
 		semanticAvailable: typeof raw.semanticAvailable === 'boolean' ? raw.semanticAvailable : undefined,
 		message: typeof raw.message === 'string' ? raw.message : undefined,
+		schemaVersion: numberField(raw.schemaVersion),
 	};
 }
 
