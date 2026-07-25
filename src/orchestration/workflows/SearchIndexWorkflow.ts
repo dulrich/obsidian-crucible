@@ -2,7 +2,7 @@ import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { isSearchIndexablePath } from '../../search/chunker';
-import { SearchServiceUnavailableError, type SearchResponse } from '../../search/types';
+import { SearchEmbeddingUnavailableError, SearchServiceUnavailableError, type SearchResponse } from '../../search/types';
 
 const SEARCH_RETRY_AFTER_MS = 30_000;
 
@@ -56,6 +56,60 @@ export class SearchRebuildWorkflow implements Workflow {
 	}
 }
 
+/**
+ * Backfill vectors for paths the index holds without usable embeddings — the "I turned semantic
+ * search on after indexing" repair, and the "I changed the embedding model" repair.
+ *
+ * Deliberately *not* SearchRebuildWorkflow with a flag: it must never call `resetIndex()`. The
+ * FTS index is what makes search work at all, and dropping it to add vectors would take search
+ * offline for the hours the backfill runs.
+ *
+ * Resumption is a property of the existing machinery rather than new bookkeeping. Each batch is
+ * a durable markdown job under the queue root, so an Obsidian restart mid-run leaves the
+ * remaining batches queued on disk and the runner picks them up; and inside a batch,
+ * `SearchManager`'s coverage-aware skip means a re-run of an already-embedded batch re-reads
+ * nothing. Interrupting the run and re-issuing the command is therefore cheap and correct: the
+ * second pass enqueues the same batches and they complete as no-ops until they reach real work.
+ *
+ * No pre-filter of covered paths here on purpose. Deciding "is this path covered" needs a
+ * fileStates round-trip over every indexable path plus a second copy of the coverage rule, and
+ * the batch workflow already applies the authoritative one; a fully-covered batch costs a single
+ * state lookup and finishes in milliseconds.
+ */
+export class SearchEmbedMissingWorkflow implements Workflow {
+	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
+		const { plugin } = ctx;
+		return runSearchWorkflow(plugin, async () => {
+			// Refuse up front rather than enqueueing dozens of batches that each discover the
+			// same misconfiguration. A backfill against no embedder must not silently become an
+			// expensive re-index that produces zero vectors.
+			if (!plugin.settings.searchSemanticEnabled) {
+				return { status: 'failed', error: 'Semantic search is disabled; enable it in Crucible → Settings → Orchestrate → Search before backfilling embeddings.' };
+			}
+			if (!plugin.settings.searchEmbeddingModel?.modelId) {
+				return { status: 'failed', error: 'No embedding model is configured; pick one in Crucible → Settings → Orchestrate → Search before backfilling embeddings.' };
+			}
+			const indexableFiles = plugin.searchManager.listIndexableFiles();
+			const batches = chunk(indexableFiles.map(file => file.path), SEARCH_REBUILD_BATCH_FILES);
+			for (let i = 0; i < batches.length; i++) {
+				const paths = batches[i] ?? [];
+				await plugin.orchestrator.enqueue('search_upsert_batch', {
+					paths,
+					rebuildId: job.id,
+					batchIndex: i,
+					batchCount: batches.length,
+					requireEmbeddings: true,
+				}, { priority: 'low', lane: 'background', inputPaths: paths });
+				if ((i + 1) % SEARCH_REBUILD_ENQUEUE_YIELD_EVERY === 0) await yieldToEventLoop();
+			}
+			return {
+				status: 'done',
+				notes: `Queued embedding backfill: ${indexableFiles.length} files in ${batches.length} batches. The FTS index is untouched; already-covered files are skipped.`,
+			};
+		});
+	}
+}
+
 export class SearchUpsertFileWorkflow implements Workflow {
 	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
@@ -90,15 +144,33 @@ export class SearchUpsertBatchWorkflow implements Workflow {
 			const batchIndex = numberParam(job, 'batchIndex');
 			const batchCount = numberParam(job, 'batchCount');
 			const progress = new SearchJobProgress(plugin, job);
+			// Set by SearchEmbedMissingWorkflow only: this batch exists to produce vectors, so
+			// FTS-only chunks are a failure rather than a graceful degradation.
+			const requireEmbeddings = booleanParam(job, 'requireEmbeddings');
 			const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
-			const result = await plugin.searchManager.indexFiles(files, (done, chunkCount) =>
-				progress.update(`${label}: ${done} / ${files.length} files indexed, ${chunkCount} chunks`),
-			);
-			return {
-				status: 'done',
-				outputPaths: files.map(file => file.path),
-				notes: `Indexed search ${label}: ${result.files} files, ${result.chunks} chunks.`,
-			};
+			try {
+				const result = await plugin.searchManager.indexFiles(files, (done, chunkCount) =>
+					progress.update(`${label}: ${done} / ${files.length} files indexed, ${chunkCount} chunks`),
+				{ requireEmbeddings });
+				return {
+					status: 'done',
+					outputPaths: files.map(file => file.path),
+					notes: `Indexed search ${label}: ${result.files} files, ${result.chunks} chunks${requireEmbeddings ? ' (embeddings required)' : ''}.`,
+				};
+			} catch (e) {
+				// A stopped embedder is a normal few-second event for a `restart: unless-stopped`
+				// container, so defer and retry rather than failing the batch — the alternative
+				// is one blip failing every remaining batch of a multi-hour run. A width
+				// mismatch is NOT this error and propagates, because retrying a
+				// misconfiguration forever is not a recovery.
+				if (!(e instanceof SearchEmbeddingUnavailableError)) throw e;
+				return {
+					status: 'deferred',
+					error: e.message,
+					notes: `Embedding backfill ${label} deferred: ${e.message}. Retrying shortly.`,
+					retryAfterMs: SEARCH_RETRY_AFTER_MS,
+				};
+			}
 		});
 	}
 }
@@ -177,6 +249,10 @@ function stringParam(job: OrchestrationJob, key: string): string {
 function stringArrayParam(job: OrchestrationJob, key: string): string[] {
 	const value = job.params?.[key];
 	return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+}
+
+function booleanParam(job: OrchestrationJob, key: string): boolean {
+	return job.params?.[key] === true;
 }
 
 function numberParam(job: OrchestrationJob, key: string): number {

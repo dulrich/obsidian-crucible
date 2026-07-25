@@ -5,7 +5,14 @@ import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './c
 import { SearchServiceClient } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
-import { SearchChunk, SearchFileState, SearchHealth, SearchResponse } from './types';
+import {
+	SearchChunk,
+	SearchEmbeddingMismatchError,
+	SearchEmbeddingUnavailableError,
+	SearchFileState,
+	SearchHealth,
+	SearchResponse,
+} from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
 
@@ -64,6 +71,27 @@ interface PreparedSearchFile {
 	file: TFile;
 	content: string;
 	contentHash: string;
+}
+
+export interface SearchIndexOptions {
+	/**
+	 * Refuse to write FTS-only chunks when the embedder cannot produce vectors.
+	 *
+	 * Off (the default) is ordinary indexing: an embedding failure is logged and the batch is
+	 * still indexed for keyword search, because keyword search working is better than the file
+	 * being absent. On is the backfill path, where FTS-only chunks are the exact wrong outcome —
+	 * they would mark the paths done while leaving them uncovered, so a multi-hour job could
+	 * complete having produced zero vectors and report success.
+	 */
+	requireEmbeddings?: boolean;
+}
+
+// Everything that isn't already one of the two typed embedding errors becomes "the embedder
+// didn't answer", which the backfill workflow defers and retries. A width mismatch stays
+// itself, because retrying a misconfiguration forever is not a recovery.
+function asEmbeddingBackfillError(e: unknown): Error {
+	if (e instanceof SearchEmbeddingMismatchError || e instanceof SearchEmbeddingUnavailableError) return e;
+	return new SearchEmbeddingUnavailableError(`embedding failed: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 export class SearchManager {
@@ -133,7 +161,15 @@ export class SearchManager {
 	async indexFiles(
 		files: TFile[],
 		onProgress?: (files: number, chunks: number) => Promise<void>,
+		options?: SearchIndexOptions,
 	): Promise<{ files: number; chunks: number }> {
+		const requireEmbeddings = options?.requireEmbeddings === true;
+		// Fail before reading a single file rather than after chunking the vault: a backfill with
+		// nothing to embed with is a configuration error, not a transient one, so it must not be
+		// deferred-and-retried forever.
+		if (requireEmbeddings && !this.activeEmbeddingModelId()) {
+			throw new Error('Search: cannot backfill embeddings — semantic search is off or no embedding model is configured (Crucible → Settings → Orchestrate → Search).');
+		}
 		const client = this.client();
 		let buffer: SearchChunk[] = [];
 		let processedFiles = 0;
@@ -146,8 +182,14 @@ export class SearchManager {
 			const batch = buffer;
 			buffer = [];
 			try {
-				await this.attachEmbeddings(batch);
+				const embedded = await this.attachEmbeddings(batch);
+				// A provider that returns fewer vectors than texts fails just as silently as one
+				// that throws, so the strict path checks the count rather than only the throw.
+				if (requireEmbeddings && embedded < batch.length) {
+					throw new SearchEmbeddingUnavailableError(`the embedder produced vectors for only ${embedded} of ${batch.length} chunks`);
+				}
 			} catch (e) {
+				if (requireEmbeddings) throw asEmbeddingBackfillError(e);
 				logWarn('search', 'embedding generation failed; indexing FTS-only chunks for batch', e);
 			}
 			await client.upsertChunks(batch);
@@ -163,7 +205,11 @@ export class SearchManager {
 		for (const prepared of preparedFiles) {
 			processedFiles++;
 			const stored = fileStates.get(prepared.file.path);
-			if (stored?.contentHash === prepared.contentHash) {
+			// Content hash alone is not enough to skip: it says the *text* is current, not that
+			// the vectors are. Turning semantic search on, or changing the embedding model, leaves
+			// every already-indexed file with a matching hash and no usable vectors — which is how
+			// "enable semantic later" used to be a silent no-op repairable only by resetIndex().
+			if (stored && stored.contentHash === prepared.contentHash && this.embeddingCoverageSatisfied(stored)) {
 				if (onProgress && (processedFiles === preparedFiles.length || processedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
 					await onProgress(processedFiles, totalChunks);
 				}
@@ -236,6 +282,38 @@ export class SearchManager {
 			maxChars: this.settings.searchChunkMaxChars,
 			overlapChars: this.settings.searchChunkOverlapChars,
 		});
+	}
+
+	/**
+	 * The model id vectors should currently be produced under, or null when vectors are not
+	 * part of the contract at all (semantic off, or no model picked).
+	 *
+	 * Null is load-bearing: it is what keeps embedding coverage *out* of the skip condition when
+	 * semantic search is disabled. Folding coverage in unconditionally would make every file in
+	 * an FTS-only vault look permanently stale, so every indexing pass would re-read and re-upsert
+	 * the whole vault forever.
+	 */
+	private activeEmbeddingModelId(): string | null {
+		if (!this.settings.searchSemanticEnabled) return null;
+		const modelId = this.settings.searchEmbeddingModel?.modelId?.trim();
+		return modelId ? modelId : null;
+	}
+
+	/**
+	 * Does the companion's stored state satisfy the *vector* half of "this file is up to date"?
+	 *
+	 * Three ways to answer no, all of which today produce no error anywhere: the path has no
+	 * vectors, it has only some (an interrupted backfill), or the vectors were produced by a
+	 * different model — mixing two vector spaces is the failure mode that yields confidently
+	 * wrong rankings. Unknown coverage (an older companion that omits the fields) also answers
+	 * no: re-indexing a file that did not need it is a wasted read, skipping one that did is a
+	 * permanent gap.
+	 */
+	private embeddingCoverageSatisfied(stored: SearchFileState): boolean {
+		const active = this.activeEmbeddingModelId();
+		if (!active) return true;
+		if (stored.hasEmbeddings !== true) return false;
+		return stored.embeddingModel === active;
 	}
 
 	private async loadFileStates(client: SearchServiceClient, paths: string[]): Promise<Map<string, SearchFileState>> {
@@ -317,17 +395,33 @@ export class SearchManager {
 		return this.app.vault.getFiles().filter(file => !this.isExcludedFromIndex(file.path));
 	}
 
-	private async attachEmbeddings(chunks: SearchChunk[]): Promise<void> {
-		if (!this.settings.searchSemanticEnabled || chunks.length === 0) return;
+	/**
+	 * Attach vectors — and the id of the model that produced them — to a flush batch.
+	 * Returns how many chunks actually came back embedded, which the strict backfill path
+	 * compares against the batch size.
+	 *
+	 * Stamping the model per chunk is what makes a later model switch detectable at all: the
+	 * companion stores it in `chunks.embedding_model` and reports it through /v1/files/state,
+	 * so `embeddingCoverageSatisfied` can tell "embedded under the model we're using now" from
+	 * "embedded under some other one".
+	 */
+	private async attachEmbeddings(chunks: SearchChunk[]): Promise<number> {
+		if (!this.settings.searchSemanticEnabled || chunks.length === 0) return 0;
 		const ref = this.settings.searchEmbeddingModel;
-		if (!ref) return;
+		if (!ref) return 0;
+		const modelId = this.activeEmbeddingModelId();
 		const texts = chunks.map(chunk => chunk.text);
 		const embeddings = await this.embedTexts(ref, texts);
+		let embedded = 0;
 		for (let i = 0; i < chunks.length; i++) {
 			const chunk = chunks[i];
 			const embedding = embeddings[i];
-			if (chunk && embedding) chunk.embedding = embedding;
+			if (!chunk || !embedding) continue;
+			chunk.embedding = embedding;
+			if (modelId) chunk.embeddingModel = modelId;
+			embedded++;
 		}
+		return embedded;
 	}
 
 	private async embedQuery(query: string): Promise<number[] | undefined> {
@@ -377,9 +471,29 @@ export class SearchManager {
 		const model = provider.models.find(m => m.id === ref.modelId);
 		if (!model) throw new Error(`Embedding model not found: ${ref.modelId}`);
 		const batchSize = Math.max(1, Math.min(this.settings.searchIndexBatchSize || 24, 96));
+		// Both of these are already computed/configured and were being discarded. Checking them
+		// per sub-batch means a width problem surfaces after ≤96 texts instead of after a whole
+		// 500-chunk flush has been embedded — and before the upsert, which the companion would
+		// reject with a 400 anyway. Embedding is the expensive half; this is what fails fast.
+		const configured = model.embeddingDimensions && model.embeddingDimensions > 0
+			? Math.floor(model.embeddingDimensions)
+			: undefined;
+		let observed: number | undefined;
 		const out: number[][] = [];
 		for (let i = 0; i < texts.length; i += batchSize) {
 			const result = await this.providerManager.embed(provider, model.id, texts.slice(i, i + batchSize));
+			// `dimensions` is what the provider client reported; the first row's length is the
+			// fallback for a client that did not report one.
+			const dimensions = result.dimensions ?? result.embeddings[0]?.length;
+			if (dimensions !== undefined) {
+				if (configured !== undefined && dimensions !== configured) {
+					throw new SearchEmbeddingMismatchError(`Embedding model "${model.id}" is configured for ${configured} dimensions but returned ${dimensions}. Fix the model's dimensions in provider settings before indexing.`);
+				}
+				if (observed !== undefined && dimensions !== observed) {
+					throw new SearchEmbeddingMismatchError(`Embedding model "${model.id}" returned ${dimensions} dimensions after returning ${observed} earlier in the same request; refusing to mix vector spaces.`);
+				}
+				observed = dimensions;
+			}
 			out.push(...result.embeddings);
 		}
 		return out;

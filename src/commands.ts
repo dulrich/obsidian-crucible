@@ -402,6 +402,18 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => plugin.orchestrator.enqueue('search_rebuild', {}, { priority: 'high', lane: 'user' }),
 	});
 
+	// Repairs "semantic search was turned on after the vault was indexed" and "the embedding
+	// model changed" without resetIndex(): the FTS index — the thing that makes search work at
+	// all — stays up for the hours the backfill runs. Resumable and interruptible; re-running it
+	// after a stop picks up where it left off, because covered files are skipped.
+	plugin.registerCrucibleCommand({
+		id: 'search-embed-missing',
+		name: 'Search: embed missing vectors',
+		group: 'Search',
+		mutating: false,
+		run: () => plugin.orchestrator.enqueue('search_embed_missing', {}, { priority: 'high', lane: 'user' }),
+	});
+
 	plugin.registerCrucibleCommand({
 		id: 'search-reindex-active-note',
 		name: 'Search: reindex active note',
