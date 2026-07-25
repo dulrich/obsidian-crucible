@@ -343,6 +343,25 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindToggle(searchGroup, {
+		name: 'Link-adjacency boost',
+		desc: 'Boost results adjacent to two or more of the top-ranked results, using Obsidian\'s own link graph (resolved + frontmatter-property links). Client-side, applied after the companion returns — no re-index needed.',
+		get: () => s.searchLinkBoostEnabled,
+		set: (v) => { s.searchLinkBoostEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Link-adjacency boost weight',
+		desc: 'How strongly adjacency reorders results. Uses the same RRF idiom as the companion\'s own fusion (weight / (60 + rank)), so this stays a small number — 0 disables the boost without touching the toggle above.',
+		placeholder: '0.05',
+		get: () => String(s.searchLinkBoostWeight),
+		set: (v) => { const n = Number(v.trim()); s.searchLinkBoostWeight = Number.isFinite(n) && n >= 0 ? n : 0.05; },
+		min: 0,
+		step: 0.01,
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(searchGroup, {
 		name: 'Image metadata extraction',
 		desc: 'After Localize writes an MD5-named image, enqueue a job that creates a sibling Markdown metadata note for search.',
 		get: () => s.imageMetadataExtractionEnabled,

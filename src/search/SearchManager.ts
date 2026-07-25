@@ -4,6 +4,7 @@ import { ProviderManager } from '../providers';
 import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
 import { SearchServiceClient } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
+import { applyLinkBoost, buildLinkGraph } from './linkGraph';
 import { SearchChunk, SearchFileState, SearchHealth, SearchResponse } from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
@@ -14,6 +15,11 @@ import { isPathExcluded } from '../exclusions';
 // well under the companion's 20MB request-body cap.
 const SEARCH_UPSERT_FLUSH_CHUNKS = 500;
 const SEARCH_PROGRESS_EVERY_FILES = 10;
+
+// buildLinkGraph walks the full metadataCache.resolvedLinks map — on a ~42,000-note vault
+// that's a real cost, so a build slower than this is logged as a follow-up rather than
+// shipped silently. See the WP-6 report for a measured figure.
+const SEARCH_LINK_BOOST_SLOW_BUILD_MS = 50;
 
 // Generic "what's worth surfacing" terms appended to a sweep's free-text description so a short
 // project brief still matches notes about source material, kits, and guides. Hand-tuned; not
@@ -177,11 +183,33 @@ export class SearchManager {
 
 	async search(query: string, limit?: number): Promise<SearchResponse> {
 		const queryEmbedding = await this.embedQuery(query);
-		return await this.client().search({
+		const response = await this.client().search({
 			query,
 			limit: limit ?? this.settings.searchResultLimit,
 			queryEmbedding,
 		});
+		return this.boostSearchResponse(response);
+	}
+
+	// Client-side link-adjacency boost (WP-6): reorders the companion's own results using
+	// Obsidian's in-memory link graph. Disabled or zero weight skips graph construction
+	// entirely — it must never build the graph and then multiply by zero. `sweep()` calls
+	// `search()`, so sweeps get the boost too; that's intended, not an oversight.
+	private boostSearchResponse(response: SearchResponse): SearchResponse {
+		if (!this.settings.searchLinkBoostEnabled || !this.settings.searchLinkBoostWeight) return response;
+		if (response.results.length === 0) return response;
+
+		const start = performance.now();
+		const graph = buildLinkGraph(this.app);
+		const elapsed = performance.now() - start;
+		if (elapsed > SEARCH_LINK_BOOST_SLOW_BUILD_MS) {
+			logWarn('search', `link graph build took ${elapsed.toFixed(1)}ms, exceeding the ${SEARCH_LINK_BOOST_SLOW_BUILD_MS}ms budget`);
+		}
+
+		return {
+			...response,
+			results: applyLinkBoost(response.results, graph, { weight: this.settings.searchLinkBoostWeight }),
+		};
 	}
 
 	async sweep(description: string, limit?: number): Promise<SearchResponse> {
