@@ -5,7 +5,23 @@ import { isSearchIndexablePath } from '../../search/chunker';
 import { SearchServiceUnavailableError, type SearchResponse } from '../../search/types';
 
 const SEARCH_RETRY_AFTER_MS = 30_000;
-const SEARCH_REBUILD_BATCH_FILES = 25;
+
+/**
+ * Files per `search_upsert_batch` job. Each batch is one durable markdown job file under the
+ * queue root, claimed and moved through JobStore — so the batch size sets how many vault
+ * writes a full rebuild costs before a single file is indexed.
+ *
+ * At the original 25, a ~42,000-file vault meant **1,680 job files created in one
+ * synchronous loop**, then drained at `maxParallel: 1` — roughly 5,000 vault operations of
+ * pure queue bookkeeping. 250 makes that ~168 jobs. The upper bound is the companion's
+ * request-body cap, which the batch does not approach: SearchManager buffers chunks and
+ * flushes every SEARCH_UPSERT_FLUSH_CHUNKS (500) regardless of how many files a batch
+ * carries, so batch size drives job-file count, not request size.
+ */
+const SEARCH_REBUILD_BATCH_FILES = 250;
+
+/** Enqueues between macrotask yields, so kicking off a rebuild can't freeze the UI thread. */
+const SEARCH_REBUILD_ENQUEUE_YIELD_EVERY = 10;
 
 export class SearchRebuildWorkflow implements Workflow {
 	run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
@@ -22,6 +38,10 @@ export class SearchRebuildWorkflow implements Workflow {
 					batchIndex: i,
 					batchCount: batches.length,
 				}, { priority: 'low', lane: 'background', inputPaths: paths });
+				// `await enqueue` only yields the microtask queue; each enqueue is a real vault
+				// write, so a long run of them still starves rendering. Hand the event loop a
+				// macrotask periodically to keep Obsidian responsive while the queue fills.
+				if ((i + 1) % SEARCH_REBUILD_ENQUEUE_YIELD_EVERY === 0) await yieldToEventLoop();
 			}
 			return {
 				status: 'done',
@@ -155,6 +175,10 @@ function stringArrayParam(job: OrchestrationJob, key: string): string[] {
 function numberParam(job: OrchestrationJob, key: string): number {
 	const value = job.params?.[key];
 	return typeof value === 'number' && Number.isFinite(value) ? value : -1;
+}
+
+function yieldToEventLoop(): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, 0));
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
