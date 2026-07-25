@@ -16,6 +16,7 @@ function fileJobTitle(job: OrchestrationJob): string {
 	switch (job.type) {
 		case 'image_metadata_extract': return typeof job.params?.imagePath === 'string' ? `Image metadata: ${job.params.imagePath.split('/').pop()}` : 'Image metadata extraction';
 		case 'search_rebuild': return 'Vault search index';
+		case 'search_embed_missing': return 'Vault embedding backfill';
 		case 'search_upsert_batch': return searchBatchTitle(job);
 		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';
 		default: return job.id;
@@ -25,8 +26,11 @@ function fileJobTitle(job: OrchestrationJob): string {
 function searchBatchTitle(job: OrchestrationJob): string {
 	const batchIndex = typeof job.params?.batchIndex === 'number' ? job.params.batchIndex : -1;
 	const batchCount = typeof job.params?.batchCount === 'number' ? job.params.batchCount : -1;
-	if (batchIndex >= 0 && batchCount > 0) return `Search batch ${batchIndex + 1} / ${batchCount}`;
-	return 'Search batch';
+	// Same job type either way; the flag is the only thing separating a rebuild batch from an
+	// embedding-backfill batch, and a multi-hour backfill is worth naming in the queue.
+	const kind = job.params?.requireEmbeddings === true ? 'Embed batch' : 'Search batch';
+	if (batchIndex >= 0 && batchCount > 0) return `${kind} ${batchIndex + 1} / ${batchCount}`;
+	return kind;
 }
 
 export function buildQueueMonitorSection(host: DashboardHost): void {

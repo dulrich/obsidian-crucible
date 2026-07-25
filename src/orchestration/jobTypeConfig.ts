@@ -112,6 +112,13 @@ export function searchRebuildJobConfig(): JobTypeConfig {
 	return fileJobConfig(() => 'search-rebuild');
 }
 
+// One backfill fan-out at a time: the job only enqueues batches, and two concurrent fan-outs
+// would double the batch count for exactly the same work (the batches are idempotent, so the
+// duplicates would drain as no-ops, but they'd still be written to the queue as job files).
+export function searchEmbedMissingJobConfig(): JobTypeConfig {
+	return fileJobConfig(() => 'search-embed-missing');
+}
+
 export function searchBatchJobConfig(): JobTypeConfig {
 	return fileJobConfig((p) => {
 		const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';

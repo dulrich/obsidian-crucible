@@ -224,11 +224,17 @@ function normalizeFileStates(value: unknown): Map<string, SearchFileState> {
 		const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
 		const path = stringField(row.path);
 		if (!path) continue;
+		// Every embedding-coverage field is read defensively and independently: a companion
+		// predating the coverage response simply omits them, which must degrade to "unknown"
+		// (undefined) rather than throw or coerce into a confident false/true.
 		out.set(path, {
 			path,
 			contentHash: typeof row.contentHash === 'string' && row.contentHash ? row.contentHash : undefined,
 			mtime: typeof row.mtime === 'number' && Number.isFinite(row.mtime) ? row.mtime : undefined,
 			chunkCount: typeof row.chunkCount === 'number' && Number.isFinite(row.chunkCount) ? row.chunkCount : undefined,
+			hasEmbeddings: typeof row.hasEmbeddings === 'boolean' ? row.hasEmbeddings : undefined,
+			embeddedChunkCount: typeof row.embeddedChunkCount === 'number' && Number.isFinite(row.embeddedChunkCount) ? row.embeddedChunkCount : undefined,
+			embeddingModel: typeof row.embeddingModel === 'string' && row.embeddingModel ? row.embeddingModel : undefined,
 		});
 	}
 	return out;
