@@ -12,6 +12,7 @@ import {
 	SearchFileState,
 	SearchHealth,
 	SearchResponse,
+	SearchResult,
 } from './types';
 import { logWarn } from '../log';
 import { isPathExcluded } from '../exclusions';
@@ -66,6 +67,30 @@ const SEARCH_SWEEP_QUERY_EXPANSION = 'articles prompt kits project description r
 //    cheap to repeat, a toast is not.
 const SEARCH_QUERY_EMBEDDING_CACHE_LIMIT = 50;
 const SEARCH_QUERY_EMBED_RETRY_COOLDOWN_MS = 60_000;
+
+// Defensive fallback only — the real default lives in DEFAULT_SETTINGS.searchRerankTopN (30) and
+// is what a fresh install actually gets. This exists so a corrupted/zeroed setting can't send an
+// empty or absurd document count to the reranker.
+const SEARCH_RERANK_DEFAULT_TOP_N = 30;
+
+// The result of an explicit rerank() call — never a type-ahead pipeline stage, always a
+// deliberate button click. `results` is the input list with its top-N candidates reordered by
+// the reranker and any remainder appended unchanged; `scores` carries each reranked candidate's
+// own relevance score keyed by chunkId (SearchModal uses it, together with the pre-rerank order
+// it captured itself, to render the "#before → #after" line — see buildRerankRowMeta).
+export interface SearchRerankOutcome {
+	results: SearchResult[];
+	scores: Map<string, number>;
+}
+
+// What gets sent to the reranker for a given search hit. Deliberately the same text already
+// fetched for the result list (title/heading/snippet) rather than re-reading the source file —
+// rerank is already a multi-hundred-ms-to-multi-second operation the user explicitly opted into;
+// adding N vault reads on top of that would make it worse for no clearly-demonstrated accuracy
+// win, and the snippet is what a user judges relevance by on-screen anyway.
+function rerankDocumentText(result: SearchResult): string {
+	return [result.title, result.heading, result.snippet].filter(Boolean).join('\n');
+}
 
 interface PreparedSearchFile {
 	file: TFile;
@@ -389,6 +414,55 @@ export class SearchManager {
 			SEARCH_SWEEP_QUERY_EXPANSION,
 		].filter(Boolean).join('\n');
 		return await this.search(query, limit ?? Math.max(this.settings.searchResultLimit, 24));
+	}
+
+	/**
+	 * Explicit, opt-in rerank of an already-fused result set — never called from the type-ahead
+	 * path (only SearchModal's Rerank button calls this). Sends the top `searchRerankTopN`
+	 * results to the configured reranker (native `/rerank`, or the complete()-based fallback —
+	 * see ProviderManager.rerank) and returns them reordered by relevance, with any results
+	 * beyond the top-N appended unchanged.
+	 *
+	 * Throws rather than degrading when reranking isn't configured or the call fails — this is a
+	 * user-initiated action with its own pending UI, not a background degrade-to-FTS path like
+	 * embedQuery(), so the caller (SearchModal) surfaces the error and leaves the prior results
+	 * exactly as they were.
+	 */
+	async rerank(query: string, results: SearchResult[]): Promise<SearchRerankOutcome> {
+		if (!this.settings.searchRerankEnabled) {
+			throw new Error('Reranking is disabled. Enable it in Settings → Orchestrate → Search.');
+		}
+		const ref = this.settings.searchRerankModel;
+		if (!ref) throw new Error('No reranker model configured in Settings → Orchestrate → Search.');
+		const trimmedQuery = query.trim();
+		if (!trimmedQuery) throw new Error('Cannot rerank without a search query.');
+		if (results.length === 0) return { results, scores: new Map() };
+
+		const provider = this.settings.providers.find(p => p.id === ref.providerId);
+		if (!provider) throw new Error(`Reranker provider not found: ${ref.providerId}`);
+		const model = provider.models.find(m => m.id === ref.modelId);
+		if (!model) throw new Error(`Reranker model not found: ${ref.modelId}`);
+
+		const topN = Math.max(1, Math.floor(this.settings.searchRerankTopN) || SEARCH_RERANK_DEFAULT_TOP_N);
+		const candidates = results.slice(0, topN);
+		const tail = results.slice(topN);
+		const documents = candidates.map(rerankDocumentText);
+
+		const { results: rerankResults } = await this.providerManager.rerank(provider, model.id, trimmedQuery, documents);
+		// normalizeRerankResults (src/providers/shared.ts) guarantees exactly one entry per
+		// candidate index, in range — so every candidate has a score. `?? 0` is defensive only.
+		const scoreByIndex = new Map(rerankResults.map(r => [r.index, r.relevanceScore]));
+		const ordered = candidates
+			.map((result, index) => ({ result, score: scoreByIndex.get(index) ?? 0 }))
+			.sort((a, b) => b.score - a.score);
+
+		const scores = new Map<string, number>();
+		const reorderedCandidates = ordered.map(({ result, score }) => {
+			scores.set(result.chunkId, score);
+			return result;
+		});
+
+		return { results: [...reorderedCandidates, ...tail], scores };
 	}
 
 	listIndexableFiles(): TFile[] {
