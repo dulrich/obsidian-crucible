@@ -88,9 +88,12 @@ export class VaultSearchModal extends Modal {
 				: await this.plugin.searchManager.search(query);
 			if (generation !== this.searchGeneration) return;
 			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false, response.rebuildRequired === true));
-			// The full reason rides along as a tooltip so the status line stays short but the
-			// stale-index condition is never silent.
-			this.statusEl.setAttr('title', response.rebuildRequired && response.message ? response.message : null);
+			// The full reason rides along as a tooltip so the status line stays short but no
+			// degradation is silent. This is not only the rebuild-required case: WP-1 also sets
+			// `message` (without `rebuildRequired`) when a query embedding's width disagrees
+			// with the vault's — e.g. mid-model-switch — and that condition deserves the same
+			// visibility, or semantic silently drops to FTS with no explanation on screen.
+			this.statusEl.setAttr('title', response.message || null);
 			this.renderResults(response.results);
 		} catch (e) {
 			if (generation !== this.searchGeneration) return;
@@ -160,8 +163,9 @@ function formatSearchStatus(visible: number, total: number | undefined, mode: st
 
 // The per-stage explain line: base score, the ranks that were fused, every boost that
 // fired, and the fused value. Ranking is meant to be tunable by observation, so this stays
-// verbose rather than pretty.
-function formatScore(result: SearchResult): string {
+// verbose rather than pretty. Exported so tests/searchModalFormat.test.mjs can assert on it
+// without instantiating a Modal.
+export function formatScore(result: SearchResult): string {
 	const parts = [`${result.score.toFixed(4)}`];
 	if (typeof result.scoreText === 'number') parts.push(`text ${result.scoreText.toFixed(3)}`);
 	if (typeof result.scoreVector === 'number') parts.push(`vec ${result.scoreVector.toFixed(3)}`);
@@ -170,11 +174,12 @@ function formatScore(result: SearchResult): string {
 	return parts.join(' · ');
 }
 
-function formatAttribution(attribution: SearchScoreAttribution | undefined): string[] {
+export function formatAttribution(attribution: SearchScoreAttribution | undefined): string[] {
 	if (!attribution) return [];
 	const parts: string[] = [];
 	if (typeof attribution.textRank === 'number') parts.push(`text #${attribution.textRank}`);
 	if (typeof attribution.titleRank === 'number') parts.push(`title #${attribution.titleRank}`);
+	if (typeof attribution.vectorRank === 'number') parts.push(`vec #${attribution.vectorRank}`);
 	if (typeof attribution.titleBoost === 'number' && attribution.titleBoost > 0) parts.push(`title +${attribution.titleBoost.toFixed(2)}`);
 	if (typeof attribution.pooledChunks === 'number' && attribution.pooledChunks > 1) parts.push(`${attribution.pooledChunks} chunks`);
 	for (const [name, value] of Object.entries(attribution.boosts ?? {})) parts.push(`${name} +${value.toFixed(2)}`);

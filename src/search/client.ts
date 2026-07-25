@@ -176,6 +176,7 @@ function normalizeAttribution(value: unknown): SearchScoreAttribution | undefine
 		textRank: numberField(raw.textRank),
 		titleRank: numberField(raw.titleRank),
 		titleBoost: numberField(raw.titleBoost),
+		vectorRank: numberField(raw.vectorRank),
 		rrf: numberField(raw.rrf),
 		pooledChunks: numberField(raw.pooledChunks),
 		boosts: Object.keys(boosts).length > 0 ? boosts : undefined,
