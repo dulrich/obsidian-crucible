@@ -310,10 +310,16 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					.setTooltip('Image extraction model')
 					.setValue(modelHasCapability(model, 'image-extraction'))
 					.onChange(async (v) => { setModelCapability(model, 'image-extraction', v); await tab.plugin.saveSettings(); }));
+			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Rerank' });
+			capabilities
+				.addToggle(t => t
+					.setTooltip('Reranker model — a cross-encoder scoring (query, document) pairs, e.g. bge-reranker-v2-m3. Not an embedding model.')
+					.setValue(modelHasCapability(model, 'rerank'))
+					.onChange(async (v) => { setModelCapability(model, 'rerank', v); await tab.plugin.saveSettings(); }));
 
 			new Setting(modelRow)
 				.setName('Embedding dimensions')
-				.setDesc('Optional. Used as documentation for the selected embedding model.')
+				.setDesc('Optional, but recommended for embedding models: indexing checks every sub-batch against it and stops on a mismatch, so a wrong-width model fails after ≤96 texts instead of after a whole flush has been embedded.')
 				.addText(t => {
 					t.setPlaceholder('Dims')
 						.setValue(model.embeddingDimensions ? String(model.embeddingDimensions) : '')
