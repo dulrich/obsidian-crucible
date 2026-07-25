@@ -476,7 +476,15 @@ LIMIT 1
 			}
 			return json(res, 404, { ok: false, error: 'not found' });
 		} catch (e) {
-			return json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+			const message = e instanceof Error ? e.message : String(e);
+			// Log before replying. The client turns any 5xx into SearchServiceUnavailableError,
+			// which surfaces to the user as "companion not reachable" — so without this line a
+			// request that failed on its own merits is indistinguishable from a down container,
+			// and `docker logs` on a perfectly healthy companion shows nothing at all. That cost
+			// a long hunt during the first full rebuild.
+			console.error(`[crucible-search] ${req.method} ${req.url} failed: ${message}`);
+			if (e instanceof Error && e.stack) console.error(e.stack);
+			return json(res, 500, { ok: false, error: message });
 		}
 	};
 }

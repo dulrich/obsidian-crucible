@@ -100,6 +100,40 @@ test('SearchServiceClient throws SearchServiceUnavailableError on a 5xx', async 
 	await assert.rejects(client.search({ query: 'x', limit: 1 }), SearchServiceUnavailableError);
 });
 
+// An interactive request and a bulk write must not share one timeout. A search that hangs
+// should give up quickly so the UI stops waiting; an upsert carries hundreds of chunks and is
+// issued from the same main thread that synchronously chunks the batch's files, so the same
+// 5s budget declared a healthy companion unreachable mid-rebuild and latched the queue.
+test('SearchServiceClient times out a search fast but gives a bulk upsert a long budget', async (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	// Never resolves: the only thing that can settle these calls is the timeout.
+	globalThis.__searchClientResponse = new Promise(() => {});
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	// Drains the microtask queue so a rejection would have landed by the assertion below.
+	// Deliberately not a timer-based yield: setTimeout is mocked in this test.
+	const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+	const search = client.search({ query: 'x', limit: 1 });
+	const searchOutcome = search.then(() => 'resolved', () => 'rejected');
+	t.mock.timers.tick(5_001);
+	assert.equal(await searchOutcome, 'rejected', 'the interactive timeout fires at 5s');
+
+	const upsert = client.upsertChunks([{ id: 'c1', path: 'note.md', text: 'body' }]);
+	let upsertSettled = false;
+	upsert.then(() => { upsertSettled = true; }, () => { upsertSettled = true; });
+
+	t.mock.timers.tick(5_001);
+	await flush();
+	assert.equal(upsertSettled, false, 'a bulk upsert must still be in flight well past the interactive timeout');
+
+	t.mock.timers.tick(60_000);
+	await assert.rejects(upsert, SearchServiceUnavailableError, 'but it does eventually time out rather than hanging forever');
+
+	globalThis.__searchClientResponse = undefined;
+});
+
 test('SearchServiceClient throws SearchServiceUnavailableError when the request fails', async () => {
 	globalThis.__searchClientRequests = [];
 	globalThis.__searchClientThrow = new Error('ECONNREFUSED');
