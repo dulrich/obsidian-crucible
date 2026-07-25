@@ -26,8 +26,8 @@ systemctl --user enable --now crucible-embed.socket crucible-rerank.socket
 
 echo
 echo "Sockets armed. Crucible should point at:"
-echo "  embeddings  http://127.0.0.1:4812/v1     (openai-compatible provider kind)"
-echo "  reranking   http://127.0.0.1:4813        (no /v1 suffix — the client appends /rerank)"
+echo "  embeddings  http://127.0.0.1:4804/v1     (openai-compatible provider kind)"
+echo "  reranking   http://127.0.0.1:4805        (no /v1 suffix — the client appends /rerank)"
 echo
 echo "First request after 30 idle minutes pays a container start plus a model load."
 echo "Check state with:  systemctl --user status crucible-embed.socket crucible-embed.service"
