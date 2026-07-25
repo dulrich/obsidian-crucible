@@ -308,6 +308,10 @@ test('with semantic on, an uncovered path is re-indexed and a fully-covered one 
 				contentHash: hashSearchContent(contentByPath.get(covered.path)),
 				hasEmbeddings: true,
 				embeddingModel: 'bge-m3',
+				// What a schema-4 companion reports for an index migrated from schema 3: the
+				// space backfilled from the model id, which is also what the client derives when
+				// the runtime reports no precision. Coverage compares this, not the model id.
+				embeddingSpace: 'bge-m3',
 			}],
 			[uncovered.path, {
 				path: uncovered.path,
@@ -326,9 +330,10 @@ test('with semantic on, an uncovered path is re-indexed and a fully-covered one 
 	assert.equal(result.files, 1);
 	assert.equal(upserted.length, 1);
 	assert.deepEqual(upserted[0].map(chunk => chunk.path), [uncovered.path]);
-	// And the re-index actually produces a vector stamped with the active model.
+	// And the re-index actually produces a vector stamped with the active model *and* space.
 	assert.deepEqual(upserted[0][0].embedding, [1, 0, 0]);
 	assert.equal(upserted[0][0].embeddingModel, 'bge-m3');
+	assert.equal(upserted[0][0].embeddingSpace, 'bge-m3');
 });
 
 test('a partly-covered path is re-indexed even though its content hash matches', async () => {
@@ -379,6 +384,7 @@ test('the same content hash under a different embedding model is not skipped', a
 			hasEmbeddings: true,
 			// Fully covered — just in the wrong vector space.
 			embeddingModel: 'nomic-embed-text',
+			embeddingSpace: 'nomic-embed-text',
 		}]]),
 		upsertChunks: async (chunks) => upserted.push(chunks),
 	};

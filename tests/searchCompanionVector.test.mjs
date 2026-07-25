@@ -304,7 +304,7 @@ test('/health reports the real dimension, model and backend instead of a hardcod
 	await withServer(db, async call => {
 		const empty = await call('GET', '/health');
 		assert.equal(empty.json.vectorAvailable, false);
-		assert.equal(empty.json.schemaVersion, 3);
+		assert.equal(empty.json.schemaVersion, 4);
 		assert.equal(empty.json.embeddingDim, null);
 
 		await call('POST', '/v1/chunks/upsert', {
