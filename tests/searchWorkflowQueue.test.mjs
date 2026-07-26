@@ -11,8 +11,24 @@ const outfile = path.join(outdir, 'SearchIndexWorkflow.mjs');
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
+// A single stdin entry re-exporting both the workflows AND the search error classes
+// (real relative import of src/search/types.ts, not stubbed — same pattern as
+// tests/drainBreaker.test.mjs) so the test can construct/throw
+// SearchServiceUnavailableError et al. and have `instanceof` line up against the same
+// class the bundled workflow code checks. `TFile` is re-exported from the 'obsidian'
+// stub for the same reason: it must be the identical class the bundle's own
+// `instanceof TFile` checks compare against.
 await esbuild.build({
-	entryPoints: ['src/orchestration/workflows/SearchIndexWorkflow.ts'],
+	stdin: {
+		contents: [
+			"export { SearchRebuildWorkflow, SearchEmbedMissingWorkflow, SearchUpsertFileWorkflow, SearchUpsertBatchWorkflow, SearchDeletePathWorkflow, SearchSweepWorkflow } from './src/orchestration/workflows/SearchIndexWorkflow';",
+			"export { SearchServiceUnavailableError, SearchEmbeddingUnavailableError, SearchEmbeddingMismatchError, SearchEmbeddingConfigError } from './src/search/types';",
+			"export { TFile } from 'obsidian';",
+		].join('\n'),
+		resolveDir: '.',
+		sourcefile: 'search-workflow-test-entry.ts',
+		loader: 'ts',
+	},
 	bundle: true,
 	platform: 'node',
 	format: 'esm',
@@ -31,7 +47,22 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { SearchRebuildWorkflow, SearchUpsertFileWorkflow } = await import(pathToFileURL(outfile));
+const {
+	SearchRebuildWorkflow,
+	SearchUpsertFileWorkflow,
+	SearchUpsertBatchWorkflow,
+	SearchDeletePathWorkflow,
+	SearchServiceUnavailableError,
+	SearchEmbeddingUnavailableError,
+	SearchEmbeddingMismatchError,
+	SearchEmbeddingConfigError,
+	TFile,
+} = await import(pathToFileURL(outfile));
+
+// A TFile-like stand-in whose `instanceof TFile` matches the bundle's own class.
+function fakeFile(filePath) {
+	return Object.assign(new TFile(), { path: filePath });
+}
 
 function makePlugin(overrides = {}) {
 	const enqueued = [];
@@ -129,6 +160,11 @@ test('search upsert defers quietly while the companion is offline', async () => 
 	assert.equal(result.status, 'deferred');
 	assert.match(result.error, /Search companion not reachable/);
 	assert.equal(result.retryAfterMs, 30_000);
+	// SE WP-4: every deferral names its service. There was no thrown exception to read a
+	// finer kind from here (the gate already knew the companion was down), so this path
+	// uses the same conservative default kind SearchServiceUnavailableError itself
+	// defaults to for an unclassified failure.
+	assert.deepEqual(result.serviceUnhealthy, { service: 'search-companion', kind: 'refused', reason: result.error });
 });
 
 // A reachable companion serving an index schema this build cannot query is unavailable too,
@@ -148,4 +184,112 @@ test('search upsert surfaces the companion reason instead of the not-reachable t
 	assert.equal(result.error, reason);
 	assert.doesNotMatch(result.error, /not reachable/);
 	assert.equal(result.retryAfterMs, 30_000);
+	assert.deepEqual(result.serviceUnhealthy, { service: 'search-companion', kind: 'refused', reason });
+});
+
+// A companion outage discovered MID-RUN (a thrown SearchServiceUnavailableError, as
+// opposed to the upfront gate already knowing it was down) must name the service with
+// the error's OWN kind, not the conservative default — the client observed exactly what
+// happened, so the deferral should say so.
+test('a mid-run companion outage defers with serviceUnhealthy naming search-companion and the error\'s own kind', async () => {
+	let offlineReason = null;
+	const plugin = makePlugin({
+		searchManager: {
+			deletePath: async () => { throw new SearchServiceUnavailableError('connect ECONNREFUSED 127.0.0.1:4801', 'server-error'); },
+			markCompanionOffline: (reason) => { offlineReason = reason; },
+			companionUnavailableReason: () => offlineReason,
+		},
+	});
+	const result = await new SearchDeletePathWorkflow().run({ id: 'del-1', params: { path: 'note.md' } }, makeCtx(plugin));
+
+	assert.equal(result.status, 'deferred');
+	assert.deepEqual(result.serviceUnhealthy, {
+		service: 'search-companion',
+		kind: 'server-error',
+		reason: 'connect ECONNREFUSED 127.0.0.1:4801',
+	});
+});
+
+// The end-to-end sanity the sprint promised: a companion-refused outage, observed exactly
+// as `client.ts` would classify it (kind 'refused'), flows through the workflow with the
+// shape the backend needs to open the breaker (WP-2's `deferEntry` reads exactly this
+// field). tests/drainBreaker.test.mjs proves the backend/registry/drain half; this proves
+// the workflow half produces the contract, using the REAL SearchDeletePathWorkflow rather
+// than a hand-rolled outage stub.
+test('a refused-connection outage produces the exact serviceUnhealthy shape the backend opens the breaker on', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			deletePath: async () => { throw new SearchServiceUnavailableError('connect ECONNREFUSED 127.0.0.1:4801', 'refused'); },
+		},
+	});
+	const result = await new SearchDeletePathWorkflow().run({ id: 'del-2', params: { path: 'note.md' } }, makeCtx(plugin));
+
+	assert.equal(result.status, 'deferred');
+	assert.equal(result.serviceUnhealthy.service, 'search-companion');
+	assert.equal(result.serviceUnhealthy.kind, 'refused');
+	assert.equal(typeof result.serviceUnhealthy.reason, 'string');
+	assert.ok(result.serviceUnhealthy.reason.length > 0);
+});
+
+// The backfill path (requireEmbeddings) is the one that can observe the embedder
+// failing to produce vectors at all — see SearchEmbedMissingWorkflow's doc comment.
+// This must defer and name search-embedder, not fail the job outright: a
+// `restart: unless-stopped` embedder blipping is a normal few-second event.
+test('a backfill batch whose embedder is unavailable defers with serviceUnhealthy naming search-embedder', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			indexFiles: async () => { throw new SearchEmbeddingUnavailableError('the embedder produced vectors for only 3 of 5 chunks'); },
+		},
+	});
+	plugin.app.vault.getAbstractFileByPath = fakeFile;
+	const result = await new SearchUpsertBatchWorkflow().run(
+		{ id: 'batch-1', params: { paths: ['note.md'], batchIndex: 0, batchCount: 1, requireEmbeddings: true } },
+		makeCtx(plugin),
+	);
+
+	assert.equal(result.status, 'deferred');
+	assert.deepEqual(result.serviceUnhealthy, {
+		service: 'search-embedder',
+		kind: 'timeout',
+		reason: 'the embedder produced vectors for only 3 of 5 chunks',
+	});
+	assert.equal(result.retryAfterMs, 30_000);
+});
+
+// SearchEmbeddingConfigError (an orphaned {providerId, modelId} ref) is PERMANENT — WP-6's
+// whole point. It must come back as a loud job-level failure, never a deferral: deferring
+// it would have the breaker read "search-embedder is down" and keep probing a
+// misconfiguration that will never self-heal.
+test('a backfill batch whose embedding ref is orphaned fails outright — permanent, not deferred', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			indexFiles: async () => { throw new SearchEmbeddingConfigError('Embedding model not found: gone-model'); },
+		},
+	});
+	plugin.app.vault.getAbstractFileByPath = fakeFile;
+	const result = await new SearchUpsertBatchWorkflow().run(
+		{ id: 'batch-2', params: { paths: ['note.md'], batchIndex: 0, batchCount: 1, requireEmbeddings: true } },
+		makeCtx(plugin),
+	);
+
+	assert.equal(result.status, 'failed');
+	assert.equal(result.error, 'Embedding model not found: gone-model');
+	assert.equal(result.serviceUnhealthy, undefined,
+		'a config error must never open the search-embedder breaker — retrying a misconfiguration is not a recovery');
+});
+
+// The same permanent-failure rule applies to a plain (non-backfill) index: a vector-width
+// mismatch is a configuration bug regardless of which workflow discovered it.
+test('a plain index whose embedder returns a width mismatch fails outright rather than deferring', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			indexFile: async () => { throw new SearchEmbeddingMismatchError('Embedding model "x" is configured for 768 dimensions but returned 1024.'); },
+		},
+	});
+	plugin.app.vault.getAbstractFileByPath = fakeFile;
+	const result = await new SearchUpsertFileWorkflow().run({ id: 'upsert-4', params: { path: 'note.md' } }, makeCtx(plugin));
+
+	assert.equal(result.status, 'failed');
+	assert.match(result.error, /dimensions but returned/);
+	assert.equal(result.serviceUnhealthy, undefined);
 });

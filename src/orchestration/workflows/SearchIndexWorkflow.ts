@@ -2,7 +2,14 @@ import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { isSearchIndexablePath } from '../../search/chunker';
-import { SearchEmbeddingUnavailableError, SearchServiceUnavailableError, type SearchResponse } from '../../search/types';
+import {
+	SearchEmbeddingConfigError,
+	SearchEmbeddingMismatchError,
+	SearchEmbeddingUnavailableError,
+	SearchServiceUnavailableError,
+	type SearchServiceUnavailableErrorKind,
+	type SearchResponse,
+} from '../../search/types';
 import { scheduleQueueChanged } from '../JobBackend';
 
 const SEARCH_RETRY_AFTER_MS = 30_000;
@@ -179,6 +186,12 @@ export class SearchUpsertBatchWorkflow implements Workflow {
 					error: e.message,
 					notes: `Embedding backfill ${label} deferred: ${e.message}. Retrying shortly.`,
 					retryAfterMs: SEARCH_RETRY_AFTER_MS,
+					// 'timeout' is a default, not a measurement: SearchEmbeddingUnavailableError
+					// carries no finer-grained kind of its own (unlike SearchServiceUnavailableError,
+					// which has one per transport outcome) — the embedder simply didn't produce
+					// vectors, and 'timeout' is the conservative choice within ServiceFailureKind for
+					// "answered badly/slowly" as opposed to a confirmed refusal.
+					serviceUnhealthy: { service: 'search-embedder', kind: 'timeout', reason: e.message },
 				};
 			}
 		});
@@ -223,8 +236,11 @@ async function runSearchWorkflow(
 	const { plugin } = ctx;
 	if (!plugin.settings.searchEnabled) return { status: 'failed', error: 'Search is disabled in settings' };
 	// The availability probe is a network round-trip, so re-check afterwards rather
-	// than committing to work a cancellation arrived during.
-	if (!(await plugin.searchManager.companionAvailable())) return searchDeferredResult(plugin);
+	// than committing to work a cancellation arrived during. No exception here to read a
+	// `kind` from — the companion was already known-down from a prior probe/failure — so
+	// this deferral names the service with the same conservative default kind
+	// SearchServiceUnavailableError itself defaults to for an unclassified failure.
+	if (!(await plugin.searchManager.companionAvailable())) return searchDeferredResult(plugin, 'refused');
 	ctx.throwIfAborted();
 	try {
 		return await run();
@@ -236,7 +252,18 @@ async function runSearchWorkflow(
 			// The thrown message becomes the gate's reason, so searchDeferredResult picks it up
 			// as the primary text — passing it again as `detail` would just print it twice.
 			plugin.searchManager.markCompanionOffline(e.message);
-			return searchDeferredResult(plugin);
+			return searchDeferredResult(plugin, e.kind);
+		}
+		// Permanent, job-level, loud — WP-6's whole point. An orphaned embedding ref or a
+		// vector-width mismatch will not self-heal on the next batch, the next file, or
+		// ever, so it must never come back as a deferral (which the breaker would read as
+		// "search-embedder is down" and keep probing forever). This is the one place both
+		// permanent kinds are caught: SearchUpsertBatchWorkflow's own catch only intercepts
+		// SearchEmbeddingUnavailableError and rethrows everything else, including these,
+		// straight here; SearchUpsertFileWorkflow's plain indexFile() call has no catch of
+		// its own and lands here directly too.
+		if (e instanceof SearchEmbeddingConfigError || e instanceof SearchEmbeddingMismatchError) {
+			return { status: 'failed', error: e.message };
 		}
 		throw e;
 	}
@@ -246,7 +273,11 @@ async function runSearchWorkflow(
 // this build cannot query is also unavailable, and the start-the-container instruction would
 // send the user to restart something already healthy. Prefer the companion's own reason when
 // it gave one; fall back to the not-reachable text only when nothing answered.
-function searchDeferredResult(plugin: WorkflowContext['plugin'], detail?: string): WorkflowResult {
+function searchDeferredResult(
+	plugin: WorkflowContext['plugin'],
+	kind: SearchServiceUnavailableErrorKind,
+	detail?: string,
+): WorkflowResult {
 	const reason = plugin.searchManager.companionUnavailableReason();
 	const message = reason
 		?? `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)`;
@@ -255,6 +286,11 @@ function searchDeferredResult(plugin: WorkflowContext['plugin'], detail?: string
 		error: detail ? `${message} (${detail})` : message,
 		notes: `${message}. Retrying shortly.`,
 		retryAfterMs: SEARCH_RETRY_AFTER_MS,
+		// SearchServiceUnavailableErrorKind ('refused'|'timeout'|'server-error') is a strict
+		// subset of ServiceFailureKind — every value maps straight across, and
+		// 'rate-limited' (the one ServiceFailureKind member with no counterpart here) is
+		// simply never produced by this path.
+		serviceUnhealthy: { service: 'search-companion', kind, reason: message },
 	};
 }
 

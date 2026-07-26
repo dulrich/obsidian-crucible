@@ -28,6 +28,12 @@ const FEED_FETCH_MIN_INTERVAL_MS = 250;
 
 const PRIORITY_ORDER = { high: 0, normal: 1, low: 2 };
 
+// Retry pacing for an all-feeds-failed YouTube RSS run — matches the search
+// workflows' default deferral window (see SEARCH_RETRY_AFTER_MS). No per-feed
+// Retry-After exists for RSS the way it does for the Data API's 429, so this is a
+// flat conservative default; the registry's own backoff doubles it on repeat.
+const YOUTUBE_RSS_RETRY_AFTER_MS = 30_000;
+
 type Plugin = WorkflowContext['plugin'];
 
 export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
@@ -127,9 +133,26 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 		const intakePath = await this.writeIntakeNote(plugin, outcomes, totalNew, rowErrors, this.source.trackerGeneratedBy, itemMetadataIndex);
 
 		if (entries.length > 0 && failedCount === entries.length) {
+			const error = this.source.allFeedsFailedError(entries.length);
+			// YouTube's feed endpoints have a single service identity ('youtube-rss', distinct
+			// from the Data API's 'youtube-api' — a quota exhaustion on one says nothing about
+			// the other). Blogs feeds span arbitrary hosts with no shared service to name, so
+			// they stay a plain job-level failure. 'server-error' is a generic-but-honest
+			// default: every feed answered badly, but rateLimitedAllSettled's per-entry
+			// rejection reasons aren't typed closely enough to pick a sharper kind here.
+			if (this.source.kind === 'youtube') {
+				return {
+					status: 'deferred',
+					error,
+					outputPaths: [intakePath],
+					notes: `${error} Retrying shortly.`,
+					retryAfterMs: YOUTUBE_RSS_RETRY_AFTER_MS,
+					serviceUnhealthy: { service: 'youtube-rss', kind: 'server-error', reason: error },
+				};
+			}
 			return {
 				status: 'failed',
-				error: this.source.allFeedsFailedError(entries.length),
+				error,
 				outputPaths: [intakePath],
 			};
 		}
