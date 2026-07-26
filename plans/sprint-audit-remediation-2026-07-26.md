@@ -60,9 +60,28 @@ the settings UI below a floor (or clamp with copy), and document the interaction
 timeouts, `docs/local-inference.md`, `docker/llamacpp-vulkan/crucible-inference-ctl`.
 *Execution: subagent.*
 
+**WP-R5 — Job claims strand under bulk queue churn: make the claim write crash-consistent (~0.2 kSLOC, ~150k tokens, ~12 min wall).**
+Observed live during SE WP-7 ops (2026-07-26, ~18:04:45–18:05:09Z): while `requeueServiceFailures`
+moved 2,022 jobs (each a rename + frontmatter rewrite), six concurrent runner claims stranded with
+the exact known silent-drop signature — file renamed into `running/` but frontmatter still carrying
+the *source* bucket's `status: queued` and `updated` stamps. Root cause is the recurrence class,
+not a new bug: `JobStore.move` routes through `updateFrontmatter`, whose stale-cache write barrier
+waits a bounded ~2s for `metadataCache` to settle — a 2,000-file churn burst keeps the cache stale
+far longer than that, the barrier writes anyway, and the claim's `status`/`updated` mutation is
+dropped against a stale `frontmatterPosition`. The strays are recoverable (`Orchestrate: scan
+queue` stale-running recovery bounces them), so severity is hygiene-not-loss, but every future bulk
+move op re-mints them. Fix directions to evaluate (chokepoint, not per-call): (a) in
+`updateFrontmatter`, when the barrier times out, fall back to an index-spliced `vault.process`
+write (never `String.replace`) instead of a `processFrontMatter` against a known-stale position;
+(b) or have `JobStore.move` verify `status` landed via raw re-read and retry once after cache
+settle; (c) or pause the auto-runner drain while a bulk repair flow is mid-move (the repair op
+already owns "one emitQueueChanged at the end" semantics). Files: `src/frontmatter.ts`,
+`src/orchestration/JobStore.ts`, `src/orchestration/failedJobRepair.ts`, tests. *Execution:
+subagent.*
+
 ## Verification
 
 Repo gates per `AGENTS.md` (lint, tsc, `npm test`, production build, the `console.` grep with
 `-a`, `file` on edited files). Per-WP test additions named above.
 
-**Total ≈ 0.6 kSLOC, ~400k raw tokens; ~280k Claude-path / ~240k Codex-path Opus/Sol-equivalent tokens.**
+**Total ≈ 0.8 kSLOC, ~550k raw tokens; ~380k Claude-path / ~325k Codex-path Opus/Sol-equivalent tokens.**
