@@ -79,9 +79,21 @@ already owns "one emitQueueChanged at the end" semantics). Files: `src/frontmatt
 `src/orchestration/JobStore.ts`, `src/orchestration/failedJobRepair.ts`, tests. *Execution:
 subagent.*
 
+**WP-R6 — Destructive index rebuild needs a confirm gate (~0.05 kSLOC, ~60k tokens, ~5 min wall).**
+Observed live during SE WP-7 ops: `Search: rebuild index` (`search-rebuild-index` in
+`src/commands.ts`) enqueues `search_rebuild`, whose workflow calls `resetIndex()` — dropping the
+entire FTS + vector index — with no confirmation, no mention of the reset in the command name, and
+no hint that the non-destructive repair (`SearchEmbedMissingWorkflow`, which exists precisely so a
+backfill "must never call resetIndex()") is the right tool for coverage repair. A user (or an
+orchestrator) reaching for "verify/repair the index" gets a full ~15-minute re-embed instead of a
+no-op sweep. Fix: route the command through `ConfirmModal` (the fleet pattern for destructive bulk
+ops, per the orphaned-attachments precedent) with copy naming the reset and pointing at the
+backfill alternative; consider renaming to "Search: reset and rebuild index". Files:
+`src/commands.ts`, possibly `src/confirmModal.ts` copy, tests. *Execution: subagent.*
+
 ## Verification
 
 Repo gates per `AGENTS.md` (lint, tsc, `npm test`, production build, the `console.` grep with
 `-a`, `file` on edited files). Per-WP test additions named above.
 
-**Total ≈ 0.8 kSLOC, ~550k raw tokens; ~380k Claude-path / ~325k Codex-path Opus/Sol-equivalent tokens.**
+**Total ≈ 0.85 kSLOC, ~610k raw tokens; ~420k Claude-path / ~355k Codex-path Opus/Sol-equivalent tokens.**
