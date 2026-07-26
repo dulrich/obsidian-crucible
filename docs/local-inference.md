@@ -151,6 +151,24 @@ with **no** `/v1`, while its embedder — started with `--url-prefix /v1` — is
 `http://host:4802/v1`. llama.cpp serves `/rerank` *and* `/v1/rerank`, so either works there.
 Configure the reranker as its own provider entry; there is no rerank-specific URL field.
 
+**crucible-inference (§12a) makes this asymmetry moot.** llama-swap serves both `/v1/rerank` and
+bare `/rerank`, so the embedding and reranking provider entries can both be configured with the
+same `http://127.0.0.1:4800/v1` base URL — there is no longer a base URL to get wrong. Two more
+rules specific to that router, worth knowing regardless of which route you actually run:
+
+- **Its config's `models`/`aliases` are the plugin's API surface — append-only.** Crucible's
+  stored provider settings (`data.json`) reference a model by alias id. Swapping the GGUF file
+  behind an alias is fine; renaming or deleting the alias breaks every vault already pointed at it.
+  Add new aliases freely; never repurpose one.
+- **A model that has aged out under `ttl` cold-loads on the next request, and this is not the same
+  cold start measured in §9/§12c.** The router itself stays up throughout — only the specific
+  `llama-server` child restarts, so there is no whole-container startup cost to pay. Expect roughly
+  1–3 seconds for a small retrieval model like `bge-m3` (comfortably inside Crucible's 5 s
+  interactive search timeout); a chat model cold-loads 10–60 s, which is exactly why chat models
+  are not on the interactive search path. If a cold load is ever unacceptable for a given model,
+  `hooks.on_startup.preload` plus a longer `ttl` keeps it always warm — trading back the idle-VRAM
+  saving that `ttl: 1800` exists to provide by default.
+
 ### Infinity (Docker)
 
 ```bash
@@ -401,7 +419,7 @@ characters. Absolute values are hardware-specific — treat the ratios as more p
 p95**, range 1,241–1,283; warm 8.9 ms. Whether the cold start is triggered by a health probe or a
 real search changes it by 10 ms.
 
-Four things about these numbers matter more than the numbers:
+Five things about these numbers matter more than the numbers:
 
 - **The reranking row is the decisive one.** At `searchRerankTopN: 30`, 9.5 seconds per click is
   long enough that the button stops being pressed. 280 ms is not. And rerank latency is *exactly
@@ -418,6 +436,19 @@ Four things about these numbers matter more than the numbers:
   the same thread. The often-quoted ~0.68 factor between the two remains a quotient of two
   unrelated sessions — it has never been measured as a pair, and it cannot be measured from outside
   the plugin. Do not lean on it.
+- **A different ratio for the same comparison sometimes turns up elsewhere in the fleet — it is
+  stale, not a second measurement.** An earlier pass recorded an **8.5 chunks/s** CPU baseline
+  (giving 6× or 10.6×, depending which GPU server it was paired against) and a **7.3 s → 0.147 s**
+  rerank-click figure (~50×). Neither reproduces under this protocol's hash-shuffled,
+  representative-length sampling: the honest CPU baseline is **3.7 chunks/s**, and the honest
+  30-document rerank comparison is **9.48 s → 0.280 s**. The mechanism is the same
+  length-transferability trap noted above — the earlier numbers were taken over a shorter,
+  unrepresentative text slice of the same corpus (compare the short-vs-long quintile finding above:
+  6.7 vs 3.1 chunks/s from the *same* sample in the *same* minute). If you see 6×, 10.6×, 24×, or
+  50× cited for this comparison anywhere else in the fleet (a compose file comment, an older
+  container README), it predates this correction and has not been re-derived from ground truth.
+  **25.7× embedding and 34× reranking are the figures this guide uses, and they are the ones that
+  reproduce from the archived raw results.**
 
 ---
 
@@ -461,15 +492,82 @@ One machine's specifics, included because the *shape* of the problem generalises
 ## 12. Setups — pick one and follow it end-to-end
 
 Sections 3–4 above are the reference material, organised by concept (routes, then rules). This
-section is the condensed, single-path version of the same information: five concrete options, each
+section is the condensed, single-path version of the same information: six concrete options, each
 with its exact commands and its gotchas inline, so setting one up doesn't require assembling the
 right order from five sections yourself. Pick one — you do not need more than one embedder, and
-reranking is opt-in on top of whichever you choose.
+reranking is opt-in on top of whichever you choose. (a) is the recommended route; (b)–(e) remain
+documented because they're still valid ways to run the same jobs, or because you may already have
+one of them running; (f) is the fleet-wiring reference rather than a route of its own.
 
-### a. LM Studio
+### a. crucible-inference (recommended)
 
-Best for trying models out before committing to a route (§3) — a GUI, model downloads, and the
-llama.cpp binaries bundled for you.
+One always-on router in front of both jobs, replacing what used to be two separately-managed
+processes: no separate embed/rerank services to remember, and no separate on/off lifecycle to
+reason about beyond the router itself.
+
+```bash
+docker/llamacpp-vulkan/smoke-inference.sh                 # confirms /health, /v1/models,
+                                                            # /v1/embeddings, /rerank all answer
+```
+
+The container image, its router config (`config.yaml`), and this smoke script already exist in
+this repo's [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) and can be built and
+run standalone with a bare `docker build`/`docker run` — see that page. Wiring `crucible-inference`
+into a fleet's compose file (port mapping, `/dev/dri` passthrough, `mem_limit`) is a separate,
+later, cross-repo step; see "Migration status" below for where that stands as of this guide.
+
+Crucible: **one base URL for both provider entries** —
+
+- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4800/v1`, model id `bge-m3`.
+- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4800/v1`, model id `bge-reranker-v2`.
+
+Both aliases are chosen to match the model ids already stored by route (c) below, specifically so
+that migrating a vault off that route onto this one is a **base-URL-only change** — repoint both
+provider entries from `4804`/`4805` to `4800` and leave the model ids alone. See Rule 2 (§4) for
+why the rerank entry no longer needs a bare, no-`/v1` base URL the way Infinity's does.
+
+What running it feels like:
+
+- The container is always up (`restart: unless-stopped`); the two retrieval models are not —
+  llama-swap spawns the `bge-m3`/`bge-reranker-v2` `llama-server` children on first request and
+  unloads them after **`ttl: 1800`** (30 minutes) idle, returning their VRAM. Idle cost is a few MB
+  of resident Go process, not a resident inference server.
+- Reranking and embedding can run concurrently without evicting each other — the `retrieval` group
+  in `config.yaml` sets `swap: false, exclusive: false`, so both children may be resident at once;
+  only `ttl` unloads either.
+- The first request after a `ttl` unload blocks while the child reloads. See Rule 2 (§4) for the
+  cold-load expectation and why it should not cost as much as the whole-container cold start
+  measured in §9/§12c — and for the `hooks.on_startup.preload` escape hatch if a cold load is ever
+  unacceptable for a given model.
+
+**Aliases are the API surface — append-only.** `config.yaml`'s `models`/`aliases` map is what
+Crucible's stored provider settings reference by id. Add new aliases freely; never rename or
+delete one a vault might already be pointed at, or every vault using it silently breaks (Rule 2,
+§4).
+
+**A chat model is not on this router yet.** `config.yaml` carries a commented-out `chat` group
+stub for when one joins — chat models are large enough that they need `swap: true, exclusive:
+true` (evict the group's previous member, and evict the retrieval pair too, before starting a chat
+request), a materially different policy from the `retrieval` group's "both models coexist"
+default. Whether that eviction-and-restore cycle is safe under RADV on this GPU is the one part of
+this design still untested; it is checked before the older services are retired, not assumed.
+
+**Migration status.** As of this guide, `docker/llamacpp-vulkan/` builds and documents this router
+(image tag `crucible-llamacpp-vulkan:b10121-swap243`), but wiring it into a fleet's compose file,
+running the smoke test against the live service, testing the chat-eviction interleave, and
+flipping Crucible's provider base URLs from `4804`/`4805` to `4800` are separate, later steps —
+not yet landed as of this writing. Until they are, route (c) below (the systemd-activated GPU
+pair) is still what a fleet built against this repo actually runs day to day; this subsection
+documents where that is headed, and its image is safe to build and run standalone in the meantime.
+
+### b. LM Studio
+
+No longer a route to depend on — (a) is the always-on service now. What LM Studio remains
+excellent at: downloading and swapping GGUF models through a GUI, and evaluating a candidate
+model's quality and speed before committing it to the router's `config.yaml`. `crucible-inference`
+mounts `~/.lmstudio/models` read-only for exactly this reason — a model downloaded here is already
+in place for the router to pick up, which is why LM Studio stays installed as a downloader/eval
+bench rather than being fully retired.
 
 1. Start LM Studio's local server (default `127.0.0.1:1234`) and load an embedding model.
 2. In Crucible's provider settings, add a provider of kind **`openai-compatible`** — never
@@ -482,7 +580,7 @@ Gotchas:
 - **Don't use LM Studio's own server for reranking.** It answers unknown endpoints with HTTP 200
   and an error body (`{"error":"Unexpected endpoint or method. (POST /x)"}`), so a capability check
   based on the status code alone reports `/v1/rerank` as supported when it is not — this is how it
-  was first mistaken for supported (§8). Use setup (b) or (c) below for reranking instead.
+  was first mistaken for supported (§8). Use setup (c) or (d) below for reranking instead.
 - **Reranker models show up in the embedding-model list too**, and pass every structural check: LM
   Studio serves them through `/v1/embeddings`, `type: embeddings`, at exactly the widths real
   embedders use — `text-embedding-bge-reranker-v2-m3` returns 1024d (colliding with `bge-m3`),
@@ -494,10 +592,23 @@ Gotchas:
   behind it can be swapped for a different quantization with no change to the string you
   configured (§4, LM Studio subsection).
 
-### b. In-repo llama.cpp Vulkan container + systemd socket activation (the GPU path)
+### c. Superseded: llama.cpp Vulkan container + systemd socket activation
 
-The fastest local route measured in this guide (§9), packaged so it is reachable at all times
-without being resident at all times.
+**Retired at cutover — this is what route (a) above replaces, not a route to set up new.** Same
+`docker/llamacpp-vulkan/` image, but run as two single-model containers instead of one router
+process, each started and stopped on demand by its own systemd socket
+(`crucible-embed.socket` on `4804`, `crucible-rerank.socket` on `4805`) rather than by a router
+`ttl`. The instructions below are kept for anyone who already has this running and needs to
+understand or migrate off it, and because the gotchas beneath them apply to any raw
+`llama-server` deployment — including this same image's still-supported single-model shape — not
+only to the retired socket-activation apparatus itself. If this is what you have running today,
+follow (a) above, confirm it works, then retire the sockets:
+
+```bash
+systemctl --user disable --now crucible-embed.socket crucible-rerank.socket
+```
+
+Historical setup, for reference:
 
 ```bash
 cd /home/_shared_code/context-control
@@ -514,14 +625,14 @@ to the socket units, which start the container on demand instead of compose keep
 instance and arms the sockets — see
 [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) for what each unit does.
 
-Crucible:
+Crucible (only if you are still on this route):
 
 - Embedding: `openai-compatible`, base URL `http://127.0.0.1:4804/v1` (`/v1` required).
 - Rerank: `openai-compatible`, base URL `http://127.0.0.1:4805` (no `/v1`).
 - Point at the **socket** ports (4804/4805), not the container's own published ports — that
   bypasses the on-demand start and hits a stopped container.
 
-Gotchas:
+Gotchas (kept because they still apply to raw `llama-server` use generally):
 
 - **The socket idle-exits the container after 30 minutes**; the first request after that pays a
   cold start. Measured steady-state here: **1,251 ms p50 / 1,283 ms p95 over 16 cold starts**
@@ -540,7 +651,10 @@ Gotchas:
   hardware driver still enumerates `llvmpipe`, a software rasteriser, as a valid device — a
   too-old Mesa answers every request correctly and just runs several times slower (§8, §10).
 
-### c. Infinity (CPU) containers
+### d. Infinity (CPU) containers
+
+The fallback route: no GPU or Vulkan driver required, and this is what stays running as a safety
+net even after a fleet cuts over to (a).
 
 ```bash
 michaelf34/infinity:0.0.77-cpu v2 --model-id BAAI/bge-m3            --engine optimum --url-prefix /v1 --port 4802
@@ -566,7 +680,7 @@ Gotchas:
   "unknown", not a failed probe — expected, not a bug. Declare precision by hand in the model
   row's fallback field only if you run two precisions of the same model side by side (§6).
 
-### d. ollama
+### e. ollama
 
 ```bash
 systemctl edit ollama          # Environment="OLLAMA_VULKAN=1" for AMD Vulkan
@@ -583,23 +697,27 @@ Gotchas:
   routes use** — chat requests hit `/api/chat`, embedding requests hit `/api/embed`. Pointing an
   `ollama`-kind provider at LM Studio's port, or an `openai-compatible` provider at ollama's, does
   not fail with a clear error — it comes back empty (Rule 1, §4).
-- **No rerank endpoint at all.** Pair ollama with route (b) or (c) if you want reranking (§3).
+- **No rerank endpoint at all.** Pair ollama with route (a), (c), or (d) if you want reranking
+  (§3).
 - ollama reports `quantization_level`, `format`, and a `digest` (sha256 of the weights blob) via
   `/api/tags` — the strongest identity signal of any local runtime covered here, useful for
   confirming what actually loaded (§4, ollama subsection).
 
-### e. The search companion itself
+### f. The search companion itself
 
 This guide is about the model server. The separate service Crucible talks to for chunk storage
 and search ranking is documented in [Search companion](search-companion.md) — see its "Inference
-services" section specifically, which documents this fleet's four containers
-(`crucible-embedder`, `crucible-reranker`, `crucible-embed-gpu`, `crucible-rerank-gpu`) as running
-instances of routes (c) and (b) above. Not a duplicate setup — read that page for how the fleet
-wires these routes together, and this one for how to reason about any one of them.
+services" section specifically, which documents this fleet's inference containers
+(`crucible-embedder`, `crucible-reranker`, `crucible-embed-gpu`, `crucible-rerank-gpu`, and the
+`crucible-inference` router migrating in to replace the last two) as running instances of routes
+(d), (c), and (a) above. Not a duplicate setup — read that page for how the fleet wires these
+routes together and where the migration to (a) currently stands, and this one for how to reason
+about any one route on its own.
 
 ### Publishing prebuilt images
 
-Building the GPU container image (route (b)) the first time costs several minutes. Publishing a
+Building the GPU container image (routes (a) and (c) above — same Dockerfile, same GPU assertion)
+the first time costs several minutes. Publishing a
 prebuilt image so a plugin user could skip that build is an **open option, not a decision** —
 recorded as explicitly undecided: "noted as an option in WP-10, not decided"
 (`plans/sprint-exit-queue-health-and-scrub.md`). Nothing here should be read as promising it.
