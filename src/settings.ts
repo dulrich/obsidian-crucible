@@ -10,7 +10,9 @@ import { renderOrchestrationSettings } from "./settings/sections/orchestration";
 import { renderLintSettings } from "./settings/sections/lint";
 import { renderSourceEvalSettings } from "./settings/sections/sourceEval";
 
-type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'orchestrator' | 'lint' | 'commands';
+// Exported so callers outside settings.ts (main.ts's settings-opening plumbing,
+// SearchModal's rerank-configure deep-link) can name a tab without duplicating the union.
+export type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'orchestrator' | 'lint' | 'commands';
 
 /**
  * The settings tab is a thin shell: it holds shared editing state and template-variable
@@ -57,6 +59,25 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		// In the settings modal the scroller is .vertical-tab-content; in the
 		// workspace-tab view it's the contentEl flagged with .crucible-settings-host.
 		return this.containerEl.closest<HTMLElement>('.vertical-tab-content, .crucible-settings-host');
+	}
+
+	/**
+	 * Deep-link entry point (WP-9: rerank Configure… affordance, and any future caller that
+	 * needs to land on a specific tab rather than wherever `activeTab` last was). Switches the
+	 * tab and drops any in-progress detail-editor state, same as clicking a tab button does.
+	 *
+	 * Only re-renders if this instance is currently attached to the DOM — the native settings
+	 * modal and the workspace-tab view (`settingsView.ts`) each own a `CrucibleSettingTab`
+	 * instance that may not be showing right now, and `display()` reads/writes `containerEl`,
+	 * which Obsidian's settings framework re-calls anyway the next time this instance is
+	 * actually surfaced. Calling `display()` on a detached instance would be harmless (it just
+	 * repopulates an off-screen container) but the connectivity check keeps the effect scoped
+	 * to "the surface the user can currently see."
+	 */
+	openToTab(tab: CrucibleSettingsTab): void {
+		this.activeTab = tab;
+		this.resetEditingState();
+		if (this.containerEl.isConnected) this.display();
 	}
 
 	refreshDisplay() {

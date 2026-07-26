@@ -1,5 +1,5 @@
 import { Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, TFolder, Editor } from 'obsidian';
-import { CrucibleSettingTab } from "./settings";
+import { CrucibleSettingTab, CrucibleSettingsTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Provider, providerModality } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
@@ -129,6 +129,10 @@ export default class CruciblePlugin extends Plugin {
 	fileOpenIndex: FileOpenIndex;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	triggers: TriggerRegistry;
+	// The single native-settings-modal instance (registered via addSettingTab in onload).
+	// Kept as a field — rather than only living inside the anonymous addSettingTab(new ...)
+	// call — so openSettingsToTab() can deep-link it even while the modal isn't open.
+	private settingTab: CrucibleSettingTab;
 	private tocComponent: TableOfContentsUI | null = null;
 	// Chain-internal command ids registered for each "Chain: X" command, so a chain
 	// can be used as an (awaited, target-file-aware) step inside another chain.
@@ -326,7 +330,8 @@ export default class CruciblePlugin extends Plugin {
 
 		this.registerShortcuts();
 		this.registerCaptures();
-		this.addSettingTab(new CrucibleSettingTab(this.app, this));
+		this.settingTab = new CrucibleSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.noteLockOverlay = new NoteLockOverlay(this);
 
@@ -731,7 +736,7 @@ export default class CruciblePlugin extends Plugin {
 		});
 	}
 
-	async activateSettingsView() {
+	async activateSettingsView(initialTab?: CrucibleSettingsTab) {
 		const { workspace } = this.app;
 		const existing = workspace.getLeavesOfType(CRUCIBLE_SETTINGS_VIEW_TYPE);
 		const leaf = existing[0] ?? workspace.getLeaf('tab');
@@ -739,6 +744,28 @@ export default class CruciblePlugin extends Plugin {
 			await leaf.setViewState({ type: CRUCIBLE_SETTINGS_VIEW_TYPE, active: true });
 		}
 		await workspace.revealLeaf(leaf);
+		if (initialTab && leaf.view instanceof CrucibleSettingsView) leaf.view.openToTab(initialTab);
+	}
+
+	/**
+	 * WP-9: the one entry point a caller outside settings.ts/main.ts uses to open Crucible
+	 * settings landed on a specific tab (first consumer: the search modal's rerank
+	 * Configure… link). Deliberately reuses the two "open settings" paths that already exist
+	 * rather than inventing a third: if the workspace-tab settings view (`Open settings in a
+	 * tab`, activateSettingsView()) is already open, deep-link that leaf; otherwise fall back
+	 * to the ribbon icon's native-settings-modal path (`app.setting.open()` +
+	 * `openTabById`), deep-linking the single registered `settingTab` instance before it's
+	 * shown.
+	 */
+	openSettingsToTab(tab: CrucibleSettingsTab): void {
+		const existing = this.app.workspace.getLeavesOfType(CRUCIBLE_SETTINGS_VIEW_TYPE);
+		if (existing.length > 0) {
+			void this.activateSettingsView(tab);
+			return;
+		}
+		this.settingTab.openToTab(tab);
+		this.app.setting.open();
+		this.app.setting.openTabById(this.manifest.id);
 	}
 
 	async activateIngestionDashboardView() {
