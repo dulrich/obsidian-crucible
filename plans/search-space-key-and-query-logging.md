@@ -239,6 +239,39 @@ three clean log lines, and answered `/health` instantly**.
   probe timeout while indexing is in flight leaves availability unchanged; the deferral message
   never falls back to the container-restart text when the true cause is a timeout.
 
+**The second defect, and the one that makes the first permanent.** `typeWorker`
+(`src/orchestration/OrchestrationAutoRunner.ts:212-214`) ends the worker on any outcome other than
+`'ran'`:
+
+```js
+// Only a successful run keeps the worker going; 'empty' ... and 'disabled' end it.
+if (outcome !== 'ran') return;
+```
+
+A job **deferred** because the companion looked unavailable is not `'ran'`, so the type's drain loop
+terminates. Kicks come only from an enqueue, from startup (`:133`), or from a mid-drain redrain
+replay (`:177`) — and a backfill enqueues its batches once, up front. So one spurious deferral
+strands every remaining batch **permanently**, with no error, no failed job, and a queue that looks
+merely idle. Measured 2026-07-25: 52 batches sat untouched across a 5-minute latch expiry and well
+beyond, while `search_upsert_file` jobs continued to run normally throughout — because unrelated
+file edits kept enqueueing *that* type and kicking its drain.
+
+This is the true cause of three separately-reported symptoms that were each mistaken for something
+else: "one batch ran and the next was not auto-queued" (reported at the start of the session), "each
+Obsidian reload drains exactly one more batch" (already recorded in `AGENTS.md` and attributed
+solely to the offline latch), and tonight's stall.
+
+- **Deferral is not termination.** A deferred job means "not now", so the worker should back off and
+  retry, not exit. At minimum, re-kick the type when the condition that caused the deferral clears —
+  the availability latch expiring is a state change nothing currently observes.
+- **Distinguish the outcomes.** `'empty'` and `'disabled'` are correct reasons to end a worker;
+  `'deferred'` is not, and today they are indistinguishable at the call site.
+- **Prefer a fix that cannot strand work even if a new deferral reason appears later** — a periodic
+  re-kick for types with pending file jobs is duller than event-driven wake-up but fails safe.
+- Tests: a deferred job leaves the type's drain alive or schedules a re-kick; a queue with pending
+  batches and no further enqueues still drains after a transient unavailability; `'empty'` and
+  `'disabled'` still end the worker.
+
 ## Public Interfaces
 
 | Surface | Change |
