@@ -2,6 +2,7 @@ import { Notice, requestUrl } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult } from '../types';
 import { logWarn } from '../log';
 import {
+	buildHttpErrorMessage,
 	HttpCallContext,
 	HttpListCallContext,
 	HttpProviderClient,
@@ -117,10 +118,11 @@ export const openAICompatibleClient: HttpProviderClient = {
 				// OpenAI pins a sampling temperature; OpenRouter and local servers leave it to the model default.
 				...(ctx.provider.kind === 'openai' ? { temperature: 0.7 } : {}),
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`${label(ctx.provider)} API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} API`, response));
 		}
 
 		const data = response.json as { choices: { message?: { content?: string }, finish_reason?: string | null }[] };
@@ -141,10 +143,11 @@ export const openAICompatibleClient: HttpProviderClient = {
 			method: 'POST',
 			headers: openRouter ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx),
 			body: JSON.stringify({ model: ctx.modelId, input: inputs }),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`${label(ctx.provider)} embeddings API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} embeddings API`, response));
 		}
 
 		const data = response.json as { data?: { embedding?: number[], index?: number }[], model?: string };
@@ -209,10 +212,11 @@ export const openAICompatibleClient: HttpProviderClient = {
 			method: 'POST',
 			headers: authHeaders(ctx),
 			body: JSON.stringify({ model: ctx.modelId, query, documents }),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`${label(ctx.provider)} rerank API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} rerank API`, response));
 		}
 
 		// results[].index refers to the position in *this request's* documents array and is not
@@ -241,10 +245,11 @@ export const openAICompatibleClient: HttpProviderClient = {
 				],
 				temperature: 0,
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`${label(ctx.provider)} image extraction API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} image extraction API`, response));
 		}
 
 		const data = response.json as { choices?: { message?: { content?: string }, finish_reason?: string | null }[] };
@@ -263,7 +268,7 @@ export const openAICompatibleClient: HttpProviderClient = {
 async function tryLmStudioNativeDescribeModel(ctx: HttpCallContext): Promise<ProviderModelDescription | null> {
 	let response;
 	try {
-		response = await requestUrl({ url: `${hostRootUrl(apiBaseUrl(ctx.provider))}/api/v0/models`, method: 'GET', headers: authHeaders(ctx) });
+		response = await requestUrl({ url: `${hostRootUrl(apiBaseUrl(ctx.provider))}/api/v0/models`, method: 'GET', headers: authHeaders(ctx), throw: false });
 	} catch {
 		return null;
 	}
@@ -347,9 +352,9 @@ function mapFallbackEntry(entry: FallbackModelEntry & { id: string }): ProviderC
 // is a clean unknown, not a guess. Infinity answers this same shape (verified live) with `backend`
 // alongside `owned_by`; still no dtype anywhere in the payload.
 async function fallbackModelsDescribeModel(ctx: HttpCallContext): Promise<ProviderModelDescription> {
-	const response = await requestUrl({ url: `${apiBaseUrl(ctx.provider)}/models`, method: 'GET', headers: authHeaders(ctx) });
+	const response = await requestUrl({ url: `${apiBaseUrl(ctx.provider)}/models`, method: 'GET', headers: authHeaders(ctx), throw: false });
 	if (response.status !== 200) {
-		throw new Error(`${label(ctx.provider)} models API returned ${response.status}: ${response.text}`);
+		throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} models API`, response));
 	}
 	const body = response.json as { data?: FallbackModelEntry[] } | { error?: unknown };
 	if (body && typeof body === 'object' && 'error' in body) {
@@ -374,7 +379,7 @@ async function fallbackModelsDescribeModel(ctx: HttpCallContext): Promise<Provid
 async function tryLmStudioNativeListModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[] | null> {
 	let response;
 	try {
-		response = await requestUrl({ url: `${hostRootUrl(apiBaseUrl(ctx.provider))}/api/v0/models`, method: 'GET', headers: authHeaders(ctx) });
+		response = await requestUrl({ url: `${hostRootUrl(apiBaseUrl(ctx.provider))}/api/v0/models`, method: 'GET', headers: authHeaders(ctx), throw: false });
 	} catch {
 		return null;
 	}
@@ -416,9 +421,10 @@ async function fallbackModelsListModels(ctx: HttpListCallContext): Promise<Provi
 		url: `${apiBaseUrl(ctx.provider)}/models`,
 		method: 'GET',
 		headers: openRouter ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx),
+		throw: false,
 	});
 	if (response.status !== 200) {
-		throw new Error(`${label(ctx.provider)} models API returned ${response.status}: ${response.text}`);
+		throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} models API`, response));
 	}
 	const body = response.json as { data?: FallbackModelEntry[] } | { error?: unknown };
 	if (body && typeof body === 'object' && 'error' in body) {
@@ -439,9 +445,10 @@ async function fetchOpenRouterEmbeddingsModels(ctx: HttpListCallContext): Promis
 		url: `${apiBaseUrl(ctx.provider)}/embeddings/models`,
 		method: 'GET',
 		headers: { ...authHeaders(ctx), ...OPENROUTER_HEADERS },
+		throw: false,
 	});
 	if (response.status !== 200) {
-		throw new Error(`OpenRouter embeddings models API returned ${response.status}: ${response.text}`);
+		throw new Error(buildHttpErrorMessage('OpenRouter embeddings models API', response));
 	}
 	const body = response.json as { data?: FallbackModelEntry[] } | { error?: unknown };
 	if (body && typeof body === 'object' && 'error' in body) {
