@@ -10,6 +10,7 @@ import { isSearchIndexablePath } from './search/chunker';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
+import { ConfirmModal } from './confirmModal';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -406,12 +407,28 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		},
 	});
 
+	// Destructive: the workflow this enqueues calls resetIndex(), dropping the entire FTS +
+	// vector index before re-embedding everything from scratch (~tens of minutes on a real
+	// vault). Confirm first, and name the non-destructive alternative — a user reaching for
+	// "verify/repair the index" should land on `search-embed-missing`, not a full reset.
 	plugin.registerCrucibleCommand({
 		id: 'search-rebuild-index',
-		name: 'Search: rebuild index',
+		name: 'Search: reset and rebuild index',
 		group: 'Search',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('search_rebuild', {}, { priority: 'high', lane: 'user' }),
+		run: async () => {
+			const confirmed = await new ConfirmModal(plugin.app, {
+				title: 'Reset and rebuild the search index?',
+				message: 'This drops the entire search index and re-embeds everything from scratch, which can take a '
+					+ 'long time on a large vault. If you\'re only trying to fill in missing embeddings (e.g. after '
+					+ 'turning on semantic search or switching models), use "Search: embed missing vectors" instead — '
+					+ 'it never resets the index.',
+				confirmText: 'Reset and rebuild',
+				destructive: true,
+			}).openAndAwait();
+			if (!confirmed) return;
+			await plugin.orchestrator.enqueue('search_rebuild', {}, { priority: 'high', lane: 'user' });
+		},
 	});
 
 	// Repairs "semantic search was turned on after the vault was indexed" and "the embedding
