@@ -1,5 +1,12 @@
 import type CruciblePlugin from '../main';
 import type { MemoryJobSeed } from './MemoryJobQueue';
+import {
+	SERVICE_SEARCH_COMPANION,
+	SERVICE_SEARCH_EMBEDDER,
+	SERVICE_YOUTUBE_API,
+	SERVICE_YOUTUBE_RSS,
+	type ServiceId,
+} from './serviceHealth';
 import { IMAGE_METADATA_SCHEMA_VERSION, localizedImageInfo } from './utils/imageMetadata';
 import { coerceVideoId } from './utils/youtubeApi';
 
@@ -40,7 +47,26 @@ export interface JobTypeConfig {
 	terminalRetentionMs?: number;
 	/** Per-type execution timeout override (ms). Falls back to the global setting; 0 disables. */
 	timeoutMs?: number;
+	/**
+	 * External dependencies this type cannot run without. The drain refuses to claim a
+	 * job of this type while any of them has an open breaker
+	 * (`Orchestrator.servicesHealthyFor`), and a successful run reports every one of
+	 * them healthy.
+	 *
+	 * All-or-nothing on purpose: a type listing two services must not run on one, so a
+	 * half-open recovery has to win every probe token it needs before a job is claimed.
+	 * A type with no entry is always drainable — declaring nothing means "this type has
+	 * no external dependency", which is the correct default for vault-local work.
+	 */
+	services?: ServiceId[];
 }
+
+// Every search job type reaches the companion, and (with semantic search on) the
+// embedding server behind it. They are listed together because the drain treats them
+// all-or-nothing anyway: a companion that is down makes an embedder-only job pointless
+// and vice versa, and a type that could run on one of the two would still write a
+// half-indexed row.
+const SEARCH_SERVICES: ServiceId[] = [SERVICE_SEARCH_COMPANION, SERVICE_SEARCH_EMBEDDER];
 
 // The common shape for single-worker, file-backed job types: they differ only in how repeat
 // enqueues collapse, so each config below is just its dedupeKey.
@@ -76,7 +102,22 @@ export function youtubeChannelEnrichJobConfig(plugin: CruciblePlugin): JobTypeCo
 		get maxParallel() { return Math.max(1, plugin.settings.orchestrationYoutubeMetadataMaxParallel || 1); },
 		get minIntervalMs() { return Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000; },
 		dedupeKey: (p) => (typeof p.channelId === 'string' && p.channelId ? `channel:${p.channelId}` : ''),
+		services: [SERVICE_YOUTUBE_API],
 	};
+}
+
+// The fan-out that enqueues per-channel enrichment jobs. It reads the Data API itself
+// (to list what needs enriching), so it carries the same dependency as the jobs it
+// seeds — a sweep that runs against a quota-exhausted API just re-enqueues work that
+// cannot run.
+export function youtubeChannelEnrichSweepJobConfig(): JobTypeConfig {
+	return { ...fileJobConfig(), services: [SERVICE_YOUTUBE_API] };
+}
+
+// The RSS tracker talks to YouTube's feed endpoints, NOT the Data API — a quota
+// exhaustion on one says nothing about the other, so they are separate service ids.
+export function youtubeTrackerJobConfig(): JobTypeConfig {
+	return { ...fileJobConfig(), services: [SERVICE_YOUTUBE_RSS] };
 }
 
 // File-backed so triggered command runs survive restarts. Dedupes on
@@ -114,14 +155,17 @@ export function imageMetadataJobConfig(): JobTypeConfig {
 }
 
 export function searchFileJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => {
-		const path = typeof p.path === 'string' ? p.path : '';
-		return path ? `search-file:${path}` : '';
-	});
+	return {
+		...fileJobConfig((p) => {
+			const path = typeof p.path === 'string' ? p.path : '';
+			return path ? `search-file:${path}` : '';
+		}),
+		services: SEARCH_SERVICES,
+	};
 }
 
 export function searchRebuildJobConfig(): JobTypeConfig {
-	return fileJobConfig(() => 'search-rebuild');
+	return { ...fileJobConfig(() => 'search-rebuild'), services: SEARCH_SERVICES };
 }
 
 // One backfill fan-out at a time. Expressed as `maxParallelFixed` rather than only as a
@@ -130,6 +174,7 @@ export function searchRebuildJobConfig(): JobTypeConfig {
 export function searchEmbedMissingJobConfig(): JobTypeConfig {
 	return {
 		...fileJobConfig(() => 'search-embed-missing'),
+		services: SEARCH_SERVICES,
 		maxParallelFixed: 'One backfill fan-out at a time: this job only enqueues batches, and two concurrent fan-outs '
 			+ 'would double the batch count for exactly the same work. The duplicate batches are idempotent and would '
 			+ 'drain as no-ops, but they would still be written to the queue as job files.',
@@ -137,18 +182,24 @@ export function searchEmbedMissingJobConfig(): JobTypeConfig {
 }
 
 export function searchBatchJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => {
-		const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';
-		const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
-		return rebuildId && batchIndex >= 0 ? `search-batch:${rebuildId}:${batchIndex}` : '';
-	});
+	return {
+		...fileJobConfig((p) => {
+			const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';
+			const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
+			return rebuildId && batchIndex >= 0 ? `search-batch:${rebuildId}:${batchIndex}` : '';
+		}),
+		services: SEARCH_SERVICES,
+	};
 }
 
 export function searchSweepJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => {
-		const description = typeof p.description === 'string' ? p.description.trim() : '';
-		return description ? `search-sweep:${description}` : '';
-	});
+	return {
+		...fileJobConfig((p) => {
+			const description = typeof p.description === 'string' ? p.description.trim() : '';
+			return description ? `search-sweep:${description}` : '';
+		}),
+		services: SEARCH_SERVICES,
+	};
 }
 
 // Memory-persistence config for the folded enrichment queue. maxParallel and the
@@ -166,5 +217,6 @@ export function youtubeMetadataJobConfig(plugin: CruciblePlugin): JobTypeConfig 
 			target: typeof p.targetPath === 'string' ? (p.targetPath.split('/').pop() ?? '').replace(/\.md$/, '') : '',
 		}),
 		terminalRetentionMs: 60_000,
+		services: [SERVICE_YOUTUBE_API],
 	};
 }

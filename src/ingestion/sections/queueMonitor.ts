@@ -303,9 +303,11 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 						void (async () => {
 							run.disabled = true;
 							const outcome = await host.plugin.orchestrationAutoRunner?.runJob(r.type as JobType, r.key);
-							// 'ran' ⇒ the row is gone; refresh. Otherwise (already claimed by a
-							// drain / no runner) leave the button usable.
-							if (outcome === 'ran') await host.refresh('queueMonitor');
+							// 'ran' ⇒ the row is gone, 'blocked' ⇒ it ran and came back deferred
+							// because a dependency is down; both change the row, so refresh.
+							// Otherwise (already claimed by a drain / no runner) leave the
+							// button usable.
+							if (outcome === 'ran' || outcome === 'blocked') await host.refresh('queueMonitor');
 							else run.disabled = false;
 						})();
 					});

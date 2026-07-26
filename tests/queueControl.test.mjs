@@ -83,6 +83,17 @@ function deferred() {
 // frontmatter write fails and it rolls the rename back. Scoped to that one transition
 // so the same job can still be claimed and run normally afterwards — which is the
 // whole content of the invariant.
+// Folder names mirror the real JobStore's STATUS_FOLDER map: the queued bucket lives
+// in `inbox/`. `folderForStatus` exists because FileJobBackend now re-verifies an
+// entry's LIVE path against it before retiring the job (the cancel-vs-claim race).
+const STORE_FOLDERS = {
+	queued: 'queue/inbox',
+	running: 'queue/running',
+	done: 'queue/done',
+	failed: 'queue/failed',
+	cancelled: 'queue/cancelled',
+};
+
 function makeStore(initial = {}) {
 	const folders = {
 		queued: [...(initial.queued ?? [])],
@@ -97,6 +108,7 @@ function makeStore(initial = {}) {
 		notes,
 		failMoveFor: initial.failMoveFor ?? null,
 		ensureFolders: async () => {},
+		folderForStatus: (status) => STORE_FOLDERS[status],
 		listFolder: async (status) => [...(folders[status] ?? [])],
 		appendNotes: async (file, lines) => { notes.push({ file, lines }); },
 		setError: async () => {},
@@ -113,6 +125,11 @@ function makeStore(initial = {}) {
 				const idx = bucket.findIndex(e => e.file === file);
 				if (idx >= 0) bucket.splice(idx, 1);
 			}
+			// Obsidian mutates a TFile's `path` in place on rename, and the backend's
+			// "has this entry moved?" check reads exactly that. A fake that left the path
+			// alone would make the race untestable — and would have hidden it.
+			const name = file.path.split('/').pop();
+			file.path = `${STORE_FOLDERS[toStatus]}/${name}`;
 			const moved = { file, job: { ...job, status: toStatus } };
 			folders[toStatus].push(moved);
 			return moved;
@@ -567,4 +584,199 @@ test('the global concurrency cap still bounds a raised per-type worker count', a
 	assert.equal(peak, 2, 'six workers, but the global semaphore only ever lets two run — the ceiling the UI names');
 
 	runner.dispose();
+});
+
+
+// --- 7. the cancel-vs-claim race: a stale snapshot must not retire live work ---
+//
+// `listFolder('queued')` awaits a readJob per file — over a several-hundred-job inbox
+// that loop is long — while Obsidian TFile objects are LIVE: a rename mutates
+// `file.path` in place. So an entry read early in the snapshot can, by the time the
+// clear acts on it, already have been claimed into running/ or even finished into
+// done/. The old guard (`!claimed.has(file.path)`) could not see either: `claimed` is
+// released the moment the claim's move completes, and it holds the INBOX path anyway.
+// These interleave the claim inside the clear's own listFolder, which is exactly where
+// the window is.
+
+// Runs `during` once, inside the next listFolder('queued') — the awaited window a
+// bulk operation's snapshot actually spans.
+function interleaveDuringSnapshot(store, during) {
+	const original = store.listFolder;
+	let pending = during;
+	store.listFolder = async (status) => {
+		const out = await original(status);
+		if (status === 'queued' && pending) {
+			const fn = pending;
+			pending = null;
+			await fn();
+		}
+		return out;
+	};
+}
+
+test('a bulk clear cannot retire a job a drain worker claimed during the snapshot', async () => {
+	const release = deferred();
+	const ran = [];
+	const workflow = {
+		async run(job) {
+			ran.push(job.id);
+			await release.promise;
+			return { status: 'done' };
+		},
+	};
+	const store = makeStore({ queued: [queuedEntry('job-a'), queuedEntry('job-b')] });
+	const plugin = makePlugin();
+	const orchestrator = new Orchestrator(plugin, store);
+	orchestrator.register(TEST_TYPE, workflow, TEST_CONFIG);
+	const backend = orchestrator.backends.get(TEST_TYPE);
+
+	let claiming = null;
+	interleaveDuringSnapshot(store, async () => {
+		claiming = backend.runNext();
+		await flush();
+	});
+
+	const cleared = await orchestrator.clearQueued(TEST_TYPE);
+
+	assert.deepEqual(ran, ['job-a'], 'the worker did claim and start job-a mid-snapshot');
+	assert.equal(cleared, 1, 'only the still-queued job was cleared');
+	assert.equal(store.folders.running.length, 1);
+	assert.equal(store.folders.running[0].job.id, 'job-a',
+		'the running job was NOT moved out from under its own execute()');
+	assert.equal(store.folders.cancelled.length, 1);
+	assert.equal(store.folders.cancelled[0].job.id, 'job-b');
+
+	release.resolve();
+	await claiming;
+	assert.equal(store.folders.done.length, 1, 'and it settled normally into done/');
+	assert.equal(store.folders.done[0].job.id, 'job-a');
+});
+
+test('a single-row cancel cannot retire a job claimed during its own snapshot', async () => {
+	const release = deferred();
+	const store = makeStore({ queued: [queuedEntry('job-a')] });
+	const plugin = makePlugin();
+	const orchestrator = new Orchestrator(plugin, store);
+	orchestrator.register(TEST_TYPE, { async run() { await release.promise; return { status: 'done' }; } }, TEST_CONFIG);
+	const backend = orchestrator.backends.get(TEST_TYPE);
+
+	let claiming = null;
+	interleaveDuringSnapshot(store, async () => {
+		claiming = backend.runNext();
+		await flush();
+	});
+
+	assert.equal(await orchestrator.removeQueuedJob(TEST_TYPE, 'job-a'), 'not-queued',
+		'it is no longer queued — it is running, which is cancelJob\'s job, not removeQueued\'s');
+	assert.equal(store.folders.cancelled.length, 0);
+	assert.equal(store.folders.running.length, 1);
+
+	release.resolve();
+	await claiming;
+	assert.equal(store.folders.done.length, 1);
+});
+
+test('a clear cannot resurrect a job that FINISHED during the snapshot', async () => {
+	const store = makeStore({ queued: [queuedEntry('job-a'), queuedEntry('job-b')] });
+	const plugin = makePlugin();
+	const orchestrator = new Orchestrator(plugin, store);
+	orchestrator.register(TEST_TYPE, inertWorkflow, TEST_CONFIG);
+	const backend = orchestrator.backends.get(TEST_TYPE);
+
+	// The whole run completes inside the window, so by the time the clear acts, the
+	// entry's live file sits in done/ and nothing is in the running registry either.
+	interleaveDuringSnapshot(store, () => backend.runNext());
+
+	const cleared = await orchestrator.clearQueued(TEST_TYPE);
+
+	assert.equal(cleared, 1, 'only job-b was still there to clear');
+	assert.equal(store.folders.done.length, 1, 'a completed job stays completed');
+	assert.equal(store.folders.done[0].job.id, 'job-a');
+	assert.equal(store.folders.cancelled.length, 1);
+	assert.equal(store.folders.cancelled[0].job.id, 'job-b');
+});
+
+
+// --- 8. filing a failure must never take the type worker with it ------------
+//
+// `failEntry` is the last step of both the failure path and `execute`'s catch-all. A
+// store write that threw there used to propagate out through runNext → typeWorker →
+// the Promise.all in drainType, ending that TYPE's drain as an unhandled rejection —
+// and leaving the job stranded in running/. Now it swallows and logs: the job stays in
+// running/, where the queue monitor shows it and scan()'s stale sweep recovers it, and
+// the drain keeps going. An un-drained type is invisible; a job in running/ is not.
+
+test('a store failure while filing a job as failed leaves the drain alive', async () => {
+	const ran = [];
+	const workflow = {
+		async run(job) {
+			ran.push(job.id);
+			if (job.id === 'job-bad') throw new Error('workflow blew up');
+			return { status: 'done' };
+		},
+	};
+	const store = makeStore({ queued: [queuedEntry('job-bad'), queuedEntry('job-next')] });
+	store.setError = async () => { throw new Error('vault write failed'); };
+	const orchestrator = new Orchestrator(makePlugin(), store);
+	orchestrator.register(TEST_TYPE, workflow, TEST_CONFIG);
+
+	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran',
+		'the run reports normally rather than rejecting into the worker');
+	assert.equal(store.folders.running.length, 1, 'the job is observable in running/, not lost');
+	assert.equal(store.folders.running[0].job.id, 'job-bad');
+
+	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran', 'and the next job still drains');
+	assert.deepEqual(ran, ['job-bad', 'job-next']);
+	assert.equal(store.folders.done.length, 1);
+});
+
+test('a rolled-back move into failed/ leaves the job in running/ and the worker running', async () => {
+	const store = makeStore({ queued: [queuedEntry('job-bad'), queuedEntry('job-next')] });
+	const originalMove = store.move;
+	store.move = async (file, job, toStatus) => {
+		// JobStore.move rolls its rename back and rethrows when the frontmatter write
+		// fails, so the job stays exactly where it was.
+		if (toStatus === 'failed') throw new Error('frontmatter write failed');
+		return originalMove(file, job, toStatus);
+	};
+	const orchestrator = new Orchestrator(makePlugin(), store);
+	orchestrator.register(TEST_TYPE, {
+		async run(job) {
+			if (job.id === 'job-bad') return { status: 'failed', error: 'nope' };
+			return { status: 'done' };
+		},
+	}, TEST_CONFIG);
+
+	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran');
+	assert.equal(store.folders.running.length, 1);
+	assert.equal(store.folders.failed.length, 0);
+
+	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran');
+	assert.equal(store.folders.done.length, 1, 'the queue behind a stuck settle keeps moving');
+});
+
+
+// --- 9. the per-job emit storm is coalesced ---------------------------------
+//
+// Every `orchestration-queue-updated` costs two listFolder passes here, one re-read in
+// every UI listener, and a kickAll() that can cost another listFolder per enabled type.
+// At two emits per job (claim + settle) that is quadratic in queue depth — draining the
+// 2,022-job requeue cohort ran into millions of awaited readJob calls on the main
+// thread. The per-job emits go through a leading+trailing 250ms window; the bulk
+// operations keep their stronger exactly-once guarantee (tests above).
+
+test('draining a burst of jobs coalesces the per-job emits instead of one pair per job', async () => {
+	const bus = makeBus();
+	const store = makeStore({ queued: Array.from({ length: 10 }, (_, i) => queuedEntry(`job-${i}`)) });
+	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), store);
+	orchestrator.register(TEST_TYPE, inertWorkflow, TEST_CONFIG);
+
+	for (let i = 0; i < 10; i++) await orchestrator.runNextOfType(TEST_TYPE);
+	await flush();
+
+	assert.equal(store.folders.done.length, 10, 'all ten really did drain');
+	const emits = bus.count('orchestration-queue-updated');
+	assert.ok(emits >= 1, 'the leading edge still fires immediately, so the UI is not left stale');
+	assert.ok(emits < 20, `20 emits (claim + settle per job) is the bug; got ${emits}`);
+	assert.ok(emits <= 4, `a burst inside one 250ms window collapses to a couple of emits; got ${emits}`);
 });

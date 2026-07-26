@@ -6,6 +6,7 @@ import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
 import { JobBackend, RunOutcome, emitQueueChanged, resolveTimeoutMs } from './JobBackend';
+import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
@@ -67,6 +68,66 @@ export class Orchestrator {
 		return this.backends.get(type)?.drainsWithoutAutorun ?? false;
 	}
 
+	// True while THIS process is executing a run for `key` of `type`.
+	isRunning(type: JobType, key: string): boolean {
+		return this.backends.get(type)?.isRunning(key) ?? false;
+	}
+
+	/**
+	 * May the drain claim a job of this type right now, as far as its declared service
+	 * dependencies are concerned?
+	 *
+	 * Three deliberate properties:
+	 *
+	 *  * **No declaration means yes.** Vault-local types are unaffected by any outage.
+	 *  * **All-or-nothing.** A type needing two services must not run on one, so a
+	 *    partially-recovered dependency set answers `false` and any probe token taken
+	 *    along the way is handed straight back — stranding one service half-open with
+	 *    a token nobody will report on is how a recovery wedges.
+	 *  * **`acquireProbe` splits the two callers.** The autorunner's *kick* asks "could
+	 *    this type run?" and must not consume the single-flight probe token, because
+	 *    the worker it is about to start would then find the token already gone and
+	 *    exit without claiming anything. The worker's own pre-claim check is the one
+	 *    that consumes it.
+	 */
+	servicesHealthyFor(type: JobType, options: { acquireProbe?: boolean } = {}): boolean {
+		const services = this.getConfig(type).services;
+		if (!services || services.length === 0) return true;
+		const registry = this.plugin.serviceHealth;
+		if (!registry) return true;
+
+		const needProbe: ServiceId[] = [];
+		for (const service of services) {
+			if (registry.isHealthy(service)) continue;
+			if (registry.isHalfOpen(service)) {
+				needProbe.push(service);
+				continue;
+			}
+			return false;
+		}
+		if (needProbe.length === 0) return true;
+		if (options.acquireProbe === false) {
+			// Non-consuming: a half-open service with its token still free is drainable.
+			return needProbe.every(service => !registry.snapshotFor(service).probeInFlight);
+		}
+		const taken: ServiceId[] = [];
+		for (const service of needProbe) {
+			if (registry.tryAcquireProbe(service)) {
+				taken.push(service);
+				continue;
+			}
+			for (const held of taken) registry.releaseProbe(held);
+			return false;
+		}
+		return true;
+	}
+
+	// Every registered type that declares `service` as a dependency — how a breaker
+	// transition resolves which drains to kick.
+	typesDependingOn(service: ServiceId): JobType[] {
+		return this.jobTypes().filter(type => this.getConfig(type).services?.includes(service));
+	}
+
 	enqueue(type: JobType, params?: Record<string, unknown>, options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null> {
 		const backend = this.backends.get(type);
 		return backend ? backend.enqueue(params ?? {}, options) : Promise.resolve(null);
@@ -81,7 +142,11 @@ export class Orchestrator {
 		}
 		for (const backend of this.backends.values()) {
 			if (backend.drainsWithoutAutorun) continue; // skip memory types here
-			if (await backend.runNext() === 'ran') return;
+			// 'blocked' means a job WAS claimed and came back service-deferred, so this
+			// manual run is answered — reporting "nothing to run" would be a lie about a
+			// job the user can still see in the queue.
+			const outcome = await backend.runNext();
+			if (outcome === 'ran' || outcome === 'blocked') return;
 		}
 		new Notice('Orchestrate: nothing to run.');
 	}
@@ -167,9 +232,10 @@ export class Orchestrator {
 		let migrated = 0;
 		for (const entry of [...queued, ...running]) {
 			if (this.getConfig(entry.job.type).persistence !== 'memory') continue;
-			// Never re-home a job this process is still winding down — its own execute()
-			// is about to move the file, and racing that would lose the settle.
-			if (this.isCancelling(entry.job.type, entry.job.id)) continue;
+			// Never re-home a job this process is executing — its own execute() is about
+			// to move the file, and racing that would both lose the settle and leave a
+			// duplicate of the job in the memory queue.
+			if (this.isRunning(entry.job.type, entry.job.id)) continue;
 			await this.backends.get(entry.job.type)?.enqueue(entry.job.params ?? {});
 			await this.store.appendNotes(entry.file, 'Re-homed to the in-memory queue (type is now memory-persistence).');
 			await this.store.move(entry.file, entry.job, 'done');
@@ -181,12 +247,14 @@ export class Orchestrator {
 		const now = Date.now();
 		for (const entry of running) {
 			if (migratedPaths.has(entry.file.path)) continue;
-			// A cancelled job is still in running/ until its execute() finishes moving it
-			// to cancelled/, and a long workflow's `updated` stamp can already be past the
-			// stale cutoff by then. Bouncing it running → queued here would resurrect
-			// exactly the work the user just stopped, so cancellation wins over recovery:
-			// the run is alive, the sweep's premise ("no live timer owns this") is false.
-			if (this.isCancelling(entry.job.type, entry.job.id)) continue;
+			// The sweep's whole premise is "no live timer owns this job". A run registered
+			// in this process is the counter-example, so it wins over recovery — whether it
+			// is winding down from a cancel (still in running/ until execute() moves it) or
+			// simply taking longer than the stale cutoff, which a long search batch or a
+			// slow LLM step genuinely can. Bouncing either running → queued duplicates the
+			// job: the original keeps executing while a worker claims and runs the copy.
+			// `isRunning` subsumes the older `isCancelling` check.
+			if (this.isRunning(entry.job.type, entry.job.id)) continue;
 			const updatedRaw = entry.job.updated ?? entry.job.created;
 			const updatedAt = Date.parse(updatedRaw);
 			const cutoff = now - staleRunningMsForTimeout(resolveTimeoutMs(this.plugin, this.getConfig(entry.job.type)));

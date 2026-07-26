@@ -3,6 +3,7 @@ import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { isSearchIndexablePath } from '../../search/chunker';
 import { SearchEmbeddingUnavailableError, SearchServiceUnavailableError, type SearchResponse } from '../../search/types';
+import { scheduleQueueChanged } from '../JobBackend';
 
 const SEARCH_RETRY_AFTER_MS = 30_000;
 
@@ -298,7 +299,12 @@ class SearchJobProgress {
 		const file = await this.resolveFile();
 		if (!file) return;
 		await this.plugin.jobStore.setProgress(file, message);
-		this.plugin.ingestionEvents?.emit('orchestration-queue-updated', { queued: 0, running: 0 });
+		// Was `emit('orchestration-queue-updated', { queued: 0, running: 0 })` — a
+		// FABRICATED payload every 10 files, which every listener rendered as "the queue
+		// is empty" and the autorunner answered with a full kickAll(). It goes through
+		// the shared coalescer instead, so the counts are real and a long batch cannot
+		// out-emit the 250ms window.
+		scheduleQueueChanged(this.plugin, this.plugin.jobStore);
 	}
 
 	private async resolveFile(): Promise<TFile | null> {
