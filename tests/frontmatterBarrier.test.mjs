@@ -33,6 +33,36 @@ await esbuild.build({
 					'export const Platform = { isDesktopApp: true, isMobileApp: false };',
 					'export function normalizePath(path) { return String(path).replace(/\\/+/g, "/"); }',
 					'export const moment = Object.assign(() => ({ format: () => "" }), { format: () => "" });',
+					// Minimal flat-scalar YAML round-trip — only what the content-splice repair
+					// path under test needs (string/number/boolean/null values, no nesting, no
+					// quoted scalars in these fixtures).
+					'export function parseYaml(text) {',
+					'  const obj = {};',
+					'  if (!text) return obj;',
+					'  const lines = String(text).split(/\\r?\\n/);',
+					'  for (const line of lines) {',
+					'    const m = /^(\\S[^:\\r\\n]*):[ \\t]?(.*)$/.exec(line);',
+					'    if (!m) continue;',
+					'    const key = m[1].trim();',
+					'    const raw = m[2].trim();',
+					'    if (raw === "") { obj[key] = null; continue; }',
+					'    if (raw === "true") { obj[key] = true; continue; }',
+					'    if (raw === "false") { obj[key] = false; continue; }',
+					'    if (/^-?\\d+(\\.\\d+)?$/.test(raw)) { obj[key] = Number(raw); continue; }',
+					'    obj[key] = raw;',
+					'  }',
+					'  return obj;',
+					'}',
+					'export function stringifyYaml(obj) {',
+					'  if (obj === null || obj === undefined) return "\\n";',
+					'  const lines = [];',
+					'  for (const key of Object.keys(obj)) {',
+					'    const v = obj[key];',
+					'    if (v === null || v === undefined) lines.push(key + ":");',
+					'    else lines.push(key + ": " + v);',
+					'  }',
+					'  return lines.join("\\n") + "\\n";',
+					'}',
 				].join('\n'),
 				loader: 'js',
 			}));
@@ -61,11 +91,20 @@ const STALE_CACHE = {
 
 // Minimal Obsidian stand-in. processFrontMatter mirrors the real quirk under test: the
 // callback's base object comes from the metadata cache's view, so a stale cache means the
-// write is computed from (and merged against) outdated state.
+// write is computed from (and merged against) outdated state — and, matching the real
+// silent-drop bug, does not persist to `state.content` at all when the cache is stale.
+// `vault.process` is a real, content-based read-modify-write: it's what the content-splice
+// repair path uses to actually land the mutation.
 function makeApp({ content, cache }) {
 	const state = { content, cache, listeners: new Set(), writes: [] };
 	const app = {
-		vault: { read: async () => state.content },
+		vault: {
+			read: async () => state.content,
+			process: async (_file, fn) => {
+				state.content = fn(state.content);
+				return state.content;
+			},
+		},
 		metadataCache: {
 			getFileCache: () => state.cache,
 			on: (_name, cb) => {
@@ -161,7 +200,7 @@ test('matching offsets but diverged key set is stale', async () => {
 	assert.equal(state.writes.length, 1);
 });
 
-test('timeout: warns, writes anyway, and escalates when the raw re-read shows the value lost', async () => {
+test('timeout: warns, writes anyway, then repairs via content splice when the value is lost (WP-R5)', async () => {
 	globalThis.__CRUCIBLE_DEBUG__ = true;
 	const warns = [];
 	const errors = [];
@@ -171,17 +210,50 @@ test('timeout: warns, writes anyway, and escalates when the raw re-read shows th
 	console.error = (...args) => errors.push(args.join(' '));
 	try {
 		const { app, state } = makeApp({ content: CONTENT, cache: STALE_CACHE });
-		// The fake never persists to content, so `word-count` stays empty on re-read — the drop.
+		// The fake processFrontMatter never persists to content, so `word-count` stays
+		// empty on the first re-read — the drop the real bulk-churn bug produces. The
+		// content-splice repair must then land it via vault.process instead of merely
+		// logging the loss.
 		await updateFrontmatter(app, file, fm => { fm['word-count'] = 42; }, 50);
-		assert.equal(state.writes.length, 1);
+		assert.equal(state.writes.length, 1, 'the first (dropped) processFrontMatter attempt still happens');
 		assert.ok(warns.some(w => w.includes('stale')), `expected stale warning, got: ${warns.join(' | ')}`);
-		assert.ok(errors.some(e => e.includes('word-count')), `expected lost-key escalation, got: ${errors.join(' | ')}`);
+		assert.ok(
+			warns.some(w => w.includes('repairing via content-based splice')),
+			`expected repair warning, got: ${warns.join(' | ')}`,
+		);
+		assert.equal(errors.length, 0, `repair should land the value with no escalation, got: ${errors.join(' | ')}`);
+		const block = state.content.match(/---\n([\s\S]*?)\n---/)[1];
+		assert.ok(/word-count: 42/.test(block), `expected the repaired content to carry word-count: 42, got:\n${block}`);
+		assert.ok(/title: X/.test(block), 'other keys must survive the splice');
 		assert.equal(state.listeners.size, 0);
 	} finally {
 		console.warn = origWarn;
 		console.error = origError;
 		delete globalThis.__CRUCIBLE_DEBUG__;
 	}
+});
+
+test('sustained churn: cache stays stale past the deadline, but a job-claim mutation still lands (zero stranded — WP-R5)', async () => {
+	const content = ['---', 'id: job-1', 'status: queued', 'updated: 2026-07-26T18:04:00Z', '---', '', 'Job body.'].join('\n');
+	// Models the metadataCache's view of a job file mid-churn: a several-thousand-file
+	// bulk rename (`requeueServiceFailures`) keeps the cache's indexing behind for the
+	// whole barrier window and beyond, so it never reflects the real, current key set.
+	const churnStaleCache = {
+		frontmatter: { id: 'job-1' },
+		frontmatterPosition: { start: { offset: 0 }, end: { offset: 10 } },
+	};
+	const { app, state } = makeApp({ content, cache: churnStaleCache });
+	// The cache never settles (no fireChanged call) — mirrors the churn burst outliving
+	// JobStore.move's barrier window, which is exactly the observed strand.
+	await updateFrontmatter(app, file, fm => {
+		fm.status = 'running';
+		fm.updated = '2026-07-26T18:05:00Z';
+	}, 30);
+	const block = state.content.match(/---\n([\s\S]*?)\n---/)[1];
+	assert.ok(/status: running/.test(block), `expected the claim status to land, got:\n${block}`);
+	assert.ok(/updated: 2026-07-26T18:05:00Z/.test(block), `expected the claim timestamp to land, got:\n${block}`);
+	assert.ok(/id: job-1/.test(block), 'unrelated keys must survive the repair');
+	assert.equal(state.listeners.size, 0);
 });
 
 test('timeout verify passes when the value did land', async () => {
