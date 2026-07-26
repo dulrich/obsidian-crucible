@@ -34,6 +34,7 @@ await esbuild.build({
 const {
 	acceptCatalogSuggestion,
 	applyFetchedCatalog,
+	buildProviderModelSuggestRows,
 	catalogEntrySummaryTokens,
 	catalogSuggestionHasChanges,
 	clearAcceptedMarker,
@@ -44,6 +45,8 @@ const {
 	formatProbeStatusText,
 	getOrCreateProbeState,
 	getProbeStatus,
+	inferCapabilities,
+	PROVIDER_MODEL_SUGGEST_LIMIT,
 	resetCatalogField,
 	setProbeStatus,
 } = await import(pathToFileURL(outfile));
@@ -433,4 +436,61 @@ test('catalogEntrySummaryTokens surfaces inputModalities verbatim and a supporte
 
 test('catalogEntrySummaryTokens omits inputModalities/supportedParameters tokens when absent', () => {
 	assert.deepEqual(catalogEntrySummaryTokens({ id: 'x', type: 'llm' }), ['llm']);
+});
+
+// ── WP-1 — inline catalog browser panel: modelCapabilities.ts additions ─────────────────────────
+
+test('inferCapabilities is exported (WP-1: the catalog browser buckets on the same signal deriveCatalogSuggestion offers)', () => {
+	assert.deepEqual(inferCapabilities({ id: 'x', type: 'llm' }), ['chat']);
+	assert.equal(inferCapabilities({ id: 'x' }), undefined, 'no signal at all stays undefined, never []');
+});
+
+test('filterCatalogModelsForQuery still matches on id alone when displayName is absent (pre-WP-2 shape)', () => {
+	const models = [{ id: 'text-embedding-bge-m3' }, { id: 'llama-3' }];
+	assert.deepEqual(filterCatalogModelsForQuery(models, 'bge'), [models[0]]);
+});
+
+test('filterCatalogModelsForQuery (WP-1) also matches a case-insensitive substring of displayName', () => {
+	const models = [
+		{ id: '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf', displayName: 'BGE-M3 (F16)' },
+		{ id: 'llama-3', displayName: 'Llama 3' },
+	];
+	assert.deepEqual(filterCatalogModelsForQuery(models, 'bge-m3'), [models[0]], 'matches displayName even though the id has no contiguous "bge-m3" substring at the same casing');
+	assert.deepEqual(filterCatalogModelsForQuery(models, 'llama'), [models[1]]);
+});
+
+test('filterCatalogModelsForQuery matches either id or displayName, not just one', () => {
+	const models = [
+		{ id: 'qwen3-embedding-8b', displayName: 'Qwen3 Embedding' },
+		{ id: 'unrelated-id', displayName: 'Also Qwen-flavored' },
+	];
+	const hits = filterCatalogModelsForQuery(models, 'qwen');
+	assert.deepEqual(hits, models, 'first matches via id, second matches via displayName only');
+});
+
+test('filterCatalogModelsForQuery tolerates a non-string displayName (defensive cast) without throwing', () => {
+	const models = [{ id: 'a', displayName: 42 }, { id: 'b' }];
+	assert.deepEqual(filterCatalogModelsForQuery(models, 'a'), [models[0]]);
+});
+
+test('buildProviderModelSuggestRows: at or under the 100-row cap, overflowCount is 0 and nothing is dropped', () => {
+	const models = Array.from({ length: PROVIDER_MODEL_SUGGEST_LIMIT }, (_, i) => ({ id: `model-${i}` }));
+	const { rows, overflowCount } = buildProviderModelSuggestRows(models, '');
+	assert.equal(rows.length, PROVIDER_MODEL_SUGGEST_LIMIT);
+	assert.equal(overflowCount, 0);
+});
+
+test('buildProviderModelSuggestRows: exactly one over the cap reports overflowCount 1 and still caps rows at the limit', () => {
+	const models = Array.from({ length: PROVIDER_MODEL_SUGGEST_LIMIT + 1 }, (_, i) => ({ id: `model-${i}` }));
+	const { rows, overflowCount } = buildProviderModelSuggestRows(models, '');
+	assert.equal(rows.length, PROVIDER_MODEL_SUGGEST_LIMIT);
+	assert.equal(overflowCount, 1);
+});
+
+test('buildProviderModelSuggestRows: overflow is computed AFTER the query filter, not against the whole catalog', () => {
+	const matching = Array.from({ length: 5 }, (_, i) => ({ id: `bge-${i}` }));
+	const noise = Array.from({ length: 500 }, (_, i) => ({ id: `llama-${i}` }));
+	const { rows, overflowCount } = buildProviderModelSuggestRows([...matching, ...noise], 'bge');
+	assert.deepEqual(rows, matching);
+	assert.equal(overflowCount, 0, 'the 500 non-matching entries must never count toward overflow');
 });

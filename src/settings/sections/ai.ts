@@ -25,14 +25,13 @@ import {
 	clearProviderModelCatalog,
 	crossEncoderWarningText,
 	deriveCatalogSuggestion,
-	formatProbeStatusText,
 	getOrCreateProbeState,
-	getProbeStatus,
 	modelHasCapability,
 	resetCatalogField,
 	setModelCapability,
 	setProbeStatus,
 } from "../modelCapabilities";
+import { renderModelCatalogBrowser } from "../modelCatalogBrowser";
 
 export function renderAiSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	if (tab.editingProviderIndex !== -1) {
@@ -559,7 +558,6 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 		});
 	}
 
-	const catalogStatus = getProbeStatus(provider);
 	new Setting(containerEl)
 		.addButton(bt => bt.setButtonText('Add model').onClick(async () => {
 			models.push({ id: '', label: '', capabilities: ['chat'] });
@@ -593,9 +591,10 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 			tab.display();
 		}));
 
-	if (catalogStatus.state !== 'idle') {
-		containerEl.createEl('p', { text: formatProbeStatusText(catalogStatus), cls: 'crucible-probe-status mod-muted' });
-	}
+	// WP-1: the inline catalog browser panel replaces the bare status-line paragraph that used to
+	// live here — its collapsed header row IS that status line (`formatProbeStatusText`), plus an
+	// expand chevron into a filterable, paged view over the fetched catalog.
+	renderModelCatalogBrowser(containerEl, { tab, provider, catalogModels });
 }
 
 function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
