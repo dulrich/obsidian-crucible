@@ -1,6 +1,7 @@
 import { requestUrl } from 'obsidian';
 import { ProviderCompletionResult, ProviderFinishReason, ProviderImageExtractionResult } from '../types';
 import {
+	buildHttpErrorMessage,
 	HttpProviderClient,
 	IMAGE_EXTRACTION_SYSTEM_PROMPT,
 	IMAGE_EXTRACTION_USER_PROMPT,
@@ -26,10 +27,11 @@ export const googleClient: HttpProviderClient = {
 					maxOutputTokens: 4096,
 				},
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error("Google API returned " + response.status + ": " + response.text);
+			throw new Error(buildHttpErrorMessage('Google API', response));
 		}
 
 		const data = response.json as { candidates: { content?: { parts?: { text?: string }[] }, finishReason?: string }[] };
@@ -64,10 +66,11 @@ export const googleClient: HttpProviderClient = {
 					maxOutputTokens: 4096,
 				},
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`Google image extraction API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage('Google image extraction API', response));
 		}
 
 		const data = response.json as { candidates?: { content?: { parts?: { text?: string }[] }, finishReason?: string }[] };

@@ -300,6 +300,65 @@ export function warnIfCrossEncoderEmbedder(
 	notify?.(message);
 }
 
+// ── HTTP error message construction (WP-R3) ─────────────────────────────────────────────────
+//
+// `requestUrl` throws by default on any status 400+, so a client that calls it with the default
+// options can never reach an `if (response.status !== 200) throw ...` branch below it — the
+// default throw fires before the check runs, and the crafted error message that check built
+// (status + response body) was dead code. Every provider client now passes `throw: false`
+// explicitly so a non-2xx response reaches its own status check instead, and builds the message
+// through this one helper so a 429/quota body (the case this fix exists for) always surfaces its
+// status, a `retry-after` header when present, and a short excerpt of the response body
+// (preferring a JSON `error` field/`.message` over raw text) — bounded so an HTML error page or a
+// verbose stack trace doesn't blow the thrown message up. This is a formatting helper only: every
+// call site still throws its own error (same type as before this fix), preserving each client's
+// existing error-type contract.
+const HTTP_ERROR_BODY_EXCERPT_LIMIT = 200;
+
+function readResponseJsonSafe(response: { json: unknown }): unknown {
+	try {
+		return response.json;
+	} catch {
+		return undefined;
+	}
+}
+
+function findHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
+	if (!headers) return undefined;
+	const lower = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === lower) return value;
+	}
+	return undefined;
+}
+
+function excerptHttpErrorBody(response: { text: string; json: unknown }): string {
+	const json = readResponseJsonSafe(response);
+	let detail: string | undefined;
+	if (json && typeof json === 'object') {
+		const err = (json as Record<string, unknown>).error;
+		if (typeof err === 'string') detail = err;
+		else if (err && typeof err === 'object') {
+			const message = (err as Record<string, unknown>).message;
+			if (typeof message === 'string') detail = message;
+		}
+	}
+	const body = (detail ?? response.text ?? '').trim();
+	if (!body) return '';
+	return body.length > HTTP_ERROR_BODY_EXCERPT_LIMIT ? `${body.slice(0, HTTP_ERROR_BODY_EXCERPT_LIMIT)}…` : body;
+}
+
+// `prefix` is the caller's own "<Provider> <endpoint> API" framing (e.g. "OpenRouter rerank
+// API"). Called only after a `requestUrl({ ..., throw: false })` response comes back non-2xx.
+export function buildHttpErrorMessage(prefix: string, response: { status: number; text: string; json: unknown; headers?: Record<string, string> }): string {
+	const parts = [`${prefix} returned ${response.status}`];
+	const retryAfter = findHeader(response.headers, 'retry-after');
+	if (retryAfter) parts.push(`retry-after ${retryAfter}`);
+	const excerpt = excerptHttpErrorBody(response);
+	if (excerpt) parts.push(excerpt);
+	return parts.join(': ');
+}
+
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	const bytes = new Uint8Array(buffer);
 	let binary = '';
