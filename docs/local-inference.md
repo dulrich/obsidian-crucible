@@ -7,9 +7,9 @@ at it, and — mostly — the ways this goes wrong *without producing an error*.
 That last part is the point of the guide. Local inference rarely fails loudly. It fails by
 answering every request correctly-shaped and quietly wrong, passing every guard on the way.
 
-> **About the numbers in this guide.** They were re-measured on 2026-07-25 under a single protocol
-> (`runs/dispatch/esi-field-report-protocol.md`), on one machine, and the run record — including
-> every raw result — is in `runs/measurements/esi-fr-2026-07-25/`. Throughput is a median of
+> **About the numbers in this guide.** They were re-measured on 2026-07-25 under a single protocol,
+> on one machine, and the run record — including every raw result — is archived in the eval-harness
+> repo's local-inference-bench archive (`/home/_shared_code/eval-harness`). Throughput is a median of
 > repetitions, latency is p50/p95 over ≥100 requests, and quality is measured against ground truth
 > rather than against another server. A few figures marked **(provisional)** survive from earlier
 > ad-hoc sessions and say so where they appear. Anything stated without a number is a **structural
@@ -453,8 +453,8 @@ One machine's specifics, included because the *shape* of the problem generalises
 - [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) — the socket-activated GPU
   embedding/reranking containers, their systemd units, and the GPU assertion.
 - `context-control/references/rdna4-gpu-hang.md` — GPU hang signature and recovery.
-- `runs/dispatch/esi-field-report-protocol.md` — the measurement protocol that will replace every
-  provisional number above.
+- The eval-harness repo's local-inference-bench archive (`/home/_shared_code/eval-harness`) — the
+  measurement protocol and full raw results behind the numbers above.
 
 ---
 

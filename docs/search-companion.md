@@ -159,9 +159,10 @@ re-embeds rather than silently mixing. Re-measured in July 2026 with adequate st
 the two are **retrievally identical**: over 61 parallel Wikipedia articles both score en→fr P@1
 100% and en→ja 98.4% with discrimination spread 0.3513 vs 0.3515, and the small rank churn between
 them (mean top-10 Jaccard 0.9939) is matched exactly by two *builds of the same engine loading a
-byte-identical file*. See `runs/measurements/esi-fr-2026-07-25/` for the full result and
-[Local inference](local-inference.md) §6 for what it means in practice. The guard stays because it
-is cheap and fails closed — do not read it as evidence that the two pairs disagree.
+byte-identical file*. See the eval-harness repo's local-inference-bench archive
+(`/home/_shared_code/eval-harness`) for the full result and [Local inference](local-inference.md)
+§6 for what it means in practice. The guard stays because it is cheap and fails closed — do not
+read it as evidence that the two pairs disagree.
 
 **Why `bge-m3` is the recommended default.** `searchEmbeddingModel` is a plain user setting — the
 companion is dimension-agnostic and stores whatever width arrives, so nothing forces `bge-m3`
