@@ -1,11 +1,15 @@
-# Portable embedding-space keys, and passive query logging for a real S2
+# Search follow-ups: portable space keys, query logging, honest embedding failures, index inspection
 
-*Recommended model/effort — Claude: Sonnet/medium for WP-1, Opus/high for WP-2; Codex: Terra/medium for WP-1, Sol/medium-high for WP-2.*
+*Filename kept as `search-space-key-and-query-logging` because `INITIATIVE.md` `pending-plans`
+registers that slug; the scope grew past the name on 2026-07-25.*
+
+*Recommended model/effort — Claude: Sonnet/medium for WP-1 and WP-3, Opus/high for WP-2 and WP-4;
+Codex: Terra/medium for WP-1 and WP-3, Sol/medium-high for WP-2 and WP-4.*
 
 ## Context
 
-Both work packages come out of ESI WP-5 Stage 2, and both were found by the user doing ordinary
-things rather than by a review.
+All four work packages come out of ESI WP-5 Stage 2, and every one was found by the user doing
+ordinary things rather than by a review.
 
 **WP-1** surfaced when "Fetch Models" was used to configure the local GPU embedder. It populated
 the model field with `/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf` — the served id, which
@@ -41,6 +45,35 @@ property of the authorship. The user's own conclusion, and it is the right one.
 Logging by discipline fails for the obvious reason — you remember to log a query exactly when you
 are not in a hurry, which is not when the hard lookups happen. Logging passively does not.
 
+**WP-3 and WP-4 come from a single incident on 2026-07-25, during the E1 run.** A full
+`Orchestrate: Search rebuild index` ran for 35 of 55 batches, reporting success on every one, while
+producing **zero** embeddings. Diagnosed live:
+
+- Editing a model's id in the provider catalog (`/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf`
+  → `bge-m3`) does **not** rewrite the saved `{providerId, modelId}` ref in `searchEmbeddingModel`.
+  The ref is matched by `provider.models.find(m => m.id === ref.modelId)`
+  (`src/search/SearchManager.ts:639`), so it silently orphans.
+- `embedTexts` then throws `Embedding model not found: …` (`:640`) — correctly.
+- But `flush()` catches it (`:233`) and, because the rebuild path does **not** set
+  `requireEmbeddings` (only the backfill does, `SearchIndexWorkflow.ts:107`), takes the lenient
+  branch: `logWarn(…)` and upsert the batch FTS-only. `logWarn` is debug-gated, so it emits nothing.
+- The job records `status: done` with `Indexed search batch 35 / 55: 100 files, 275 chunks`.
+
+Observed end state: `/health` reporting `embeddedChunks: 0`, `embeddingModel: null`,
+`embeddingSpaces: []` against an index with a healthy FTS side (`total=2162` for `the`). **Every
+individual component behaved as designed.** The lenient branch is right for "the embedder is
+briefly down" and wrong for "the configured model does not exist", and it cannot tell them apart —
+one is transient, the other can never self-heal. That distinction is WP-3.
+
+The incident also exposes that there is **no window into the index and no lever short of
+`/v1/index/reset`**. `/health` reports five scalars; there is no per-space or per-model breakdown,
+no way to see which paths lack vectors, and no way to drop a superseded embedding space without
+wiping the vault's index entirely. Two consequences compound over time: a user who switches
+embedding models leaves the old space's vectors in the database forever — counted in
+`embeddedChunks`, excluded from the scan by schema 4's space filter, never reclaimed — and a
+failure like the one above is invisible until someone thinks to query `/health` by hand. That is
+WP-4.
+
 ## Decisions locked
 
 User-confirmed 2026-07-25:
@@ -49,6 +82,12 @@ User-confirmed 2026-07-25:
    invalidates every number in `runs/measurements/esi-fr-2026-07-25/`.
 2. **Query logging is a real feature, not test scaffolding** — it ships to users, so it is
    opt-in, local, and inspectable.
+3. **The index-inspection surface belongs on the dashboard**, alongside the existing Orphaned
+   Attachments section — same shape (scan for stale artifacts, offer targeted cleanup), same
+   precedent for a read-mostly view with a small number of destructive buttons.
+4. **Dropping a space's embeddings must not be a reset.** Chunks and FTS rows stay; only vectors
+   go. The coverage-aware skip then re-embeds those files on the next pass with no re-chunk
+   required — that mechanism already exists and is exactly what makes targeted cleanup safe.
 
 ## Key Changes
 
@@ -93,6 +132,59 @@ User-confirmed 2026-07-25:
   (`{id, text, source, targetPaths}`), with `targetPaths` seeded from what was actually opened.
   That closes the loop — D1 re-runs on real queries with real targets and no authorship bias.
 
+**WP-3 — A broken embedding configuration must fail loudly (~0.3 kSLOC touched, ~170k tokens, ~13 min wall).** Files: `src/search/SearchManager.ts`, `src/settings/sections/ai.ts`, `src/types.ts`, `tests/searchEmbeddingConfig.test.mjs` (new). *Model: mid (Claude Sonnet/medium; Codex Terra/medium) — the diagnosis is already done and the fix is narrow. Execution: subagent.* Independent of WP-1, WP-2 and WP-4.
+
+- **Separate "cannot embed right now" from "cannot ever embed with this configuration."** The
+  `flush()` catch at `src/search/SearchManager.ts:233` currently treats both as the same lenient
+  case. A missing provider or a model id absent from the catalog is a **configuration** error: it
+  will not resolve itself on the next batch, on the next restart, or ever. Route those to a
+  `Notice` (following `embedQuery`'s once-per-session precedent at `:620-623`) and to a job-visible
+  failure, while a transport error, timeout or 5xx keeps today's FTS-only degradation.
+- **Do not simply set `requireEmbeddings: true` on the rebuild path.** That would make a rebuild
+  abort on a transient embedder blip, which is the failure mode the lenient branch exists to
+  prevent, and would trade a silent wrong result for a fragile one. The distinction is the error's
+  *class*, not the caller's strictness.
+- **Validate the ref where it is chosen, not only where it is used.** Add a resolve helper
+  (`providerId` + `modelId` → model, or a typed "orphaned" result) and use it in the search
+  settings section to render an inline warning when `searchEmbeddingModel` or `searchRerankModel`
+  points at a model no longer in its provider's catalog. The user hit this by *renaming* a catalog
+  entry; the clear-then-repick workflow fixed it, but nothing said it needed fixing.
+- **Audit the other consumers of `{providerId, modelId}` refs.** Agents and chains hold the same
+  shape and presumably orphan the same way. Report what is affected even if the fix is scoped to
+  search; a silent-orphan class that spans surfaces should be recorded as such.
+- Tests: an orphaned embedding ref surfaces an error rather than upserting FTS-only chunks; a
+  transport failure still degrades to FTS-only and does **not** fail the job; the once-per-session
+  notice does not fire per batch.
+
+**WP-4 — Search index inspection and targeted maintenance (~0.7 kSLOC touched, ~320k tokens, ~25 min wall).** Files: `scripts/search-companion.mjs`, `src/search/client.ts`, `src/search/types.ts`, `src/ingestionDashboard.ts`, `styles.css`, `tests/searchIndexStats.test.mjs` (new). *Model: top (Claude Opus/high; Codex Sol/medium-high) — it adds destructive operations to a persisted store and must get vault scoping right. Execution: subagent.* Best after WP-1 (space ids become portable, so a space breakdown is worth displaying) but not blocked by it.
+
+- **A stats endpoint that answers "what is actually in there."** Per vault: chunk and path counts,
+  a breakdown by `embedding_space` and `embedding_model` with counts and coverage, chunks with no
+  vector, `unattributedEmbeddedChunks` (already reported by `/health` and currently unexplained
+  anywhere), and database size. This is the view that would have made today's incident obvious in
+  one glance instead of 35 batches.
+- **Every statement keys on `vault_id`** — see the schema-5 quirk in `AGENTS.md`. An aggregate or
+  delete that omits the vault filter reports or destroys another vault's data, and that exact class
+  of bug has already shipped once here in four separate statements. This is the single highest-risk
+  part of the WP.
+- **Targeted deletes, each narrower than reset**: drop all vectors for a named `embedding_space`
+  (chunks and FTS survive; the coverage-aware skip re-embeds on the next pass), and drop chunks for
+  paths that no longer exist in the vault. Both are per-vault. Reset stays as the blunt instrument.
+- **A dashboard section** modelled on Orphaned Attachments (`src/ingestionDashboard.ts`): the
+  breakdown as a table, a coverage indicator, and the cleanup buttons — destructive ones carrying
+  `mod-warning` and routed through `ConfirmModal`, with a `gap` in the action cell per the UI
+  standards. Pills follow the fleet taxonomy: coverage is a **status** pill, a space's chunk count
+  at rest is **neutral** — a count is not an alarm.
+- **Surface a health warning when the vault has chunks but zero vectors while semantic search is
+  on.** That single condition is today's incident, and it is cheap to detect.
+- Do **not** add a rebuild-progress view here. That is the queue's job and it already has one; this
+  section describes the index's contents, not the work in flight.
+- Tests: stats aggregate correctly with two vaults in one database and never cross the boundary
+  (extend `tests/searchVaultIsolation.test.mjs`'s two-vault fixture — it is the only one that
+  writes distinct vault ids); dropping a space leaves chunk and FTS rows intact and coverage
+  correctly reports those files as needing embeddings; dropping one vault's space leaves the
+  other's untouched.
+
 ## Public Interfaces
 
 | Surface | Change |
@@ -101,8 +193,14 @@ User-confirmed 2026-07-25:
 | `searchQueryLogEnabled` | **New** setting, default **false** |
 | `searchQueryLogPath` | **New**; must sit under a search-excluded prefix |
 | `Search: export query log as query set` | **New** command |
+| `GET /v1/index/stats` | **New**; per-vault chunk/path counts, breakdown by space and model, coverage |
+| `POST /v1/embeddings/drop` | **New**; drops vectors for one `embeddingSpace` in one vault, keeps chunks + FTS |
+| `POST /v1/chunks/prune` | **New**; drops chunks for paths absent from the vault, one vault only |
+| `GET /health` | Warns when a vault holds chunks but zero vectors while semantic search is on |
 
-No forced re-embed from either WP: WP-1's default path reproduces the current key byte-for-byte.
+No forced re-embed from any WP: WP-1's default path reproduces the current key byte-for-byte, and
+WP-4's drops are opt-in and explicitly user-triggered. **No schema bump** — schema 5 already carries
+every column WP-4 reads.
 
 ## Test Plan / Verification
 
@@ -115,6 +213,11 @@ Gates per the repo standard (`npm run lint`, `npx tsc -noEmit -skipLibCheck`, `n
 3. Query log is inert when disabled: no file created, no writes.
 4. The log path is rejected at save time if it is not search-excluded.
 5. Exported query sets validate against `dseries-judge.mjs prepare`'s schema.
+6. An orphaned model ref fails the indexing job; a transport error does not (WP-3's whole point).
+7. Stats and every delete are vault-scoped — asserted against a two-vault fixture, not a one-vault
+   one, per the schema-5 lesson that every companion test but one pins a single constant.
+8. Dropping a space leaves chunks and FTS rows intact, and those files then report coverage
+   unsatisfied.
 
 ## Assumptions
 
@@ -126,3 +229,13 @@ Gates per the repo standard (`npm run lint`, `npx tsc -noEmit -skipLibCheck`, `n
    orchestration queue and needs no rotation scheme on day one.
 3. WP-2's value is realized weeks later, not on landing. It should ship early precisely because
    its output accrues with time.
+4. **The orphaned-ref failure is reproduced, not inferred** (2026-07-25). Observed live: a catalog
+   entry renamed to `bge-m3` while `searchEmbeddingModel.modelId` still held the `.gguf` path; 35
+   of 55 rebuild batches completed `status: done` with zero embeddings; `/health` reporting
+   `embeddedChunks: 0` against a healthy FTS side. Re-picking the model through the settings
+   clear-then-pick workflow rewrote both refs correctly.
+5. **Whether agents and chains orphan the same way is unverified.** They hold the same
+   `{providerId, modelId}` shape, so it is likely, but WP-3 should confirm before claiming it.
+6. **WP-4's stats are read-mostly and can be computed on demand.** The counts come from indexed
+   columns over tens of thousands of rows; no cache, no materialized view, no background job on day
+   one. Revisit only if a measurement says otherwise.
