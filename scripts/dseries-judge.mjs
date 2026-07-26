@@ -41,6 +41,7 @@ const USAGE = `Usage: node scripts/dseries-judge.mjs <prepare|judge|report> [opt
 prepare  --queries <path>   S2 query set: JSON array of
                             {id, text, source: "troublesome"|"fill",
                              targetPaths?: string[],   // known answer notes -> rank reporting
+                             excludePaths?: string[],  // notes containing the query text itself
                              answerable?: boolean}     // false = answer provably not in the vault
          --a <arm>          label:vaultId:mode[:runtimeSpec]   mode = fts | vector | rerank
          --b <arm>          the other arm
@@ -136,19 +137,37 @@ async function rerankResults(opts, query, results) {
 	return scored.map(s => s.result);
 }
 
+// Scoring a retrieval system on finding its own input is circular, and this vault makes that a
+// live hazard rather than a hypothetical: the user logs half-remembered lookups verbatim into
+// monthly Observations notes, and FEEDBACK.md carries the query text of anything discussed with an
+// agent. Both then rank first on an exact-phrase match while containing no answer at all. Such
+// paths are dropped BEFORE the top-k cut, so an excluded hit does not consume a result slot, and
+// the drop is counted per arm so the run record can show it happened.
+function dropExcluded(results, excludePaths) {
+	if (!excludePaths?.length) return { results, excluded: 0 };
+	const kept = results.filter(r => !excludePaths.includes(r.path));
+	return { results: kept, excluded: results.length - kept.length };
+}
+
 async function runArm(arm, query, opts) {
-	const body = { vaultId: arm.vaultId, query: query.text, limit: arm.mode === 'rerank' ? opts.rerankTopN : opts.limit };
+	// Over-fetch so exclusions cannot leave the arm short and manufacture a result-count asymmetry.
+	const overfetch = query.excludePaths?.length ?? 0;
+	const body = { vaultId: arm.vaultId, query: query.text, limit: (arm.mode === 'rerank' ? opts.rerankTopN : opts.limit) + overfetch };
 	if (arm.mode !== 'fts') {
 		body.queryEmbedding = await embedQuery(arm.runtime, query.text);
 		if (opts.space) body.embeddingSpace = opts.space;
 	}
 	const res = await postJson(`${opts.target}/v1/search`, body);
-	let results = res.results ?? [];
+	// Exclude before reranking as well as before the cut: a reranker spending its window on the
+	// query's own text is the same waste, just later in the pipeline.
+	const { results: filtered, excluded } = dropExcluded(res.results ?? [], query.excludePaths);
+	let results = filtered;
 	if (arm.mode === 'rerank') results = (await rerankResults(opts, query.text, results)).slice(0, opts.limit);
 	return {
 		mode: res.mode,
 		semanticAvailable: res.semanticAvailable,
 		message: res.message,
+		excludedHits: excluded,
 		results: results.slice(0, opts.limit).map(r => ({
 			path: r.path, title: r.title, heading: r.heading, snippet: r.snippet,
 		})),
@@ -183,6 +202,9 @@ async function prepare(opts) {
 		// 50% and understate the vector leg on the queries it can actually serve.
 		if (q.answerable === false && q.targetPaths?.length) {
 			throw new Error(`Query ${q.id}: answerable:false contradicts targetPaths`);
+		}
+		for (const p of q.excludePaths ?? []) {
+			if (q.targetPaths?.includes(p)) throw new Error(`Query ${q.id}: ${p} is both a target and an exclusion`);
 		}
 	}
 	const seed = opts.seed ?? String(Date.now());
