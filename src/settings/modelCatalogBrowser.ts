@@ -6,6 +6,8 @@ import {
 	acceptCatalogSuggestion,
 	catalogEntrySummaryTokens,
 	deriveCatalogSuggestion,
+	deriveModelDisplayLabel,
+	fillModelLabelIfEmpty,
 	filterCatalogModelsForQuery,
 	formatProbeStatusText,
 	getOrCreateProbeState,
@@ -95,11 +97,13 @@ export function filterModelsByBucket(models: ProviderCatalogModel[], bucket: Mod
 
 /**
  * Display-name resolution for a catalog entry: the OpenRouter server-side display name (WP-2's
- * `ProviderCatalogModel.displayName`) when present and non-blank, else the raw id.
+ * `ProviderCatalogModel.displayName`) when present and non-blank; else (WP-3) a file-path-shaped
+ * id's derived basename (`deriveModelDisplayLabel` — the same auto-alias logic the Use button
+ * applies to a newly created `ProviderModel.label`, so the browser shows the exact label a pick
+ * would produce); else the raw id.
  */
 export function catalogEntryDisplayName(entry: ProviderCatalogModel): string {
-	const displayName = entry.displayName;
-	return displayName && displayName.trim().length > 0 ? displayName : entry.id;
+	return deriveModelDisplayLabel(entry.id, entry.displayName) || entry.id;
 }
 
 // ── Pure logic: paging ──────────────────────────────────────────────────────────────────────────
@@ -148,15 +152,29 @@ export interface UseCatalogEntryResult {
  * Dedupes on id: if `provider.models` already has a row with this id, nothing is created or
  * mutated — the caller (the DOM renderer) is expected to surface a "already configured" Notice and
  * otherwise no-op (no save, no re-render), per the brief.
+ *
+ * WP-3: `label` is auto-filled via `deriveModelDisplayLabel` (always onto an empty label here,
+ * since the row is brand new — the "only when empty" rule the pick path in `ai.ts` also follows is
+ * trivially satisfied by construction). `resolveDescribedPrecision`, when given, is the same
+ * best-effort `describeModel()` fallback the re-rendered Accept row in `ai.ts` uses
+ * (`describedPrecisionFor`) — passed in rather than called directly so this function stays free of
+ * any Obsidian/`CrucibleSettingTab` dependency; only used when the catalog entry itself has no
+ * quantization signal, same gating as `deriveCatalogSuggestion` already applies internally.
  */
-export function useCatalogEntry(provider: Provider, entry: ProviderCatalogModel): UseCatalogEntryResult {
+export function useCatalogEntry(
+	provider: Provider,
+	entry: ProviderCatalogModel,
+	resolveDescribedPrecision?: (model: ProviderModel) => string | undefined,
+): UseCatalogEntryResult {
 	const models = provider.models ?? (provider.models = []);
 	const existing = models.find(m => m.id === entry.id);
 	if (existing) return { created: false, model: existing };
 
 	const model: ProviderModel = { id: entry.id, label: "" };
+	fillModelLabelIfEmpty(model, entry);
 	const probeState = getOrCreateProbeState(model);
-	acceptCatalogSuggestion(model, deriveCatalogSuggestion(entry), probeState);
+	const describedPrecision = entry.quantization === undefined ? resolveDescribedPrecision?.(model) : undefined;
+	acceptCatalogSuggestion(model, deriveCatalogSuggestion(entry, describedPrecision), probeState);
 	models.push(model);
 	return { created: true, model };
 }
@@ -167,6 +185,10 @@ export interface ModelCatalogBrowserDeps {
 	tab: CrucibleSettingTab;
 	provider: Provider;
 	catalogModels: ProviderCatalogModel[];
+	// WP-3: threaded through to `useCatalogEntry` for the Use button — see that function's doc
+	// comment for why this is a plain injected callback rather than an import cycle back to
+	// `sections/ai.ts` (the only place `describedPrecisionFor`'s WeakMap-backed cache lives).
+	resolveDescribedPrecision: (model: ProviderModel) => string | undefined;
 }
 
 interface BrowserSessionState {
@@ -306,7 +328,7 @@ export function renderModelCatalogBrowser(container: HTMLElement, deps: ModelCat
 			const useBtn = row.createEl("button", { text: "Use" });
 			useBtn.type = "button";
 			useBtn.addEventListener("click", () => {
-				const result = useCatalogEntry(provider, entry);
+				const result = useCatalogEntry(provider, entry, deps.resolveDescribedPrecision);
 				if (!result.created) {
 					new Notice(`"${displayName}" is already configured on this provider.`);
 					return;
