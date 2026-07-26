@@ -2,10 +2,28 @@ import type CruciblePlugin from '../main';
 import type { Orchestrator } from './Orchestrator';
 import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob } from './types';
 import type { CancelJobOutcome, StopJobOutcome } from './cancellation';
+import type { RunOutcome } from './JobBackend';
 import { Semaphore } from './utils/semaphore';
 import { computeShouldDrain, readTypeAutorun, readTypeMinIntervalOverride, resolveMaxParallel } from './autorunGate';
 
 const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
+
+/**
+ * The guaranteed wake.
+ *
+ * Recovery used to hang on `FileJobBackend.scheduleRetryWake` — ONE `setTimeout` per
+ * backend that every new deferral *replaced*, firing a kick through an optional chain
+ * (`plugin.orchestrationAutoRunner?.kickDrainType`). Lose that timer (a later deferral
+ * with a longer delay overwrites it, the optional chain is nullish during teardown, a
+ * reload drops it entirely) and the queue simply stops: work sits deferred with
+ * nothing scheduled to look at it again.
+ *
+ * This interval is the backstop that makes that failure mode uninteresting. It ticks
+ * the breaker (open windows elapse into half-open) and kicks every type, so the worst
+ * case for any stall is one minute rather than forever. It is a *backstop*, not the
+ * primary path — transitions still kick dependent types immediately.
+ */
+export const SERVICE_HEALTH_TICK_MS = 60_000;
 
 // Drains the unified queue per job type. Each type runs up to its configured
 // `maxParallel` workers, each spaced by the type's shared MinIntervalGate, with a
@@ -26,12 +44,33 @@ export class OrchestrationAutoRunner {
 	private readonly redrainRequested = new Set<JobType>();
 	private readonly globalSem: Semaphore;
 	private fileDrainReady = false;
+	private unsubscribeHealth: (() => void) | null = null;
+	private healthTimer: ReturnType<typeof setInterval> | null = null;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly orchestrator: Orchestrator) {
 		this.globalSem = new Semaphore(() => Math.max(1, plugin.settings.orchestrationMaxConcurrent || 1));
 		const bus = plugin.ingestionEvents;
 		if (bus) {
 			this.unsubscribe = bus.on('orchestration-queue-updated', () => this.kickAll());
+		}
+		// Subscribed in the constructor, not wired up by a caller: the runner is the only
+		// thing that can act on a recovery, so it must not be possible to construct one
+		// that isn't listening.
+		const health = plugin.serviceHealth;
+		if (health) {
+			this.unsubscribeHealth = health.onTransition(transition => {
+				// Only recoveries are actionable. An `open` transition needs no kick — the
+				// drain is already refusing to claim.
+				if (transition.to === 'open') return;
+				for (const type of this.orchestrator.typesDependingOn(transition.service)) {
+					this.kickDrainType(type);
+				}
+			});
+			this.healthTimer = setInterval(() => {
+				if (this.disposed) return;
+				health.tick();
+				this.kickAll();
+			}, SERVICE_HEALTH_TICK_MS);
 		}
 		plugin.app.workspace.onLayoutReady(() => {
 			setTimeout(() => {
@@ -47,6 +86,10 @@ export class OrchestrationAutoRunner {
 		this.disposed = true;
 		this.unsubscribe?.();
 		this.unsubscribe = null;
+		this.unsubscribeHealth?.();
+		this.unsubscribeHealth = null;
+		if (this.healthTimer !== null) clearInterval(this.healthTimer);
+		this.healthTimer = null;
 	}
 
 	// Manual "Run next": execute a single file-backed job regardless of autorun.
@@ -59,7 +102,7 @@ export class OrchestrationAutoRunner {
 	// runs exactly the job identified by `key` (file job id / memory entry key),
 	// reusing the backend claim guards so it can't double-run a job a drain already
 	// took. Bounded by the global semaphore; no per-type pacing (one-shot user intent).
-	async runJob(type: JobType, key: string): Promise<'ran' | 'empty' | 'disabled'> {
+	async runJob(type: JobType, key: string): Promise<RunOutcome> {
 		if (this.disposed) return 'empty';
 		await this.globalSem.acquire();
 		try {
@@ -136,6 +179,9 @@ export class OrchestrationAutoRunner {
 	kickDrainType(type: JobType): void {
 		if (this.disposed) return;
 		if (!this.shouldDrain(type)) return;
+		// Non-consuming: starting a drain must not eat the single half-open probe token
+		// that the worker it is about to start needs in order to claim anything.
+		if (!this.orchestrator.servicesHealthyFor(type, { acquireProbe: false })) return;
 		// Already draining (auto or manual): record the kick so it replays after the
 		// current drain ends.
 		if (this.draining.has(type)) {
@@ -187,6 +233,14 @@ export class OrchestrationAutoRunner {
 			if (this.draining.get(type) !== 'manual' && !this.shouldDrain(type)) return;
 			const config = this.orchestrator.getConfig(type);
 
+			// The breaker, checked per claim rather than once per drain: the FIRST job of an
+			// outage is always claimed before anyone knows the service is down, and it is
+			// that job coming back 'blocked' that opens the breaker. Re-asking here is what
+			// stops the second one. A manual drain is exempt — a user's click is intent, and
+			// doubles as a probe. This is also the call that CONSUMES a half-open probe
+			// token, which is why it sits immediately before the claim.
+			if (this.draining.get(type) !== 'manual' && !this.orchestrator.servicesHealthyFor(type)) return;
+
 			// Memory types know precisely when they are empty (and can refill); file
 			// types report "maybe" (hasPending === true), so this block is a no-op for
 			// them and the actual emptiness check is the claim inside runNextOfType.
@@ -203,14 +257,16 @@ export class OrchestrationAutoRunner {
 			await gate.wait();
 
 			await this.globalSem.acquire();
-			let outcome: 'ran' | 'empty' | 'disabled';
+			let outcome: RunOutcome;
 			try {
 				outcome = await this.orchestrator.runNextOfType(type);
 			} finally {
 				this.globalSem.release();
 			}
 			// Only a successful run keeps the worker going; 'empty' (nothing claimable,
-			// possibly because a peer took the last job) and 'disabled' end it.
+			// possibly because a peer took the last job), 'disabled', and 'blocked' (the
+			// job deferred because a dependency is down — the whole queue behind it would
+			// defer identically) all end it.
 			if (outcome !== 'ran') return;
 		}
 	}

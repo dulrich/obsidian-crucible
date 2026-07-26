@@ -6,7 +6,17 @@ import type { Workflow, WorkflowContext } from './workflows/Workflow';
 import { CancelJobOutcome, RemoveQueuedOutcome, applyCancellation, cancelledResultFor } from './cancellation';
 import { logError } from '../log';
 
-export type RunOutcome = 'ran' | 'empty' | 'disabled';
+/**
+ * How one claim-and-run attempt ended, as the drain loop reads it.
+ *
+ * `blocked` is the service-health outcome: a job WAS claimed and run, and it came
+ * back deferred because a *dependency* is down rather than because of anything about
+ * the job. It ends the type's drain for this pass — that is the whole point. Without
+ * it a service-level deferral reported as `'ran'`, so the worker looped straight back
+ * for the next job and swept the entire queue at ~40 jobs/s against a dead service,
+ * rewriting every job file on the way past.
+ */
+export type RunOutcome = 'ran' | 'empty' | 'disabled' | 'blocked';
 
 /**
  * One persistence strategy for a registered job type. `FileJobBackend` (durable,
@@ -45,6 +55,16 @@ export interface JobBackend {
 	 * isn't bounced `running → queued` and re-run.
 	 */
 	isCancelling(key: string): boolean;
+	/**
+	 * True while THIS process is executing a run for `key`, cancelled or not.
+	 *
+	 * `scan()`'s stale-running sweep reads it: the sweep's premise is "no live timer
+	 * owns this job", and a run registered here is the counter-example. Without it a
+	 * long job whose `updated` stamp has aged past the stale cutoff gets bounced
+	 * `running → queued` while it is still executing, then claimed and run a second
+	 * time — two concurrent runs of one job, each writing the same note.
+	 */
+	isRunning(key: string): boolean;
 	/**
 	 * Remove one *queued* job by key — the other half of the single Cancel verb, for
 	 * work that has not started. Takes the same claim guard the drain takes, so a job
@@ -95,6 +115,62 @@ export async function emitQueueChanged(plugin: CruciblePlugin, store: JobStore):
 	} catch (err) {
 		logError('failed to emit orchestration-queue-updated', err);
 	}
+}
+
+/**
+ * Coalescing window for the per-job queue-changed emits.
+ *
+ * Every `orchestration-queue-updated` costs two full `listFolder` passes here, a
+ * `listFolder` re-read in each UI listener, and a `kickAll()` in the autorunner that
+ * can cost another `listFolder` per enabled type. At ~2 emits per job (claim +
+ * settle) that is quadratic in queue depth: draining the 2,022-job requeue cohort
+ * ran into millions of awaited `readJob` calls on the main thread.
+ */
+export const QUEUE_CHANGE_COALESCE_MS = 250;
+
+interface QueueChangeCoalescer {
+	lastEmitAt: number;
+	timer: ReturnType<typeof setTimeout> | null;
+}
+
+// Per JobStore (i.e. per vault queue), so two backends draining different types share
+// one window rather than each getting its own.
+const queueChangeCoalescers = new WeakMap<JobStore, QueueChangeCoalescer>();
+
+/**
+ * Leading-plus-trailing-edge coalesced `emitQueueChanged`, for the high-frequency
+ * per-job emits (claim / defer / settle / progress).
+ *
+ * Leading edge matters: the first change in a quiet period still emits immediately,
+ * so a single enqueue wakes the drain and refreshes the UI with no added latency. Only
+ * a *storm* is collapsed, and it collapses to at most one emit per window plus a
+ * trailing one carrying the settled counts.
+ *
+ * Bulk operations deliberately do NOT use this — `Orchestrator.clearQueued` /
+ * `removeQueuedJob` emit exactly once for the whole operation, which is a stronger
+ * guarantee than coalescing and is asserted by tests.
+ */
+export function scheduleQueueChanged(plugin: CruciblePlugin, store: JobStore): void {
+	let state = queueChangeCoalescers.get(store);
+	if (!state) {
+		state = { lastEmitAt: 0, timer: null };
+		queueChangeCoalescers.set(store, state);
+	}
+	// A trailing emit is already booked; it will carry whatever this change did.
+	if (state.timer) return;
+	const now = Date.now();
+	const since = now - state.lastEmitAt;
+	if (since >= QUEUE_CHANGE_COALESCE_MS) {
+		state.lastEmitAt = now;
+		void emitQueueChanged(plugin, store);
+		return;
+	}
+	const pending = state;
+	pending.timer = setTimeout(() => {
+		pending.timer = null;
+		pending.lastEmitAt = Date.now();
+		void emitQueueChanged(plugin, store);
+	}, QUEUE_CHANGE_COALESCE_MS - since);
 }
 
 // Resolves the effective per-run timeout: a per-type override if set, else the

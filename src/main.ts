@@ -36,7 +36,8 @@ import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
 import type { AutoSourceFn } from './orchestration/EnrichmentQueueAdapter';
 import { migrateJobTypeControls, readTypeAutorun, setTypeControl } from './orchestration/autorunGate';
-import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeMetadataJobConfig } from './orchestration/jobTypeConfig';
+import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
+import { ServiceHealthRegistry } from './orchestration/serviceHealth';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
 import { ImageMetadataExtractWorkflow } from './orchestration/workflows/ImageMetadataExtractWorkflow';
@@ -112,6 +113,13 @@ export default class CruciblePlugin extends Plugin {
 	agentManager: AgentManager;
 	jobStore: JobStore;
 	orchestrator: Orchestrator;
+	/**
+	 * Per-dependency circuit breaker for the queue. Deliberately in-memory and NEVER
+	 * persisted: a breaker that survives a reload can wedge a service that recovered
+	 * while Obsidian was closed, and rebuilding the hysteresis costs at most three
+	 * deferrals with zero failures.
+	 */
+	serviceHealth: ServiceHealthRegistry;
 	ingestionEvents: IngestionEventBus;
 	noteLocks: NoteLockManager;
 	private noteLockOverlay: NoteLockOverlay;
@@ -167,17 +175,20 @@ export default class CruciblePlugin extends Plugin {
 		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
 		this.jobStore = new JobStore(this);
+		// Before the orchestrator and the autorunner: both read it, and the autorunner
+		// subscribes to its transitions in its own constructor.
+		this.serviceHealth = new ServiceHealthRegistry();
 		this.orchestrator = new Orchestrator(this, this.jobStore);
 		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
 		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow(), transcriptRefineJobConfig());
-		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow());
+		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow(), youtubeTrackerJobConfig());
 		this.orchestrator.register('youtube_tracker_consolidate', new YoutubeTrackerConsolidateWorkflow());
 		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
 		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
 		this.orchestrator.register('youtube_channel_enrich', new YoutubeChannelEnrichWorkflow(), youtubeChannelEnrichJobConfig(this));
-		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow());
+		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow(), youtubeChannelEnrichSweepJobConfig());
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
 		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
 		this.orchestrator.register('image_metadata_extract', new ImageMetadataExtractWorkflow(), imageMetadataJobConfig());
@@ -327,6 +338,7 @@ export default class CruciblePlugin extends Plugin {
 		this.noteLockOverlay?.dispose();
 		this.triggers?.dispose();
 		this.orchestrationAutoRunner?.dispose();
+		this.serviceHealth?.dispose();
 		this.enrichmentQueue?.dispose();
 		this.ingestionEvents?.dispose();
 	}

@@ -105,6 +105,52 @@ test('scan keeps recently running jobs active', async () => {
 	assert.equal(report.running, 1);
 });
 
+// The stale sweep's premise is "no live timer owns this job". A run registered in
+// THIS process is the counter-example, and the guard used to be `isCancelling` — which
+// is true only for a job someone asked to stop. A merely long job (a search batch, an
+// LLM step) whose `updated` stamp aged past the cutoff was bounced running → queued
+// while it was still executing, then claimed and run a second time: two concurrent
+// runs of one job, both writing the same note.
+test('scan does not re-queue a job this process is still executing, however stale its stamp', async () => {
+	const ancient = new Date(Date.now() - 10 * 60 * 60_000).toISOString();
+	const file = { path: 'queue/running/long.md' };
+	const job = { id: 'job-long', type: 'command_run', status: 'running', created: ancient, updated: ancient, params: {} };
+	const moves = [];
+	const store = makeStore({ running: [{ file, job }] });
+	store.move = async (f, j, status) => {
+		moves.push(status);
+		return { file: f, job: { ...j, status } };
+	};
+
+	const plugin = {
+		settings: {
+			orchestrationEnabled: true,
+			orchestrationAutorunTimeoutSeconds: 600,
+			orchestrationRoutineNoticesEnabled: {},
+		},
+	};
+	const orchestrator = new Orchestrator(plugin, store);
+	let release = () => {};
+	const gate = new Promise(resolve => { release = resolve; });
+	orchestrator.register('command_run', { async run() { await gate; return { status: 'done' }; } },
+		{ persistence: 'file', maxParallel: 1, minIntervalMs: 0 });
+
+	// Start the run the way the drain would, so it registers in the backend's running
+	// registry, then scan while it is mid-flight.
+	const execution = orchestrator.backends.get('command_run').execute({ file, job });
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	const report = await orchestrator.scan({ notify: false });
+
+	assert.equal(report.recovered, 0, 'a live run is not a stranded job');
+	assert.equal(report.running, 1);
+	assert.deepEqual(moves, [], 'and nothing was moved out from under it');
+
+	release();
+	await execution;
+	assert.deepEqual(moves, ['done'], 'it settled itself, exactly once');
+});
+
 function makeStore(folders) {
 	return {
 		ensureFolders: async () => {},

@@ -4,7 +4,7 @@ import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
-import { JobBackend, RunOutcome, emitQueueChanged, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
+import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout, scheduleQueueChanged } from './JobBackend';
 import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
@@ -57,7 +57,7 @@ export class FileJobBackend implements JobBackend {
 					if (promotesLane || promotesPriority) {
 						if (promotesLane) await this.store.setLane(existing.file, lane);
 						if (promotesLane || promotesPriority) await this.store.setPriority(existing.file, priority);
-						void this.emitQueueUpdate();
+						this.emitQueueUpdate();
 						routineJobNotice(this.plugin, this.type, `Orchestrate: promoted ${this.type} (${existing.job.id})`);
 						return { ...existing.job, lane, priority };
 					}
@@ -68,7 +68,7 @@ export class FileJobBackend implements JobBackend {
 		}
 		const job = await this.store.enqueue(this.type, { params, priority: options.priority, lane: options.lane, inputPaths: options.inputPaths });
 		routineJobNotice(this.plugin, this.type, `Orchestrate: queued ${this.type} (${job.id})`);
-		void this.emitQueueUpdate();
+		this.emitQueueUpdate();
 		return job;
 	}
 
@@ -76,16 +76,14 @@ export class FileJobBackend implements JobBackend {
 		if (!this.plugin.settings.orchestrationEnabled) return 'disabled';
 		const moved = await this.claimNext();
 		if (!moved) return 'empty';
-		await this.execute(moved);
-		return 'ran';
+		return this.execute(moved);
 	}
 
 	async runJob(id: string): Promise<RunOutcome> {
 		if (!this.plugin.settings.orchestrationEnabled) return 'disabled';
 		const moved = await this.claimById(id);
 		if (!moved) return 'empty';
-		await this.execute(moved);
-		return 'ran';
+		return this.execute(moved);
 	}
 
 	// Cancels the running job with this id. A queued job is not running, so it
@@ -99,12 +97,16 @@ export class FileJobBackend implements JobBackend {
 		return this.running.isCancelling(id);
 	}
 
+	isRunning(id: string): boolean {
+		return this.running.isRunning(id);
+	}
+
 	// Removes one queued job of this type. A job a worker has already claimed reads as
 	// `not-queued` here — it is on its way to running/, where `cancelJob` addresses it.
 	async removeQueued(id: string): Promise<RemoveQueuedOutcome> {
 		await this.store.ensureFolders();
 		const queued = await this.store.listFolder('queued');
-		const entry = queued.find(e => e.job.type === this.type && e.job.id === id && !this.claimed.has(e.file.path));
+		const entry = queued.find(e => e.job.type === this.type && e.job.id === id && this.isRetirable(e));
 		return entry ? this.retire(entry) : 'not-queued';
 	}
 
@@ -117,7 +119,7 @@ export class FileJobBackend implements JobBackend {
 		const queued = await this.store.listFolder('queued');
 		let removed = 0;
 		for (const entry of queued) {
-			if (entry.job.type !== this.type || this.claimed.has(entry.file.path)) continue;
+			if (entry.job.type !== this.type || !this.isRetirable(entry)) continue;
 			// A job the store refused stays queued and is simply not counted — one bad
 			// job must not abort the clear for the several hundred behind it.
 			if (await this.retire(entry) === 'removed') removed++;
@@ -136,8 +138,38 @@ export class FileJobBackend implements JobBackend {
 	// policy. Moving also inherits JobStore.move's rollback invariant — a frontmatter
 	// write failure renames the file back and rethrows, leaving the job fully queued,
 	// which is exactly the case this must report as `'failed'` rather than swallow.
+	/**
+	 * Is this snapshot entry still ours to retire?
+	 *
+	 * `listFolder('queued')` awaits a `readJob` per file — over a 2,000-job inbox that
+	 * loop is long — while Obsidian `TFile` objects are *live*: a rename mutates
+	 * `file.path` in place. So an entry read early in the snapshot can, by the time we
+	 * act on it, already have been claimed by a drain worker and renamed into
+	 * `running/`, or even have finished and landed in `done/`. The old guard
+	 * (`!claimed.has(file.path)`) could not see that: `claimed` is cleared the moment
+	 * the claim's move completes, and it holds the *inbox* path anyway, so the check
+	 * passed and `retire()` moved a mid-execution job into `cancelled/` — after which
+	 * the workflow's own settle renamed it out again.
+	 *
+	 * The live path is the authoritative bucket (the folder IS the job's state), so
+	 * comparing it against the queued folder is the exact "did this move?" test, and it
+	 * needs no extra store round trip.
+	 */
+	private isRetirable(entry: { file: TFile; job: OrchestrationJob }): boolean {
+		if (this.claimed.has(entry.file.path)) return false;
+		if (this.running.isRunning(entry.job.id)) return false;
+		const queuedFolder = this.store.folderForStatus('queued');
+		return entry.file.path.startsWith(`${queuedFolder}/`);
+	}
+
 	private async retire(entry: { file: TFile; job: OrchestrationJob }): Promise<RemoveQueuedOutcome> {
-		this.claimed.add(entry.file.path);
+		// Re-checked here, with no await between the check and the claim, so the window
+		// between the caller's `find` and this call cannot be used either.
+		if (!this.isRetirable(entry)) return 'not-queued';
+		// `TFile.path` mutates on rename, so the key to release is the one we added, not
+		// whatever the file's path reads as after the move.
+		const claimPath = entry.file.path;
+		this.claimed.add(claimPath);
 		try {
 			const moved = await this.store.move(entry.file, entry.job, 'cancelled');
 			try {
@@ -152,7 +184,7 @@ export class FileJobBackend implements JobBackend {
 			logError(`failed to cancel queued job ${entry.job.id}; it stays queued`, err);
 			return 'failed';
 		} finally {
-			this.claimed.delete(entry.file.path);
+			this.claimed.delete(claimPath);
 		}
 	}
 
@@ -197,13 +229,14 @@ export class FileJobBackend implements JobBackend {
 		});
 		if (!next && Number.isFinite(nextRetryAt)) this.scheduleRetryWake(nextRetryAt - Date.now());
 		if (!next) return null;
-		this.claimed.add(next.file.path);
+		const claimPath = next.file.path;
+		this.claimed.add(claimPath);
 		try {
 			const moved = await this.store.move(next.file, next.job, 'running');
-			void this.emitQueueUpdate();
+			this.emitQueueUpdate();
 			return moved;
 		} finally {
-			this.claimed.delete(next.file.path);
+			this.claimed.delete(claimPath);
 		}
 	}
 
@@ -215,20 +248,24 @@ export class FileJobBackend implements JobBackend {
 		const queued = await this.store.listFolder('queued');
 		const next = queued.find(e => e.job.type === this.type && e.job.id === id && !this.claimed.has(e.file.path));
 		if (!next) return null;
-		this.claimed.add(next.file.path);
+		const claimPath = next.file.path;
+		this.claimed.add(claimPath);
 		try {
 			const moved = await this.store.move(next.file, next.job, 'running');
-			void this.emitQueueUpdate();
+			this.emitQueueUpdate();
 			return moved;
 		} finally {
-			this.claimed.delete(next.file.path);
+			this.claimed.delete(claimPath);
 		}
 	}
 
-	private async execute(moved: { file: TFile; job: OrchestrationJob }): Promise<void> {
+	// Returns the drain outcome: 'ran' for anything the drain should keep going after,
+	// 'blocked' when the job came back deferred because a declared *service* is down —
+	// which ends the type's drain for this pass.
+	private async execute(moved: { file: TFile; job: OrchestrationJob }): Promise<RunOutcome> {
 		if (!this.isWorkflowEnabled()) {
 			await this.failEntry(moved, `Workflow "${moved.job.type}" is disabled in settings`);
-			return;
+			return 'ran';
 		}
 		// Registered for the whole of execute(), including the store moves that settle
 		// the job. `isCancelling` therefore stays true until the file has left
@@ -245,7 +282,7 @@ export class FileJobBackend implements JobBackend {
 			}
 			if (result.status === 'deferred') {
 				await this.deferEntry(moved, result);
-				return;
+				return result.serviceUnhealthy ? 'blocked' : 'ran';
 			}
 			if (result.notes) {
 				await this.store.appendNotes(moved.file, result.notes);
@@ -254,14 +291,18 @@ export class FileJobBackend implements JobBackend {
 			if (result.status === 'cancelled') {
 				settlement = 'cancelled';
 				await this.cancelEntry(moved, result);
-				return;
+				return 'ran';
 			}
 			if (result.status === 'failed') {
 				await this.failEntry(moved, result.error ?? 'Workflow returned failed status', result);
-				return;
+				return 'ran';
 			}
 			await this.store.move(moved.file, moved.job, 'done');
-			void this.emitQueueUpdate();
+			// A completed job is the only honest evidence that its dependencies are alive,
+			// and it is evidence for ALL of them: the workflow could not have finished with
+			// one of them down. This is the half-open probe's success path.
+			this.reportServicesHealthy();
+			this.emitQueueUpdate();
 			this.emitTrackerEvent(result, 'done');
 			routineJobNotice(this.plugin, this.type, `Orchestrate: ${moved.job.id} → done`);
 		} catch (e) {
@@ -269,6 +310,13 @@ export class FileJobBackend implements JobBackend {
 		} finally {
 			run.finish(settlement);
 		}
+		return 'ran';
+	}
+
+	private reportServicesHealthy(): void {
+		const registry = this.plugin.serviceHealth;
+		if (!registry) return;
+		for (const service of this.config.services ?? []) registry.reportSuccess(service);
 	}
 
 	// Terminal settle for a cancelled run. Deliberately not failEntry: no `error` is
@@ -277,7 +325,7 @@ export class FileJobBackend implements JobBackend {
 	// follows the routine-notice gate rather than the unconditional failure Notice.
 	private async cancelEntry(moved: { file: TFile; job: OrchestrationJob }, result: WorkflowResult): Promise<void> {
 		await this.store.move(moved.file, moved.job, 'cancelled');
-		void this.emitQueueUpdate();
+		this.emitQueueUpdate();
 		routineJobNotice(
 			this.plugin,
 			this.type,
@@ -286,13 +334,21 @@ export class FileJobBackend implements JobBackend {
 	}
 
 	private async deferEntry(moved: { file: TFile; job: OrchestrationJob }, result: WorkflowResult): Promise<void> {
+		// Report BEFORE the store writes: the breaker must open even if settling the job
+		// file then fails, because the whole point is to stop the next claim.
+		const unhealthy = result.serviceUnhealthy;
+		if (unhealthy) {
+			this.plugin.serviceHealth?.reportFailure(unhealthy.service, unhealthy.kind, unhealthy.reason, result.retryAfterMs);
+		}
 		const retryAfterMs = Math.max(1000, result.retryAfterMs ?? 30_000);
 		const deferUntil = new Date(Date.now() + retryAfterMs).toISOString();
 		const message = result.notes ?? result.error ?? `Deferred; retrying after ${deferUntil}`;
 		await this.store.setDeferred(moved.file, message, deferUntil);
 		await this.store.move(moved.file, { ...moved.job, deferUntil }, 'queued');
+		// Best-effort: the autorunner's 60s tick + kickAll is the guaranteed wake now, so
+		// this timer being replaceable (one per backend) is no longer a recovery hazard.
 		this.scheduleRetryWake(retryAfterMs);
-		void this.emitQueueUpdate();
+		this.emitQueueUpdate();
 	}
 
 	private scheduleRetryWake(delayMs: number): void {
@@ -300,19 +356,42 @@ export class FileJobBackend implements JobBackend {
 		if (this.retryTimer) clearTimeout(this.retryTimer);
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = null;
-			void this.emitQueueUpdate();
+			this.emitQueueUpdate();
 			this.plugin.orchestrationAutoRunner?.kickDrainType(this.type);
 		}, delay);
 	}
 
+	/**
+	 * Settles a job into `failed/`, and **never throws**.
+	 *
+	 * It is the last step of both the failure path and `execute`'s catch-all, so a
+	 * store write that throws here used to take out the type worker with it: the
+	 * rejection propagated through `runNext` → `typeWorker` → the `Promise.all` in
+	 * `drainType`, ending that type's drain (as an unhandled rejection on the
+	 * `void drainType(...)` call) AND leaving the job stranded in `running/`.
+	 *
+	 * The choice made here: swallow, log, and let the job stay in `running/`. It is
+	 * observable there — the queue monitor renders it, and `scan()`'s stale-running
+	 * sweep bounces it back to `queued/` once no live run owns it — whereas an
+	 * un-drained *type* is invisible until someone notices the queue stopped moving.
+	 * `JobStore.move` rolls its rename back on a frontmatter failure, so "still in
+	 * running/" is a consistent state rather than a half-moved one.
+	 */
 	private async failEntry(
 		moved: { file: TFile; job: OrchestrationJob },
 		error: string,
 		result?: WorkflowResult,
 	): Promise<void> {
-		await this.store.setError(moved.file, error);
-		await this.store.move(moved.file, moved.job, 'failed');
-		void this.emitQueueUpdate();
+		try {
+			await this.store.setError(moved.file, error);
+			await this.store.move(moved.file, moved.job, 'failed');
+			this.emitQueueUpdate();
+		} catch (err) {
+			logError(
+				`failed to settle job ${moved.job.id} into failed/; it stays in running/ for scan() to recover (original error: ${error})`,
+				err,
+			);
+		}
 		if (result) this.emitTrackerEvent(result, 'failed');
 		new Notice(`Orchestrate: ${moved.job.id} → failed (${error})`);
 	}
@@ -332,8 +411,11 @@ export class FileJobBackend implements JobBackend {
 		}
 	}
 
-	private emitQueueUpdate(): Promise<void> {
-		return emitQueueChanged(this.plugin, this.store);
+	// Coalesced (leading + trailing edge): a drain settles two emits per job, and each
+	// emit costs two listFolder passes here plus one per listener plus a kickAll. See
+	// scheduleQueueChanged. Bulk operations still emit exactly once, from the Orchestrator.
+	private emitQueueUpdate(): void {
+		scheduleQueueChanged(this.plugin, this.store);
 	}
 
 	private emitTrackerEvent(result: WorkflowResult, status: 'done' | 'failed'): void {
