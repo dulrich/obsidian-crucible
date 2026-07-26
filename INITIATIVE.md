@@ -9,8 +9,8 @@ initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
 pending-plans:
   - "[[semantic-vector-leg-and-reranker]]"
-  - "[[embedding-space-identity-and-runtime-bakeoff]]"
   - "[[search-space-key-and-query-logging]]"
+  - "[[sprint-exit-queue-health-and-scrub]]"
 initiative-status: active
 initiative-cadence: as-needed
 ---
