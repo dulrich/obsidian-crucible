@@ -19,6 +19,7 @@ import { bindText, bindToggle, bindDropdown, bindSearch } from "../bind";
 import {
 	acceptCatalogSuggestion,
 	applyFetchedCatalog,
+	CatalogSuggestion,
 	catalogEntrySummaryTokens,
 	catalogSuggestionHasChanges,
 	clearAcceptedMarker,
@@ -399,10 +400,14 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 			// points at it (search embedding/reranker, and the same shape in agents/chains).
 			// Warn *before* the rename, not only after — the settings-render half of this fix
 			// (orchestration.ts's dangling-ref inline warning) can only catch it once broken.
+			// WP-1: notices for this row (search-refs warning, embedding field detail,
+			// cross-encoder warning, probe-suggestion provenance) are collected here and rendered
+			// as ONE consolidated block at the bottom of the row, below the fields — see the
+			// `crucible-model-notices` container built after the catalog-entry checks below.
 			const referencedBy = searchRefsPointingAt(tab, provider, model);
+			const noticeEntries: { text: string; variant?: 'info' }[] = [];
 			if (referencedBy.length > 0) {
-				modelRow.createDiv({
-					cls: 'crucible-inline-warning',
+				noticeEntries.push({
 					text: `Currently used as ${referencedBy.join(' and ')} (Settings → Orchestrate → Search). Changing this id will orphan that setting until it is re-picked.`,
 				});
 			}
@@ -477,7 +482,15 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 				.addToggle(t => t
 					.setTooltip('Embedding model')
 					.setValue(modelHasCapability(model, 'embedding'))
-					.onChange(async (v) => { setModelCapability(model, 'embedding', v); clearAcceptedMarker(probeState, 'capabilities'); await tab.plugin.saveSettings(); }));
+					.onChange(async (v) => {
+						setModelCapability(model, 'embedding', v);
+						clearAcceptedMarker(probeState, 'capabilities');
+						await tab.plugin.saveSettings();
+						// WP-1: the Embedding dimensions / Embedding precision fields below are
+						// gated on this capability — re-render so they appear/disappear live,
+						// matching how the rest of the tab re-renders on a state change.
+						tab.display();
+					}));
 			capabilities.controlEl.createSpan({ cls: 'crucible-inline-control-label', text: 'Image' });
 			capabilities
 				.addToggle(t => t
@@ -491,99 +504,115 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					.setValue(modelHasCapability(model, 'rerank'))
 					.onChange(async (v) => { setModelCapability(model, 'rerank', v); clearAcceptedMarker(probeState, 'capabilities'); await tab.plugin.saveSettings(); }));
 
-			const dimsSetting = new Setting(modelRow)
-				.setName('Embedding dimensions')
-				.setDesc('Optional, but recommended for embedding models: indexing checks every sub-batch against it and stops on a mismatch, so a wrong-width model fails after ≤96 texts instead of after a whole flush has been embedded.');
-			if (probeState.accepted.embeddingDimensions) {
-				dimsSetting.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
-				dimsSetting.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
-					resetCatalogField(model, 'embeddingDimensions', probeState);
-					await tab.plugin.saveSettings();
-					tab.display();
-				}));
-			}
-			dimsSetting.addText(t => {
-				t.setPlaceholder('Dims')
-					.setValue(model.embeddingDimensions ? String(model.embeddingDimensions) : '')
-					.onChange(async (v) => {
-						const n = Number(v.trim());
-						if (Number.isFinite(n) && n > 0) model.embeddingDimensions = Math.floor(n);
-						else delete model.embeddingDimensions;
-						clearAcceptedMarker(probeState, 'embeddingDimensions');
+			// WP-1: gated on the Embedding capability (mirroring the Probe button's existing gate
+			// below) — the Rerank toggle above stays unconditional. The Embedding toggle's onChange
+			// re-renders the tab, so these fields appear/disappear live as the capability changes.
+			if (modelHasCapability(model, 'embedding')) {
+				const dimsSetting = new Setting(modelRow)
+					.setName('Embedding dimensions')
+					.setDesc('Optional but recommended — validates embedding sub-batches early; see the notice below.');
+				if (probeState.accepted.embeddingDimensions) {
+					dimsSetting.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
+					dimsSetting.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
+						resetCatalogField(model, 'embeddingDimensions', probeState);
 						await tab.plugin.saveSettings();
-					});
-				t.inputEl.type = 'number';
-				t.inputEl.min = '1';
-				t.inputEl.step = '1';
-				t.inputEl.addClass('pi-width-half');
-			});
-
-			// WP-3 item 3: an explicit, never-automatic one-shot embed() call — shown only where
-			// it's actually useful (the model claims embedding capability, and there's no width
-			// recorded yet). Writes through the SAME accepted-marker path as every other probed
-			// field (probeEmbeddingDimensions calls acceptCatalogSuggestion internally), so the
-			// badge + Reset control above already covers undo; no separate mechanism needed.
-			if (modelHasCapability(model, 'embedding') && !model.embeddingDimensions) {
-				dimsSetting.addButton(bt => bt
-					.setButtonText('Probe dimensions')
-					.setTooltip('Calls this model once with a short test input and reads back the vector length. A local model that needs to load first can take seconds to minutes.')
-					.onClick(async () => {
-						if (!model.id) {
-							new Notice('Set a model id before probing dimensions.');
-							return;
-						}
-						bt.setDisabled(true);
-						bt.setButtonText('Probing…');
-						new Notice('Probing embedding dimensions — a local model may need to load first, which can take a while.');
-						try {
-							await probeEmbeddingDimensions(
-								(inputs) => tab.plugin.providerManager.embed(provider, model.id, inputs),
-								model,
-								probeState,
-							);
-							await tab.plugin.saveSettings();
-							tab.display();
-						} catch (err) {
-							new Notice(`Could not probe embedding dimensions: ${err instanceof Error ? err.message : String(err)}`);
-							bt.setButtonText('Probe dimensions');
-							bt.setDisabled(false);
-						}
+						tab.display();
 					}));
-			}
+				}
+				dimsSetting.addText(t => {
+					t.setPlaceholder('Dims')
+						.setValue(model.embeddingDimensions ? String(model.embeddingDimensions) : '')
+						.onChange(async (v) => {
+							const n = Number(v.trim());
+							if (Number.isFinite(n) && n > 0) model.embeddingDimensions = Math.floor(n);
+							else delete model.embeddingDimensions;
+							clearAcceptedMarker(probeState, 'embeddingDimensions');
+							await tab.plugin.saveSettings();
+						});
+					t.inputEl.type = 'number';
+					t.inputEl.min = '1';
+					t.inputEl.step = '1';
+					t.inputEl.addClass('pi-width-half');
+				});
 
-			const variantSetting = new Setting(modelRow)
-				.setName('Embedding precision (fallback)')
-				.setDesc('Only needed when the server cannot report what it loaded — Crucible asks first, and a reported value always wins. The same weights at a different precision are a different vector space, so setting this when it matters (e.g. f16 vs fp32) keeps the two from being mixed. Leave empty unless you know: changing it re-embeds the vault.');
-			if (probeState.accepted.embeddingVariant) {
-				variantSetting.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
-				variantSetting.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
-					resetCatalogField(model, 'embeddingVariant', probeState);
-					await tab.plugin.saveSettings();
-					tab.display();
-				}));
-			}
-			variantSetting.addText(t => {
-				t.setPlaceholder('e.g. f16, fp32, q4_k_m')
-					.setValue(model.embeddingVariant ?? '')
-					.onChange(async (v) => {
-						const trimmed = v.trim();
-						if (trimmed) model.embeddingVariant = trimmed;
-						else delete model.embeddingVariant;
-						clearAcceptedMarker(probeState, 'embeddingVariant');
+				// WP-3 item 3: an explicit, never-automatic one-shot embed() call — shown only where
+				// it's actually useful (no width recorded yet; the embedding-capability half of the
+				// gate is now the enclosing `if` above). Writes through the SAME accepted-marker
+				// path as every other probed field (probeEmbeddingDimensions calls
+				// acceptCatalogSuggestion internally), so the badge + Reset control above already
+				// covers undo; no separate mechanism needed.
+				if (!model.embeddingDimensions) {
+					dimsSetting.addButton(bt => bt
+						.setButtonText('Probe dimensions')
+						.setTooltip('Calls this model once with a short test input and reads back the vector length. A local model that needs to load first can take seconds to minutes.')
+						.onClick(async () => {
+							if (!model.id) {
+								new Notice('Set a model id before probing dimensions.');
+								return;
+							}
+							bt.setDisabled(true);
+							bt.setButtonText('Probing…');
+							new Notice('Probing embedding dimensions — a local model may need to load first, which can take a while.');
+							try {
+								await probeEmbeddingDimensions(
+									(inputs) => tab.plugin.providerManager.embed(provider, model.id, inputs),
+									model,
+									probeState,
+								);
+								await tab.plugin.saveSettings();
+								tab.display();
+							} catch (err) {
+								new Notice(`Could not probe embedding dimensions: ${err instanceof Error ? err.message : String(err)}`);
+								bt.setButtonText('Probe dimensions');
+								bt.setDisabled(false);
+							}
+						}));
+				}
+
+				const variantSetting = new Setting(modelRow)
+					.setName('Embedding precision (fallback)')
+					.setDesc('Optional — only needed if the server can\'t report precision itself; see the notice below.');
+				if (probeState.accepted.embeddingVariant) {
+					variantSetting.nameEl.createSpan({ cls: 'crucible-probe-accepted-badge', text: 'probe-accepted' });
+					variantSetting.addExtraButton(cb => cb.setIcon('undo-2').setTooltip('Reset to your entered value').onClick(async () => {
+						resetCatalogField(model, 'embeddingVariant', probeState);
 						await tab.plugin.saveSettings();
-					});
-				t.inputEl.addClass('pi-width-half');
-			});
+						tab.display();
+					}));
+				}
+				variantSetting.addText(t => {
+					t.setPlaceholder('e.g. f16, fp32, q4_k_m')
+						.setValue(model.embeddingVariant ?? '')
+						.onChange(async (v) => {
+							const trimmed = v.trim();
+							if (trimmed) model.embeddingVariant = trimmed;
+							else delete model.embeddingVariant;
+							clearAcceptedMarker(probeState, 'embeddingVariant');
+							await tab.plugin.saveSettings();
+						});
+					t.inputEl.addClass('pi-width-half');
+				});
+
+				// WP-1: the detail trimmed off the two setDescs above folds into the consolidated
+				// notices block below rather than disappearing.
+				noticeEntries.push({
+					text: 'Embedding dimensions: indexing checks every sub-batch against it and stops on a mismatch, so a wrong-width model fails after ≤96 texts instead of after a whole flush has been embedded.',
+					variant: 'info',
+				});
+				noticeEntries.push({
+					text: 'Embedding precision (fallback): Crucible asks the server first, and a reported value always wins. The same weights at a different precision are a different vector space, so setting this when it matters (e.g. f16 vs fp32) keeps the two from being mixed. Leave empty unless you know: changing it re-embeds the vault.',
+					variant: 'info',
+				});
+			}
 
 			// D2 rule 2 (Surface): only rendered when the current id matches a fetched catalog
-			// entry. Nothing here writes to `model` — the Accept button below is the only control
-			// in this row that does.
+			// entry. Nothing here writes to `model` — the Accept button in the notices block below
+			// is the only control in this row that does.
 			const catalogEntry = catalogModels.find(m => m.id === model.id);
+			let suggestion: CatalogSuggestion | undefined;
 			if (catalogEntry) {
 				const warning = crossEncoderWarningText(catalogEntry);
-				if (warning) {
-					modelRow.createDiv({ cls: 'crucible-inline-warning', text: warning });
-				}
+				if (warning) noticeEntries.push({ text: warning });
 
 				// WP-8: when the catalog entry itself has no quantization signal (OpenRouter, plain
 				// OpenAI, Infinity, or a bare-`/models` local server), a best-effort describeModel()
@@ -593,16 +622,34 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 				const fallbackPrecision = catalogEntry.quantization === undefined
 					? describedPrecisionFor(tab, provider, model)
 					: undefined;
-				const suggestion = deriveCatalogSuggestion(catalogEntry, fallbackPrecision);
-				if (catalogSuggestionHasChanges(model, suggestion)) {
-					new Setting(modelRow)
-						.setName('Probe suggestion')
+				const derivedSuggestion = deriveCatalogSuggestion(catalogEntry, fallbackPrecision);
+				if (catalogSuggestionHasChanges(model, derivedSuggestion)) suggestion = derivedSuggestion;
+			}
+
+			// WP-1: ONE consolidated notices block at the bottom of the row, below the fields and
+			// above the (provider-level) catalog browser — the search-refs rename warning, the
+			// embedding-field detail folded out of the setDesc text above, the cross-encoder
+			// warning, and the probe-suggestion provenance (with its still-functional Accept CTA)
+			// all land here instead of being interleaved through the row. Each is pushed onto
+			// `noticeEntries` (or `suggestion`) at most once above, so each renders at most once.
+			if (noticeEntries.length > 0 || suggestion) {
+				const notices = modelRow.createDiv({ cls: 'crucible-model-notices' });
+				for (const entry of noticeEntries) {
+					notices.createDiv({
+						cls: entry.variant === 'info' ? 'crucible-inline-warning is-info' : 'crucible-inline-warning',
+						text: entry.text,
+					});
+				}
+				if (suggestion && catalogEntry) {
+					const acceptedSuggestion = suggestion;
+					const suggestionNotice = new Setting(notices)
 						.setDesc(buildProvenanceText(provider, catalogEntry))
 						.addButton(bt => bt.setButtonText('Accept').setCta().onClick(async () => {
-							acceptCatalogSuggestion(model, suggestion, probeState);
+							acceptCatalogSuggestion(model, acceptedSuggestion, probeState);
 							await tab.plugin.saveSettings();
 							tab.display();
 						}));
+					suggestionNotice.settingEl.addClass('crucible-inline-warning', 'is-info');
 				}
 			}
 		});
