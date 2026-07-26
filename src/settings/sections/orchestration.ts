@@ -135,12 +135,12 @@ function describeImageExtractionModel(tab: CrucibleSettingTab, ref: ProviderMode
 	return `${providerName} · ${model.label || model.id}`;
 }
 
-// Unlike embedding/image-extraction, reranking has no dedicated model-capability checkbox
-// (that lives on the AI settings tab, out of WP-5's scope) — any configured model can be picked.
-// Point it at a provider that either speaks Infinity's native /rerank (a separate
-// openai-compatible entry, typically http://127.0.0.1:4803 with no /v1 suffix — that container
-// is deliberately started without --url-prefix) or any chat model, which is scored via the
-// slower, fuzzier complete()-based fallback instead.
+// Reranking DOES have a dedicated model-capability checkbox now (the "Rerank" toggle in the
+// Capabilities row on the AI settings tab, `sections/ai.ts`) — `rerankModelRefs` above filters the
+// Pick list to models marked with it. Point it at a provider that either speaks Infinity's native
+// /rerank (a separate openai-compatible entry, typically http://127.0.0.1:4803 with no /v1 suffix
+// — that container is deliberately started without --url-prefix) or any chat model, which is
+// scored via the slower, fuzzier complete()-based fallback instead.
 function describeRerankModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
 	const resolution = resolveProviderModelRef(tab.plugin.settings.providers, ref);
 	if (resolution.status === 'unset') return 'No reranker model selected. The Rerank button stays hidden on the search modal.';

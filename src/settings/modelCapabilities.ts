@@ -1,4 +1,5 @@
 import { Provider, ProviderCatalogModel, ProviderModel, ProviderModelCapability } from '../types';
+import { normalizePrecision } from '../providers/shared';
 
 /**
  * Reading and writing a provider model's capability flags.
@@ -176,6 +177,81 @@ export function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCap
 	return hasSignal ? Array.from(inferred) : undefined;
 }
 
+// A model id "looks like a filesystem path" when it starts with `/` (an absolute path, the shape
+// every local llama.cpp/GGUF-serving alias in practice takes — see the crucible-inference design)
+// or ends in `.gguf` (a relative path or bare filename). Deliberately NARROWER than "contains a
+// slash at all": a vendor-namespaced catalog id like `openai/text-embedding-3-small` also contains
+// a slash, but is not a filesystem path and must not have its "vendor/" prefix stripped and shown
+// as if it were a meaningful basename.
+function isFilePathShapedModelId(id: string): boolean {
+	return id.startsWith('/') || /\.gguf$/i.test(id);
+}
+
+// Strips any directory prefix and a trailing `.gguf` extension (case-insensitive) — shared by
+// `deriveModelDisplayLabel` and `precisionFromModelId`, both of which need to inspect only the
+// final, decoration-free path segment.
+function modelIdBasename(id: string): string {
+	const segments = id.split('/');
+	const last = segments[segments.length - 1] ?? id;
+	return last.replace(/\.gguf$/i, '');
+}
+
+/**
+ * WP-3 — auto-alias. What `ProviderModel.label` should be auto-filled with on an explicit pick
+ * (type-ahead pick in `ai.ts`, or the catalog browser's Use button in `modelCatalogBrowser.ts`),
+ * never overwriting a value the user already typed (callers must apply the empty-only rule
+ * themselves; this function only computes the candidate).
+ *
+ * Order: (1) the catalog's own server-reported `displayName` (WP-2 — OpenRouter's `name`) always
+ * wins when present and non-blank; (2) for a file-path-shaped id (a local GGUF alias like
+ * `/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf`) the basename with the `.gguf` extension
+ * stripped, e.g. `bge-m3-f16` — the quantization suffix is deliberately KEPT (it is real,
+ * distinguishing information, unlike the directory noise around it); (3) otherwise `''` — a plain
+ * id such as `openai/text-embedding-3-small` is already exactly as readable as any label we could
+ * derive from it, so leaving the label empty (not, say, `text-embedding-3-small`) avoids
+ * manufacturing a second, redundant name for something that already has a good one.
+ */
+export function deriveModelDisplayLabel(id: string, displayName?: string): string {
+	if (displayName && displayName.trim().length > 0) return displayName;
+	if (!isFilePathShapedModelId(id)) return '';
+	return modelIdBasename(id);
+}
+
+/**
+ * The "only when empty" half of auto-alias, factored out as its own pure, directly-testable step
+ * so both call sites (the type-ahead pick handler in `ai.ts`, and `useCatalogEntry`'s Use button
+ * in `modelCatalogBrowser.ts`) express the exact same rule rather than each re-implementing the
+ * empty check inline: a label the user already typed is NEVER overwritten by a pick, whatever the
+ * catalog entry suggests. A no-op when `model.label` is already non-empty.
+ */
+export function fillModelLabelIfEmpty(model: ProviderModel, entry: ProviderCatalogModel): void {
+	if (model.label) return;
+	model.label = deriveModelDisplayLabel(entry.id, entry.displayName);
+}
+
+// The trailing precision token `deriveCatalogSuggestion` parses out of an id as a last resort —
+// case-insensitive, `-`/`_`/`.`-separated, anchored to the end of the basename. Covers the two
+// shapes precision decoration actually takes in the wild: the float family (f16/f32/fp16/fp32/
+// bf16) and the GGUF quant-scheme family (Q2_K, Q4_K_M, Q8_0, ...) — `q\d+\w*` greedily consumes
+// every underscore-joined suffix segment (`\w` includes `_`), so `Q4_K_M` is captured whole rather
+// than truncating at the first underscore.
+const TRAILING_PRECISION_TOKEN_RE = /[-_.](fp?(?:16|32)|bf16|q\d+\w*)$/i;
+
+/**
+ * WP-3 — precision-from-id, a LAST-resort `embeddingVariant` source: the crucible-inference
+ * design carries precision directly in its alias names (`bge-m3-f16`, `bge-reranker-v2-m3-Q8_0`),
+ * so an id that carries no other signal at all can still suggest one. Routed through
+ * `normalizePrecision` so the id-derived token collapses onto the identical space-key spelling a
+ * probed value would (`Q4_K_M` and `q4_k_m` are the same token either way). Returns `undefined`,
+ * never a guess, when the basename carries no trailing token matching the pattern.
+ */
+export function precisionFromModelId(id: string): string | undefined {
+	const basename = modelIdBasename(id);
+	const match = basename.match(TRAILING_PRECISION_TOKEN_RE);
+	if (!match) return undefined;
+	return normalizePrecision(match[1]);
+}
+
 /**
  * The Surface step: what a catalog entry would fill in, if accepted. Never mutates anything —
  * `acceptCatalogSuggestion` is the only function below that writes to a `ProviderModel`.
@@ -197,6 +273,10 @@ export function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCap
  * `describeModel()` also came back empty (e.g. Infinity, which exposes no dtype at either
  * endpoint). Passing it is the caller's job (`ai.ts`) — this function stays a pure, synchronous
  * transform with no knowledge of how a caller obtained the fallback value.
+ *
+ * WP-3: when NEITHER of those has anything, `precisionFromModelId` gets a last look at the id
+ * itself — see that function's doc comment. Order is deliberate and matches the doc order here:
+ * real server quantization, then a probed fallback, then an id-parsed guess.
  */
 export function deriveCatalogSuggestion(entry: ProviderCatalogModel, describedPrecision?: string): CatalogSuggestion {
 	const suggestion: CatalogSuggestion = {};
@@ -205,6 +285,10 @@ export function deriveCatalogSuggestion(entry: ProviderCatalogModel, describedPr
 	if (entry.embeddingLength !== undefined) suggestion.embeddingDimensions = entry.embeddingLength;
 	if (entry.quantization !== undefined) suggestion.embeddingVariant = entry.quantization;
 	else if (describedPrecision !== undefined) suggestion.embeddingVariant = describedPrecision;
+	else {
+		const fromId = precisionFromModelId(entry.id);
+		if (fromId !== undefined) suggestion.embeddingVariant = fromId;
+	}
 	return suggestion;
 }
 
@@ -283,6 +367,36 @@ export function acceptCatalogSuggestion(model: ProviderModel, suggestion: Catalo
 		model.embeddingVariant = suggestion.embeddingVariant;
 		state.accepted.embeddingVariant = true;
 	}
+}
+
+/**
+ * WP-3 — the explicit "Probe dimensions" button's effect. Deliberately NOT automatic: `embed` is
+ * an injected one-shot call (`ai.ts` binds it to `ProviderManager.embed(provider, model.id, …)`),
+ * so this function stays free of any Obsidian import while still being exactly what the button's
+ * click handler awaits.
+ *
+ * Calls `embed` with a single short probe input and reads the returned vector's length as the
+ * model's embedding width, then writes it through the SAME `acceptCatalogSuggestion` path every
+ * other probed field uses — the per-field probe-accepted badge + Reset control is therefore
+ * already the undo affordance here too, with no second mechanism to build.
+ *
+ * Throws (never silently no-ops) when the response carries no usable vector, so the caller's
+ * Notice reports a real failure rather than a false "probed 0 dimensions" — a cold-loading local
+ * model timing out, an unsupported endpoint, or a malformed response should all surface as an
+ * error the user can read, not a silent no-op.
+ */
+export async function probeEmbeddingDimensions(
+	embed: (inputs: string[]) => Promise<{ embeddings: number[][] }>,
+	model: ProviderModel,
+	state: ModelProbeState,
+): Promise<number> {
+	const result = await embed(['probe']);
+	const vector = result.embeddings[0];
+	if (!vector || vector.length === 0) {
+		throw new Error('The server returned no embedding vector for the probe input.');
+	}
+	acceptCatalogSuggestion(model, { embeddingDimensions: vector.length }, state);
+	return vector.length;
 }
 
 /** The Reset step — D2's rule 4. Restores one field to what it held immediately before Accept, and clears its accepted marking. A no-op if the field was never accepted. */
