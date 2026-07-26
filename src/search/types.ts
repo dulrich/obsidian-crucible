@@ -1,9 +1,27 @@
+/**
+ * Why the companion did not answer, distinct from "did it answer" — a probe result of
+ * `refused` or `server-error` is confirmed evidence the service is down or broken; `timeout`
+ * is not, because a single-threaded, synchronous-SQLite companion mid-flush on our own bulk
+ * write simply does not get to the event loop in time. Treating the two the same is the bug
+ * this type exists to remove: see the WP-5 residue in `plans/sprint-exit-queue-health-and-scrub.md`.
+ *
+ * - `refused` — the request never reached a server (connection refused/reset, DNS failure,
+ *   or any other transport-level failure below the HTTP layer).
+ * - `timeout` — the client gave up waiting; the companion may still be working.
+ * - `server-error` — the companion answered with a 5xx: a confirmed, reachable failure.
+ */
+export type SearchServiceUnavailableErrorKind = 'refused' | 'timeout' | 'server-error';
+
 // Thrown by SearchServiceClient when the companion does not respond successfully —
 // timeouts, connection failures, and 5xx. Callers branch on this (instanceof) to defer
 // + retry, instead of sniffing error message text. A 4xx is a real (non-retryable) bug
 // and stays a plain Error.
 export class SearchServiceUnavailableError extends Error {
-	constructor(message: string) {
+	// Defaults to 'refused': every construction site in `client.ts` passes an explicit kind,
+	// but a default keeps any other (test, future) call site conservative — refused is the
+	// kind that earns the immediate confirmed-outage latch, which is the safe assumption for
+	// an unclassified failure.
+	constructor(message: string, public readonly kind: SearchServiceUnavailableErrorKind = 'refused') {
 		super(message);
 		this.name = 'SearchServiceUnavailableError';
 	}

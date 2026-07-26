@@ -209,6 +209,8 @@ User-confirmed 2026-07-25:
 
 **WP-5 — A busy companion must not read as a dead one (~0.25 kSLOC touched, ~150k tokens, ~12 min wall).** Files: `src/search/lifecycleGate.ts`, `src/search/client.ts`, `scripts/search-companion.mjs`, `tests/searchLifecycleGate.test.mjs`. *Model: mid (Claude Sonnet/medium; Codex Terra/medium) — narrow, and the diagnosis is complete. Execution: subagent.* Independent of the others; **highest priority of the five**, because it makes long indexing runs self-suppressing.
 
+**Probe-semantics scope below implemented by `plans/sprint-exit-queue-health-and-scrub.md` WP-3** (typed `refused`/`timeout`/`server-error` cause, gate-level 3-consecutive-timeout hysteresis, a dedicated background probe timeout, flush-window probe suppression, honest offline copy, and a chunked companion upsert that keeps `/health` responsive). The circuit-breaker tail that followed this section moved to that plan's WP-2 — see the note below in place of it.
+
 Observed 2026-07-25, immediately after the E1 run: the whole queue reported `Search companion not
 reachable at http://127.0.0.1:4801` while the container had **7 hours uptime, 0 restarts, no OOM,
 three clean log lines, and answered `/health` instantly**.
@@ -239,51 +241,7 @@ three clean log lines, and answered `/health` instantly**.
   probe timeout while indexing is in flight leaves availability unchanged; the deferral message
   never falls back to the container-restart text when the true cause is a timeout.
 
-**There is no circuit breaker: an unavailable dependency makes the runner sweep the entire queue at
-full speed.** This is the defect a first reading misses, and it was spotted from the symptom before
-it was found in the code.
-
-Measured 2026-07-25: all **52** pending `search_upsert_batch` jobs carry `updated` timestamps
-between **01:40:35.2 and 01:40:36.5** — the whole queue claimed, deferred and written back in **~1.3
-seconds**, roughly 40 jobs/second, at the instant the availability latch armed. No `attempts` field,
-no `error` field; each job was simply bounced.
-
-The mechanics:
-
-- `SearchIndexWorkflow.ts:176-181` correctly returns `{ status: 'deferred', retryAfterMs }` — a
-  per-job backoff was designed in, and deferring rather than failing is right (a stopped embedder is
-  a normal few-second event for a `restart: unless-stopped` container).
-- But a deferred job is reported as `'ran'` by the backend (`Orchestrator.ts:84`), so `typeWorker`
-  (`OrchestrationAutoRunner.ts:212-214`) keeps looping and claims the next one, and the next.
-- The sweep stops only when **every** job is in retry-after cooldown and nothing is claimable —
-  `'empty'` — at which point the worker exits and the type's drain is dead.
-- Nothing observes `retryAfterMs` elapsing, and kicks come only from an enqueue, from startup
-  (`:133`), or from a mid-drain redrain replay (`:177`). A backfill enqueues its batches once, up
-  front. So the designed retry never happens.
-
-**Three defects stack to produce the stall, and all three need fixing** — the latch is spurious, the
-sweep has no breaker, and the retry never wakes. Removing any one alone still leaves the backfill
-unable to complete unattended.
-
-The per-job backoff is the wrong granularity for a *shared* dependency. Availability is global and
-already known; rechecking it per job means one outage costs a full-queue sweep of claim → rewrite
-frontmatter → move file → move back, which is real vault filesystem churn (52 jobs here; thousands
-in a large rebuild) and destroys the queue's diagnostic value, since every row then reads "companion
-not reachable" whether or not it has a problem of its own.
-
-- **Check availability once per drain pass, before claiming anything.** If the dependency is down,
-  do not start the sweep — back off the whole type.
-- **Wake up when the backoff expires.** Schedule a re-kick at the later of `retryAfterMs` and the
-  availability latch expiry, so the designed retry actually fires.
-- **Prefer a fix that cannot strand work even if a new deferral reason appears later** — a periodic
-  re-kick for types with pending file jobs is duller than event-driven wake-up but fails safe.
-- Tests: an unavailable dependency defers **at most one** job per drain pass, not the whole queue; a
-  queue with pending batches and no further enqueues still drains after a transient unavailability;
-  `'empty'` and `'disabled'` still end the worker.
-
-This is the shared cause of three symptoms previously read as separate: "one batch ran and the next
-was not auto-queued" (reported at the start of the session), "each Obsidian reload drains exactly one
-more batch" (recorded in `AGENTS.md`, attributed solely to the offline latch), and tonight's stall.
+**Circuit breaker (registry, drain integration, retry wake-up) moved to `plans/sprint-exit-queue-health-and-scrub.md` WP-2** — the finding still stands (no breaker meant an unavailable dependency swept the entire queue at full speed, ~40 jobs/second, and the designed per-job `retryAfterMs` retry never fired because nothing observed it elapsing), but the fix is a cross-cutting service-health registry shared by every job type, not a search-local change; see that plan's WP-2 for the full mechanics and test list.
 
 ## Public Interfaces
 

@@ -3,7 +3,7 @@ import { CrucibleSettings, Provider, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
 import { normalizePrecision } from '../providers/shared';
 import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
-import { SearchServiceClient } from './client';
+import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
 import {
@@ -132,7 +132,15 @@ function asEmbeddingBackfillError(e: unknown): Error {
 }
 
 export class SearchManager {
-	private readonly availability = new CompanionAvailabilityGate();
+	// The gate consults `flushInFlight` (below) through this callback rather than a setter it
+	// exposes itself — the flag is owned here, not by the gate, so a workflow reaching for
+	// "suppress probing" has nothing to reach into. See flushInFlight's own comment.
+	private readonly availability = new CompanionAvailabilityGate(undefined, () => this.flushInFlight);
+	// Set for the duration of our own bulk writes (upsertChunks/resetIndex/deletePath). A
+	// health-probe timeout that lands in this window is inconclusive by construction: the
+	// companion is single-threaded and synchronous-SQLite, so it is busy with OUR OWN write, not
+	// down. See CompanionAvailabilityGate's suppressProbing callback.
+	private flushInFlight = false;
 	// Built lazily on the first boosted search and reused until the metadata cache says the
 	// link graph moved. See linkGraph() for why this cache is load-bearing rather than a
 	// micro-optimization.
@@ -162,9 +170,32 @@ export class SearchManager {
 
 	// Single authority on companion availability for both the auto-index path and the
 	// orchestration workflows: caches a health probe per TTL window so a burst of jobs makes
-	// at most one probe, and a known-down companion short-circuits.
+	// at most one probe, and a known-down companion short-circuits. Uses the longer background
+	// probe budget (see probeHealth) — this is the indexing/availability path, not an
+	// interactive UI call.
 	async companionAvailable(): Promise<boolean> {
-		return await this.availability.available(() => this.health());
+		return await this.availability.available(() => this.probeHealth());
+	}
+
+	// Health probe issued from the background indexing/availability path: gets the ~15s
+	// SEARCH_BACKGROUND_PROBE_TIMEOUT_MS budget instead of the 5s interactive one `health()`
+	// uses, because the companion may simply be mid-flush on our own bulk write. `health()`
+	// stays the interactive entry point (e.g. a settings "test connection" action) — it must
+	// keep giving up quickly since a human is waiting on it.
+	private async probeHealth(): Promise<SearchHealth> {
+		return await this.client().health(SEARCH_BACKGROUND_PROBE_TIMEOUT_MS);
+	}
+
+	// Wraps a bulk companion write (upsertChunks/resetIndex/deletePath) so the availability
+	// gate knows not to probe — or record a probe timeout as evidence — for its duration. See
+	// flushInFlight and CompanionAvailabilityGate's suppressProbing callback.
+	private async withFlushInFlight<T>(fn: () => Promise<T>): Promise<T> {
+		this.flushInFlight = true;
+		try {
+			return await fn();
+		} finally {
+			this.flushInFlight = false;
+		}
 	}
 
 	// Flip the shared cache to offline when an in-flight operation fails with
@@ -184,7 +215,7 @@ export class SearchManager {
 	}
 
 	async resetIndex(): Promise<void> {
-		await this.client().resetIndex();
+		await this.withFlushInFlight(() => this.client().resetIndex());
 	}
 
 	async indexFile(file: TFile): Promise<number> {
@@ -234,7 +265,7 @@ export class SearchManager {
 				if (requireEmbeddings) throw asEmbeddingBackfillError(e);
 				logWarn('search', 'embedding generation failed; indexing FTS-only chunks for batch', e);
 			}
-			await client.upsertChunks(batch);
+			await this.withFlushInFlight(() => client.upsertChunks(batch));
 		};
 
 		const signal = options?.signal;
@@ -440,7 +471,7 @@ export class SearchManager {
 
 	async deletePath(path: string): Promise<void> {
 		if (this.isExcludedFromIndex(path)) return;
-		await this.client().deletePath(path);
+		await this.withFlushInFlight(() => this.client().deletePath(path));
 	}
 
 	async search(query: string, limit?: number): Promise<SearchResponse> {

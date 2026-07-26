@@ -23,10 +23,21 @@ await esbuild.build({
 			build.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian-test-stub', namespace: 'stub' }));
 			build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
 				contents: `
+					// Mirrors real Obsidian requestUrl: it throws when the status is 400+ UNLESS
+					// the caller passes throw:false (RequestUrlParam.throw defaults to true). The
+					// stub used to always return the response object regardless of status, which
+					// is not what the real API does — a client that forgot throw:false would still
+					// pass every test here even though every real 4xx/5xx would have thrown before
+					// the client's own status branches ever ran.
 					export async function requestUrl(options) {
 						globalThis.__searchClientRequests.push(options);
 						if (globalThis.__searchClientThrow) throw globalThis.__searchClientThrow;
-						return globalThis.__searchClientResponse;
+						const response = globalThis.__searchClientResponse;
+						const status = response && typeof response.status === 'number' ? response.status : undefined;
+						if (status !== undefined && status >= 400 && options.throw !== false) {
+							throw new Error('Request failed, status ' + status);
+						}
+						return response;
 					}
 				`,
 				loader: 'js',
@@ -224,4 +235,70 @@ test('SearchServiceClient keeps a 4xx as a plain (non-retryable) Error', async (
 		assert.match(err.message, /returned 400/);
 		return true;
 	});
+});
+
+// F1 regression: Obsidian's requestUrl throws on any status >= 400 by default (RequestUrlParam
+// `throw` defaults to true). Without an explicit `throw: false`, that default fires BEFORE the
+// client's own status branches ever run, so every companion 4xx — including the deliberate
+// width/space-conflict 400s — would land in the generic catch block and get misclassified as
+// SearchServiceUnavailableError ("companion not reachable"), which the caller then defers and
+// retries forever instead of surfacing as the non-retryable request bug it is. The test stub
+// above now mirrors that real throw-on-4xx+ behavior, so this test would fail without the fix.
+test('SearchServiceClient passes throw:false to requestUrl, so a 4xx surfaces via the client\'s own status branch', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = { status: 400, text: 'bad request', json: {} };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await assert.rejects(client.search({ query: 'x', limit: 1 }), (err) => {
+		assert.equal(err instanceof SearchServiceUnavailableError, false, 'a 4xx must never be misread as "companion not reachable"');
+		assert.match(err.message, /returned 400/);
+		assert.match(err.message, /bad request/, 'the response body\'s message must survive, not just the status code');
+		return true;
+	});
+	assert.equal(globalThis.__searchClientRequests[0].throw, false, 'requestUrl must be called with throw:false');
+});
+
+test('SearchServiceClient throws SearchServiceUnavailableError with kind "server-error" on a 5xx', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = { status: 503, text: 'overloaded', json: {} };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await assert.rejects(client.search({ query: 'x', limit: 1 }), (err) => {
+		assert.ok(err instanceof SearchServiceUnavailableError);
+		assert.equal(err.kind, 'server-error');
+		return true;
+	});
+});
+
+test('SearchServiceClient throws SearchServiceUnavailableError with kind "refused" when the request fails below the HTTP layer', async () => {
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientThrow = new Error('ECONNREFUSED');
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await assert.rejects(client.health(), (err) => {
+		assert.ok(err instanceof SearchServiceUnavailableError);
+		assert.equal(err.kind, 'refused');
+		return true;
+	});
+	globalThis.__searchClientThrow = undefined;
+});
+
+test('SearchServiceClient throws SearchServiceUnavailableError with kind "timeout" when the request times out', async (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = new Promise(() => {});
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const search = client.search({ query: 'x', limit: 1 });
+	const assertion = assert.rejects(search, (err) => {
+		assert.ok(err instanceof SearchServiceUnavailableError);
+		assert.equal(err.kind, 'timeout');
+		return true;
+	});
+	t.mock.timers.tick(5_001);
+	await assertion;
+	globalThis.__searchClientResponse = undefined;
 });

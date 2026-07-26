@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { mkdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 // Zero-dependency search companion: Node builtins only. There is no `npm install` step in
@@ -984,6 +985,86 @@ function clampLimit(value) {
 	return Math.max(1, Math.min(Math.floor(limit), MAX_LIMIT));
 }
 
+// A bulk upsert used to run as one BEGIN/COMMIT transaction over every chunk in the request —
+// hundreds at a time. `node:sqlite`'s `DatabaseSync` is synchronous, so that whole transaction
+// ran without ever yielding the event loop, and a `/health` request arriving mid-upsert simply
+// queued behind it: measured 17 such probe timeouts in one indexing run, each landing right
+// before a +500 chunk counter jump on a companion that was never actually down (see
+// SEARCH_PROBE_TIMEOUT_ESCALATION_THRESHOLD on the client side, which is the other half of
+// this fix). Splitting into sub-batches, each its own transaction with an event-loop yield
+// between them, lets a pending `/health` (or any other request) get serviced between chunks
+// of the upsert instead of only after all of it completes.
+//
+// Chunk upserts are idempotent per `(vault_id, id)` (a full replace, not a merge — see
+// upsertChunk below), so a sub-batch committing before a later one in the same request throws
+// is safe: re-sending the request repeats already-correct work rather than corrupting it. That
+// idempotency guarantee holds only at the granularity of a whole PATH, though: the first chunk
+// seen for a `(vaultId, path)` deletes every existing row for that path before any new rows for
+// it are inserted (a full replace, not a merge — see `clearedPaths` below), so if that path's
+// chunks were split across two sub-batches and the second one throws, the path would be left
+// with its old rows deleted and only some of its new rows committed — stale AND wrong, and
+// worse than the pre-split behavior (one transaction, so a throw anywhere rolled the whole
+// request back and left the path's previous rows untouched). `splitUpsertSubBatches` therefore
+// groups by `(vaultId, path)` first and packs whole groups into sub-batches, letting a
+// sub-batch overflow the target size rather than splitting a group. The invariant this
+// guarantees: a path's chunks never span sub-batches, so a mid-request failure can leave a path
+// stale (untouched, if its sub-batch never ran) or fully-new (committed, if its sub-batch did)
+// but never half-written.
+export const UPSERT_SUB_BATCH_CHUNKS = 100;
+
+// Pure and exported for unit testing without a database — see the module-shape note at the top
+// of this file. `size <= 0` is treated as "no splitting" (one batch) rather than looping
+// forever.
+//
+// `fallbackVaultId` mirrors the per-chunk `chunk.vaultId ?? body.vaultId` resolution the request
+// handler applies when actually writing each chunk (a chunk may omit its own `vaultId` and rely
+// on the request's top-level one). Grouping on `chunk.vaultId` alone, ignoring that fallback,
+// could split what is really one (vaultId, path) group in two — one sub-group keyed on the
+// explicit vaultId a sibling chunk happened to repeat, one keyed on `undefined` — which would
+// silently reopen the same straddling bug this helper exists to close. Pass it whenever the
+// caller has a request-level `vaultId` to fall back to.
+export function splitUpsertSubBatches(chunks, size = UPSERT_SUB_BATCH_CHUNKS, fallbackVaultId) {
+	if (!Array.isArray(chunks) || chunks.length === 0) return [];
+	const target = size > 0 ? size : Infinity;
+
+	// Group by (vaultId, path), preserving first-seen order. Callers already send one path's
+	// chunks contiguously in practice, but this does not assume it — every chunk is grouped by
+	// identity, not by position, so even a caller that interleaves two paths' chunks still gets
+	// each path's chunks packed together, never split.
+	const groups = [];
+	const groupIndexByKey = new Map();
+	for (const chunk of chunks) {
+		const vaultId = (chunk && chunk.vaultId) ?? fallbackVaultId;
+		const key = `${vaultId}\n${chunk && chunk.path}`;
+		let index = groupIndexByKey.get(key);
+		if (index === undefined) {
+			index = groups.length;
+			groupIndexByKey.set(key, index);
+			groups.push([]);
+		}
+		groups[index].push(chunk);
+	}
+
+	// Pack whole groups into sub-batches of ~`size`, letting a sub-batch overflow rather than
+	// split a group — see the invariant documented above UPSERT_SUB_BATCH_CHUNKS. A single path
+	// with more than `size` chunks becomes its own oversized sub-batch; that's the pre-existing
+	// atomicity for that path, not a regression.
+	const batches = [];
+	let current = [];
+	let currentCount = 0;
+	for (const group of groups) {
+		if (current.length > 0 && currentCount + group.length > target) {
+			batches.push(current);
+			current = [];
+			currentCount = 0;
+		}
+		current.push(...group);
+		currentCount += group.length;
+	}
+	if (current.length > 0) batches.push(current);
+	return batches;
+}
+
 export function createRequestHandler(db, options = {}) {
 	// The vector backend is injectable so a different implementation (or a test double) can
 	// take over without touching a single line of the request handling below — that is the
@@ -1156,12 +1237,12 @@ LIMIT 1
 				const body = await readJson(req);
 				const chunks = Array.isArray(body.chunks) ? body.chunks : [];
 				const touchedVaults = new Set();
-				// Width *and* space consistency, enforced once per vault per request. Mixing two
-				// vector spaces inside one index is the failure mode that produces confidently
-				// wrong rankings with no error anywhere — and width alone does not catch it:
-				// bge-m3 is 1024d under every quantization, so an fp32 index and a Q4 re-index
-				// pass a width check unchanged. Both are refused here, atomically (the throw
-				// rolls the whole batch back).
+				// Width *and* space consistency, enforced once per vault per REQUEST — across every
+				// sub-batch below, not reset per sub-batch, so splitting the transaction does not
+				// weaken the check. Mixing two vector spaces inside one index is the failure mode
+				// that produces confidently wrong rankings with no error anywhere — and width alone
+				// does not catch it: bge-m3 is 1024d under every quantization, so an fp32 index and
+				// a Q4 re-index pass a width check unchanged. Both are refused here.
 				//
 				// Deliberately *not* also a per-batch space check, unlike `batchDim`. A mixed-width
 				// batch cannot be stored coherently at all, whereas chunks disagreeing about their
@@ -1169,83 +1250,97 @@ LIMIT 1
 				// fail-closed (it answers `undefined`, so the client re-embeds) and the scan filter
 				// already survives. Refusing it here would only delete that defence's test coverage.
 				const checkedVaults = new Set();
+				const clearedPaths = new Set();
 				let batchDim = null;
-				db.exec('BEGIN');
-				try {
-					const clearedPaths = new Set();
-					for (const chunk of chunks) {
-						const id = requireString(chunk.id, 'chunk.id');
-						const vaultId = requireString(chunk.vaultId ?? body.vaultId, 'chunk.vaultId');
-						const path = requireString(chunk.path, 'chunk.path');
-						const contentHash = requireString(chunk.contentHash, 'chunk.contentHash');
-						const title = String(chunk.title ?? path);
-						const heading = String(chunk.heading ?? '');
-						const text = requireString(chunk.text, 'chunk.text');
-						const mtime = Number(chunk.mtime ?? 0);
-						const ordinal = Number(chunk.ordinal ?? 0);
-						const pathKey = `${vaultId}\n${path}`;
-						// The first chunk seen for a (vaultId, path) clears every existing row
-						// for that path: an upsert is a full replace, not a merge.
-						if (!clearedPaths.has(pathKey)) {
-							for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(vaultId, row.id);
-							deleteByPath.run(vaultId, path);
-							clearedPaths.add(pathKey);
-						}
-						touchedVaults.add(vaultId);
-
-						const embedding = prepareChunkEmbedding(
-							chunk.embedding,
-							chunk.embeddingModel ?? body.embeddingModel,
-							chunk.embeddingSpace ?? body.embeddingSpace,
-						);
-						if (embedding) {
-							if (batchDim === null) batchDim = embedding.dim;
-							else if (embedding.dim !== batchDim) {
-								throw new HttpError(400, `chunk "${id}" carries a ${embedding.dim}-dimension embedding but this batch established ${batchDim}`);
+				// Split into sub-batches, each its own transaction, so a `/health` request (or
+				// anything else) queued behind a large upsert gets serviced between them instead of
+				// only after the whole thing completes. See UPSERT_SUB_BATCH_CHUNKS. `body.vaultId`
+				// is passed as the fallback so grouping matches the same `chunk.vaultId ?? body.vaultId`
+				// resolution used below when a chunk omits its own vaultId.
+				const subBatches = splitUpsertSubBatches(chunks, UPSERT_SUB_BATCH_CHUNKS, body.vaultId);
+				for (let batchIndex = 0; batchIndex < subBatches.length; batchIndex++) {
+					const subBatch = subBatches[batchIndex];
+					db.exec('BEGIN');
+					try {
+						for (const chunk of subBatch) {
+							const id = requireString(chunk.id, 'chunk.id');
+							const vaultId = requireString(chunk.vaultId ?? body.vaultId, 'chunk.vaultId');
+							const path = requireString(chunk.path, 'chunk.path');
+							const contentHash = requireString(chunk.contentHash, 'chunk.contentHash');
+							const title = String(chunk.title ?? path);
+							const heading = String(chunk.heading ?? '');
+							const text = requireString(chunk.text, 'chunk.text');
+							const mtime = Number(chunk.mtime ?? 0);
+							const ordinal = Number(chunk.ordinal ?? 0);
+							const pathKey = `${vaultId}\n${path}`;
+							// The first chunk seen for a (vaultId, path) clears every existing row
+							// for that path: an upsert is a full replace, not a merge.
+							if (!clearedPaths.has(pathKey)) {
+								for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(vaultId, row.id);
+								deleteByPath.run(vaultId, path);
+								clearedPaths.add(pathKey);
 							}
-							if (!checkedVaults.has(vaultId)) {
-								// Read *after* this path's rows were cleared, so re-embedding a
-								// vault that holds exactly one path is allowed while a genuine
-								// mix (other paths still at the old width, or in the old space)
-								// is refused.
-								const existing = selectVaultEmbeddingDim.get(vaultId);
-								const existingDim = existing?.dim === null || existing?.dim === undefined ? null : Number(existing.dim);
-								if (existingDim && existingDim !== embedding.dim) {
-									throw new HttpError(400, `vault "${vaultId}" is indexed with ${existingDim}-dimension embeddings; refusing a ${embedding.dim}-dimension vector. Reset the index before changing the embedding model.`);
-								}
-								const existingSpace = optionalId(selectVaultEmbeddingSpace.get(vaultId)?.space);
-								if (existingSpace && embedding.space && existingSpace !== embedding.space) {
-									throw new HttpError(400, `vault "${vaultId}" is indexed in embedding space "${existingSpace}"; refusing a vector from "${embedding.space}". Two spaces in one index cannot be compared, so reset the index before changing the embedding model or its precision.`);
-								}
-								checkedVaults.add(vaultId);
-							}
-						}
+							touchedVaults.add(vaultId);
 
-						upsertChunk.run(
-							id,
-							vaultId,
-							path,
-							contentHash,
-							title,
-							heading,
-							text,
-							Number.isFinite(mtime) ? mtime : 0,
-							Number.isFinite(ordinal) ? ordinal : 0,
-							JSON.stringify(chunk.metadata ?? {}),
-							embedding ? embedding.bytes : null,
-							embedding ? embedding.dim : null,
-							embedding ? embedding.model : null,
-							embedding ? embedding.space : null,
-						);
-						deleteFtsById.run(vaultId, id);
-						insertFts.run(id, vaultId, path, title, heading, text);
+							const embedding = prepareChunkEmbedding(
+								chunk.embedding,
+								chunk.embeddingModel ?? body.embeddingModel,
+								chunk.embeddingSpace ?? body.embeddingSpace,
+							);
+							if (embedding) {
+								if (batchDim === null) batchDim = embedding.dim;
+								else if (embedding.dim !== batchDim) {
+									throw new HttpError(400, `chunk "${id}" carries a ${embedding.dim}-dimension embedding but this batch established ${batchDim}`);
+								}
+								if (!checkedVaults.has(vaultId)) {
+									// Read *after* this path's rows were cleared, so re-embedding a
+									// vault that holds exactly one path is allowed while a genuine
+									// mix (other paths still at the old width, or in the old space)
+									// is refused.
+									const existing = selectVaultEmbeddingDim.get(vaultId);
+									const existingDim = existing?.dim === null || existing?.dim === undefined ? null : Number(existing.dim);
+									if (existingDim && existingDim !== embedding.dim) {
+										throw new HttpError(400, `vault "${vaultId}" is indexed with ${existingDim}-dimension embeddings; refusing a ${embedding.dim}-dimension vector. Reset the index before changing the embedding model.`);
+									}
+									const existingSpace = optionalId(selectVaultEmbeddingSpace.get(vaultId)?.space);
+									if (existingSpace && embedding.space && existingSpace !== embedding.space) {
+										throw new HttpError(400, `vault "${vaultId}" is indexed in embedding space "${existingSpace}"; refusing a vector from "${embedding.space}". Two spaces in one index cannot be compared, so reset the index before changing the embedding model or its precision.`);
+									}
+									checkedVaults.add(vaultId);
+								}
+							}
+
+							upsertChunk.run(
+								id,
+								vaultId,
+								path,
+								contentHash,
+								title,
+								heading,
+								text,
+								Number.isFinite(mtime) ? mtime : 0,
+								Number.isFinite(ordinal) ? ordinal : 0,
+								JSON.stringify(chunk.metadata ?? {}),
+								embedding ? embedding.bytes : null,
+								embedding ? embedding.dim : null,
+								embedding ? embedding.model : null,
+								embedding ? embedding.space : null,
+							);
+							deleteFtsById.run(vaultId, id);
+							insertFts.run(id, vaultId, path, title, heading, text);
+						}
+						db.exec('COMMIT');
+					} catch (e) {
+						db.exec('ROLLBACK');
+						throw e;
 					}
-					db.exec('COMMIT');
-				} catch (e) {
-					db.exec('ROLLBACK');
-					throw e;
+					// Invalidate after every sub-batch commits, not only once at the end: upserts
+					// are idempotent per chunk (see the comment above UPSERT_SUB_BATCH_CHUNKS), so a
+					// later sub-batch throwing must not leave the vector matrix cache stale for the
+					// vaults earlier sub-batches already, successfully, wrote new vectors into.
+					for (const vault of touchedVaults) vectors.invalidate(vault);
+					if (batchIndex < subBatches.length - 1) await yieldEventLoop();
 				}
-				for (const vault of touchedVaults) vectors.invalidate(vault);
 				return json(res, 200, { ok: true, count: chunks.length });
 			}
 			if (req.method === 'POST' && url.pathname === '/v1/search') {
@@ -1316,19 +1411,24 @@ export function startServer({ port, host, dbPath }) {
 	return { server, db };
 }
 
+// F5: malformed input is a 4xx, never a 5xx — the request handler's catch-all maps anything
+// that is not an HttpError to 500, and the client maps any 5xx to SearchServiceUnavailableError
+// ("companion not reachable"), which the caller then defers and retries forever. A too-large or
+// unparseable body, or a missing required field, is a client bug, not a companion outage, so
+// every rejection below is an explicit HttpError(400) rather than a plain Error.
 function readJson(req) {
 	return new Promise((resolveBody, reject) => {
 		let raw = '';
 		req.setEncoding('utf8');
 		req.on('data', chunk => {
 			raw += chunk;
-			if (raw.length > 20_000_000) reject(new Error('request body too large'));
+			if (raw.length > 20_000_000) reject(new HttpError(400, 'request body too large'));
 		});
 		req.on('end', () => {
 			try {
 				resolveBody(raw ? JSON.parse(raw) : {});
 			} catch (e) {
-				reject(e);
+				reject(new HttpError(400, `invalid JSON body: ${e instanceof Error ? e.message : String(e)}`));
 			}
 		});
 		req.on('error', reject);
@@ -1341,7 +1441,7 @@ function json(res, status, body) {
 }
 
 function requireString(value, name) {
-	if (typeof value !== 'string' || value.trim() === '') throw new Error(`Missing ${name}`);
+	if (typeof value !== 'string' || value.trim() === '') throw new HttpError(400, `Missing ${name}`);
 	return value.trim();
 }
 
