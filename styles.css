@@ -1390,7 +1390,101 @@ If your plugin does not need CSS, delete this file.
 }
 
 /* Fetch models / Clear cache status line — surfaces "no models reported" vs "could not reach the
-   server" as read text rather than a spinner that just stops. */
-.crucible-probe-status {
-  margin-top: 0.25rem;
+   server" as read text rather than a spinner that just stops. WP-1 folded this line into the
+   catalog browser panel's header row (`.crucible-model-catalog-browser-status` below), so the
+   bare-paragraph rule it used to style is gone along with the paragraph itself. */
+
+/* WP-1 — inline model catalog browser panel
+   (plans/model-catalog-ux-local-inference-and-remediations.md). Appended at the end for the same
+   rebase-friendliness reason as the WP-D block above it — this WP and others in the same
+   dispatch wave touch this file in parallel. */
+
+.crucible-model-catalog-browser {
+  margin-top: 0.5rem;
+}
+
+.crucible-model-catalog-browser-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.crucible-model-catalog-browser-header:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.crucible-model-catalog-browser-toggle {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.crucible-model-catalog-browser-toggle svg {
+  width: 14px;
+  height: 14px;
+}
+
+.crucible-model-catalog-browser-status {
+  font-size: var(--font-ui-smaller);
+}
+
+.crucible-model-catalog-browser-body {
+  padding: 0.5rem 0.5rem 0.25rem;
+}
+
+.crucible-model-catalog-browser-filter {
+  margin-bottom: 0.5rem;
+}
+
+/* Capability chip row — neutral pills (per the fleet taxonomy: a capability tag is not an
+   ok/warn/error/info fact, so it must never borrow a status hue), toggled between `.is-muted`
+   (inactive) and `.is-contrast` (the active filter) rather than introducing a third pill family. */
+.crucible-model-catalog-browser-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.crucible-model-catalog-browser-chip {
+  cursor: pointer;
+}
+
+.crucible-model-catalog-browser-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+}
+
+.crucible-model-catalog-browser-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.crucible-model-catalog-browser-row-name {
+  font-weight: 600;
+}
+
+.crucible-model-catalog-browser-row-id,
+.crucible-model-catalog-browser-row-summary {
+  font-size: var(--font-ui-smaller);
+}
+
+.crucible-model-catalog-browser-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.crucible-model-catalog-browser-pager-counter {
+  font-size: var(--font-ui-smaller);
 }

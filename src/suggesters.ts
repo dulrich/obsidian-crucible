@@ -6,7 +6,7 @@ import { loadConfiguredChannels } from "./orchestration/utils/feedIntake";
 import type { ChannelEntry } from "./orchestration/utils/youtube";
 import { CurrencyCache, GeocodeCacheEntry, ProviderCatalogModel } from "./types";
 import { buildRanges, compileQuery, scoreCompiledText, ScoreResult } from "./rankScore";
-import { catalogEntrySummaryTokens, filterCatalogModelsForQuery } from "./settings/modelCapabilities";
+import { buildProviderModelSuggestRows, catalogEntrySummaryTokens } from "./settings/modelCapabilities";
 
 /** One scored candidate, held only long enough to build the bounded top-K result. */
 interface ScoredCandidate<T> {
@@ -425,8 +425,23 @@ export class LocationSuggest extends AbstractInputSuggest<GeoResult> {
  * true by construction: an id absent from the catalog — or a catalog that's empty because the
  * probe was never run, came back empty, or the server is unreachable — simply produces no
  * suggestions, and the text field behaves exactly as it always did.
+ *
+ * WP-1: when a query matches more than the 100-row cap, the dropdown gains a trailing,
+ * non-selectable "+N more — use the catalog browser below" row rather than silently dropping the
+ * rest with no indication anything was cut — that's what the inline catalog browser panel
+ * (`settings/modelCatalogBrowser.ts`) exists to reach. `ProviderModelSuggestMoreRow` is a distinct
+ * shape (never a real `ProviderCatalogModel`) so `renderSuggestion`/`selectSuggestion` can tell the
+ * tail row apart from an actual entry without a sentinel id that could theoretically collide.
  */
-export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogModel> {
+interface ProviderModelSuggestMoreRow {
+	moreCount: number;
+}
+
+function isProviderModelSuggestMoreRow(row: ProviderCatalogModel | ProviderModelSuggestMoreRow): row is ProviderModelSuggestMoreRow {
+	return "moreCount" in row;
+}
+
+export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogModel | ProviderModelSuggestMoreRow> {
 	public inputEl: HTMLInputElement;
 	private getCatalog: () => ProviderCatalogModel[];
 	private onChoose?: (entry: ProviderCatalogModel) => void;
@@ -441,18 +456,30 @@ export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogMo
 		this.inputEl = inputEl;
 		this.getCatalog = getCatalog;
 		this.onChoose = onChoose;
+		// This class already enforces its own 100-row cap (via `buildProviderModelSuggestRows`,
+		// deliberately, so the cap is unit-testable without bundling Obsidian's fuzzy matcher) and,
+		// with WP-1, may append one further synthetic "+N more" row on top of that cap — 101 items
+		// total. `AbstractInputSuggest`'s own built-in `limit` (default 100) would silently drop
+		// that 101st row before it ever renders, so it's disabled here in favour of the cap this
+		// class already manages itself.
+		this.limit = 0;
 	}
 
-	getSuggestions(inputStr: string): ProviderCatalogModel[] {
-		// Substring filter (`filterCatalogModelsForQuery`), not `prepareFuzzySearch` like the
-		// other suggesters here — deliberately, so the "an id absent from the catalog is never
-		// forced to match" guarantee is unit-testable without bundling Obsidian's fuzzy matcher.
-		// Model ids are short and typically typed near-verbatim (often via copy-paste from a
-		// server's own listing), so substring matching costs little in practice.
-		return filterCatalogModelsForQuery(this.getCatalog(), inputStr).slice(0, 100);
+	getSuggestions(inputStr: string): (ProviderCatalogModel | ProviderModelSuggestMoreRow)[] {
+		// Substring filter (`filterCatalogModelsForQuery`, via `buildProviderModelSuggestRows`), not
+		// `prepareFuzzySearch` like the other suggesters here — deliberately, so the "an id absent
+		// from the catalog is never forced to match" guarantee is unit-testable without bundling
+		// Obsidian's fuzzy matcher. Model ids are short and typically typed near-verbatim (often via
+		// copy-paste from a server's own listing), so substring matching costs little in practice.
+		const { rows, overflowCount } = buildProviderModelSuggestRows(this.getCatalog(), inputStr);
+		return overflowCount > 0 ? [...rows, { moreCount: overflowCount }] : rows;
 	}
 
-	renderSuggestion(entry: ProviderCatalogModel, el: HTMLElement): void {
+	renderSuggestion(entry: ProviderCatalogModel | ProviderModelSuggestMoreRow, el: HTMLElement): void {
+		if (isProviderModelSuggestMoreRow(entry)) {
+			el.createDiv({ text: `+${entry.moreCount} more — use the catalog browser below`, cls: "suggestion-aux mod-muted" });
+			return;
+		}
 		el.createDiv({ text: entry.id });
 		// WP-8: richer suggestions — every summary token the catalog carries (type, quantization,
 		// arch, context size, embedding width, server capability tags, input modalities, param
@@ -462,7 +489,10 @@ export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogMo
 		if (aux) el.createDiv({ text: aux, cls: "suggestion-aux" });
 	}
 
-	selectSuggestion(entry: ProviderCatalogModel): void {
+	selectSuggestion(entry: ProviderCatalogModel | ProviderModelSuggestMoreRow): void {
+		// Non-selectable per the brief: the tail row carries no real model id to pick, so picking
+		// it is a no-op rather than writing "+N more — use the catalog browser below" into the field.
+		if (isProviderModelSuggestMoreRow(entry)) return;
 		this.inputEl.value = entry.id;
 		this.inputEl.dispatchEvent(new Event("input"));
 		if (this.onChoose) this.onChoose(entry);
