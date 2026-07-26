@@ -126,10 +126,11 @@ test('cancelIfPending stops only pending entries, and marks rather than deletes'
 	assert.equal(queue.getPendingCount(), 1, 'only the running entry still counts as in flight');
 });
 
-test('a cancelled entry suppresses its own auto-source re-seed until it is swept', () => {
-	// Retention 0 so the sweep at the end of the test is immediate; the suppression
-	// being tested is refill's, and refill never sweeps regardless of the window.
-	const { queue } = makeQueue(0);
+test('a cancelled entry suppresses its own auto-source re-seed while it is still live', () => {
+	// A realistic (nonzero) retention: refill() now also sweeps opportunistically (see
+	// the R1 sweep tests below), so a 0ms window would let this very refill() call reap
+	// the entry instead of demonstrating the live suppression this test is about.
+	const { queue } = makeQueue();
 	queue.setAutoSource(() => [{ key: 'seeded', params: {} }]);
 	queue.setAutoSourceEnabled(true);
 	assert.equal(queue.getEntry('seeded').status, 'pending');
@@ -138,9 +139,16 @@ test('a cancelled entry suppresses its own auto-source re-seed until it is swept
 	queue.refill();
 	assert.equal(queue.getEntry('seeded').status, 'cancelled',
 		'refill skips a tracked key, so an enabled source cannot instantly undo the cancel');
+});
 
+test('an explicit sweep clears a stale cancelled entry so the next refill re-seeds it', () => {
 	// The suppression is not permanent, which is exactly why the UI copy says cleared
 	// items can come back: once retention expires the source may offer the key again.
+	const { queue } = makeQueue(0); // retention 0 → terminal entries immediately stale
+	queue.setAutoSource(() => [{ key: 'seeded', params: {} }]);
+	queue.setAutoSourceEnabled(true);
+	assert.equal(queue.cancelIfPending('seeded'), true);
+
 	queue.sweepTerminal();
 	assert.equal(queue.getEntry('seeded'), null);
 	queue.refill();
@@ -280,4 +288,54 @@ test('a cooled-off entry is still claimable by key for a manual Run', () => {
 	const claimed = queue.claimEntry('a');
 	assert.ok(claimed, 'claimEntry is the manual Run: it ignores the cooloff exactly as claimById does');
 	assert.equal(claimed.status, 'running');
+});
+
+// --- R1: lazy hygiene on a quiet queue ---------------------------------------
+//
+// Before this, sweepTerminal() only ever fired from MemoryJobBackend.runEntry's
+// finally, so a queue that never ran another job after a terminal entry (nothing
+// else pending, autorun off, or the one entry that keeps failing) would let that
+// entry outlive its retention window forever. hasPending()/refill()/enqueue() are
+// the cheap read/write paths every caller already touches, so piggybacking the
+// sweep there reaps a stale entry the moment anyone next asks the queue anything —
+// with no free-running timer of its own.
+
+test('a terminal entry on a quiet queue ages out via hasPending() alone, with no job ever running', () => {
+	const { queue } = makeQueue(0); // retention 0 → immediately stale
+	queue.enqueue('a', {});
+	queue.claimNext();
+	queue.markFailed('a', 'boom');
+	assert.equal(queue.getEntry('a').status, 'failed', 'still there — nothing has swept it yet');
+
+	assert.equal(queue.hasPending(), false, 'no pending work; the point is hasPending() alone still sweeps');
+	assert.equal(queue.getEntry('a'), null, 'hasPending() reaped the stale failure on its own');
+});
+
+test('a failed entry stops suppressing its own auto-source re-seed once refill() ages it out — no job ran', () => {
+	const { queue } = makeQueue(0); // retention 0 → immediately stale
+	queue.setAutoSource(() => [{ key: 'seeded', params: {} }]);
+	queue.setAutoSourceEnabled(true);
+	assert.equal(queue.getEntry('seeded').status, 'pending');
+
+	queue.claimNext();
+	queue.markFailed('seeded', 'boom');
+	assert.equal(queue.getEntry('seeded').status, 'failed');
+
+	// Before this fix, only an explicit sweepTerminal() call (never fired outside
+	// runEntry's finally) could clear this; a queue that only ever calls refill() —
+	// because nothing else ever runs — would suppress the re-seed forever.
+	queue.refill();
+	assert.equal(queue.getEntry('seeded').status, 'pending', 'refill() itself swept the stale failure and re-seeded it');
+});
+
+test("enqueue() also sweeps: a different key's stale terminal entry doesn't linger past an unrelated enqueue", () => {
+	const { queue } = makeQueue(0); // retention 0 → immediately stale
+	queue.enqueue('a', {});
+	queue.claimNext();
+	queue.markDone('a');
+	assert.equal(queue.getEntry('a').status, 'done');
+
+	queue.enqueue('b', {});
+	assert.equal(queue.getEntry('a'), null, "enqueueing 'b' swept the stale 'a' along the way");
+	assert.equal(queue.getEntry('b').status, 'pending');
 });

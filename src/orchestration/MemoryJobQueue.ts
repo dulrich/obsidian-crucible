@@ -78,6 +78,13 @@ export class MemoryJobQueue {
 	// entries are never interrupted. A terminal (done/failed) entry is replaced.
 	enqueue(key: string, params: Record<string, unknown>, display: Record<string, unknown> = {}, lane: JobLane = 'background'): boolean {
 		if (!key) return false;
+		// Lazy hygiene: a quiet queue only ever runs sweepTerminal() from runEntry's
+		// finally, so a queue that never runs a job (e.g. its one entry keeps failing
+		// and nothing else is enqueued) would let a terminal entry suppress its own
+		// auto-source re-seed forever. Piggybacking the sweep onto the cheap read/write
+		// paths (this, hasPending, refill) means no free-running timer is needed and the
+		// entry ages out the moment anyone next touches the queue.
+		this.sweepTerminal();
 		const existing = this.entries.get(key);
 		if (existing && existing.status === 'pending') {
 			if (existing.lane === 'background' && lane === 'user') {
@@ -130,6 +137,7 @@ export class MemoryJobQueue {
 	}
 
 	hasPending(): boolean {
+		this.sweepTerminal();
 		const now = Date.now();
 		for (const e of this.entries.values()) {
 			if (e.status === 'pending' && !isDeferred(e, now)) return true;
@@ -141,6 +149,7 @@ export class MemoryJobQueue {
 	// any state (pending/running keep their slot; done/failed are intentionally not
 	// re-enqueued so a one-shot result is not retried on every refill).
 	refill(): void {
+		this.sweepTerminal();
 		if (!this.autoSourceEnabled || !this.autoSource) return;
 		let changed = false;
 		for (const seed of this.autoSource()) {

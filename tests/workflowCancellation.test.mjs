@@ -432,6 +432,80 @@ test('cancelling a pending memory entry reports not-running', async () => {
 		'queued work is removed by a queue operation, not by an abort');
 });
 
+// --- R1: MemoryJobBackend.synthJob reports live state, not a hardcoded 'running' -
+
+test("enqueue() returns a job that reports the entry's real (queued) status", async () => {
+	const workflow = { async run() { return { status: 'done' }; } };
+	const backend = new MemoryJobBackend(makePlugin(), 'youtube_metadata_fetch', {
+		persistence: 'memory',
+		minIntervalMs: 0,
+		maxParallel: 1,
+		dedupeKey: params => String(params.key ?? ''),
+	}, workflow);
+
+	const job = await backend.enqueue({ key: 'note:c.md' });
+	assert.equal(job.status, 'queued',
+		'the entry has not been claimed yet — synthJob used to hardcode "running" for every caller');
+
+	// Sanity: the same entry really does flip to running once actually claimed.
+	const claimed = backend.getQueue().claimEntry('note:c.md');
+	assert.equal(claimed.status, 'running');
+});
+
+// --- R2: stopJob's claim-window honesty --------------------------------------
+//
+// Between a drain claiming a job (removing it from `queued`) and that claim actually
+// registering the run in `running`, the job used to be invisible to both — file-side
+// this is JobStore.move's cache write-barrier window (up to ~2s), memory-side it is
+// the near-instant gap before RunningJobRegistry.begin() runs. A cancelJob() landing
+// in that window used to answer 'not-running' for a job that then visibly started.
+
+test('FileJobBackend.cancelJob waits out an in-flight claim instead of answering not-running', async () => {
+	const file = { path: 'queue/queued/job-race.md' };
+	const job = { id: 'job-race', type: TEST_TYPE, status: 'queued', params: {} };
+	const store = makeStore({ queued: [{ file, job }] });
+
+	// Simulate JobStore.move's cache write-barrier: the claim (queued → running) does
+	// not land until the test explicitly releases it.
+	const moveGate = deferred();
+	const realMove = store.move;
+	store.move = async (f, j, toStatus) => {
+		await moveGate.promise;
+		return realMove(f, j, toStatus);
+	};
+
+	const workflow = { async run() { return { status: 'done' }; } };
+	const { backend } = fileBackend(workflow, { store });
+
+	const drain = backend.runNext(); // starts claiming; blocks inside the slowed move
+	await flush();
+	await flush();
+
+	let cancelSettled = false;
+	const cancelling = backend.cancelJob('job-race').then(outcome => { cancelSettled = true; return outcome; });
+	await flush();
+	assert.equal(cancelSettled, false,
+		'a claim is in flight for this id; cancelJob must wait it out rather than answer immediately');
+
+	moveGate.resolve(); // let the claim land
+	const outcome = await cancelling;
+	assert.notEqual(outcome, 'not-running',
+		'the job was seconds from running; reporting not-running here is the exact lie stopJob used to tell');
+	assert.ok(outcome === 'cancelled' || outcome === 'completed',
+		`expected an honest terminal cancel outcome, got ${outcome}`);
+
+	await drain;
+	const settledCount = store.folders.running.length + store.folders.cancelled.length + store.folders.done.length;
+	assert.equal(settledCount, 1, 'the job landed somewhere real — it did not vanish mid-claim');
+});
+
+test('a cancelJob issued before any claim starts is unaffected — still an immediate not-running', async () => {
+	const store = makeStore({ queued: [] });
+	const workflow = { async run() { return { status: 'done' }; } };
+	const { backend } = fileBackend(workflow, { store });
+	assert.equal(await backend.cancelJob('nobody-claimed-this'), 'not-running');
+});
+
 // --- the entry checkpoint is central ----------------------------------------
 
 test('runWorkflowWithTimeout refuses to start a workflow cancelled before dispatch', async () => {

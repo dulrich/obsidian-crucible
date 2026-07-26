@@ -128,9 +128,17 @@ export class OrchestrationAutoRunner {
 	// removal, which answers `false` for a job that is running. Exactly one of the two
 	// can succeed for a given key.
 	//
-	// The second `cancelJob` covers the one real race: a drain claiming the job in the
-	// window between the two calls. Without it that job reports 'not-found' — "there's
-	// nothing there" — about a job the user can still see running in the table.
+	// The second `cancelJob` covers the race of a drain claiming the job in the window
+	// between the two calls. It used to be the only defense, and an incomplete one: a
+	// claim in flight (JobStore.move under the cache write-barrier can take ~2s;
+	// MemoryJobQueue's claim flip is near-instant but not provably zero) is invisible
+	// to *both* `running` and `queued` while it is in progress, so either `cancelJob`
+	// call landing inside that window still answered 'not-running' for a job that then
+	// visibly started — the caller was left with 'not-found'. Both backends'
+	// `cancelJob` now wait out an in-flight claim before answering (see `claiming` on
+	// FileJobBackend / MemoryJobBackend), so *either* call here can catch the race
+	// honestly; the second call remains as the belt-and-suspenders for a claim that
+	// starts strictly after the first `cancelJob` already returned.
 	async stopJob(type: JobType, key: string): Promise<StopJobOutcome> {
 		const running = await this.orchestrator.cancelJob(type, key);
 		if (running !== 'not-running') return running;
