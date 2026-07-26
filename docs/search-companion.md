@@ -127,13 +127,13 @@ nothing should be configured against them — a client pointed there bypasses th
 and hits a stopped container.
 
 **The GPU pair above is mid-migration to a single router, `crucible-inference` on
-`127.0.0.1:4800`** — one always-on `llama-swap` process that spawns/unloads the same
+`127.0.0.1:4806`** — one always-on `llama-swap` process that spawns/unloads the same
 `bge-m3`/`bge-reranker-v2-m3` `llama-server` children on demand (`ttl`-based, not
 socket-activated), replacing `crucible-embed-gpu`/`crucible-rerank-gpu` and the systemd socket
 apparatus entirely. The container image and its router config already exist in this repo's
 [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md); wiring `crucible-inference` into
 this fleet's compose file, running its smoke test live, and flipping this fleet's provider base
-URLs from `4804`/`4805` to `4800` are separate, later steps not yet landed as of this writing — see
+URLs from `4804`/`4805` to `4806` are separate, later steps not yet landed as of this writing — see
 [Local inference](local-inference.md) §12a for the full setup and its "Migration status" note, and
 §12a/Rule 2 for why the new router needs only one base URL for both jobs instead of the asymmetric
 pair described below. Until that cutover lands, the table above is what this fleet actually runs.

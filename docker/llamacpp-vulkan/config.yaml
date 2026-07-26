@@ -11,7 +11,7 @@
 # `bge-m3` and `bge-reranker-v2` are not arbitrary names: they are the exact `modelId` values
 # Crucible's live plugin settings (data.json) already store for the embed and rerank provider
 # entries. That is what makes migrating a vault onto this service a base-URL-only change (just
-# repoint the provider's base URL at 127.0.0.1:4800) instead of an id rewrite. Renaming or
+# repoint the provider's base URL at 127.0.0.1:4806) instead of an id rewrite. Renaming or
 # deleting an alias here silently breaks every vault already pointed at it — treat this list the
 # same way a public API's field names are treated. Add new aliases freely; never repurpose one.
 #
@@ -23,7 +23,7 @@
 healthCheckTimeout: 120  # seconds llama-swap waits for a freshly spawned child's checkEndpoint
                          # to go healthy before giving up on the request that triggered the spawn
 startPort: 5800          # first ${PORT} handed to a spawned child; never published outside the
-                         # container — only llama-swap's own :4800 listener is reachable
+                         # container — only llama-swap's own :4806 listener is reachable
 
 macros:
   # The flags below are carried over verbatim from the compose invocations this service

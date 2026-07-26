@@ -6,7 +6,7 @@
 # or otherwise touch any container.
 #
 # Usage:
-#   docker/llamacpp-vulkan/smoke-inference.sh [--url http://127.0.0.1:4800] [--wait-ttl]
+#   docker/llamacpp-vulkan/smoke-inference.sh [--url http://127.0.0.1:4806] [--wait-ttl]
 #
 # --wait-ttl is opt-in and slow on purpose: the retrieval group's ttl is 1800s (30 minutes), so
 # proving unload-on-ttl for real means sleeping through it. Without the flag, that check is
@@ -15,7 +15,7 @@
 # Exits non-zero on any check failure. Requires: curl, jq.
 set -u
 
-URL="http://127.0.0.1:4800"
+URL="http://127.0.0.1:4806"
 WAIT_TTL=0
 
 while [ "$#" -gt 0 ]; do
