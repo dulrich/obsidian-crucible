@@ -6,7 +6,7 @@ import { loadConfiguredChannels } from "./orchestration/utils/feedIntake";
 import type { ChannelEntry } from "./orchestration/utils/youtube";
 import { CurrencyCache, GeocodeCacheEntry, ProviderCatalogModel } from "./types";
 import { buildRanges, compileQuery, scoreCompiledText, ScoreResult } from "./rankScore";
-import { buildProviderModelSuggestRows, catalogEntrySummaryTokens } from "./settings/modelCapabilities";
+import { buildProviderModelSuggestRows, catalogEntrySummaryTokens, deriveModelDisplayLabel } from "./settings/modelCapabilities";
 
 /** One scored candidate, held only long enough to build the bounded top-K result. */
 interface ScoredCandidate<T> {
@@ -480,7 +480,17 @@ export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogMo
 			el.createDiv({ text: `+${entry.moreCount} more — use the catalog browser below`, cls: "suggestion-aux mod-muted" });
 			return;
 		}
-		el.createDiv({ text: entry.id });
+		// WP-3: prefer the derived display label (catalog displayName, else a file-path-shaped id's
+		// basename — same auto-alias `deriveModelDisplayLabel` a pick applies to the model row's
+		// label) over the raw id, with the id shown dimmed underneath only when it differs — same
+		// label-over-id pattern the catalog browser (`modelCatalogBrowser.ts`) already uses.
+		const label = deriveModelDisplayLabel(entry.id, entry.displayName);
+		if (label && label !== entry.id) {
+			el.createDiv({ text: label });
+			el.createDiv({ text: entry.id, cls: "suggestion-aux mod-muted" });
+		} else {
+			el.createDiv({ text: entry.id });
+		}
 		// WP-8: richer suggestions — every summary token the catalog carries (type, quantization,
 		// arch, context size, embedding width, server capability tags, input modalities, param
 		// count), not just the first two. Shares `catalogEntrySummaryTokens` with the "<Provider>

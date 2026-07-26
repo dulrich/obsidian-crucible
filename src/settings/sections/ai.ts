@@ -25,8 +25,10 @@ import {
 	clearProviderModelCatalog,
 	crossEncoderWarningText,
 	deriveCatalogSuggestion,
+	fillModelLabelIfEmpty,
 	getOrCreateProbeState,
 	modelHasCapability,
+	probeEmbeddingDimensions,
 	resetCatalogField,
 	setModelCapability,
 	setProbeStatus,
@@ -348,7 +350,11 @@ interface DescribedPrecisionEntry {
 }
 const describedPrecisionByModel = new WeakMap<ProviderModel, DescribedPrecisionEntry>();
 
-function describedPrecisionFor(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): string | undefined {
+// WP-3: exported so `renderModelCatalogBrowser`'s Use button (`modelCatalogBrowser.ts`) can thread
+// the exact same best-effort fallback into `useCatalogEntry` — see that function's doc comment for
+// why it takes this as an injected callback rather than importing it directly (this file already
+// imports `renderModelCatalogBrowser` from there, and a reverse import would be a cycle).
+export function describedPrecisionFor(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): string | undefined {
 	const existing = describedPrecisionByModel.get(model);
 	if (existing) return existing.status === 'done' ? existing.precision : undefined;
 	if (!model.id) return undefined;
@@ -421,7 +427,18 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					// would tear down the settings pane's DOM (this input included) out from
 					// under that close() call.
 					new ProviderModelSuggest(tab.app, t.inputEl, () => catalogModels, (entry) => {
-						acceptCatalogSuggestion(model, deriveCatalogSuggestion(entry), probeState);
+						// WP-3 item 1: the pick path now passes the same session-cached
+						// describedPrecision fallback the re-rendered Accept row below already
+						// does (same `quantization === undefined` gate) — before this fix only
+						// the Accept row got the benefit of a describeModel()-probed precision;
+						// an explicit pick from the type-ahead silently skipped it.
+						const fallbackPrecision = entry.quantization === undefined
+							? describedPrecisionFor(tab, provider, model)
+							: undefined;
+						acceptCatalogSuggestion(model, deriveCatalogSuggestion(entry, fallbackPrecision), probeState);
+						// WP-3 item 2 (auto-alias): only when the label is still empty — a value
+						// the user already typed always wins, pick or no pick.
+						fillModelLabelIfEmpty(model, entry);
 						setTimeout(() => {
 							void tab.plugin.saveSettings();
 							tab.display();
@@ -500,6 +517,39 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 				t.inputEl.step = '1';
 				t.inputEl.addClass('pi-width-half');
 			});
+
+			// WP-3 item 3: an explicit, never-automatic one-shot embed() call — shown only where
+			// it's actually useful (the model claims embedding capability, and there's no width
+			// recorded yet). Writes through the SAME accepted-marker path as every other probed
+			// field (probeEmbeddingDimensions calls acceptCatalogSuggestion internally), so the
+			// badge + Reset control above already covers undo; no separate mechanism needed.
+			if (modelHasCapability(model, 'embedding') && !model.embeddingDimensions) {
+				dimsSetting.addButton(bt => bt
+					.setButtonText('Probe dimensions')
+					.setTooltip('Calls this model once with a short test input and reads back the vector length. A local model that needs to load first can take seconds to minutes.')
+					.onClick(async () => {
+						if (!model.id) {
+							new Notice('Set a model id before probing dimensions.');
+							return;
+						}
+						bt.setDisabled(true);
+						bt.setButtonText('Probing…');
+						new Notice('Probing embedding dimensions — a local model may need to load first, which can take a while.');
+						try {
+							await probeEmbeddingDimensions(
+								(inputs) => tab.plugin.providerManager.embed(provider, model.id, inputs),
+								model,
+								probeState,
+							);
+							await tab.plugin.saveSettings();
+							tab.display();
+						} catch (err) {
+							new Notice(`Could not probe embedding dimensions: ${err instanceof Error ? err.message : String(err)}`);
+							bt.setButtonText('Probe dimensions');
+							bt.setDisabled(false);
+						}
+					}));
+			}
 
 			const variantSetting = new Setting(modelRow)
 				.setName('Embedding precision (fallback)')
@@ -594,7 +644,12 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 	// WP-1: the inline catalog browser panel replaces the bare status-line paragraph that used to
 	// live here — its collapsed header row IS that status line (`formatProbeStatusText`), plus an
 	// expand chevron into a filterable, paged view over the fetched catalog.
-	renderModelCatalogBrowser(containerEl, { tab, provider, catalogModels });
+	renderModelCatalogBrowser(containerEl, {
+		tab,
+		provider,
+		catalogModels,
+		resolveDescribedPrecision: (m) => describedPrecisionFor(tab, provider, m),
+	});
 }
 
 function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {

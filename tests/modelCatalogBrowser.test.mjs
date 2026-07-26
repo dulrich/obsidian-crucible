@@ -216,3 +216,43 @@ test('useCatalogEntry initializes provider.models when the provider had none yet
 	assert.equal(result.created, true);
 	assert.deepEqual(p.models, [result.model]);
 });
+
+// ── WP-3: Use auto-fills the display label and threads a describedPrecision fallback ────────────
+
+test('useCatalogEntry (WP-3) auto-fills label via the same file-path-shaped id derivation a type-ahead pick applies', () => {
+	const p = provider();
+	const result = useCatalogEntry(p, catalogModel({ id: '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf', type: 'embeddings' }));
+	assert.equal(result.model.label, 'bge-m3-f16');
+});
+
+test('useCatalogEntry (WP-3) prefers a catalog displayName over a derived path label for the auto-filled label', () => {
+	const p = provider();
+	const result = useCatalogEntry(p, catalogModel({ id: '/models/x/bge-m3-f16.gguf', displayName: 'BGE-M3 (F16)', type: 'embeddings' }));
+	assert.equal(result.model.label, 'BGE-M3 (F16)');
+});
+
+test('useCatalogEntry (WP-3) leaves label empty for a plain id with nothing to derive', () => {
+	const p = provider();
+	const result = useCatalogEntry(p, catalogModel({ id: 'openai/text-embedding-3-small', type: 'embeddings' }));
+	assert.equal(result.model.label, '');
+});
+
+test('useCatalogEntry (WP-3) threads resolveDescribedPrecision into embeddingVariant only when the catalog entry itself has no quantization', () => {
+	const p = provider();
+	const resolve = () => 'f16';
+
+	// No quantization on the entry — the fallback is consulted and used.
+	const withFallback = useCatalogEntry(p, catalogModel({ id: 'a', type: 'embeddings' }), resolve);
+	assert.equal(withFallback.model.embeddingVariant, 'f16');
+
+	// A real quantization on the entry wins — the fallback must not even need to be correct here,
+	// but assert it really is skipped by having it return something different.
+	const withQuant = useCatalogEntry(p, catalogModel({ id: 'b', type: 'embeddings', quantization: 'Q4_K_M' }), () => 'bf16');
+	assert.equal(withQuant.model.embeddingVariant, 'Q4_K_M');
+});
+
+test('useCatalogEntry (WP-3) works with no resolveDescribedPrecision at all (optional parameter, existing 2-arg call sites unaffected)', () => {
+	const p = provider();
+	const result = useCatalogEntry(p, catalogModel({ id: 'c', type: 'embeddings' }));
+	assert.equal(result.model.embeddingVariant, undefined);
+});

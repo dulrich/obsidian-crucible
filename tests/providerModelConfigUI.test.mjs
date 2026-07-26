@@ -41,11 +41,15 @@ const {
 	clearProviderModelCatalog,
 	crossEncoderWarningText,
 	deriveCatalogSuggestion,
+	deriveModelDisplayLabel,
+	fillModelLabelIfEmpty,
 	filterCatalogModelsForQuery,
 	formatProbeStatusText,
 	getOrCreateProbeState,
 	getProbeStatus,
 	inferCapabilities,
+	precisionFromModelId,
+	probeEmbeddingDimensions,
 	PROVIDER_MODEL_SUGGEST_LIMIT,
 	resetCatalogField,
 	setProbeStatus,
@@ -493,4 +497,132 @@ test('buildProviderModelSuggestRows: overflow is computed AFTER the query filter
 	const { rows, overflowCount } = buildProviderModelSuggestRows([...matching, ...noise], 'bge');
 	assert.deepEqual(rows, matching);
 	assert.equal(overflowCount, 0, 'the 500 non-matching entries must never count toward overflow');
+});
+
+// ── WP-3 — auto-alias: deriveModelDisplayLabel ──────────────────────────────────────────────────
+
+test('deriveModelDisplayLabel: a file-path-shaped id (the live crucible-inference GGUF shape) derives the basename with .gguf stripped, quant suffix kept', () => {
+	assert.equal(
+		deriveModelDisplayLabel('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf'),
+		'bge-m3-f16',
+	);
+});
+
+test('deriveModelDisplayLabel: a plain vendor/model catalog id keeps the label empty — the id is already readable', () => {
+	assert.equal(deriveModelDisplayLabel('openai/text-embedding-3-small'), '');
+	assert.equal(deriveModelDisplayLabel('bge-m3'), '');
+});
+
+test('deriveModelDisplayLabel: a relative path ending in .gguf (no leading slash) still counts as file-path-shaped', () => {
+	assert.equal(deriveModelDisplayLabel('models/bge-reranker-v2-m3-Q8_0.gguf'), 'bge-reranker-v2-m3-Q8_0');
+});
+
+test('deriveModelDisplayLabel: a non-blank catalog displayName always wins, even over a file-path-shaped id', () => {
+	assert.equal(
+		deriveModelDisplayLabel('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf', 'BGE-M3 (F16)'),
+		'BGE-M3 (F16)',
+	);
+});
+
+test('deriveModelDisplayLabel: a blank/whitespace displayName is treated as absent, falling through to id derivation', () => {
+	assert.equal(deriveModelDisplayLabel('/models/x/bge-m3-f16.gguf', '   '), 'bge-m3-f16');
+	assert.equal(deriveModelDisplayLabel('openai/text-embedding-3-small', ''), '');
+});
+
+test('fillModelLabelIfEmpty: fills an empty label from the derived label, and never touches a label the user already typed', () => {
+	const entry = { id: '/models/x/bge-m3-f16.gguf', displayName: undefined };
+
+	const empty = model({ label: '' });
+	fillModelLabelIfEmpty(empty, entry);
+	assert.equal(empty.label, 'bge-m3-f16');
+
+	const userTyped = model({ label: 'My custom label' });
+	fillModelLabelIfEmpty(userTyped, entry);
+	assert.equal(userTyped.label, 'My custom label', 'a user-typed label is never overwritten by a pick');
+});
+
+test('fillModelLabelIfEmpty: a plain id with nothing to derive leaves the label empty rather than writing the id itself', () => {
+	const m = model({ label: '' });
+	fillModelLabelIfEmpty(m, { id: 'openai/text-embedding-3-small' });
+	assert.equal(m.label, '');
+});
+
+// ── WP-3 — precision-from-id: deriveCatalogSuggestion's last-resort embeddingVariant source ────
+
+test('precisionFromModelId: parses the float family (f16/f32/fp16/fp32/bf16), case-insensitively, [-_.]-separated', () => {
+	assert.equal(precisionFromModelId('bge-m3-f16'), 'f16');
+	assert.equal(precisionFromModelId('bge-m3-F32'), 'fp32');
+	assert.equal(precisionFromModelId('bge-m3-fp16'), 'f16');
+	assert.equal(precisionFromModelId('bge-m3.fp32'), 'fp32');
+	assert.equal(precisionFromModelId('bge-m3_BF16'), 'bf16');
+});
+
+test('precisionFromModelId: parses the GGUF quant-scheme family (Q2_K, Q4_K_M, Q8_0), capturing the full underscore-joined suffix', () => {
+	assert.equal(precisionFromModelId('bge-reranker-v2-m3-Q8_0'), 'q8_0');
+	assert.equal(precisionFromModelId('some-model-Q4_K_M'), 'q4_k_m');
+	assert.equal(precisionFromModelId('another-model-q2_k'), 'q2_k');
+});
+
+test('precisionFromModelId: works on a file-path-shaped id too — the basename is parsed after stripping directory and .gguf', () => {
+	assert.equal(precisionFromModelId('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf'), 'f16');
+});
+
+test('precisionFromModelId: returns undefined for an id with no trailing precision token, never a guess', () => {
+	assert.equal(precisionFromModelId('bge-m3'), undefined);
+	assert.equal(precisionFromModelId('openai/text-embedding-3-small'), undefined);
+});
+
+test('deriveCatalogSuggestion: id-parsed precision is a LAST resort — real quantization and describedPrecision both win over it', () => {
+	// Nothing but the id itself carries a signal.
+	assert.equal(deriveCatalogSuggestion({ id: 'bge-m3-f16' }).embeddingVariant, 'f16');
+	assert.equal(deriveCatalogSuggestion({ id: 'bge-reranker-v2-m3-Q8_0' }).embeddingVariant, 'q8_0');
+
+	// The catalog's own reported quantization wins over an id-parseable token.
+	assert.equal(
+		deriveCatalogSuggestion({ id: 'bge-m3-f16', quantization: 'Q4_K_M' }).embeddingVariant,
+		'Q4_K_M',
+	);
+
+	// A describeModel() fallback wins over an id-parseable token too.
+	assert.equal(deriveCatalogSuggestion({ id: 'bge-m3-f16' }, 'bf16').embeddingVariant, 'bf16');
+
+	// No signal anywhere (no quantization, no fallback, no parseable id token) stays absent.
+	assert.equal(deriveCatalogSuggestion({ id: 'bge-m3' }).embeddingVariant, undefined);
+});
+
+// ── WP-3 — dims probe: probeEmbeddingDimensions writes via the accepted-marker path ─────────────
+
+test('probeEmbeddingDimensions writes embeddingDimensions through acceptCatalogSuggestion (badge + Reset), from a mocked embed() call', async () => {
+	const m = model({ embeddingDimensions: undefined });
+	const state = getOrCreateProbeState(m);
+	const embed = async (inputs) => {
+		assert.deepEqual(inputs, ['probe']);
+		return { embeddings: [Array.from({ length: 1024 }, () => 0.1)] };
+	};
+
+	const dims = await probeEmbeddingDimensions(embed, m, state);
+
+	assert.equal(dims, 1024);
+	assert.equal(m.embeddingDimensions, 1024);
+	assert.equal(state.accepted.embeddingDimensions, true, 'probe-accepted badge condition');
+	assert.equal(state.snapshot.get('embeddingDimensions'), undefined, 'the pre-probe value (undefined) was snapshotted for Reset');
+});
+
+test('probeEmbeddingDimensions Reset restores the prior value via the same resetCatalogField path other probed fields use', async () => {
+	const m = model({ embeddingDimensions: 42 });
+	const state = getOrCreateProbeState(m);
+	await probeEmbeddingDimensions(async () => ({ embeddings: [[0.1, 0.2, 0.3]] }), m, state);
+	assert.equal(m.embeddingDimensions, 3);
+
+	resetCatalogField(m, 'embeddingDimensions', state);
+	assert.equal(m.embeddingDimensions, 42, 'restored to the value before the probe, not to undefined');
+	assert.equal(state.accepted.embeddingDimensions, undefined);
+});
+
+test('probeEmbeddingDimensions throws (never silently no-ops) on an empty/missing embedding vector', async () => {
+	const m = model();
+	const state = getOrCreateProbeState(m);
+	await assert.rejects(() => probeEmbeddingDimensions(async () => ({ embeddings: [] }), m, state));
+	await assert.rejects(() => probeEmbeddingDimensions(async () => ({ embeddings: [[]] }), m, state));
+	assert.equal(m.embeddingDimensions, undefined, 'a failed probe must not have written anything');
 });
