@@ -1,6 +1,7 @@
 import { Notice, requestUrl } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription } from '../types';
 import {
+	buildHttpErrorMessage,
 	HttpCallContext,
 	HttpListCallContext,
 	HttpProviderClient,
@@ -46,10 +47,11 @@ export const ollamaClient: HttpProviderClient = {
 				],
 				stream: false,
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`Ollama API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage('Ollama API', response));
 		}
 
 		const data = response.json as { message?: { content?: string }, done_reason?: string | null };
@@ -67,10 +69,11 @@ export const ollamaClient: HttpProviderClient = {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ model: ctx.modelId, input: inputs }),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`Ollama embeddings API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage('Ollama embeddings API', response));
 		}
 
 		const data = response.json as { embeddings?: number[][], embedding?: number[], model?: string };
@@ -103,9 +106,9 @@ export const ollamaClient: HttpProviderClient = {
 		// even if both HTTP calls below fail.
 		warnIfCrossEncoderEmbedder(ctx.provider.id, 'ollama', ctx.modelId, [], (msg) => new Notice(msg));
 
-		const tagsResponse = await requestUrl({ url: `${baseUrl(ctx.provider)}/api/tags`, method: 'GET' });
+		const tagsResponse = await requestUrl({ url: `${baseUrl(ctx.provider)}/api/tags`, method: 'GET', throw: false });
 		if (tagsResponse.status !== 200) {
-			throw new Error(`Ollama tags API returned ${tagsResponse.status}: ${tagsResponse.text}`);
+			throw new Error(buildHttpErrorMessage('Ollama tags API', tagsResponse));
 		}
 		const tagsData = tagsResponse.json as { models?: OllamaTagEntry[] };
 		const models = tagsData.models ?? [];
@@ -138,9 +141,9 @@ export const ollamaClient: HttpProviderClient = {
 	// to `undefined` rather than failing the whole list, matching the resilience of the existing
 	// probeOllamaGgufFileType fallback below.
 	async listModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
-		const tagsResponse = await requestUrl({ url: `${baseUrl(ctx.provider)}/api/tags`, method: 'GET' });
+		const tagsResponse = await requestUrl({ url: `${baseUrl(ctx.provider)}/api/tags`, method: 'GET', throw: false });
 		if (tagsResponse.status !== 200) {
-			throw new Error(`Ollama tags API returned ${tagsResponse.status}: ${tagsResponse.text}`);
+			throw new Error(buildHttpErrorMessage('Ollama tags API', tagsResponse));
 		}
 		const tagsData = tagsResponse.json as { models?: OllamaTagEntry[] };
 		const models = tagsData.models ?? [];
@@ -175,10 +178,11 @@ export const ollamaClient: HttpProviderClient = {
 				stream: false,
 				options: { temperature: 0 },
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`Ollama image extraction API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage('Ollama image extraction API', response));
 		}
 
 		const data = response.json as { message?: { content?: string }, done_reason?: string | null };
@@ -200,6 +204,7 @@ async function probeOllamaGgufFileType(ctx: HttpCallContext): Promise<string | u
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ model: ctx.modelId }),
+			throw: false,
 		});
 		if (response.status !== 200) return undefined;
 		const data = response.json as { model_info?: Record<string, unknown> };
@@ -230,6 +235,7 @@ async function probeOllamaShow(provider: Provider, modelName: string): Promise<O
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ model: modelName }),
+			throw: false,
 		});
 		if (response.status !== 200) return undefined;
 		const data = response.json as { capabilities?: unknown; model_info?: Record<string, unknown> };

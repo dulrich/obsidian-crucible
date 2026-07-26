@@ -1,6 +1,7 @@
 import { requestUrl } from 'obsidian';
 import { ProviderCompletionResult, ProviderFinishReason, ProviderImageExtractionResult } from '../types';
 import {
+	buildHttpErrorMessage,
 	HttpProviderClient,
 	IMAGE_EXTRACTION_SYSTEM_PROMPT,
 	IMAGE_EXTRACTION_USER_PROMPT,
@@ -30,10 +31,11 @@ export const anthropicClient: HttpProviderClient = {
 				messages: [{ role: 'user', content: user }],
 				max_tokens: 4096,
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`Anthropic API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage('Anthropic API', response));
 		}
 
 		const data = response.json as { content?: { text?: string }[], stop_reason?: string | null };
@@ -65,10 +67,11 @@ export const anthropicClient: HttpProviderClient = {
 				max_tokens: 4096,
 				temperature: 0,
 			}),
+			throw: false,
 		});
 
 		if (response.status !== 200) {
-			throw new Error(`Anthropic image extraction API returned ${response.status}: ${response.text}`);
+			throw new Error(buildHttpErrorMessage('Anthropic image extraction API', response));
 		}
 
 		const data = response.json as { content?: { text?: string }[], stop_reason?: string | null };
