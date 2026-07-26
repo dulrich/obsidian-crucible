@@ -78,10 +78,11 @@ groups:
   # safely coexist with each other, or necessarily with the retrieval pair, under this GPU's
   # VRAM — swap: true unloads the group's previous member before starting the next one,
   # exclusive: true additionally stops any *other* group's members first (i.e. it would evict
-  # bge-m3/bge-reranker-v2 while a chat request is in flight). Whether that eviction-and-restore
-  # cycle is safe under RADV on this GPU is untested; it's the named open risk to check at
-  # cutover (WP-6) before the CPU fallback services are retired. Uncomment and fill in a real
-  # model + cmd when a chat model is added to this router.
+  # bge-m3/bge-reranker-v2 while a chat request is in flight). The eviction-and-restore cycle
+  # was tested at cutover (2026-07-26, gemma-4-12B Q4_K_M as the chat member, RX 9070/RADV):
+  # two full evict→reload cycles, embeddings byte-identical after each reload, ~1.3s retrieval
+  # reloads warm, no amdgpu errors in the kernel log. Uncomment and fill in a real model + cmd
+  # when a chat model is added to this router.
   # chat:
   #   swap: true
   #   exclusive: true

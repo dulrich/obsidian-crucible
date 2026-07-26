@@ -60,13 +60,18 @@ else
 fi
 
 # ── 2. /v1/models lists both aliases ────────────────────────────────────────────────────────
+# llama-swap (verified on v243) does not surface aliases as top-level ids: each entry's id is
+# the canonical model name, and its aliases ride in meta.llamaswap.aliases. Requests BY alias
+# still route (checks 3 and 4 use the aliases), so accept an alias appearing in either place.
 note "checking GET /v1/models ..."
 models_json=$(curl -s --max-time 10 "$URL/v1/models") || models_json=""
-model_ids=$(echo "$models_json" | jq -r '.data[]?.id // empty' 2>/dev/null)
-if echo "$model_ids" | grep -qx "bge-m3" && echo "$model_ids" | grep -qx "bge-reranker-v2"; then
+model_names=$(echo "$models_json" | jq -r '
+	.data[]? | (.id // empty), (.meta.llamaswap.aliases[]? // empty)
+' 2>/dev/null)
+if echo "$model_names" | grep -qx "bge-m3" && echo "$model_names" | grep -qx "bge-reranker-v2"; then
 	pass "/v1/models lists both aliases (bge-m3, bge-reranker-v2)"
 else
-	bad "/v1/models did not list both required aliases. Got: $(echo "$model_ids" | tr '\n' ',' )"
+	bad "/v1/models did not list both required aliases (as ids or meta.llamaswap.aliases). Got: $(echo "$model_names" | tr '\n' ',' )"
 fi
 
 # ── 3. /v1/embeddings (model bge-m3) returns a numeric vector ───────────────────────────────
