@@ -28,6 +28,21 @@ by an explicit **Accept** button, and reversible via a manual reset/override. Th
 `model.capabilities` user-owned — the field where commit `193975c` just fixed a silent-clobber bug —
 while still removing the hand-typing that motivated the feature.
 
+**D2 amendment (decision 4, `plans/sprint-exit-queue-health-and-scrub.md` SE WP-8, user-confirmed
+2026-07-25/26): auto-apply on explicit pick; badge + undo; background fetch never writes.** The
+original rule conflated two different actions under one gate — a background/lazy catalog fetch
+(no user intent expressed yet) and a user explicitly picking a model id from the fetched catalog
+(as deliberate an action as clicking Accept once was). The amendment splits them: picking a model
+from the catalog via the model-id suggest now calls `acceptCatalogSuggestion` immediately, through
+the exact same path the Accept button always used — the per-field "probe-accepted" badge plus its
+Reset button is the badge-and-undo affordance, not a new mechanism. The catalog itself also now
+auto-fetches lazily the first time a provider's Models section renders when `modelCatalog` is
+absent (at most once per provider per session; a manual Fetch models click or Clear cache still
+work as before). What D2 continues to forbid, unchanged: a background or lazy fetch (or anything
+short of an explicit user pick/Accept) writing to a `ProviderModel`'s
+`capabilities`/`embeddingDimensions`/`embeddingVariant`. The **Accept** button remains, for a
+hand-typed id that later comes to match a catalog entry.
+
 **D3 — The `SCHEMA_VERSION` / `SEARCH_REQUIRED_SCHEMA_VERSION` pairing rule is honoured.** Both go
 to 5. Search is unavailable between the plugin update and the container rebuild; that window is
 harmless while the feature is actively being rebuilt, whereas a permanent documented deviation is a
@@ -465,8 +480,10 @@ Tests that must exist:
     input.
 11. **The global `orchestrationMaxConcurrent` cap still bounds the sum** when several types each
     have a raised per-type concurrency.
-12. **A probe never writes `model.capabilities` without Accept** (D2), including the
-    `undefined`-vs-`[]` distinction.
+12. **Auto-apply on explicit pick; badge + undo; background fetch never writes** (D2 as amended
+    by SE WP-8) — an explicit catalog pick applies `model.capabilities` immediately (via the same
+    path Accept always used, including the `undefined`-vs-`[]` distinction), a background or lazy
+    fetch never does, and the per-field probe-accepted badge plus Reset is the undo affordance.
 13. **Accept then Reset restores user-entered state** and the row reports which values are
     probe-derived.
 14. **A probe failure leaves manual entry fully functional** — the id field still accepts free text.

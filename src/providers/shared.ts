@@ -273,12 +273,31 @@ export function looksLikeCrossEncoder(...candidates: (string | undefined)[]): bo
 //
 // Deduplicated per (providerId, modelId) for the life of the module (i.e. the plugin session), so
 // a hot indexing loop that calls this once per embed batch logs it exactly once.
-export function warnIfCrossEncoderEmbedder(providerId: string, providerLabel: string, modelId: string, ...hints: (string | undefined)[]): void {
+//
+// WP-8 (plans/sprint-exit-queue-health-and-scrub.md): the warning used to be logWarn-only, which
+// is debug-gated (see src/log.ts) — invisible unless the user has already turned on Crucible debug
+// output, which someone picking a reranker as an embedder for the first time has no reason to have
+// done. `notify`, when supplied, is called with the identical message so a caller with access to
+// Obsidian's UI (the two provider clients below; this file stays import-free of 'obsidian' so it
+// can keep bundling standalone in tests/providerModelProbe.test.mjs) can surface a visible Notice.
+// It shares this function's own session dedup gate rather than getting a second one, so the
+// logWarn and the Notice can never drift out of step on "have we already told the user about this
+// (provider, model) pair this session". `hints` moved from a rest parameter to an array so an
+// optional parameter could follow it; every existing call site is a mechanical wrap in `[...]`.
+export function warnIfCrossEncoderEmbedder(
+	providerId: string,
+	providerLabel: string,
+	modelId: string,
+	hints: (string | undefined)[] = [],
+	notify?: (message: string) => void,
+): void {
 	if (!looksLikeCrossEncoder(modelId, ...hints)) return;
 	const key = `${providerId}::${modelId}`;
 	if (crossEncoderWarned.has(key)) return;
 	crossEncoderWarned.add(key);
-	logWarn(`${providerLabel}: model "${modelId}" looks like a cross-encoder / reranker (matched "rerank"/"cross-enc" in its id or reported metadata) but is configured as an embedding model. Cross-encoder outputs are not valid similarity vectors for search — verify this is a bi-encoder before indexing with it.`);
+	const message = `${providerLabel}: model "${modelId}" looks like a cross-encoder / reranker (matched "rerank"/"cross-enc" in its id or reported metadata) but is configured as an embedding model. Cross-encoder outputs are not valid similarity vectors for search — verify this is a bi-encoder before indexing with it.`;
+	logWarn(message);
+	notify?.(message);
 }
 
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {

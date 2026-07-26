@@ -6,7 +6,7 @@ import { loadConfiguredChannels } from "./orchestration/utils/feedIntake";
 import type { ChannelEntry } from "./orchestration/utils/youtube";
 import { CurrencyCache, GeocodeCacheEntry, ProviderCatalogModel } from "./types";
 import { buildRanges, compileQuery, scoreCompiledText, ScoreResult } from "./rankScore";
-import { filterCatalogModelsForQuery } from "./settings/modelCapabilities";
+import { catalogEntrySummaryTokens, filterCatalogModelsForQuery } from "./settings/modelCapabilities";
 
 /** One scored candidate, held only long enough to build the bounded top-K result. */
 interface ScoredCandidate<T> {
@@ -454,7 +454,11 @@ export class ProviderModelSuggest extends AbstractInputSuggest<ProviderCatalogMo
 
 	renderSuggestion(entry: ProviderCatalogModel, el: HTMLElement): void {
 		el.createDiv({ text: entry.id });
-		const aux = [entry.type, entry.quantization].filter((v): v is string => !!v).join(' · ');
+		// WP-8: richer suggestions — every summary token the catalog carries (type, quantization,
+		// arch, context size, embedding width, server capability tags, input modalities, param
+		// count), not just the first two. Shares `catalogEntrySummaryTokens` with the "<Provider>
+		// reports: ..." provenance line in ai.ts rather than maintaining a second, narrower list.
+		const aux = catalogEntrySummaryTokens(entry).join(' · ');
 		if (aux) el.createDiv({ text: aux, cls: "suggestion-aux" });
 	}
 

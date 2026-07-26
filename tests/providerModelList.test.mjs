@@ -253,6 +253,44 @@ test('a real LM Studio /api/v0/models response is used directly, without falling
 	assert.equal(nativeRequest.url, 'http://127.0.0.1:1234/api/v0/models');
 });
 
+// ── WP-8: LM Studio native listModels() carries max_context_length through as contextLength ──
+//
+// Verified live against a running LM Studio (2026-07-25): the native listing's context-size field
+// is `max_context_length`, not the OpenRouter-shaped `context_length` the fallback branch reads —
+// same wire-format-caution family as `quantization` vs `quant`.
+
+test('LM Studio native listModels() carries max_context_length through as ProviderCatalogModel.contextLength', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({
+			status: 200,
+			json: {
+				object: 'list',
+				data: [{ id: 'llama-3-8b-instruct', quantization: 'Q4_K_M', type: 'llm', arch: 'llama', max_context_length: 8192 }],
+			},
+		})],
+	]);
+	const provider = {
+		id: 'lmstudio-ctx', name: 'LM Studio', kind: 'openai-compatible',
+		baseUrl: 'http://127.0.0.1:1234/v1', models: [],
+	};
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const catalog = await manager.listModels(provider);
+	assert.equal(catalog[0].contextLength, 8192);
+});
+
+test('LM Studio native listModels() omits contextLength when max_context_length is absent — never fabricated', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({
+			status: 200,
+			json: { object: 'list', data: [{ id: 'no-ctx-model', type: 'llm' }] },
+		})],
+	]);
+	const provider = { id: 'lmstudio-noctx', name: 'LM Studio', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:1234/v1', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const catalog = await manager.listModels(provider);
+	assert.equal(catalog[0].contextLength, undefined);
+});
+
 // ── 6. OpenRouter's rich, currently-unread metadata surfaces, and no API key is required ───
 
 test('OpenRouter /models metadata (context_length, input_modalities, supported_parameters) surfaces, with no API key configured', async () => {
