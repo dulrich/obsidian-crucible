@@ -608,7 +608,9 @@ follow (a) above, confirm it works, then retire the sockets:
 systemctl --user disable --now crucible-embed.socket crucible-rerank.socket
 ```
 
-Historical setup, for reference:
+Historical setup, for reference — note the pieces it names (the `crucible-embed-gpu`/
+`crucible-rerank-gpu` compose services and the `docker/llamacpp-vulkan/systemd/` directory with
+its `install.sh`) were **deleted at the 2026-07-26 cutover** and now exist only in git history:
 
 ```bash
 cd /home/_shared_code/context-control
@@ -618,12 +620,9 @@ docker compose -f compose.home.yml stop crucible-embed-gpu
 /home/_shared_code/obsidian-crucible/docker/llamacpp-vulkan/systemd/install.sh
 ```
 
-The first `hc up` builds the image; stopping the compose service immediately after hands control
-to the socket units, which start the container on demand instead of compose keeping it always up.
-`install.sh` symlinks the unit files in
-[`docker/llamacpp-vulkan/systemd/`](../docker/llamacpp-vulkan/systemd/) into your user systemd
-instance and arms the sockets — see
-[`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) for what each unit does.
+The first `hc up` built the image; stopping the compose service immediately after handed control
+to the socket units, which started the container on demand instead of compose keeping it always
+up. `install.sh` symlinked the unit files into your user systemd instance and armed the sockets.
 
 Crucible (only if you are still on this route):
 
@@ -653,8 +652,9 @@ Gotchas (kept because they still apply to raw `llama-server` use generally):
 
 ### d. Infinity (CPU) containers
 
-The fallback route: no GPU or Vulkan driver required, and this is what stays running as a safety
-net even after a fleet cuts over to (a).
+The fallback route: no GPU or Vulkan driver required. (On the home fleet the two compose
+services running this recipe were retired at the 2026-07-26 cutover along with everything else
+route (a) replaced; the recipe itself remains the right shape for a host with no usable GPU.)
 
 ```bash
 michaelf34/infinity:0.0.77-cpu v2 --model-id BAAI/bge-m3            --engine optimum --url-prefix /v1 --port 4802

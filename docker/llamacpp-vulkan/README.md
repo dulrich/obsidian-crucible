@@ -7,9 +7,8 @@ This replaces the old shape — two separate `llama-server` containers, each beh
 systemd socket that started/stopped the container on demand — with **one router process**
 (`llama-swap`) that itself spawns/swaps/unloads the actual `llama-server` children per-model,
 in-container, per its `config.yaml`. The socket-activation apparatus (`systemd/*.socket`,
-`*.service`, `crucible-inference-ctl`) still lives in this directory and still works against the
-image's old dual-single-model shape, but it is retired once the router cutover lands — see
-"Migration status" below.
+`*.service`, `crucible-inference-ctl`, `install.sh`) was deleted at the 2026-07-26 cutover —
+it lives on in git history if a per-model socket-activated deployment is ever wanted again.
 
 | | Infinity (CPU) | this (Vulkan GPU) | |
 |---|---|---|---|
@@ -30,7 +29,6 @@ entrypoint.sh       refuses to start on a software rasteriser (see "The llvmpipe
                     exec tail — runs whatever command it's given (llama-swap or a bare llama-server)
 config.yaml         llama-swap router config: models, aliases, ttl, groups — bind-mounted, not baked in
 smoke-inference.sh  host-run smoke test against a running router (see "Smoke testing" below)
-systemd/            retired at cutover: socket units, service units, installer, lifecycle helper
 ```
 
 Tag: **`crucible-llamacpp-vulkan:b10121-swap243`** — llama.cpp tag + llama-swap tag, both baked
@@ -38,10 +36,7 @@ into the name so it's visible without opening the Dockerfile.
 
 The compose service itself (`crucible-inference`, port mapping, `/models` and `config.yaml`
 mounts, `/dev/dri` passthrough, `mem_limit`) lives in the fleet repo,
-`context-control/compose.home.yml` — that wiring, plus the live cutover, is a separate,
-cross-repo work package from this directory's contents. See the governing plan
-(`plans/model-catalog-ux-local-inference-and-remediations.md`, WP-4/WP-5/WP-6) for the full
-sequencing.
+`context-control/compose.home.yml`.
 
 ## Dual-use image, on purpose
 
@@ -204,27 +199,17 @@ that file. `docker build` fails closed on a mismatch (`sha256sum -c -`).
 
 ## Migration status
 
-This directory is mid-migration from the old per-model socket-activated shape to the always-on
-llama-swap router. As of this file:
+**Cutover complete (2026-07-26).** `crucible-inference` is the live and only inference path:
+the compose service runs always-on in `context-control/compose.home.yml`, Crucible's two
+provider entries point at `127.0.0.1:4806`, and the smoke test plus the chat-evicts-retrieval
+interleave (two evict→reload cycles, byte-identical embeddings after each reload, no amdgpu
+errors) passed against the real service before anything was retired.
 
-- The Dockerfile, `entrypoint.sh`, `config.yaml`, and `smoke-inference.sh` in this directory
-  build and describe the **new** router shape (`crucible-inference` on port 4806).
-- The `systemd/` unit files, `crucible-inference-ctl`, and the compose services
-  `crucible-embed-gpu`/`crucible-rerank-gpu` (context-control) are still the **live** path —
-  they are not touched by this change and continue to work exactly as documented in git history.
-- Bringing up `crucible-inference` in compose, running the smoke test against the real service,
-  testing the chat-evicts-retrieval interleave, flipping Crucible's provider base URLs from
-  4804/4805 to 4806, and retiring the systemd sockets are separate, later steps (cutover) — not
-  part of authoring this container image and its config.
+Retired in the same cutover, all recoverable from git history if ever needed:
 
-## The CPU services are still there
-
-`crucible-embedder` and `crucible-reranker` (Infinity) remain on the `cpu-inference` profile
-throughout this migration and stay as the fallback for a host with no usable GPU.
-
-```bash
-hc up crucible-embedder      # naming a profiled service enables its profile
-docker stop crucible-embedder
-```
-
-A bare `hc down` will not stop them, because `down` only considers active profiles.
+- The `systemd/` socket-activation apparatus in this directory (unit files,
+  `crucible-inference-ctl`, `install.sh`).
+- The per-model compose services `crucible-embed-gpu`/`crucible-rerank-gpu` (4804/4805).
+- The Infinity CPU pair `crucible-embedder`/`crucible-reranker` (4802/4803) and their HF cache
+  volumes. For a host with no usable GPU, the recipe survives as route (d) in
+  [`docs/local-inference.md`](../../docs/local-inference.md).
