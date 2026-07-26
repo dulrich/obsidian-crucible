@@ -353,6 +353,15 @@ export interface ProviderCatalogModel {
 	contextLength?: number;
 	inputModalities?: string[];
 	supportedParameters?: string[];
+	// openrouter (`/models` and `/embeddings/models`, WP-2): the server's own display name
+	// ("OpenAI: Text Embedding Ada 002") — dropped nowhere else, so a UI wanting a human label
+	// instead of a raw id reads it from here rather than guessing one from the id.
+	displayName?: string;
+	// openrouter `architecture.output_modalities` (WP-2): the embeddings-listing leg's entries
+	// report `["embeddings"]` here, which is the only signal that distinguishes an embedding
+	// model from a chat model on OpenRouter (chat entries have no `output_modalities` at all, or
+	// report `["text"]`). See modelCapabilities.ts inferCapabilities for the consuming side.
+	outputModalities?: string[];
 	// ollama (`/api/tags` + `/api/show`). Named `serverCapabilities`, deliberately NOT
 	// `capabilities` — that name is `ProviderModel.capabilities` above, the D2-protected field this
 	// whole probe layer must never write. Keeping the names visibly distinct is a small guardrail

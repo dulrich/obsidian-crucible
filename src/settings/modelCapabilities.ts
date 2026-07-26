@@ -142,13 +142,27 @@ function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCapability
 		for (const cap of capabilitiesFromServerTags(entry.serverCapabilities)) inferred.add(cap);
 	}
 
+	// WP-2: OpenRouter's embeddings-listing leg (`GET /embeddings/models`) reports
+	// `architecture.output_modalities: ["embeddings"]` — the only signal that distinguishes an
+	// embedding model from a chat model there, since both legs share the same entry shape and an
+	// embedding entry still reports a text `input_modalities` (see the pinned facts in the WP-2
+	// brief). This takes precedence over the inputModalities-chat branch below: an embeddings
+	// entry's `input_modalities` describes what it *accepts*, not that it can chat, so that branch
+	// must not also add `chat` for an entry this branch has already classified.
+	const isEmbeddingOutput = Array.isArray(entry.outputModalities) && entry.outputModalities.includes('embeddings');
+	if (isEmbeddingOutput) {
+		hasSignal = true;
+		inferred.add('embedding');
+	}
+
 	// WP-8: OpenRouter-style `architecture.input_modalities` (surfaced here as
 	// `ProviderCatalogModel.inputModalities`) is real capability signal with no equivalent in the
 	// `type`-tag branches above — OpenRouter's `/models` never sets `type`. Any reported input
 	// modality means the model accepts completion requests at all (`chat`); an `image` modality
 	// additionally means it can see images (`image-extraction`), mirroring the `vlm` branch above
-	// for a kind that reports modalities instead of a type tag.
-	if (entry.inputModalities && entry.inputModalities.length > 0) {
+	// for a kind that reports modalities instead of a type tag. Skipped for an entry already
+	// classified as an embedding model (see isEmbeddingOutput above).
+	if (!isEmbeddingOutput && entry.inputModalities && entry.inputModalities.length > 0) {
 		hasSignal = true;
 		inferred.add('chat');
 		if (entry.inputModalities.includes('image')) inferred.add('image-extraction');
