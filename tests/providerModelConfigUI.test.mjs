@@ -590,6 +590,30 @@ test('deriveCatalogSuggestion: id-parsed precision is a LAST resort — real qua
 	assert.equal(deriveCatalogSuggestion({ id: 'bge-m3' }).embeddingVariant, undefined);
 });
 
+// ── WP-1 — pick-path regression: a llama-swap-shaped catalog entry end to end ───────────────────
+
+test('picking a llama-swap-shaped catalog entry (id carrying -f16) sets capabilities and lands embeddingVariant f16 via the precision chain', () => {
+	// The pick path (ai.ts's ProviderModelSuggest callback) and the Accept button share exactly
+	// this Surface → Accept call sequence — deriveCatalogSuggestion then acceptCatalogSuggestion —
+	// so exercising it directly is a faithful stand-in for the UI pick, without bundling ai.ts.
+	const entry = { id: 'bge-m3-f16', type: 'embeddings' };
+	const m = model({ id: '', capabilities: ['chat'] });
+	const state = getOrCreateProbeState(m);
+
+	// Surface: no real `quantization` field and no describeModel() fallback passed in — a
+	// llama-swap alias like `bge-m3-f16` carries its only precision signal in the id itself, so
+	// this exercises precisionFromModelId as the last-resort step of the chain.
+	const suggestion = deriveCatalogSuggestion(entry);
+	assert.deepEqual(suggestion.capabilities, ['embedding']);
+	assert.equal(suggestion.embeddingVariant, 'f16');
+
+	acceptCatalogSuggestion(m, suggestion, state);
+	assert.deepEqual(m.capabilities, ['embedding']);
+	assert.equal(m.embeddingVariant, 'f16');
+	assert.equal(state.accepted.capabilities, true, 'probe-accepted badge condition for capabilities');
+	assert.equal(state.accepted.embeddingVariant, true, 'probe-accepted badge condition for embeddingVariant');
+});
+
 // ── WP-3 — dims probe: probeEmbeddingDimensions writes via the accepted-marker path ─────────────
 
 test('probeEmbeddingDimensions writes embeddingDimensions through acceptCatalogSuggestion (badge + Reset), from a mocked embed() call', async () => {

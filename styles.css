@@ -1389,6 +1389,29 @@ If your plugin does not need CSS, delete this file.
   font-size: 0.9em;
 }
 
+/* WP-1 — model row editor: `.is-info` extends the same family for a notice that is informational
+   (folded-out field detail, probe-suggestion provenance) rather than an actual warning (a rename
+   that would orphan a search ref, a suspected cross-encoder) — same geometry, an accent-colored
+   border instead of the warning hue so the two read as distinct at a glance. */
+.crucible-inline-warning.is-info {
+  border-left-color: var(--text-accent);
+}
+
+/* The consolidated per-model notices block (plans/model-ux-search-perf-and-inference-consolidation.md
+   WP-1): every callout previously interleaved through the model row — the search-refs rename
+   warning, the embedding-field detail, the cross-encoder warning, the probe-suggestion provenance
+   — renders here instead, at the bottom of the row, below the fields. A `.crucible-inline-warning`
+   nested here (the probe-suggestion Accept row, which reuses Setting for its button) sheds
+   Setting's own top border/padding so it reads as one notice among the others, not a new section. */
+.crucible-model-notices {
+  margin-top: 0.5rem;
+}
+
+.crucible-model-notices .setting-item {
+  border-top: none;
+  padding: 0.4rem 0.6rem;
+}
+
 /* Fetch models / Clear cache status line — surfaces "no models reported" vs "could not reach the
    server" as read text rather than a spinner that just stops. WP-1 folded this line into the
    catalog browser panel's header row (`.crucible-model-catalog-browser-status` below), so the
