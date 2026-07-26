@@ -18,6 +18,19 @@ export { SEARCH_REQUIRED_SCHEMA_VERSION } from './types';
 const SEARCH_SERVICE_TIMEOUT_MS = 5000;
 
 /**
+ * Budget for a health probe issued from the background indexing/availability path
+ * (`CompanionAvailabilityGate` via `SearchManager.companionAvailable`), as opposed to an
+ * interactive, user-facing health/search call.
+ *
+ * The companion is single-threaded and `node:sqlite`'s `DatabaseSync` is synchronous, so a
+ * ~500-chunk flush blocks it for longer than the interactive 5s budget — measured: 17 such
+ * probe timeouts in one indexing run, each immediately before a +500 chunk counter jump. The
+ * interactive timeout must stay short (a human is waiting on it); a background probe can
+ * afford to wait longer before treating silence as meaningful.
+ */
+export const SEARCH_BACKGROUND_PROBE_TIMEOUT_MS = 15_000;
+
+/**
  * Indexing-path requests get a far longer budget than interactive ones.
  *
  * An upsert carries hundreds of chunks and is issued from the same main thread that
@@ -35,8 +48,12 @@ export class SearchServiceClient {
 	// The schema check lives immediately around the health probe and the search response —
 	// the only two payloads that carry a schema version — and nowhere else, so there is one
 	// place to reason about "is this index queryable by this build".
-	async health(): Promise<SearchHealth> {
-		const response = await this.request('/health', 'GET');
+	//
+	// `timeoutMs` lets a background probe (CompanionAvailabilityGate) request the longer
+	// SEARCH_BACKGROUND_PROBE_TIMEOUT_MS budget; interactive callers (a settings "test
+	// connection" action, SearchManager.health()'s default) get the 5s interactive one.
+	async health(timeoutMs: number = SEARCH_SERVICE_TIMEOUT_MS): Promise<SearchHealth> {
+		const response = await this.request('/health', 'GET', undefined, timeoutMs);
 		const health = normalizeHealth(response.json);
 		const outdated = schemaOutdatedMessage(health.schemaVersion);
 		if (!outdated) return health;
@@ -100,6 +117,16 @@ export class SearchServiceClient {
 	// Single choke point for companion I/O. Timeouts, connection failures, and 5xx all mean
 	// "the companion isn't answering" → SearchServiceUnavailableError (retryable). A 4xx is a
 	// genuine request bug and stays a plain Error so it surfaces instead of retrying forever.
+	//
+	// `throw: false` is load-bearing, not cosmetic: Obsidian's `requestUrl` throws on any status
+	// >= 400 by default, which would make every branch below dead code and every companion 4xx
+	// (including the deliberate width/space-conflict 400s) land in the catch block below and get
+	// wrapped as SearchServiceUnavailableError — "companion not reachable" — turning a client bug
+	// into an infinite 30s defer loop instead of a surfaced, non-retryable error.
+	//
+	// The `kind` on each throw is what lets a caller (CompanionAvailabilityGate.probe) tell a
+	// confirmed outage (refused, server-error) apart from a timeout, which confirms nothing —
+	// see SearchServiceUnavailableErrorKind.
 	private async request(path: string, method: string, body?: string, timeoutMs = SEARCH_SERVICE_TIMEOUT_MS): Promise<RequestUrlResponse> {
 		let response: RequestUrlResponse;
 		try {
@@ -108,13 +135,14 @@ export class SearchServiceClient {
 				method,
 				headers: body ? { 'Content-Type': 'application/json' } : undefined,
 				body,
+				throw: false,
 			}), timeoutMs, `Search service ${path} timed out after ${timeoutMs}ms`);
 		} catch (e) {
 			if (e instanceof SearchServiceUnavailableError) throw e;
-			throw new SearchServiceUnavailableError(`Search service ${path} unreachable: ${e instanceof Error ? e.message : String(e)}`);
+			throw new SearchServiceUnavailableError(`Search service ${path} unreachable: ${e instanceof Error ? e.message : String(e)}`, 'refused');
 		}
 		if (response.status >= 500) {
-			throw new SearchServiceUnavailableError(`Search service ${path} returned ${response.status}: ${response.text}`);
+			throw new SearchServiceUnavailableError(`Search service ${path} returned ${response.status}: ${response.text}`, 'server-error');
 		}
 		if (response.status < 200 || response.status >= 300) {
 			throw new Error(`Search service ${path} returned ${response.status}: ${response.text}`);
@@ -130,7 +158,7 @@ export class SearchServiceClient {
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => reject(new SearchServiceUnavailableError(message)), timeoutMs);
+		timer = setTimeout(() => reject(new SearchServiceUnavailableError(message, 'timeout')), timeoutMs);
 	});
 	try {
 		return await Promise.race([promise, timeout]);
