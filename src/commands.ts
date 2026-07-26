@@ -287,7 +287,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 
 	plugin.registerCrucibleCommand({
 		id: 'orchestrator-scan',
-		name: 'Orchestrate: scan',
+		name: 'Orchestrate: scan queue',
 		group: 'Orchestrations',
 		mutating: false,
 		run: () => plugin.orchestrator.scan(),
