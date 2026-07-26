@@ -1,7 +1,13 @@
 import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
-import { coerceVideoId, enrichYoutubeMetadataStandalone, ingestYoutubeVideoMetadata } from '../utils/youtubeApi';
+import {
+	YoutubeApiUnavailableError,
+	coerceVideoId,
+	enrichYoutubeMetadataStandalone,
+	ingestYoutubeVideoMetadata,
+	youtubeApiDeferredResult,
+} from '../utils/youtubeApi';
 
 // One job per note. With params.targetPath it links the video's metadata note onto
 // that note — fetching via the Data API only when the metadata note doesn't exist
@@ -15,28 +21,35 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 		const targetPath = typeof params.targetPath === 'string' ? params.targetPath : '';
 		const paramVideoId = typeof params.videoId === 'string' ? params.videoId.trim() : '';
 
-		// Standalone: no target note to link, just fetch + save the metadata note.
-		if (!targetPath) {
-			if (!paramVideoId) {
-				return { status: 'failed', error: 'Missing params.videoId' };
+		try {
+			// Standalone: no target note to link, just fetch + save the metadata note.
+			if (!targetPath) {
+				if (!paramVideoId) {
+					return { status: 'failed', error: 'Missing params.videoId' };
+				}
+				const result = await enrichYoutubeMetadataStandalone(plugin, paramVideoId);
+				return this.toResult(result, paramVideoId);
 			}
-			const result = await enrichYoutubeMetadataStandalone(plugin, paramVideoId);
-			return this.toResult(result, paramVideoId);
-		}
 
-		const file = plugin.app.vault.getAbstractFileByPath(targetPath);
-		if (!(file instanceof TFile)) {
-			return { status: 'failed', error: `Target note not found: ${targetPath}` };
-		}
+			const file = plugin.app.vault.getAbstractFileByPath(targetPath);
+			if (!(file instanceof TFile)) {
+				return { status: 'failed', error: `Target note not found: ${targetPath}` };
+			}
 
-		const fmVideoId = coerceVideoId(plugin.app.metadataCache.getFileCache(file)?.frontmatter?.['yt-video-id']);
-		const videoId = paramVideoId || fmVideoId;
-		if (!videoId) {
-			return { status: 'failed', error: `No yt-video-id on note: ${targetPath}` };
-		}
+			const fmVideoId = coerceVideoId(plugin.app.metadataCache.getFileCache(file)?.frontmatter?.['yt-video-id']);
+			const videoId = paramVideoId || fmVideoId;
+			if (!videoId) {
+				return { status: 'failed', error: `No yt-video-id on note: ${targetPath}` };
+			}
 
-		const result = await ingestYoutubeVideoMetadata(plugin, file, videoId);
-		return this.toResult(result, targetPath);
+			const result = await ingestYoutubeVideoMetadata(plugin, file, videoId);
+			return this.toResult(result, targetPath);
+		} catch (e) {
+			// The Data API itself is down/throttled — a service-level deferral, not a
+			// per-job failure. See the class doc on YoutubeApiUnavailableError.
+			if (e instanceof YoutubeApiUnavailableError) return youtubeApiDeferredResult(e);
+			throw e;
+		}
 	}
 
 	private toResult(

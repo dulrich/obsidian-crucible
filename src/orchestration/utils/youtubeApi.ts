@@ -1,11 +1,115 @@
-import { App, TFile, TFolder, normalizePath, requestUrl } from 'obsidian';
+import { App, RequestUrlResponse, TFile, TFolder, normalizePath, requestUrl } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { ensureFolder, slugify } from '../../utils';
 import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontmatter';
 import { yamlString } from '../../frontmatterValues';
+import type { ServiceFailureKind } from '../serviceHealth';
+import type { WorkflowResult } from '../types';
 import { parseChannelsTable } from './youtube';
 
 export const YOUTUBE_DATA_API_SECRET_KEY = 'crucible-youtube-data-api-key';
+
+/**
+ * The YouTube Data API is unreachable, throttled, or erroring server-side — as
+ * opposed to a job-level problem (missing/bad credential, a video that genuinely
+ * doesn't exist, a malformed response body) that no retry will fix. Consumers catch
+ * this and defer the job with `serviceUnhealthy: { service: 'youtube-api', ... }`
+ * rather than fail it, so the breaker (not per-job retry policy) governs recovery.
+ *
+ * `retryAfterMs` carries the server's own instruction when it gave one (a 429
+ * `Retry-After` header) or a conservative fixed backoff for a 403-quota rejection,
+ * which has no header at all — see `YOUTUBE_QUOTA_RETRY_AFTER_MS`.
+ */
+export class YoutubeApiUnavailableError extends Error {
+	constructor(message: string, public readonly kind: ServiceFailureKind, public readonly retryAfterMs?: number) {
+		super(message);
+		this.name = 'YoutubeApiUnavailableError';
+	}
+}
+
+/**
+ * The YouTube Data API gives no `Retry-After` for a quota rejection (unlike its 429
+ * rate-limit response, which sometimes does) — quota resets at midnight Pacific, so
+ * the "correct" wait is anywhere from seconds to ~24h depending on when it was hit.
+ * A conservative fixed hour is a deliberate middle ground: short enough that a quota
+ * bump mid-day recovers within the session, long enough that the breaker isn't
+ * probing (and getting refused again) every 30s-doubling cycle for a condition that
+ * will not clear until a clock event. The registry's own backoff doubling still
+ * applies on top of this if the probe fails again.
+ */
+export const YOUTUBE_QUOTA_RETRY_AFTER_MS = 60 * 60_000;
+
+/** Builds the deferred WorkflowResult a consumer returns for a caught `YoutubeApiUnavailableError`. */
+export function youtubeApiDeferredResult(e: YoutubeApiUnavailableError): WorkflowResult {
+	return {
+		status: 'deferred',
+		error: e.message,
+		notes: `${e.message}. Retrying shortly.`,
+		retryAfterMs: e.retryAfterMs,
+		serviceUnhealthy: { service: 'youtube-api', kind: e.kind, reason: e.message },
+	};
+}
+
+function retryAfterMsFromHeaders(headers: Record<string, string> | undefined): number | undefined {
+	if (!headers) return undefined;
+	const key = Object.keys(headers).find(k => k.toLowerCase() === 'retry-after');
+	if (!key) return undefined;
+	const seconds = Number(headers[key]);
+	return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
+
+/**
+ * Issues one YouTube Data API GET and classifies the response before any caller sees
+ * it. A network-level failure, a 5xx, a 429, or a 403 quota rejection are all "the
+ * service is down/throttled", not a bug in what we asked for, so they throw
+ * `YoutubeApiUnavailableError` and the caller's workflow can defer the whole job
+ * instead of misreporting a service outage as a permanent per-job failure. Everything
+ * else (404, bad-key 403, a non-2xx status this function doesn't otherwise recognize)
+ * is left as a plain Error — a job-level problem the caller keeps handling as it
+ * always has.
+ *
+ * `requestUrl` is passed `throw: false`: without it, Obsidian throws on any HTTP 400+
+ * status itself and the status branches below never see it, only the network-error
+ * catch would fire (audit finding B6's "dead status branches" does not apply here —
+ * this call site already opts out of that behavior).
+ */
+async function requestYoutubeApi(url: string, notFoundMessage: string): Promise<RequestUrlResponse> {
+	let res: RequestUrlResponse;
+	try {
+		res = await requestUrl({ url, method: 'GET', throw: false });
+	} catch (e) {
+		throw new YoutubeApiUnavailableError(
+			`YouTube Data API: request failed — ${e instanceof Error ? e.message : String(e)}`,
+			'refused',
+		);
+	}
+
+	if (res.status === 429) {
+		throw new YoutubeApiUnavailableError(
+			'YouTube Data API: rate limited (HTTP 429)',
+			'rate-limited',
+			retryAfterMsFromHeaders(res.headers),
+		);
+	}
+	if (res.status === 403) {
+		const detail = extractApiErrorReason(res.text);
+		if (detail.includes('quota')) {
+			throw new YoutubeApiUnavailableError(`YouTube Data API: quota exceeded`, 'rate-limited', YOUTUBE_QUOTA_RETRY_AFTER_MS);
+		}
+		throw new Error(`YouTube Data API: forbidden (HTTP 403). Check the API key and Data API enablement.`);
+	}
+	if (res.status === 404) {
+		throw new Error(notFoundMessage);
+	}
+	if (res.status >= 500) {
+		throw new YoutubeApiUnavailableError(`YouTube Data API: HTTP ${res.status}`, 'server-error');
+	}
+	if (res.status !== 200) {
+		const snippet = (res.text || '').slice(0, 200).replace(/\s+/g, ' ');
+		throw new Error(`YouTube Data API: HTTP ${res.status} — ${snippet}`);
+	}
+	return res;
+}
 
 export async function loadYoutubeApiKey(plugin: CruciblePlugin): Promise<string> {
 	return plugin.secretRegistry.get(YOUTUBE_DATA_API_SECRET_KEY);
@@ -74,22 +178,7 @@ export async function fetchYoutubeVideo(apiKey: string, videoId: string): Promis
 		key: apiKey,
 	});
 	const url = `https://www.googleapis.com/youtube/v3/videos?${params.toString()}`;
-	const res = await requestUrl({ url, method: 'GET', throw: false });
-
-	if (res.status === 403) {
-		const detail = extractApiErrorReason(res.text);
-		if (detail.includes('quota')) {
-			throw new Error(`YouTube Data API: quota exceeded`);
-		}
-		throw new Error(`YouTube Data API: forbidden (HTTP 403). Check the API key and Data API enablement.`);
-	}
-	if (res.status === 404) {
-		throw new Error(`YouTube Data API: video ${videoId} not found`);
-	}
-	if (res.status !== 200) {
-		const snippet = (res.text || '').slice(0, 200).replace(/\s+/g, ' ');
-		throw new Error(`YouTube Data API: HTTP ${res.status} — ${snippet}`);
-	}
+	const res = await requestYoutubeApi(url, `YouTube Data API: video ${videoId} not found`);
 
 	let payload: { items?: YoutubeApiResponseItem[] };
 	try {
@@ -362,22 +451,7 @@ export async function fetchYoutubeChannel(apiKey: string, channelId: string): Pr
 		key: apiKey,
 	});
 	const url = `https://www.googleapis.com/youtube/v3/channels?${params.toString()}`;
-	const res = await requestUrl({ url, method: 'GET', throw: false });
-
-	if (res.status === 403) {
-		const detail = extractApiErrorReason(res.text);
-		if (detail.includes('quota')) {
-			throw new Error(`YouTube Data API: quota exceeded`);
-		}
-		throw new Error(`YouTube Data API: forbidden (HTTP 403). Check the API key and Data API enablement.`);
-	}
-	if (res.status === 404) {
-		throw new Error(`YouTube Data API: channel ${channelId} not found`);
-	}
-	if (res.status !== 200) {
-		const snippet = (res.text || '').slice(0, 200).replace(/\s+/g, ' ');
-		throw new Error(`YouTube Data API: HTTP ${res.status} — ${snippet}`);
-	}
+	const res = await requestYoutubeApi(url, `YouTube Data API: channel ${channelId} not found`);
 
 	let payload: { items?: YoutubeChannelApiItem[] };
 	try {

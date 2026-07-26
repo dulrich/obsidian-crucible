@@ -230,7 +230,8 @@ export class OrchestrationAutoRunner {
 		for (;;) {
 			if (this.disposed) return;
 			// A manual drain ignores the auto-run gate but still stops when empty.
-			if (this.draining.get(type) !== 'manual' && !this.shouldDrain(type)) return;
+			const manual = this.draining.get(type) === 'manual';
+			if (!manual && !this.shouldDrain(type)) return;
 			const config = this.orchestrator.getConfig(type);
 
 			// The breaker, checked per claim rather than once per drain: the FIRST job of an
@@ -239,14 +240,24 @@ export class OrchestrationAutoRunner {
 			// stops the second one. A manual drain is exempt — a user's click is intent, and
 			// doubles as a probe. This is also the call that CONSUMES a half-open probe
 			// token, which is why it sits immediately before the claim.
-			if (this.draining.get(type) !== 'manual' && !this.orchestrator.servicesHealthyFor(type)) return;
+			if (!manual && !this.orchestrator.servicesHealthyFor(type)) return;
 
 			// Memory types know precisely when they are empty (and can refill); file
 			// types report "maybe" (hasPending === true), so this block is a no-op for
 			// them and the actual emptiness check is the claim inside runNextOfType.
 			if (!this.orchestrator.hasPending(type)) {
 				this.orchestrator.refillMemory(type);
-				if (!this.orchestrator.hasPending(type)) return;
+				if (!this.orchestrator.hasPending(type)) {
+					// The servicesHealthyFor call above may have just acquired a half-open
+					// probe token on the promise of a claim that turned out not to exist — no
+					// job ran, so no verdict will ever reach the registry for it. Hand it back
+					// rather than let it strand until the 5-minute stale reclaim. `manual`
+					// guard: a manual drain never acquired a token here (see above), so it must
+					// not release one a concurrent auto-drain of a DIFFERENT type sharing this
+					// service is legitimately still holding.
+					if (!manual) this.orchestrator.releaseProbesFor(type);
+					return;
+				}
 			}
 
 			// Pace per-type before taking a global slot, so a worker sleeping out its
@@ -263,6 +274,13 @@ export class OrchestrationAutoRunner {
 			} finally {
 				this.globalSem.release();
 			}
+			// The claim may have settled with no verdict reaching the registry — 'empty'
+			// (nothing there to claim), 'disabled', or a job-level defer/fail/cancel (no
+			// `serviceUnhealthy`, which says nothing about the service). 'blocked' and a
+			// successful 'ran' both already resolved any token via reportFailure/
+			// reportSuccess, so this is a harmless no-op for them — see
+			// Orchestrator.releaseProbesFor.
+			if (!manual) this.orchestrator.releaseProbesFor(type);
 			// Only a successful run keeps the worker going; 'empty' (nothing claimable,
 			// possibly because a peer took the last job), 'disabled', and 'blocked' (the
 			// job deferred because a dependency is down — the whole queue behind it would

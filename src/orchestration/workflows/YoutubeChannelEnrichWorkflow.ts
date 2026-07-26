@@ -1,6 +1,6 @@
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
-import { ensureChannelAboutNote } from '../utils/youtubeApi';
+import { YoutubeApiUnavailableError, ensureChannelAboutNote, youtubeApiDeferredResult } from '../utils/youtubeApi';
 
 // One job per channel: find-or-fetch-write the channel's about.md. With
 // params.force the note is re-fetched and overwritten even when present; with
@@ -16,7 +16,15 @@ export class YoutubeChannelEnrichWorkflow implements Workflow {
 		const force = params.force === true;
 		const maxAgeMs = typeof params.maxAgeMs === 'number' ? params.maxAgeMs : undefined;
 
-		const result = await ensureChannelAboutNote(plugin, channelId, { force, maxAgeMs });
+		let result: Awaited<ReturnType<typeof ensureChannelAboutNote>>;
+		try {
+			result = await ensureChannelAboutNote(plugin, channelId, { force, maxAgeMs });
+		} catch (e) {
+			// The Data API itself is down/throttled — a service-level deferral, not a
+			// per-job failure. See the class doc on YoutubeApiUnavailableError.
+			if (e instanceof YoutubeApiUnavailableError) return youtubeApiDeferredResult(e);
+			throw e;
+		}
 		switch (result.status) {
 			case 'created':
 				return { status: 'done', outputPaths: [result.aboutPath], notes: `Created about.md for ${channelId}` };
