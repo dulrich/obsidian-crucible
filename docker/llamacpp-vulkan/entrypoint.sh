@@ -44,5 +44,11 @@ fi
 echo "[entrypoint] devices as ggml resolves them:"
 llama-server --list-devices 2>&1 | sed 's/^/[entrypoint]   /' || true
 
-echo "[entrypoint] starting: llama-server $*"
-exec llama-server "$@"
+# Dual-use tail: this used to hardcode `exec llama-server "$@"`, but the image now also runs
+# llama-swap (which spawns its own llama-server children internally per its config.yaml) as the
+# default CMD. The GPU assertion above is identical either way — it belongs to the container,
+# not to whichever process ends up owning the tensors — so only this exec needs to become
+# argv-agnostic. Passing a bare `llama-server -m ... --embeddings ...` command still works
+# exactly as before.
+echo "[entrypoint] starting: $*"
+exec "$@"

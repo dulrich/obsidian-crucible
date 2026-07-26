@@ -1,0 +1,90 @@
+# crucible-inference — llama-swap router config for the Vulkan GPU llama.cpp image
+# (crucible-llamacpp-vulkan:b10121-swap243).
+#
+# This file is bind-mounted read-only at /app/config.yaml by the compose service — it is NEVER
+# baked into the image (the Dockerfile does not COPY it), specifically so it can be edited
+# without a rebuild. The compose wiring for that mount lives in context-control's
+# compose.home.yml (a later, cross-repo work package); this file only defines the router shape.
+#
+# ── Aliases are the API surface — APPEND ONLY, never rename or delete ──────────────────────────
+#
+# `bge-m3` and `bge-reranker-v2` are not arbitrary names: they are the exact `modelId` values
+# Crucible's live plugin settings (data.json) already store for the embed and rerank provider
+# entries. That is what makes migrating a vault onto this service a base-URL-only change (just
+# repoint the provider's base URL at 127.0.0.1:4800) instead of an id rewrite. Renaming or
+# deleting an alias here silently breaks every vault already pointed at it — treat this list the
+# same way a public API's field names are treated. Add new aliases freely; never repurpose one.
+#
+# One always-on router replaces the old per-model systemd socket-activation apparatus entirely:
+# llama-swap already does spawn-on-first-request plus `ttl`-based unload, so there's no separate
+# idle/wake layer to maintain, and the idle cost is a few MB of resident Go process, not a
+# full inference server.
+
+healthCheckTimeout: 120  # seconds llama-swap waits for a freshly spawned child's checkEndpoint
+                         # to go healthy before giving up on the request that triggered the spawn
+startPort: 5800          # first ${PORT} handed to a spawned child; never published outside the
+                         # container — only llama-swap's own :4800 listener is reachable
+
+macros:
+  # The flags below are carried over verbatim from the compose invocations this service
+  # replaces (crucible-embed-gpu / crucible-rerank-gpu). `--pooling` is DELIBERATELY absent from
+  # every model's cmd: the GGUF metadata already carries the correct pooling mode, and
+  # `--embeddings` / `--reranking` each imply their own pooling on top of that — do not add
+  # `--pooling` back in "to be explicit". `-ngl 99` offloads every layer to the GPU; the
+  # `-c/-b/-ub 8192` context/batch sizing matches what was already tuned and measured for these
+  # two models.
+  llama_server_common: >
+    /usr/local/bin/llama-server
+    --host 0.0.0.0 --port ${PORT}
+    -ngl 99 -c 8192 -b 8192 -ub 8192
+
+models:
+  bge-m3-f16:
+    name: "BGE-M3 embedding (f16)"
+    aliases:
+      - bge-m3
+    cmd: |
+      ${llama_server_common}
+      -m /models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf
+      --embeddings
+    ttl: 1800
+    checkEndpoint: /health
+
+  bge-reranker-v2-m3-Q8_0:
+    name: "BGE reranker v2 m3 (Q8_0)"
+    aliases:
+      - bge-reranker-v2
+    cmd: |
+      ${llama_server_common}
+      -m /models/gpustack/bge-reranker-v2-m3-GGUF/bge-reranker-v2-m3-Q8_0.gguf
+      --reranking
+    ttl: 1800
+    checkEndpoint: /health
+
+groups:
+  # Embedding and reranking are small enough, and used closely enough together by a single
+  # search/rerank flow, that neither should evict the other: swap/exclusive both false means
+  # llama-swap is free to run both children at once, and persistent: false means the ttl above
+  # is still what unloads them (a persistent group would never unload regardless of ttl).
+  retrieval:
+    swap: false
+    exclusive: false
+    persistent: false
+    members:
+      - bge-m3-f16
+      - bge-reranker-v2-m3-Q8_0
+
+  # Stub for when a chat model joins this router. Chat models are large enough that they cannot
+  # safely coexist with each other, or necessarily with the retrieval pair, under this GPU's
+  # VRAM — swap: true unloads the group's previous member before starting the next one,
+  # exclusive: true additionally stops any *other* group's members first (i.e. it would evict
+  # bge-m3/bge-reranker-v2 while a chat request is in flight). Whether that eviction-and-restore
+  # cycle is safe under RADV on this GPU is untested; it's the named open risk to check at
+  # cutover (WP-6) before the CPU fallback services are retired. Uncomment and fill in a real
+  # model + cmd when a chat model is added to this router.
+  # chat:
+  #   swap: true
+  #   exclusive: true
+  #   persistent: false
+  #   members:
+  #     - some-chat-model-id

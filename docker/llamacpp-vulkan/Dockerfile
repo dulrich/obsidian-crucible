@@ -1,4 +1,13 @@
-# llama.cpp `llama-server` on Vulkan, for the fleet's GPU embedding and reranking services.
+# llama.cpp `llama-server` on Vulkan + llama-swap, for the fleet's GPU inference services.
+#
+# Resulting tag: crucible-llamacpp-vulkan:b10121-swap243 (llama.cpp tag + llama-swap tag baked
+# into this image, so the tag alone tells you both pins without opening the Dockerfile).
+#
+# As of the llama-swap addition this image is dual-use, and that is deliberate — it is mid
+# migration from "one model, one process, one systemd socket" to "one always-on multi-model
+# router" (see README.md). `ENTRYPOINT` still only proves the GPU is real; whatever command you
+# pass after that (`llama-swap -config ... -listen ...` — the image's `CMD` default — or a bare
+# `llama-server -m ... --embeddings ...` for the old single-model shape) is exec'd unchanged.
 #
 # Why this image exists at all, when the search companion's Dockerfile sits at the repo root:
 # that one ships Crucible's own code, this one ships a third-party inference server. Its build
@@ -64,6 +73,41 @@ RUN cmake -B build \
       -DLLAMA_CURL=OFF \
     && cmake --build build --config Release --target llama-server -j"$(nproc)"
 
+# ── llama-swap fetch stage ───────────────────────────────────────────────────────────────────
+#
+# llama-swap turns this image from "one model, one process" into a multi-model router: it spawns
+# llama-server children on demand per request (holding the client's request until the child
+# reports healthy on its `checkEndpoint`), swaps/unloads them per `ttl`, and exposes one stable
+# set of aliases across `/v1/chat/completions`, `/v1/embeddings`, `/v1/models` (aggregated), and
+# `/rerank` + `/v1/rerank`. It is a static Go binary published as a GitHub release asset, so
+# there is no source build to reproduce here — only a download to pin and verify, the same shape
+# as any other pinned third-party binary in this fleet.
+#
+# Pinned to >= v242 specifically: v242 fixed a TTL-unload deadlock, and llama-swap has no
+# stability guarantee below that. v243 is the release this was authored against (2026-07-26).
+# The checksum is not hand-typed: it is the `llama-swap_<ver>_linux_amd64.tar.gz` line from that
+# release's own `llama-swap_<ver>_checksums.txt`, cross-checked here by downloading the asset
+# and hashing it independently. Bump `LLAMA_SWAP_TAG` deliberately, and re-derive
+# `LLAMA_SWAP_SHA256` from the new release's checksums file the same way — never hand-edit the
+# hash to make a build pass.
+FROM debian:sid-slim AS swap
+
+ARG LLAMA_SWAP_TAG=v243
+ARG LLAMA_SWAP_SHA256=1bb27ccbdaff0c4e42ef2356e2e7b5c693073dd57f9dcecf6c35ae6847f0b140
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /swap
+# The release asset name drops the leading "v" from the tag (llama-swap_243_..., not
+# llama-swap_v243_...) — `${LLAMA_SWAP_TAG#v}` strips it.
+RUN curl -fsSL -o llama-swap.tar.gz \
+      "https://github.com/mostlygeek/llama-swap/releases/download/${LLAMA_SWAP_TAG}/llama-swap_${LLAMA_SWAP_TAG#v}_linux_amd64.tar.gz" \
+    && echo "${LLAMA_SWAP_SHA256}  llama-swap.tar.gz" | sha256sum -c - \
+    && tar -xzf llama-swap.tar.gz llama-swap \
+    && chmod +x llama-swap
+
 # ── Runtime stage ────────────────────────────────────────────────────────────────────────────
 FROM debian:sid-slim
 
@@ -78,10 +122,22 @@ COPY --from=build /src/build/bin/llama-server /usr/local/bin/llama-server
 COPY --from=build /src/build/bin/*.so /usr/local/lib/
 RUN ldconfig
 
+COPY --from=swap /swap/llama-swap /usr/local/bin/llama-swap
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Read-only mount point for the GGUF library. Nothing in this image ever writes to it.
 VOLUME ["/models"]
 
+# /app/config.yaml is where the compose service (context-control, WP-6) bind-mounts
+# config.yaml read-only. It is NEVER COPYed into the image — llama-swap's config must be
+# editable without a rebuild, and baking it in would defeat that. This just ensures the mount
+# point directory exists.
+RUN mkdir -p /app
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Dual-use default: the router is the new normal, but the image still runs a bare
+# `llama-server ...` command unchanged (`entrypoint.sh`'s tail is `exec "$@"`) — see README.md.
+CMD ["llama-swap", "-config", "/app/config.yaml", "-listen", ":4800"]
