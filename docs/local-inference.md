@@ -455,3 +455,151 @@ One machine's specifics, included because the *shape* of the problem generalises
 - `context-control/references/rdna4-gpu-hang.md` — GPU hang signature and recovery.
 - `runs/dispatch/esi-field-report-protocol.md` — the measurement protocol that will replace every
   provisional number above.
+
+---
+
+## 12. Setups — pick one and follow it end-to-end
+
+Sections 3–4 above are the reference material, organised by concept (routes, then rules). This
+section is the condensed, single-path version of the same information: five concrete options, each
+with its exact commands and its gotchas inline, so setting one up doesn't require assembling the
+right order from five sections yourself. Pick one — you do not need more than one embedder, and
+reranking is opt-in on top of whichever you choose.
+
+### a. LM Studio
+
+Best for trying models out before committing to a route (§3) — a GUI, model downloads, and the
+llama.cpp binaries bundled for you.
+
+1. Start LM Studio's local server (default `127.0.0.1:1234`) and load an embedding model.
+2. In Crucible's provider settings, add a provider of kind **`openai-compatible`** — never
+   `ollama` (Rule 1, §4).
+3. Set the base URL to `http://127.0.0.1:1234/v1`. The `/v1` is required (Rule 2, §4). No API key
+   needed.
+
+Gotchas:
+
+- **Don't use LM Studio's own server for reranking.** It answers unknown endpoints with HTTP 200
+  and an error body (`{"error":"Unexpected endpoint or method. (POST /x)"}`), so a capability check
+  based on the status code alone reports `/v1/rerank` as supported when it is not — this is how it
+  was first mistaken for supported (§8). Use setup (b) or (c) below for reranking instead.
+- **Reranker models show up in the embedding-model list too**, and pass every structural check: LM
+  Studio serves them through `/v1/embeddings`, `type: embeddings`, at exactly the widths real
+  embedders use — `text-embedding-bge-reranker-v2-m3` returns 1024d (colliding with `bge-m3`),
+  `text-embedding-bge-reranker-base` returns 768d (colliding with `nomic-embed-text`). Mark any
+  reranker model **Rerank**, never Embedding, in Crucible's provider settings — that capability
+  flag is what keeps it out of the embedding picker (§1).
+- **One loaded model can appear under several aliases**, some carrying the quantization
+  (`model@q4_k_m`), some not. The quant-free alias is the natural one to configure, and the file
+  behind it can be swapped for a different quantization with no change to the string you
+  configured (§4, LM Studio subsection).
+
+### b. In-repo llama.cpp Vulkan container + systemd socket activation (the GPU path)
+
+The fastest local route measured in this guide (§9), packaged so it is reachable at all times
+without being resident at all times.
+
+```bash
+cd /home/_shared_code/context-control
+hc up crucible-embed-gpu
+docker compose -f compose.home.yml stop crucible-embed-gpu
+
+/home/_shared_code/obsidian-crucible/docker/llamacpp-vulkan/systemd/install.sh
+```
+
+The first `hc up` builds the image; stopping the compose service immediately after hands control
+to the socket units, which start the container on demand instead of compose keeping it always up.
+`install.sh` symlinks the unit files in
+[`docker/llamacpp-vulkan/systemd/`](../docker/llamacpp-vulkan/systemd/) into your user systemd
+instance and arms the sockets — see
+[`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) for what each unit does.
+
+Crucible:
+
+- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4804/v1` (`/v1` required).
+- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4805` (no `/v1`).
+- Point at the **socket** ports (4804/4805), not the container's own published ports — that
+  bypasses the on-demand start and hits a stopped container.
+
+Gotchas:
+
+- **The socket idle-exits the container after 30 minutes**; the first request after that pays a
+  cold start. Measured steady-state here: **1,251 ms p50 / 1,283 ms p95 over 16 cold starts**
+  (§9) — comfortably inside Crucible's 5 s interactive search timeout. The startup helper's own
+  wait budget is a more generous ceiling — up to ~120s inside `ExecStartPre`, covering a slower
+  container/model load than the steady-state measurement above — and a user-lowered
+  `orchestrationAutorunTimeoutSeconds` well below that ceiling can turn a post-idle first embed
+  batch into a **failed** job rather than a merely slow one. This interaction is a known, deferred
+  gap — not yet guarded in the settings UI (`plans/sprint-audit-remediation-2026-07-26.md`,
+  WP-R4).
+- **Unlike LM Studio, this route does real reranking.** `llama-server` started with `--reranking
+  --pooling rank` serves a real rerank endpoint (§3, §4).
+- **llama.cpp's `/rerank` returns raw logits** — negative, unbounded — not the 0–1 range Infinity
+  returns. A threshold written for one is wrong against the other (§7).
+- **Don't bypass the GPU assertion outside a deliberate test.** A Vulkan loader with no usable
+  hardware driver still enumerates `llvmpipe`, a software rasteriser, as a valid device — a
+  too-old Mesa answers every request correctly and just runs several times slower (§8, §10).
+
+### c. Infinity (CPU) containers
+
+```bash
+michaelf34/infinity:0.0.77-cpu v2 --model-id BAAI/bge-m3            --engine optimum --url-prefix /v1 --port 4802
+michaelf34/infinity:0.0.77-cpu v2 --model-id BAAI/bge-reranker-v2-m3 --engine torch                    --port 4803
+```
+
+Crucible:
+
+- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4802/v1`, no API key.
+- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4803` — **no** `/v1`.
+
+Gotchas:
+
+- **The base-URL asymmetry mirrors the GPU route, for the same reason.** The embedder is started
+  with `--url-prefix /v1`, so its base URL needs one; Infinity's default routes (used by the
+  reranker above) are unprefixed, so that one doesn't (Rule 2, §4).
+- **`--engine optimum` needs published ONNX weights.** `bge-reranker-v2-m3` publishes PyTorch
+  weights only, so under `optimum` it dies at engine selection with `No onnx files found` — before
+  downloading a byte, at any memory limit. `bge-m3` does ship ONNX, so the embedder keeps the
+  faster path. Check what a repo actually publishes before aligning the two `--engine` flags (§4,
+  §8).
+- **Infinity reports no dtype at all.** Crucible's precision probe reads this as a clean
+  "unknown", not a failed probe — expected, not a bug. Declare precision by hand in the model
+  row's fallback field only if you run two precisions of the same model side by side (§6).
+
+### d. ollama
+
+```bash
+systemctl edit ollama          # Environment="OLLAMA_VULKAN=1" for AMD Vulkan
+ollama pull bge-m3
+curl -s localhost:11434/api/tags | jq '.models[].details'   # quantization_level, format, digest
+```
+
+Crucible: provider kind **`ollama`** (not `openai-compatible`), base URL `http://127.0.0.1:11434`
+— no `/v1`.
+
+Gotchas:
+
+- **ollama speaks its own JSON wire protocol, not the OpenAI-compatible shape the other three
+  routes use** — chat requests hit `/api/chat`, embedding requests hit `/api/embed`. Pointing an
+  `ollama`-kind provider at LM Studio's port, or an `openai-compatible` provider at ollama's, does
+  not fail with a clear error — it comes back empty (Rule 1, §4).
+- **No rerank endpoint at all.** Pair ollama with route (b) or (c) if you want reranking (§3).
+- ollama reports `quantization_level`, `format`, and a `digest` (sha256 of the weights blob) via
+  `/api/tags` — the strongest identity signal of any local runtime covered here, useful for
+  confirming what actually loaded (§4, ollama subsection).
+
+### e. The search companion itself
+
+This guide is about the model server. The separate service Crucible talks to for chunk storage
+and search ranking is documented in [Search companion](search-companion.md) — see its "Inference
+services" section specifically, which documents this fleet's four containers
+(`crucible-embedder`, `crucible-reranker`, `crucible-embed-gpu`, `crucible-rerank-gpu`) as running
+instances of routes (c) and (b) above. Not a duplicate setup — read that page for how the fleet
+wires these routes together, and this one for how to reason about any one of them.
+
+### Publishing prebuilt images
+
+Building the GPU container image (route (b)) the first time costs several minutes. Publishing a
+prebuilt image so a plugin user could skip that build is an **open option, not a decision** —
+recorded as explicitly undecided: "noted as an option in WP-10, not decided"
+(`plans/sprint-exit-queue-health-and-scrub.md`). Nothing here should be read as promising it.
