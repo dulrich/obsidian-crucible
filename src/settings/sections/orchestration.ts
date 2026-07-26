@@ -11,6 +11,7 @@ import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 import type { JobType } from "../../orchestration/types";
 import { TEXT_EXTRACTABLE_CATEGORIES, deriveFileTypeGroups } from "../../fileTypes";
 import { renderExtensionCheckboxGroups } from "./commands";
+import { resolveProviderModelRef } from "../../search/SearchManager";
 
 interface WorkflowMeta {
 	id: string;
@@ -103,13 +104,26 @@ function imageExtractionModelRefs(tab: CrucibleSettingTab): ProviderModelRef[] {
 	return refs;
 }
 
+// Both the description text and the inline warning below resolve through the same
+// resolveProviderModelRef() SearchManager itself uses at index time — so "does this ref still
+// exist" can never say yes here and no there. A dangling ref (WP-3/SE-WP-6: renaming a catalog
+// entry does not rewrite the saved ref) previously showed the same generic "missing" copy as an
+// intentionally-unset ref; the two are different problems (one needs a Pick, the other needs a
+// fix-or-clear) and only the orphaned case gets the loud crucible-inline-warning treatment below.
 function describeEmbeddingModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
-	if (!ref) return 'No embedding model selected. Search will use FTS/BM25 only.';
-	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
-	const model = provider?.models.find(m => m.id === ref.modelId);
-	if (!provider || !model) return 'Selected embedding model is missing. Search will use FTS/BM25 only.';
-	const providerName = provider.name || provider.kind;
-	return `${providerName} · ${model.label || model.id}`;
+	const resolution = resolveProviderModelRef(tab.plugin.settings.providers, ref);
+	if (resolution.status === 'unset') return 'No embedding model selected. Search will use FTS/BM25 only.';
+	if (resolution.status === 'orphaned') return 'Selected embedding model no longer exists in its provider\'s catalog. Search will use FTS/BM25 only until this is fixed.';
+	const providerName = resolution.provider.name || resolution.provider.kind;
+	return `${providerName} · ${resolution.model.label || resolution.model.id}`;
+}
+
+// Names the dangling id explicitly — the description above deliberately does not, since it is
+// also shown for the everyday "nothing picked yet" state and naming an id there would be noise.
+function danglingRefWarning(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined, label: string): string | null {
+	const resolution = resolveProviderModelRef(tab.plugin.settings.providers, ref);
+	if (resolution.status !== 'orphaned' || !ref) return null;
+	return `${label} "${ref.modelId}" (provider "${ref.providerId}") is not in the current catalog — it was likely renamed or removed. Pick a replacement or Clear.`;
 }
 
 function describeImageExtractionModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
@@ -128,10 +142,10 @@ function describeImageExtractionModel(tab: CrucibleSettingTab, ref: ProviderMode
 // is deliberately started without --url-prefix) or any chat model, which is scored via the
 // slower, fuzzier complete()-based fallback instead.
 function describeRerankModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
-	if (!ref) return 'No reranker model selected. The Rerank button stays hidden on the search modal.';
-	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
-	const model = provider?.models.find(m => m.id === ref.modelId);
-	if (!provider || !model) return 'Selected reranker model is missing. The Rerank button stays hidden on the search modal.';
+	const resolution = resolveProviderModelRef(tab.plugin.settings.providers, ref);
+	if (resolution.status === 'unset') return 'No reranker model selected. The Rerank button stays hidden on the search modal.';
+	if (resolution.status === 'orphaned') return 'Selected reranker model no longer exists in its provider\'s catalog. The Rerank button stays hidden on the search modal until this is fixed.';
+	const { provider, model } = resolution;
 	const providerName = provider.name || provider.kind;
 	// A selection made before the Rerank capability existed still works — nothing checks the flag
 	// at run time, only the Pick list filters on it. Say so rather than implying it is broken, but
@@ -323,6 +337,13 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			await save();
 			tab.display();
 		}));
+	// SE-WP-6: a renamed catalog entry silently orphans this ref (the id string stays non-empty,
+	// it just stops resolving) — the picker Setting above only shows a generic "missing" desc.
+	// Name the dangling id so the fix is "Pick" or "Clear", not a support thread.
+	const embeddingRefWarning = danglingRefWarning(tab, s.searchEmbeddingModel, 'Embedding model');
+	if (embeddingRefWarning) {
+		searchGroup.createDiv({ cls: 'crucible-inline-warning', text: embeddingRefWarning });
+	}
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	renderExtensionCheckboxGroups(tab, searchGroup, {
@@ -459,6 +480,12 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			await save();
 			tab.display();
 		}));
+	// See the matching comment on the embedding-model warning above — same dangling-ref class,
+	// same fix.
+	const rerankRefWarning = danglingRefWarning(tab, s.searchRerankModel, 'Reranker model');
+	if (rerankRefWarning) {
+		searchGroup.createDiv({ cls: 'crucible-inline-warning', text: rerankRefWarning });
+	}
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindNumber(searchGroup, {
