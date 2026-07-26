@@ -49,6 +49,15 @@ export interface OrchestrationJob {
 	outputPaths: string[];
 	params?: Record<string, unknown>;
 	error?: string;
+	/**
+	 * How `error` was classified when the job settled into `failed/`, stamped by
+	 * `FileJobBackend.failEntry` via `classifyFailedJob` (`./failedJobRepair.ts`).
+	 * `'service'` means the failure text matched the conservative service-outage
+	 * pattern table (a dependency was down, not a bug in the job); `'job'` means it
+	 * didn't. Forward-looking: lets a future sweep read frontmatter instead of
+	 * re-pattern-matching `error`. Absent on jobs written before this field existed.
+	 */
+	failureKind?: 'service' | 'job';
 	progress?: string;
 	deferUntil?: string;
 }

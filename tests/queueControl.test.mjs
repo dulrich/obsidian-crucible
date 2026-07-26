@@ -103,15 +103,20 @@ function makeStore(initial = {}) {
 		cancelled: [],
 	};
 	const notes = [];
+	const errors = [];
+	const failureKinds = [];
 	const store = {
 		folders,
 		notes,
+		errors,
+		failureKinds,
 		failMoveFor: initial.failMoveFor ?? null,
 		ensureFolders: async () => {},
 		folderForStatus: (status) => STORE_FOLDERS[status],
 		listFolder: async (status) => [...(folders[status] ?? [])],
 		appendNotes: async (file, lines) => { notes.push({ file, lines }); },
-		setError: async () => {},
+		setError: async (file, message) => { errors.push({ path: file.path, message }); },
+		setFailureKind: async (file, kind) => { failureKinds.push({ path: file.path, kind }); },
 		setOutputPaths: async () => {},
 		setPartial: async () => {},
 		setDeferred: async () => {},
@@ -753,6 +758,38 @@ test('a rolled-back move into failed/ leaves the job in running/ and the worker 
 
 	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran');
 	assert.equal(store.folders.done.length, 1, 'the queue behind a stuck settle keeps moving');
+});
+
+// --- 8b. failureKind classification, forward-looking for future sweeps ------
+//
+// failEntry stamps how the failure classifies using the same conservative pattern
+// table failedJobRepair.ts's retroactive requeue tool uses (single source of truth
+// — see tests/failedJobRepair.test.mjs for the pattern table's own coverage).
+
+test('failEntry stamps failureKind "service" for a service-outage-shaped error', async () => {
+	const store = makeStore({ queued: [queuedEntry('job-outage')] });
+	const orchestrator = new Orchestrator(makePlugin(), store);
+	orchestrator.register(TEST_TYPE, {
+		async run() { throw new Error('net::ERR_CONNECTION_REFUSED'); },
+	}, TEST_CONFIG);
+
+	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran');
+	assert.equal(store.folders.failed.length, 1);
+	assert.equal(store.failureKinds.length, 1);
+	assert.equal(store.failureKinds[0].kind, 'service');
+});
+
+test('failEntry stamps failureKind "job" for a failure that does not match any outage pattern', async () => {
+	const store = makeStore({ queued: [queuedEntry('job-genuine')] });
+	const orchestrator = new Orchestrator(makePlugin(), store);
+	orchestrator.register(TEST_TYPE, {
+		async run() { return { status: 'failed', error: 'malformed input: missing required field "path"' }; },
+	}, TEST_CONFIG);
+
+	assert.equal(await orchestrator.runNextOfType(TEST_TYPE), 'ran');
+	assert.equal(store.folders.failed.length, 1);
+	assert.equal(store.failureKinds.length, 1);
+	assert.equal(store.failureKinds[0].kind, 'job');
 });
 
 

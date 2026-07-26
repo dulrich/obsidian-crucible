@@ -150,10 +150,11 @@ export class JobStore {
 			? (fm.params as Record<string, unknown>)
 			: undefined;
 		const error = typeof fm.error === 'string' ? fm.error : undefined;
+		const failureKind = fm.failureKind === 'service' || fm.failureKind === 'job' ? fm.failureKind : undefined;
 		const progress = typeof fm.progress === 'string' ? fm.progress : undefined;
 		const deferUntil = typeof fm.deferUntil === 'string' ? fm.deferUntil : undefined;
 
-		return { id, type, status, priority, lane, created, updated, inputPaths, outputPaths, params, error, progress, deferUntil };
+		return { id, type, status, priority, lane, created, updated, inputPaths, outputPaths, params, error, failureKind, progress, deferUntil };
 	}
 
 	async move(file: TFile, job: OrchestrationJob, toStatus: JobStatus): Promise<{ file: TFile; job: OrchestrationJob }> {
@@ -220,6 +221,29 @@ export class JobStore {
 	async setError(file: TFile, message: string): Promise<void> {
 		await updateFrontmatter(this.app, file, (fm) => {
 			fm.error = message;
+			fm.updated = nowIso();
+		});
+	}
+
+	/** Stamps how `setError`'s message was classified. Kept as its own write (rather
+	 * than a parameter on `setError`) so `setError`'s existing callers — including
+	 * `Orchestrator`'s stale-running recovery — are untouched. */
+	async setFailureKind(file: TFile, kind: 'service' | 'job'): Promise<void> {
+		await updateFrontmatter(this.app, file, (fm) => {
+			fm.failureKind = kind;
+		});
+	}
+
+	/**
+	 * Clears a job's recorded failure before it re-enters the queue — used by the
+	 * retroactive service-outage repair (`failedJobRepair.ts`) so a requeued job
+	 * doesn't carry a stale `error`/`failureKind` from the run that failed it.
+	 * Mirrors `setError`'s frontmatter handling.
+	 */
+	async clearError(file: TFile): Promise<void> {
+		await updateFrontmatter(this.app, file, (fm) => {
+			delete fm.error;
+			delete fm.failureKind;
 			fm.updated = nowIso();
 		});
 	}

@@ -58,6 +58,13 @@ export interface DashboardHost {
 		defaultCollapsed: boolean,
 	): { heading: HTMLElement; countEl: HTMLElement; metaEl: HTMLElement };
 	registerSection(ctx: SectionContext): void;
+	/**
+	 * Registers a teardown callback run on `unmount()`, alongside the dashboard's own
+	 * event-bus subscriptions. For a section that wires a live subscription outside the
+	 * refresh cycle (e.g. `queueMonitor`'s `serviceHealth.onTransition`) — a section
+	 * built once in `mount()` has no other hook to release it from.
+	 */
+	registerDisposer(dispose: () => void): void;
 	setSectionCount(id: SectionId, n: number): void;
 	setSectionMeta(id: SectionId, text: string): void;
 	// The enrichment auto-source: uncaptured videos without an enrichment file yet,

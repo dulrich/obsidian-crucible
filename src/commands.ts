@@ -9,6 +9,7 @@ import { VaultSearchModal } from './search/SearchModal';
 import { isSearchIndexablePath } from './search/chunker';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
+import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -365,6 +366,17 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Orchestrations',
 		mutating: false,
 		run: () => plugin.orchestrator.enqueue('link_scan', {}, { priority: 'high', lane: 'user' }),
+	});
+
+	// Retroactive repair for a service-outage cohort in failed/ (see
+	// failedJobRepair.ts). Not `mutating`: it moves queue job files, not the active
+	// note — same reasoning as every other Orchestrate command in this group.
+	plugin.registerCrucibleCommand({
+		id: 'orchestrator-requeue-service-outage-failures',
+		name: 'Orchestrate: Requeue service-outage failures',
+		group: 'Orchestrations',
+		mutating: false,
+		run: () => runServiceOutageRequeueFlow(plugin),
 	});
 
 	plugin.registerCrucibleCommand({

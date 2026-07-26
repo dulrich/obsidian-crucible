@@ -61,6 +61,7 @@ export class IngestionDashboardUI {
 			createSectionHeader: (card, title, description, defaultCollapsed) =>
 				this.createSectionHeader(card, title, description, defaultCollapsed),
 			registerSection: ctx => this.sections.set(ctx.id, ctx),
+			registerDisposer: dispose => this.disposers.push(dispose),
 			setSectionCount: (id, n) => this.setSectionCount(id, n),
 			setSectionMeta: (id, text) => this.setSectionMeta(id, text),
 			// Delegates to the uncaptured-videos section's own cache; see that
