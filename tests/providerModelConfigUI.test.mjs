@@ -386,6 +386,26 @@ test('an entry with no type/serverCapabilities/inputModalities still yields no c
 	assert.equal(deriveCatalogSuggestion({ id: 'x', contextLength: 1000 }).capabilities, undefined);
 });
 
+// ── WP-2: OpenRouter's embeddings-listing leg reports architecture.output_modalities ────────
+
+test('deriveCatalogSuggestion reads OpenRouter-style outputModalities: "embeddings" suggests the embedding capability alone', () => {
+	const suggestion = deriveCatalogSuggestion({ id: 'x', inputModalities: ['text'], outputModalities: ['embeddings'] });
+	assert.deepEqual(suggestion.capabilities, ['embedding']);
+});
+
+test('outputModalities "embeddings" takes precedence over the inputModalities-chat branch — no chat capability is inferred', () => {
+	// An OpenRouter embeddings-listing entry reports a text input modality alongside
+	// output_modalities: ["embeddings"] (WP-2 pinned facts) — the entry accepts text input, but
+	// that must not be read as "this model can chat."
+	const suggestion = deriveCatalogSuggestion({ id: 'x', inputModalities: ['text', 'image'], outputModalities: ['embeddings'] });
+	assert.deepEqual(suggestion.capabilities, ['embedding']);
+});
+
+test('outputModalities without "embeddings" falls through to the ordinary inputModalities-chat inference', () => {
+	const suggestion = deriveCatalogSuggestion({ id: 'x', inputModalities: ['text'], outputModalities: ['text'] });
+	assert.deepEqual(suggestion.capabilities, ['chat']);
+});
+
 test('deriveCatalogSuggestion routes a supplied describeModel() precision into embeddingVariant only when the catalog entry itself has no quantization', () => {
 	// No catalog quantization signal at all (OpenRouter / plain "/models" shape) — the describeModel
 	// fallback is used.

@@ -321,6 +321,141 @@ test('OpenRouter /models metadata (context_length, input_modalities, supported_p
 	assert.equal(listRequest.headers.Authorization, undefined);
 });
 
+// ── WP-2: OpenRouter's embedding models live on a separate endpoint ────────────────────────
+//
+// GET /api/v1/models never lists embedding models (verified live 2026-07-26: 343 models, zero
+// embeddings); they live on GET /api/v1/embeddings/models (27 models). listModels() must fetch
+// both for kind `openrouter` and merge id-deduped, tagging the merged-in entries so
+// inferCapabilities can classify them.
+
+test('OpenRouter listModels() merges the embeddings-models leg into the chat catalog, id-deduped', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => { throw new Error('OpenRouter has no LM Studio-native endpoint'); }],
+		[/\/embeddings\/models$/, async () => ({
+			status: 200,
+			json: {
+				data: [{
+					id: 'openai/text-embedding-3-small',
+					name: 'OpenAI: Text Embedding 3 Small',
+					context_length: 8191,
+					architecture: { modality: 'text->embeddings', input_modalities: ['text'], output_modalities: ['embeddings'] },
+				}],
+			},
+		})],
+		[/\/models$/, async () => ({
+			status: 200,
+			json: { data: [{ id: 'anthropic/claude-x', name: 'Anthropic: Claude X', context_length: 200000 }] },
+		})],
+	]);
+	const provider = { id: 'openrouter-merge', name: 'OpenRouter', kind: 'openrouter', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const catalog = await manager.listModels(provider);
+
+	assert.equal(catalog.length, 2);
+	const chat = catalog.find(m => m.id === 'anthropic/claude-x');
+	assert.equal(chat.displayName, 'Anthropic: Claude X');
+	const embedding = catalog.find(m => m.id === 'openai/text-embedding-3-small');
+	assert.ok(embedding, 'the embeddings-listing leg entry must be present in the merged catalog');
+	assert.equal(embedding.displayName, 'OpenAI: Text Embedding 3 Small');
+	assert.deepEqual(embedding.outputModalities, ['embeddings']);
+	assert.equal(embedding.contextLength, 8191);
+});
+
+test('OpenRouter listModels() dedupes by id, and the embeddings-listing entry wins on collision', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => { throw new Error('OpenRouter has no LM Studio-native endpoint'); }],
+		// Same id reported on both legs — shouldn't happen live today, but the merge must have a
+		// defined winner. The embeddings-leg version (with output_modalities) must survive.
+		[/\/embeddings\/models$/, async () => ({
+			status: 200,
+			json: { data: [{ id: 'shared/model-x', name: 'Shared Model (embeddings)', architecture: { output_modalities: ['embeddings'] } }] },
+		})],
+		[/\/models$/, async () => ({
+			status: 200,
+			json: { data: [{ id: 'shared/model-x', name: 'Shared Model (chat)' }] },
+		})],
+	]);
+	const provider = { id: 'openrouter-collide', name: 'OpenRouter', kind: 'openrouter', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const catalog = await manager.listModels(provider);
+
+	assert.equal(catalog.length, 1);
+	assert.equal(catalog[0].displayName, 'Shared Model (embeddings)');
+	assert.deepEqual(catalog[0].outputModalities, ['embeddings']);
+});
+
+test('OpenRouter listModels() degrades to the chat-only catalog when the embeddings-listing leg fetch fails', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => { throw new Error('OpenRouter has no LM Studio-native endpoint'); }],
+		[/\/embeddings\/models$/, async () => { throw new Error('ECONNRESET'); }],
+		[/\/models$/, async () => ({
+			status: 200,
+			json: { data: [{ id: 'anthropic/claude-x', name: 'Anthropic: Claude X' }] },
+		})],
+	]);
+	const provider = { id: 'openrouter-degrade', name: 'OpenRouter', kind: 'openrouter', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const catalog = await manager.listModels(provider);
+
+	// Must not throw, and must not lose the chat catalog just because the embeddings leg failed.
+	assert.deepEqual(catalog.map(m => m.id), ['anthropic/claude-x']);
+});
+
+test('OpenRouter listModels() degrades to the chat-only catalog when the embeddings-listing leg returns a non-200', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => { throw new Error('OpenRouter has no LM Studio-native endpoint'); }],
+		[/\/embeddings\/models$/, async () => ({ status: 500, text: 'internal error', json: {} })],
+		[/\/models$/, async () => ({
+			status: 200,
+			json: { data: [{ id: 'anthropic/claude-x' }] },
+		})],
+	]);
+	const provider = { id: 'openrouter-degrade-500', name: 'OpenRouter', kind: 'openrouter', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const catalog = await manager.listModels(provider);
+	assert.deepEqual(catalog.map(m => m.id), ['anthropic/claude-x']);
+});
+
+test('OpenRouter listModels() sends OPENROUTER_HEADERS on both the chat and embeddings-listing requests', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => { throw new Error('OpenRouter has no LM Studio-native endpoint'); }],
+		[/\/embeddings\/models$/, async () => ({ status: 200, json: { data: [] } })],
+		[/\/models$/, async () => ({ status: 200, json: { data: [{ id: 'anthropic/claude-x' }] } })],
+	]);
+	const provider = { id: 'openrouter-headers', name: 'OpenRouter', kind: 'openrouter', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	await manager.listModels(provider);
+
+	const chatRequest = globalThis.__providerRequests.find(r => /\/v1\/models$/.test(r.url));
+	const embeddingsRequest = globalThis.__providerRequests.find(r => /\/embeddings\/models$/.test(r.url));
+	for (const req of [chatRequest, embeddingsRequest]) {
+		assert.equal(req.headers['X-Title'], 'Crucible Obsidian Plugin');
+		assert.equal(req.headers['HTTP-Referer'], 'https://github.com/dulrich/obsidian-crucible');
+	}
+});
+
+test('OpenRouter embed() sends OPENROUTER_HEADERS alongside the standard OpenAI embeddings request shape', async () => {
+	resetRequests([
+		[/\/embeddings$/, async () => ({
+			status: 200,
+			json: { model: 'openai/text-embedding-3-small', data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }] },
+		})],
+	]);
+	const provider = { id: 'openrouter-embed', name: 'OpenRouter', kind: 'openrouter', models: [] };
+	const manager = new ProviderManager(fakeApp, secretsThatReturn('test-key'));
+	const result = await manager.embed(provider, 'openai/text-embedding-3-small', ['hello world']);
+
+	assert.deepEqual(result.embeddings, [[0.1, 0.2, 0.3]]);
+	assert.equal(result.dimensions, 3);
+	assert.equal(result.servedModel, 'openai/text-embedding-3-small');
+	const embedRequest = globalThis.__providerRequests.find(r => /\/embeddings$/.test(r.url));
+	assert.equal(embedRequest.headers['X-Title'], 'Crucible Obsidian Plugin');
+	assert.equal(embedRequest.headers['HTTP-Referer'], 'https://github.com/dulrich/obsidian-crucible');
+	assert.equal(embedRequest.headers.Authorization, 'Bearer test-key');
+	const body = JSON.parse(embedRequest.body);
+	assert.deepEqual(body, { model: 'openai/text-embedding-3-small', input: ['hello world'] });
+});
+
 // ── 7. ollama: /api/tags + per-model /api/show enrichment ──────────────────────────────────
 
 test('ollama listModels() enriches each /api/tags entry with /api/show capabilities and embedding_length', async () => {

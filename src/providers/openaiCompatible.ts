@@ -1,5 +1,6 @@
 import { Notice, requestUrl } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult } from '../types';
+import { logWarn } from '../log';
 import {
 	HttpCallContext,
 	HttpListCallContext,
@@ -134,10 +135,11 @@ export const openAICompatibleClient: HttpProviderClient = {
 	},
 
 	async embed(ctx, inputs): Promise<ProviderEmbeddingResult> {
+		const openRouter = isOpenRouter(ctx.provider);
 		const response = await requestUrl({
 			url: `${apiBaseUrl(ctx.provider)}/embeddings`,
 			method: 'POST',
-			headers: authHeaders(ctx),
+			headers: openRouter ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx),
 			body: JSON.stringify({ model: ctx.modelId, input: inputs }),
 		});
 
@@ -185,8 +187,13 @@ export const openAICompatibleClient: HttpProviderClient = {
 	// against — this returns every entry the server reports.
 	async listModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
 		const native = await tryLmStudioNativeListModels(ctx);
-		if (native) return native;
-		return await fallbackModelsListModels(ctx);
+		const catalog = native ?? await fallbackModelsListModels(ctx);
+		// WP-2: OpenRouter's chat catalog (`/models`) never lists embedding models — they live on a
+		// separate endpoint. Only OpenRouter has this second leg; LM Studio/llama-server/vLLM/etc.
+		// have no such route, and `native` is always null for OpenRouter (no LM Studio endpoint), so
+		// this only ever runs against the fallback list.
+		if (!isOpenRouter(ctx.provider)) return catalog;
+		return await mergeOpenRouterEmbeddingsModels(ctx, catalog);
 	},
 
 	// Primary rerank backend (WP-5): `POST {apiBaseUrl}/rerank`, verified against Infinity's
@@ -298,8 +305,40 @@ interface FallbackModelEntry {
 	// Absent on OpenAI/LM Studio/Infinity — left undefined there, which is the correct, honest
 	// result rather than something to guess at.
 	context_length?: number;
-	architecture?: { input_modalities?: unknown };
+	// WP-2: `output_modalities` is present on both OpenRouter legs but only ever non-trivial
+	// (`["embeddings"]`) on the embeddings-listing leg — chat entries on `/models` report no
+	// `output_modalities` at all, or `["text"]`. Shares the `architecture` object with
+	// `input_modalities` rather than sitting alongside it, matching the live response shape.
+	architecture?: { input_modalities?: unknown, output_modalities?: unknown };
 	supported_parameters?: unknown;
+	// WP-2: OpenRouter's display name ("OpenAI: Text Embedding Ada 002"), present on both legs.
+	name?: string;
+}
+
+// Shared entry mapper for OpenRouter/OpenAI-compatible-shaped `/models` list entries — used by both
+// the main chat catalog (`fallbackModelsListModels`) and the OpenRouter embeddings-listing leg
+// (`fetchOpenRouterEmbeddingsModels`), since both endpoints return the same entry shape (WP-2
+// pinned facts: "same family as chat entries").
+function mapFallbackEntry(entry: FallbackModelEntry & { id: string }): ProviderCatalogModel {
+	const inputModalities = Array.isArray(entry.architecture?.input_modalities)
+		? (entry.architecture.input_modalities as unknown[]).filter((v): v is string => typeof v === 'string')
+		: undefined;
+	const outputModalities = Array.isArray(entry.architecture?.output_modalities)
+		? (entry.architecture.output_modalities as unknown[]).filter((v): v is string => typeof v === 'string')
+		: undefined;
+	const supportedParameters = Array.isArray(entry.supported_parameters)
+		? (entry.supported_parameters as unknown[]).filter((v): v is string => typeof v === 'string')
+		: undefined;
+	return {
+		id: entry.id,
+		ownedBy: entry.owned_by,
+		contextLength: typeof entry.context_length === 'number' ? entry.context_length : undefined,
+		inputModalities,
+		outputModalities,
+		supportedParameters,
+		displayName: typeof entry.name === 'string' && entry.name ? entry.name : undefined,
+		looksLikeCrossEncoder: looksLikeCrossEncoder(entry.id, entry.backend),
+	};
 }
 
 // Fallback for any server without LM Studio's native endpoint: the plain OpenAI-compatible
@@ -372,7 +411,12 @@ async function tryLmStudioNativeListModels(ctx: HttpListCallContext): Promise<Pr
 // (ProviderManager.listModels's httpListContext() does not enforce one), so this call succeeds even
 // for an OpenRouter provider with no stored key.
 async function fallbackModelsListModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
-	const response = await requestUrl({ url: `${apiBaseUrl(ctx.provider)}/models`, method: 'GET', headers: authHeaders(ctx) });
+	const openRouter = isOpenRouter(ctx.provider);
+	const response = await requestUrl({
+		url: `${apiBaseUrl(ctx.provider)}/models`,
+		method: 'GET',
+		headers: openRouter ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx),
+	});
 	if (response.status !== 200) {
 		throw new Error(`${label(ctx.provider)} models API returned ${response.status}: ${response.text}`);
 	}
@@ -383,22 +427,49 @@ async function fallbackModelsListModels(ctx: HttpListCallContext): Promise<Provi
 	const list = (body as { data?: FallbackModelEntry[] }).data ?? [];
 	return list
 		.filter((entry): entry is FallbackModelEntry & { id: string } => typeof entry.id === 'string')
-		.map(entry => {
-			const inputModalities = Array.isArray(entry.architecture?.input_modalities)
-				? (entry.architecture.input_modalities as unknown[]).filter((v): v is string => typeof v === 'string')
-				: undefined;
-			const supportedParameters = Array.isArray(entry.supported_parameters)
-				? (entry.supported_parameters as unknown[]).filter((v): v is string => typeof v === 'string')
-				: undefined;
-			return {
-				id: entry.id,
-				ownedBy: entry.owned_by,
-				contextLength: typeof entry.context_length === 'number' ? entry.context_length : undefined,
-				inputModalities,
-				supportedParameters,
-				looksLikeCrossEncoder: looksLikeCrossEncoder(entry.id, entry.backend),
-			};
-		});
+		.map(mapFallbackEntry);
+}
+
+// WP-2: OpenRouter's embedding models live on a separate endpoint from the main chat catalog
+// (verified live 2026-07-26: `GET /api/v1/models` returns 343 models, zero embedding models;
+// `GET /api/v1/embeddings/models` returns 27, same entry shape as a chat entry). Kind `openrouter`
+// only — no other server this client speaks to has this route.
+async function fetchOpenRouterEmbeddingsModels(ctx: HttpListCallContext): Promise<ProviderCatalogModel[]> {
+	const response = await requestUrl({
+		url: `${apiBaseUrl(ctx.provider)}/embeddings/models`,
+		method: 'GET',
+		headers: { ...authHeaders(ctx), ...OPENROUTER_HEADERS },
+	});
+	if (response.status !== 200) {
+		throw new Error(`OpenRouter embeddings models API returned ${response.status}: ${response.text}`);
+	}
+	const body = response.json as { data?: FallbackModelEntry[] } | { error?: unknown };
+	if (body && typeof body === 'object' && 'error' in body) {
+		throw new Error('OpenRouter embeddings models API returned an error body');
+	}
+	const list = (body as { data?: FallbackModelEntry[] }).data ?? [];
+	return list
+		.filter((entry): entry is FallbackModelEntry & { id: string } => typeof entry.id === 'string')
+		.map(mapFallbackEntry);
+}
+
+// Merges the OpenRouter embeddings-listing leg into the main chat catalog, id-deduped with the
+// embeddings entry winning any collision (the more specific classification for an id reported on
+// both legs — none is known live today, but the merge must still have a defined winner). A failure
+// fetching the embeddings leg degrades to the chat-only catalog rather than failing listModels()
+// entirely — the embeddings leg is additive data, not a prerequisite for the rest of the catalog.
+async function mergeOpenRouterEmbeddingsModels(ctx: HttpListCallContext, chatModels: ProviderCatalogModel[]): Promise<ProviderCatalogModel[]> {
+	let embeddingModels: ProviderCatalogModel[];
+	try {
+		embeddingModels = await fetchOpenRouterEmbeddingsModels(ctx);
+	} catch (err) {
+		logWarn('openaiCompatible.listModels', 'OpenRouter embeddings-models fetch failed; returning chat-only catalog', err);
+		return chatModels;
+	}
+	const byId = new Map<string, ProviderCatalogModel>();
+	for (const model of chatModels) byId.set(model.id, model);
+	for (const model of embeddingModels) byId.set(model.id, model);
+	return Array.from(byId.values());
 }
 
 function normalizeChatCompletionFinishReason(raw: string | undefined): ProviderFinishReason {
