@@ -199,6 +199,121 @@ test('describeModel() against an Infinity-shaped server (no native endpoint, no 
 	assert.equal(description.fingerprint, 'optimum');
 });
 
+// ── 2b. WP-2: llama-swap's /v1/models lists only canonical ids; a provider row configured with
+// the alias (the friendlier name users actually type in Settings) must still resolve, and the
+// resolved servedModel must be the canonical id — the server-reported truth, not the alias.
+
+test('describeModel() against a llama-swap-shaped server resolves servedModel=canonical + a fingerprint when probed by alias', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({ status: 404, text: 'not found', json: {} })],
+		[/\/v1\/models$/, async () => ({
+			status: 200,
+			json: {
+				object: 'list',
+				data: [{ id: 'bge-m3-f16', owned_by: 'llama-swap', meta: { llamaswap: { aliases: ['bge-m3'] } } }],
+			},
+		})],
+	]);
+	const provider = {
+		id: 'llama-swap', name: 'llama-swap', kind: 'openai-compatible',
+		baseUrl: 'http://127.0.0.1:9090/v1',
+		models: [{ id: 'bge-m3', label: 'bge-m3' }],
+	};
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const description = await manager.describeModel(provider, 'bge-m3');
+	assert.equal(description.servedModel, 'bge-m3-f16');
+	// The fallback leg never carries dtype (see the Infinity test above) — that stays unchanged;
+	// alias resolution must not fabricate a precision the server didn't report.
+	assert.equal(description.precision, undefined);
+	assert.equal(description.fingerprint, 'llama-swap');
+});
+
+test('describeModel() against the same llama-swap payload still resolves when probed by the canonical id directly', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({ status: 404, text: 'not found', json: {} })],
+		[/\/v1\/models$/, async () => ({
+			status: 200,
+			json: {
+				object: 'list',
+				data: [{ id: 'bge-m3-f16', owned_by: 'llama-swap', meta: { llamaswap: { aliases: ['bge-m3'] } } }],
+			},
+		})],
+	]);
+	const provider = {
+		id: 'llama-swap-canonical', name: 'llama-swap', kind: 'openai-compatible',
+		baseUrl: 'http://127.0.0.1:9090/v1',
+		models: [{ id: 'bge-m3-f16', label: 'bge-m3-f16' }],
+	};
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const description = await manager.describeModel(provider, 'bge-m3-f16');
+	assert.equal(description.servedModel, 'bge-m3-f16');
+});
+
+test('describeModel() prefers an exact id match over an alias match when an id row also matches literally', async () => {
+	// If a server ever listed both a canonical entry aliasing "shared-name" AND a distinct entry
+	// whose own id literally is "shared-name", the literal id match must win — server-reported
+	// identity beats an alias lookup.
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({ status: 404, text: 'not found', json: {} })],
+		[/\/v1\/models$/, async () => ({
+			status: 200,
+			json: {
+				object: 'list',
+				data: [
+					{ id: 'shared-name', owned_by: 'direct' },
+					{ id: 'other-canonical', owned_by: 'llama-swap', meta: { llamaswap: { aliases: ['shared-name'] } } },
+				],
+			},
+		})],
+	]);
+	const provider = { id: 'exact-wins', name: 'llama-swap', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:9090/v1', models: [] };
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const description = await manager.describeModel(provider, 'shared-name');
+	assert.equal(description.servedModel, 'shared-name');
+	assert.equal(description.fingerprint, 'direct');
+});
+
+test('describeModel() alias lookup tolerates absent/malformed meta shapes on other entries without throwing', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({ status: 404, text: 'not found', json: {} })],
+		[/\/v1\/models$/, async () => ({
+			status: 200,
+			json: {
+				object: 'list',
+				data: [
+					{ id: 'no-meta-at-all', owned_by: 'plain' },
+					{ id: 'null-meta', owned_by: 'plain', meta: null },
+					{ id: 'empty-meta', owned_by: 'plain', meta: {} },
+					{ id: 'null-llamaswap', owned_by: 'plain', meta: { llamaswap: null } },
+					{ id: 'non-array-aliases', owned_by: 'plain', meta: { llamaswap: { aliases: 'not-an-array' } } },
+					{ id: 'bge-m3-f16', owned_by: 'llama-swap', meta: { llamaswap: { aliases: ['bge-m3'] } } },
+				],
+			},
+		})],
+	]);
+	const provider = { id: 'malformed-meta', name: 'llama-swap', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:9090/v1', models: [] };
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	// Malformed entries earlier in the list must be skipped silently (no throw) so the real
+	// alias hit further down the list is still found.
+	const description = await manager.describeModel(provider, 'bge-m3');
+	assert.equal(description.servedModel, 'bge-m3-f16');
+});
+
+test('describeModel() returns an undefined servedModel (not a throw) when no entry matches by id or alias', async () => {
+	resetRequests([
+		[/\/api\/v0\/models$/, async () => ({ status: 404, text: 'not found', json: {} })],
+		[/\/v1\/models$/, async () => ({
+			status: 200,
+			json: { object: 'list', data: [{ id: 'unrelated-model', owned_by: 'plain', meta: { llamaswap: { aliases: ['also-unrelated'] } } }] },
+		})],
+	]);
+	const provider = { id: 'no-match', name: 'llama-swap', kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:9090/v1', models: [] };
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const description = await manager.describeModel(provider, 'bge-m3');
+	assert.equal(description.servedModel, undefined);
+	assert.equal(description.precision, undefined);
+});
+
 // ── 3. A 200 response carrying an error body is treated as unsupported, not success ────────
 //
 // LM Studio answers unknown endpoints with HTTP 200 and {"error": "..."} in the body — a
