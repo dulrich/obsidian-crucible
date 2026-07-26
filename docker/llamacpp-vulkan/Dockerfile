@@ -140,4 +140,4 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Dual-use default: the router is the new normal, but the image still runs a bare
 # `llama-server ...` command unchanged (`entrypoint.sh`'s tail is `exec "$@"`) — see README.md.
-CMD ["llama-swap", "-config", "/app/config.yaml", "-listen", ":4800"]
+CMD ["llama-swap", "-config", "/app/config.yaml", "-listen", ":4806"]
