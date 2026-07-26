@@ -9,6 +9,7 @@ initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
 pending-plans:
   - "[[search-space-key-and-query-logging]]"
+  - "[[model-catalog-ux-local-inference-and-remediations]]"
 initiative-status: active
 initiative-cadence: as-needed
 ---

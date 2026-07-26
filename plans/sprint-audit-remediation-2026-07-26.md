@@ -3,7 +3,11 @@
 *Recommended model/effort — Claude: Sonnet/medium throughout; Codex: Terra/medium throughout.*
 
 Deliberately **unregistered** in `INITIATIVE.md` (user routes implementation, per the review-plan
-convention). Source: the read-only sprint-closure audit (`runs/dispatch/wp-se1-audit-report.md`,
+convention).
+
+> **Status 2026-07-26:** WP-R3, WP-R5 and WP-R6 are **absorbed into
+> `plans/model-catalog-ux-local-inference-and-remediations.md`** (user-routed) — execute them
+> there, not from this doc. WP-R1, WP-R2 and WP-R4 remain parked here. Source: the read-only sprint-closure audit (`runs/dispatch/wp-se1-audit-report.md`,
 Fable agent, 2026-07-26). The audit's closure-relevant findings F1–F6 and broader items B1, B2 and
 B7(a) were absorbed into the active sprint (`plans/sprint-exit-queue-health-and-scrub.md`: F1/F5 →
 WP-3, F2/F3/F6/B1/B2/B7a → WP-2, F4 → WP-6) and are **not** repeated here. What remains is real
