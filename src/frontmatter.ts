@@ -1,4 +1,11 @@
 import { App, EventRef, TFile } from 'obsidian';
+// Namespace import (rather than named `{ parseYaml, stringifyYaml }`) deliberately: these
+// two are only reached by the content-splice repair path below, which most callers never
+// exercise, and a handful of unrelated test suites bundle this file transitively through
+// `updateFrontmatter` against a minimal hand-rolled `obsidian` stub that doesn't declare
+// every real export. A named import would fail those bundles at build time even though
+// they never call the repair path; a namespace import defers the lookup to call time.
+import * as ObsidianAPI from 'obsidian';
 import { FRONTMATTER_REGEX } from './utils';
 import { logError, logWarn } from './log';
 
@@ -46,9 +53,67 @@ export async function updateFrontmatter(
 	const content = await app.vault.read(file);
 	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
 	const lost = Array.from(mutated).filter(([key, value]) => !frontmatterValueLanded(block, key, value));
-	if (lost.length > 0) {
-		logError(`frontmatter write lost under stale cache for keys [${lost.map(([key]) => key).join(', ')}] (${file.path})`);
+	if (lost.length === 0) return;
+
+	// The merge above was computed against a base object the stale cache supplied, so
+	// under sustained churn (e.g. a few-thousand-file bulk move keeping the cache stale
+	// past the barrier window) the mutation can be silently absent from what actually
+	// landed on disk. Repair by re-reading the file's real current bytes, locating the
+	// frontmatter block from the raw `---` delimiters (never the cache's
+	// frontmatterPosition), applying the same mutator to what's actually there, and
+	// splicing the result back in by index — never `String.replace(block, …)`, which
+	// can corrupt an empty/odd block. This repairs every updateFrontmatter caller once,
+	// at the one chokepoint, rather than each call site re-verifying for itself.
+	logWarn(`frontmatter write lost under stale cache for keys [${lost.map(([key]) => key).join(', ')}] `
+		+ `(${file.path}); repairing via content-based splice`);
+	await repairFrontmatterViaContentSplice(app, file, update);
+
+	const repairedContent = await app.vault.read(file);
+	const repairedBlock = repairedContent.match(FRONTMATTER_REGEX)?.[1] ?? '';
+	const stillLost = Array.from(mutated).filter(([key, value]) => !frontmatterValueLanded(repairedBlock, key, value));
+	if (stillLost.length > 0) {
+		logError(`frontmatter write still lost after content-splice repair for keys `
+			+ `[${stillLost.map(([key]) => key).join(', ')}] (${file.path})`);
 	}
+}
+
+// Fallback write path for updateFrontmatter's stale-cache-timeout case. Re-reads the
+// file's actual current bytes (rather than trusting anything the metadata cache
+// reported), locates the frontmatter block by parsing the raw `---` delimiters, parses
+// it, applies `update` to that real object, and splices the serialized result back into
+// the content by index. This never touches `frontmatterPosition` and never does a
+// substring `String.replace` of the block text (which can corrupt an empty/odd block) —
+// the splice points come from the regex match's own span on the freshly-read content.
+async function repairFrontmatterViaContentSplice(
+	app: App,
+	file: TFile,
+	update: (fm: FrontmatterRecord) => void,
+): Promise<void> {
+	await app.vault.process(file, (raw: string) => {
+		const bom = raw.startsWith('\uFEFF') ? '\uFEFF' : '';
+		const m = raw.match(FRONTMATTER_REGEX);
+		if (!m) {
+			const fm: FrontmatterRecord = {};
+			update(fm);
+			const serialized = ObsidianAPI.stringifyYaml(fm).replace(/\n$/, '');
+			const body = bom ? raw.slice(1) : raw;
+			return `${bom}---\n${serialized}\n---\n\n${body}`;
+		}
+
+		const parsed: unknown = ObsidianAPI.parseYaml(m[1] ?? '');
+		const fm: FrontmatterRecord = (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+			? (parsed as FrontmatterRecord)
+			: {};
+		update(fm);
+
+		const trailingNewlines = m[2] ?? '';
+		const closeEnd = m[0].slice(0, m[0].length - trailingNewlines.length).replace(/[^\S\r\n]+$/, '').length;
+		const start = m.index ?? 0;
+		const before = raw.slice(0, start);
+		const rest = raw.slice(start + closeEnd);
+		const serialized = ObsidianAPI.stringifyYaml(fm).replace(/\n$/, '');
+		return `${before}${bom}---\n${serialized}\n---${rest}`;
+	});
 }
 
 // Raw-content check that a scalar write survived; structured values (arrays, objects)
