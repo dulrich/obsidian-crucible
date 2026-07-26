@@ -9,6 +9,7 @@ import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlem
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
 import { defaultLaneForPriority, laneRank } from './lanes';
+import { classifyFailedJob } from './failedJobRepair';
 
 // Durable, markdown-backed job type: every job is a file under
 // orchestrationQueueRoot/{queued,running,done,failed}. Enqueue collapses repeats by
@@ -384,6 +385,11 @@ export class FileJobBackend implements JobBackend {
 	): Promise<void> {
 		try {
 			await this.store.setError(moved.file, error);
+			// Forward-looking: stamps how this failure classifies so a future sweep can
+			// read frontmatter instead of re-pattern-matching `error`. Same classifier the
+			// retroactive repair tool uses — single source of truth for the pattern table.
+			const kind = classifyFailedJob(moved.job, error) === 'service-outage' ? 'service' : 'job';
+			await this.store.setFailureKind(moved.file, kind);
 			await this.store.move(moved.file, moved.job, 'failed');
 			this.emitQueueUpdate();
 		} catch (err) {
