@@ -299,12 +299,83 @@ function searchRefsPointingAt(tab: CrucibleSettingTab, provider: Provider, model
 	return labels;
 }
 
+// WP-8 (D2 amendment — plans/sprint-exit-queue-health-and-scrub.md, "probe-first becomes the
+// default"): a provider's model catalog is fetched automatically the first time its Models section
+// renders, rather than requiring the user to find the Fetch models button. Session-only (a
+// WeakSet, not a counter) and fires at most once per Provider object — a failure (unsupported
+// kind, unreachable server) must not retry on every re-render ("no retry loops" per the brief).
+// Clear cache re-arms it (see its onClick below) so clearing genuinely starts over. This never
+// blocks the current synchronous render: it kicks off the fetch and, once the promise settles
+// (success OR failure), triggers exactly one deferred re-render — the same "await the probe before
+// re-rendering" discipline the manual Fetch models button already follows.
+//
+// Background/lazy fetches still never write per D2 — this only ever calls `applyFetchedCatalog`
+// (Provider.modelCatalog), the same as a manual Fetch click; nothing here touches a ProviderModel.
+const lazyFetchAttempted = new WeakSet<Provider>();
+
+function maybeLazyFetchCatalog(tab: CrucibleSettingTab, provider: Provider): void {
+	if (provider.modelCatalog) return;
+	if (lazyFetchAttempted.has(provider)) return;
+	lazyFetchAttempted.add(provider);
+	void (async () => {
+		try {
+			const fetched = await tab.plugin.providerManager.listModels(provider);
+			applyFetchedCatalog(provider, fetched);
+			await tab.plugin.saveSettings();
+			setProbeStatus(provider, { state: 'ok', count: fetched.length });
+		} catch (err) {
+			// Never for providers with an unreachable-by-design kind if a guard already exists:
+			// listModels() itself throws a precise message for CLI kinds and kinds with no probe
+			// client (requireCapability) — this degrades to the same status line the manual Fetch
+			// button already shows for that error, not a new failure mode.
+			setProbeStatus(provider, { state: 'error', reason: err instanceof Error ? err.message : String(err) });
+		}
+		tab.display();
+	})();
+}
+
+// WP-8 scope item 3: a best-effort per-model precision fallback for the embeddingVariant
+// suggestion, used only when the catalog entry itself has no quantization signal (OpenRouter,
+// plain OpenAI, Infinity, or a bare-`/models` local server). `ProviderManager.describeModel` is
+// already session-cached per (provider, modelId), so repeated renders cost nothing once resolved —
+// this WeakMap exists only to read that result *synchronously* during a render (describeModel is
+// async; a render is not) and to guarantee the probe is kicked off at most once per model row.
+// `status: 'pending'` and a resolved `precision: undefined` are deliberately distinct from "never
+// asked" (`describedPrecisionByModel.get(model)` returning `undefined`) — seeing "no precision"
+// once is enough; it must not re-probe every render.
+interface DescribedPrecisionEntry {
+	status: 'pending' | 'done';
+	precision?: string;
+}
+const describedPrecisionByModel = new WeakMap<ProviderModel, DescribedPrecisionEntry>();
+
+function describedPrecisionFor(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): string | undefined {
+	const existing = describedPrecisionByModel.get(model);
+	if (existing) return existing.status === 'done' ? existing.precision : undefined;
+	if (!model.id) return undefined;
+
+	describedPrecisionByModel.set(model, { status: 'pending' });
+	void tab.plugin.providerManager.describeModel(provider, model.id)
+		.then((description) => {
+			describedPrecisionByModel.set(model, { status: 'done', precision: description.precision });
+			// Only worth a re-render if the probe actually found something to suggest — degrade
+			// silently otherwise, same as a rejection below (unsupported kind, unreachable server).
+			if (description.precision !== undefined) tab.display();
+		})
+		.catch(() => {
+			describedPrecisionByModel.set(model, { status: 'done', precision: undefined });
+		});
+	return undefined;
+}
+
 function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElement, provider: Provider) {
 	new Setting(containerEl).setName('Models').setHeading();
 	containerEl.createEl('p', {
-		text: 'Configure one or more models. Agents bind to a (provider, model) pair, and chain steps can override via {{model}}. Use Fetch models to pull the server\'s own model list and suggest capabilities and metadata — nothing is applied to a model until you press Accept.',
+		text: 'Configure one or more models. Agents bind to a (provider, model) pair, and chain steps can override via {{model}}. Picking a model from the fetched catalog auto-applies its probed capabilities and metadata — use the undo button next to a probe-applied field, or Accept, for the manual fallback.',
 		cls: 'mod-muted',
 	});
+
+	maybeLazyFetchCatalog(tab, provider);
 
 	const list = containerEl.createDiv({ cls: 'crucible-settings-group' });
 	const models = provider.models ?? (provider.models = []);
@@ -338,11 +409,25 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 						.setValue(model.id)
 						.onChange(async (v) => { model.id = v; await tab.plugin.saveSettings(); })
 						.inputEl.addClass('pi-width-normal');
+					// WP-8 (D2 amendment): an explicit pick from the fetched catalog auto-applies
+					// the probed values through the SAME acceptCatalogSuggestion path the Accept
+					// button below uses — the per-field "probe-accepted" badge + its Reset button
+					// is therefore already the undo affordance, with no separate mechanism to
+					// build. This does not weaken D2: free typing and the lazy/background fetch
+					// above still never write anything to a ProviderModel — only an explicit
+					// suggest pick, which is exactly as deliberate an action as clicking Accept.
+					//
 					// Deferred to a macrotask: selectSuggestion() still needs to close its own
 					// popup after this callback returns, and a synchronous tab.display() here
 					// would tear down the settings pane's DOM (this input included) out from
 					// under that close() call.
-					new ProviderModelSuggest(tab.app, t.inputEl, () => catalogModels, () => { setTimeout(() => tab.display(), 0); });
+					new ProviderModelSuggest(tab.app, t.inputEl, () => catalogModels, (entry) => {
+						acceptCatalogSuggestion(model, deriveCatalogSuggestion(entry), probeState);
+						setTimeout(() => {
+							void tab.plugin.saveSettings();
+							tab.display();
+						}, 0);
+					});
 				})
 				.addText(t => t
 					.setPlaceholder('Display label (optional)')
@@ -451,7 +536,15 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					modelRow.createDiv({ cls: 'crucible-inline-warning', text: warning });
 				}
 
-				const suggestion = deriveCatalogSuggestion(catalogEntry);
+				// WP-8: when the catalog entry itself has no quantization signal (OpenRouter, plain
+				// OpenAI, Infinity, or a bare-`/models` local server), a best-effort describeModel()
+				// probe may still surface a normalized precision. Fires at most once per model row
+				// per session and never blocks this render — see describedPrecisionFor's own doc
+				// comment.
+				const fallbackPrecision = catalogEntry.quantization === undefined
+					? describedPrecisionFor(tab, provider, model)
+					: undefined;
+				const suggestion = deriveCatalogSuggestion(catalogEntry, fallbackPrecision);
 				if (catalogSuggestionHasChanges(model, suggestion)) {
 					new Setting(modelRow)
 						.setName('Probe suggestion')
@@ -473,7 +566,7 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 			await tab.plugin.saveSettings();
 			tab.display();
 		}))
-		.addButton(bt => bt.setButtonText('Fetch models').setTooltip('Query the provider\'s model-list endpoint. Nothing is applied automatically — review and Accept per model below.').onClick(async () => {
+		.addButton(bt => bt.setButtonText('Fetch models').setTooltip('Query the provider\'s model-list endpoint. Picking a model from the list applies its probed capabilities and metadata automatically (undo per field below); nothing changes until you pick or Accept.').onClick(async () => {
 			bt.setDisabled(true);
 			try {
 				const fetched = await tab.plugin.providerManager.listModels(provider);
@@ -490,6 +583,10 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 		}))
 		.addButton(bt => bt.setButtonText('Clear cache').setWarning().onClick(async () => {
 			clearProviderModelCatalog(provider, (id) => tab.plugin.providerManager.clearModelListCache(id));
+			// Re-arm the lazy fetch (WP-8): Clear cache is a deliberate "start over" action, so the
+			// next time this section renders it should probe again automatically rather than
+			// requiring another manual Fetch models click.
+			lazyFetchAttempted.delete(provider);
 			setProbeStatus(provider, { state: 'idle' });
 			await tab.plugin.saveSettings();
 			new Notice('Model list cache cleared');

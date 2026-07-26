@@ -334,3 +334,83 @@ test('catalogSuggestionHasChanges treats capability list order as irrelevant', (
 	const m = model({ capabilities: ['embedding', 'chat'] });
 	assert.equal(catalogSuggestionHasChanges(m, { capabilities: ['chat', 'embedding'] }), false);
 });
+
+// ── WP-8 — probe-first becomes the default (D2 amendment, plans/sprint-exit-queue-health-and-scrub.md) ──
+
+test('WP-8: an explicit catalog pick auto-applies through the SAME acceptCatalogSuggestion/resetCatalogField path Accept uses — badge + undo is the fallback, not a new mechanism', () => {
+	const m = model({ id: 'text-embedding-bge-m3', capabilities: undefined });
+	const state = getOrCreateProbeState(m);
+	const entry = { id: 'text-embedding-bge-m3', type: 'embeddings', quantization: 'F16', embeddingLength: 1024 };
+
+	// This is exactly what ai.ts's ProviderModelSuggest onChoose now does: derive + accept
+	// immediately, with no separate Accept click required.
+	const suggestion = deriveCatalogSuggestion(entry);
+	acceptCatalogSuggestion(m, suggestion, state);
+
+	assert.deepEqual(m.capabilities, ['embedding']);
+	assert.equal(m.embeddingDimensions, 1024);
+	assert.equal(m.embeddingVariant, 'F16');
+	assert.equal(state.accepted.capabilities, true);
+	assert.equal(state.accepted.embeddingDimensions, true);
+	assert.equal(state.accepted.embeddingVariant, true);
+
+	// Undo (the per-field Reset button) restores every field to its pre-pick state.
+	resetCatalogField(m, 'capabilities', state);
+	resetCatalogField(m, 'embeddingDimensions', state);
+	resetCatalogField(m, 'embeddingVariant', state);
+	assert.equal(m.capabilities, undefined);
+	assert.equal(m.embeddingDimensions, undefined);
+	assert.equal(m.embeddingVariant, undefined);
+});
+
+test('WP-8: applyFetchedCatalog (background/lazy fetch) never mutates any model row, even immediately before an auto-apply pick', () => {
+	// The lazy fetch and the explicit pick are two different actions gated differently — this
+	// pins that the fetch half still only ever writes Provider.modelCatalog.
+	const p = provider({ models: [model({ id: 'existing', capabilities: ['chat'] })] });
+	const before = p.models.map(m => ({ ...m }));
+	applyFetchedCatalog(p, [{ id: 'existing', type: 'embeddings' }, { id: 'new-one', type: 'llm' }]);
+	assert.deepEqual(p.models, before, 'a fetch alone must not touch any existing ProviderModel');
+});
+
+test('deriveCatalogSuggestion reads OpenRouter-style inputModalities: an "image" modality suggests image-extraction (and chat)', () => {
+	const suggestion = deriveCatalogSuggestion({ id: 'x', inputModalities: ['text', 'image'] });
+	assert.deepEqual(new Set(suggestion.capabilities), new Set(['chat', 'image-extraction']));
+});
+
+test('deriveCatalogSuggestion reads inputModalities without "image": chat only, no image-extraction', () => {
+	const suggestion = deriveCatalogSuggestion({ id: 'x', inputModalities: ['text'] });
+	assert.deepEqual(suggestion.capabilities, ['chat']);
+});
+
+test('an entry with no type/serverCapabilities/inputModalities still yields no capability suggestion (contextLength alone is not a capability signal)', () => {
+	assert.equal(deriveCatalogSuggestion({ id: 'x', contextLength: 1000 }).capabilities, undefined);
+});
+
+test('deriveCatalogSuggestion routes a supplied describeModel() precision into embeddingVariant only when the catalog entry itself has no quantization', () => {
+	// No catalog quantization signal at all (OpenRouter / plain "/models" shape) — the describeModel
+	// fallback is used.
+	const withFallbackOnly = deriveCatalogSuggestion({ id: 'x' }, 'f16');
+	assert.equal(withFallbackOnly.embeddingVariant, 'f16');
+
+	// The catalog's OWN reported quantization always wins over the describeModel fallback.
+	const withBoth = deriveCatalogSuggestion({ id: 'x', quantization: 'Q4_K_M' }, 'f16');
+	assert.equal(withBoth.embeddingVariant, 'Q4_K_M');
+
+	// No signal at all (no quantization, no fallback) — stays absent, never guessed.
+	const withNeither = deriveCatalogSuggestion({ id: 'x' });
+	assert.equal(withNeither.embeddingVariant, undefined);
+});
+
+test('catalogEntrySummaryTokens surfaces inputModalities verbatim and a supportedParameters count (read, not fabricated)', () => {
+	const tokens = catalogEntrySummaryTokens({
+		id: 'x',
+		inputModalities: ['text', 'image'],
+		supportedParameters: ['tools', 'temperature', 'seed'],
+	});
+	assert.ok(tokens.includes('text/image'));
+	assert.ok(tokens.includes('3 params'));
+});
+
+test('catalogEntrySummaryTokens omits inputModalities/supportedParameters tokens when absent', () => {
+	assert.deepEqual(catalogEntrySummaryTokens({ id: 'x', type: 'llm' }), ['llm']);
+});

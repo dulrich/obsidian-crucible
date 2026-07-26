@@ -1,4 +1,4 @@
-import { requestUrl } from 'obsidian';
+import { Notice, requestUrl } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription } from '../types';
 import {
 	HttpCallContext,
@@ -101,7 +101,7 @@ export const ollamaClient: HttpProviderClient = {
 	async describeModel(ctx: HttpCallContext): Promise<ProviderModelDescription> {
 		// Cheap, network-independent pass first: an id that already reads as a reranker must warn
 		// even if both HTTP calls below fail.
-		warnIfCrossEncoderEmbedder(ctx.provider.id, 'ollama', ctx.modelId);
+		warnIfCrossEncoderEmbedder(ctx.provider.id, 'ollama', ctx.modelId, [], (msg) => new Notice(msg));
 
 		const tagsResponse = await requestUrl({ url: `${baseUrl(ctx.provider)}/api/tags`, method: 'GET' });
 		if (tagsResponse.status !== 200) {
@@ -112,7 +112,7 @@ export const ollamaClient: HttpProviderClient = {
 		const match = models.find(m => m.name === ctx.modelId || m.model === ctx.modelId)
 			?? models.find(m => typeof m.name === 'string' && baseModelName(m.name) === baseModelName(ctx.modelId));
 
-		warnIfCrossEncoderEmbedder(ctx.provider.id, 'ollama', ctx.modelId, match?.name, match?.details?.format);
+		warnIfCrossEncoderEmbedder(ctx.provider.id, 'ollama', ctx.modelId, [match?.name, match?.details?.format], (msg) => new Notice(msg));
 
 		let precision = normalizePrecision(match?.details?.quantization_level);
 		if (precision === undefined && match) {
