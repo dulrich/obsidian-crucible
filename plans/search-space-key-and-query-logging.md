@@ -207,6 +207,38 @@ User-confirmed 2026-07-25:
   correctly reports those files as needing embeddings; dropping one vault's space leaves the
   other's untouched.
 
+**WP-5 — A busy companion must not read as a dead one (~0.25 kSLOC touched, ~150k tokens, ~12 min wall).** Files: `src/search/lifecycleGate.ts`, `src/search/client.ts`, `scripts/search-companion.mjs`, `tests/searchLifecycleGate.test.mjs`. *Model: mid (Claude Sonnet/medium; Codex Terra/medium) — narrow, and the diagnosis is complete. Execution: subagent.* Independent of the others; **highest priority of the five**, because it makes long indexing runs self-suppressing.
+
+Observed 2026-07-25, immediately after the E1 run: the whole queue reported `Search companion not
+reachable at http://127.0.0.1:4801` while the container had **7 hours uptime, 0 restarts, no OOM,
+three clean log lines, and answered `/health` instantly**.
+
+- **The probe path treats a timeout as a confirmed outage, and it is not one.** `probe()`
+  (`src/search/lifecycleGate.ts:78-92`) does `await healthCheck().catch(() => null)` and, on
+  anything other than `ok === true`, calls `markOffline(health?.message ?? null)` — the **5-minute**
+  `SEARCH_OFFLINE_CACHE_MS` latch. `client.health()` (`:38-39`) uses the 5s interactive timeout.
+  The companion is single-threaded and `node:sqlite`'s `DatabaseSync` is synchronous, so a
+  ~500-chunk flush blocks it well past 5s. The E1 trace caught this 17 times, each timeout landing
+  immediately before a +500 counter jump.
+- **The existing fix stopped one step short.** `markTransientFailure` was introduced for
+  *mid-operation* failures (`SearchManager.ts:182`) with the rule "keep `markOffline` for
+  probe-confirmed outages only." The unexamined premise is that a failed probe confirms an outage.
+  **A timeout confirms nothing** — distinguish *no answer within the deadline* (transient; the
+  server may simply be busy with our own work) from *actively refused / connection error* (a real
+  outage). Only the latter earns the 5-minute latch.
+- **Never latch while our own indexing is in flight.** The plugin knows whether search jobs are
+  running; a probe timeout during that window is the expected consequence of the work, not evidence
+  against it.
+- **A null reason must not produce "go start the container."** That string sends a user to restart
+  a healthy service — already recorded as a hazard in `AGENTS.md`, and it happened again here
+  because `markOffline(null)` is exactly the null-reason path.
+- **Consider the server side too**: the flush holds the event loop for seconds at a time. Either
+  chunk the transaction so the loop breathes, or serve `/health` in a way that cannot queue behind
+  a write. This is the root cause; the client change is the guard.
+- Tests: a timed-out probe does **not** latch for 5 minutes; a connection-refused probe does; a
+  probe timeout while indexing is in flight leaves availability unchanged; the deferral message
+  never falls back to the container-restart text when the true cause is a timeout.
+
 ## Public Interfaces
 
 | Surface | Change |
