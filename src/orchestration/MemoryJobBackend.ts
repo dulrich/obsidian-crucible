@@ -1,11 +1,11 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
+import type { JobLane, JobStatus, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
 import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout } from './JobBackend';
 import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
-import { MemoryJobEntry, MemoryJobQueue } from './MemoryJobQueue';
+import { MemoryJobEntry, MemoryJobQueue, MemoryJobStatus } from './MemoryJobQueue';
 import { defaultLaneForPriority } from './lanes';
 import { logWarn } from '../log';
 
@@ -18,6 +18,17 @@ export class MemoryJobBackend implements JobBackend {
 	private readonly queue: MemoryJobQueue;
 	// Keyed by memory entry key — the same key `runJob` takes.
 	private readonly running = new RunningJobRegistry();
+	/**
+	 * Entry keys currently mid-claim — the memory-side mirror of FileJobBackend's
+	 * `claiming`. `claimNext`/`claimEntry` flip an entry to `'running'` with no await
+	 * before the flip, so in practice the gap before `running.begin()` registers it is
+	 * a single synchronous JS turn rather than the file backend's ~2s `store.move`
+	 * window — "tiny but nonzero," per the audit. Tracked anyway so `cancelJob` never
+	 * depends on that gap staying zero (a future await inserted anywhere in this path
+	 * would silently reopen the file-side bug here too), and so both backends answer
+	 * `stopJob`'s claim-window question the same way.
+	 */
+	private readonly claiming = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 
 	constructor(
 		private readonly plugin: CruciblePlugin,
@@ -52,6 +63,7 @@ export class MemoryJobBackend implements JobBackend {
 	async runNext(): Promise<RunOutcome> {
 		const entry = this.queue.claimNext();
 		if (!entry) return 'empty';
+		this.registerClaiming(entry.key);
 		return this.runEntry(entry);
 	}
 
@@ -60,13 +72,26 @@ export class MemoryJobBackend implements JobBackend {
 	async runJob(key: string): Promise<RunOutcome> {
 		const entry = this.queue.claimEntry(key);
 		if (!entry) return 'empty';
+		this.registerClaiming(entry.key);
 		return this.runEntry(entry);
 	}
 
 	// Cancels the running entry with this key. A *pending* entry answers
 	// 'not-running': dropping it from the queue is `removeQueued`, not an abort.
+	//
+	// If `key` is mid-claim (see `claiming`), wait it out first — see FileJobBackend's
+	// `cancelJob` for why: without this, a `cancelJob` landing in that window answers
+	// 'not-running' for an entry that is a JS turn away from executing.
+	//
+	// Deliberately NOT an `async` function — see the identical note on
+	// FileJobBackend.cancelJob: several callers read `isCancelling(key)` synchronously
+	// right after calling this, and an unconditional `async`/`await` would delay
+	// `running.cancel`'s abort() by a microtask tick even when there is no claim to
+	// wait for.
 	cancelJob(key: string): Promise<CancelJobOutcome> {
-		return this.running.cancel(key);
+		const claiming = this.claiming.get(key);
+		if (!claiming) return this.running.cancel(key);
+		return claiming.promise.then(() => this.running.cancel(key));
 	}
 
 	isCancelling(key: string): boolean {
@@ -89,9 +114,29 @@ export class MemoryJobBackend implements JobBackend {
 		return this.queue.clearPending(CANCELLED_BEFORE_RUN);
 	}
 
+	// Registers `key` as mid-claim; resolved by `settleClaiming` once it lands in
+	// `running`. `runEntry` is always called immediately after a successful claim (no
+	// branch skips it), so — unlike the file backend — there is no failure path here
+	// that needs its own settle: registration and settlement always pair up.
+	private registerClaiming(key: string): void {
+		let resolve: () => void = () => { /* replaced synchronously below */ };
+		const promise = new Promise<void>(r => { resolve = r; });
+		this.claiming.set(key, { promise, resolve });
+	}
+
+	private settleClaiming(key: string): void {
+		const state = this.claiming.get(key);
+		if (!state) return;
+		this.claiming.delete(key);
+		state.resolve();
+	}
+
 	private async runEntry(entry: MemoryJobEntry): Promise<RunOutcome> {
 		const job = this.synthJob(entry.key, entry.params, entry.lane);
 		const run = this.running.begin(entry.key);
+		// Settle AFTER begin(), never before — see FileJobBackend.execute's identical
+		// ordering comment for why the order matters.
+		this.settleClaiming(entry.key);
 		let settlement: RunSettlement = 'completed';
 		let outcome: RunOutcome = 'ran';
 		try {
@@ -157,13 +202,20 @@ export class MemoryJobBackend implements JobBackend {
 		this.queue.refill();
 	}
 
-	private synthJob(key: string, params: Record<string, unknown>, lane = this.queue.getEntry(key)?.lane ?? 'background'): OrchestrationJob {
+	// Builds the OrchestrationJob view of one memory entry, read live from the queue
+	// rather than assumed by the caller. Before this it hardcoded `status: 'running'`
+	// unconditionally, which was only ever correct from runEntry's call site (the
+	// entry really is running by then) — `enqueue()`'s call site returns the job for
+	// a freshly-queued (still-pending) entry, so callers reading `.status` off an
+	// enqueue result saw "running" for a job that had not started.
+	private synthJob(key: string, params: Record<string, unknown>, lane?: JobLane): OrchestrationJob {
+		const entry = this.queue.getEntry(key);
 		return {
 			id: `mem:${this.type}:${key}`,
 			type: this.type,
-			status: 'running',
+			status: toJobStatus(entry?.status),
 			priority: 'normal',
-			lane,
+			lane: lane ?? entry?.lane ?? 'background',
 			created: new Date().toISOString(),
 			inputPaths: [],
 			outputPaths: [],
@@ -189,5 +241,23 @@ export class MemoryJobBackend implements JobBackend {
 			metadataFile,
 			sourceFile: sourceFile instanceof TFile ? sourceFile : undefined,
 		});
+	}
+}
+
+// Maps a memory entry's own status vocabulary onto the shared `JobStatus` union the
+// rest of the queue UI reads. `pending` (the memory queue's word for "not yet
+// claimed") becomes `queued` (the file queue's word for the same thing) so the two
+// backends read the same way to anything downstream. An entry that has already been
+// swept (or never existed) reports `queued` too, rather than throwing — a caller
+// asking "what job did enqueue() just hand me" should never see undefined behavior
+// over a race with the sweep it does not know about.
+function toJobStatus(status: MemoryJobStatus | undefined): JobStatus {
+	switch (status) {
+		case 'pending': return 'queued';
+		case 'running': return 'running';
+		case 'done': return 'done';
+		case 'failed': return 'failed';
+		case 'cancelled': return 'cancelled';
+		default: return 'queued';
 	}
 }

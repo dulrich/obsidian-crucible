@@ -25,6 +25,23 @@ export class FileJobBackend implements JobBackend {
 	// Runs currently executing, keyed by job id — the same key `runJob` takes, so
 	// `cancelJob(id)` addresses a job with the identifier the caller already has.
 	private readonly running = new RunningJobRegistry();
+	/**
+	 * Job ids currently mid-claim — registered the instant `claimNext`/`claimById`
+	 * decide to take a job, resolved only once that job is either registered in
+	 * `running` (a real run starting) or the claim itself failed. This is what makes
+	 * `cancelJob` honest during `JobStore.move`'s claim window (up to ~2s under the
+	 * cache write-barrier — see the frontmatter-barrier quirk in AGENTS.md): before
+	 * this, a job in that window was invisible to both `running` and `queued`
+	 * (already off `this.claimed`'s callers' radar for `removeQueued`, but not yet in
+	 * `running`), so `stopJob`'s two-call retry could exhaust both checks and answer
+	 * `'not-found'` for a job that then visibly started running.
+	 *
+	 * Deliberately NOT a redesign of claiming: this only makes `cancelJob` wait out a
+	 * claim already in flight before it answers, using the exact same
+	 * `running`/`store.move` machinery the drain already relies on. It does not touch
+	 * `isRetirable`'s stale-claim recovery semantics.
+	 */
+	private readonly claiming = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(
@@ -90,8 +107,22 @@ export class FileJobBackend implements JobBackend {
 	// Cancels the running job with this id. A queued job is not running, so it
 	// answers 'not-running' — dropping queued work is a queue operation (removing the
 	// markdown file), not an abort of work in progress.
+	//
+	// If `id` is mid-claim (see `claiming`), wait it out first: `running.cancel` reads
+	// the registry as it is *right now*, and right now the claim may simply not have
+	// landed yet even though the job is seconds from executing. Waiting is what turns
+	// that into an honest 'cancelled'/'completed' instead of a premature 'not-running'.
+	//
+	// Deliberately NOT an `async` function: several callers read `isCancelling(id)`
+	// synchronously right after calling this (no await), relying on `running.cancel`'s
+	// own abort() having already run by then. Wrapping the whole body in `async` would
+	// insert a microtask tick before that abort() even for the common (not currently
+	// claiming) case, breaking that guarantee. Only take the detour when there is
+	// actually a claim to wait for.
 	cancelJob(id: string): Promise<CancelJobOutcome> {
-		return this.running.cancel(id);
+		const claiming = this.claiming.get(id);
+		if (!claiming) return this.running.cancel(id);
+		return claiming.promise.then(() => this.running.cancel(id));
 	}
 
 	isCancelling(id: string): boolean {
@@ -215,6 +246,25 @@ export class FileJobBackend implements JobBackend {
 		return null;
 	}
 
+	// Registers `id` as mid-claim; resolved by `settleClaiming` once it either lands in
+	// `running` or the claim itself fails. Called synchronously at the same point `id`
+	// is added to `claimed`, so a `cancelJob` arriving anywhere in the claim window
+	// sees it.
+	private registerClaiming(id: string): void {
+		let resolve: () => void = () => { /* replaced synchronously below */ };
+		const promise = new Promise<void>(r => { resolve = r; });
+		this.claiming.set(id, { promise, resolve });
+	}
+
+	// Wakes any `cancelJob` waiting on `id`'s claim. Idempotent — a second call (there
+	// isn't one today, but future callers should be able to rely on it) is a no-op.
+	private settleClaiming(id: string): void {
+		const state = this.claiming.get(id);
+		if (!state) return;
+		this.claiming.delete(id);
+		state.resolve();
+	}
+
 	private async claimNext(): Promise<{ file: TFile; job: OrchestrationJob } | null> {
 		await this.store.ensureFolders();
 		const queued = await this.store.listFolder('queued');
@@ -232,10 +282,16 @@ export class FileJobBackend implements JobBackend {
 		if (!next) return null;
 		const claimPath = next.file.path;
 		this.claimed.add(claimPath);
+		this.registerClaiming(next.job.id);
 		try {
 			const moved = await this.store.move(next.file, next.job, 'running');
 			this.emitQueueUpdate();
 			return moved;
+		} catch (err) {
+			// The claim failed — nobody will call execute() for this id, so nothing else
+			// will ever settle it. A cancelJob() waiting on it would otherwise hang.
+			this.settleClaiming(next.job.id);
+			throw err;
 		} finally {
 			this.claimed.delete(claimPath);
 		}
@@ -251,10 +307,14 @@ export class FileJobBackend implements JobBackend {
 		if (!next) return null;
 		const claimPath = next.file.path;
 		this.claimed.add(claimPath);
+		this.registerClaiming(next.job.id);
 		try {
 			const moved = await this.store.move(next.file, next.job, 'running');
 			this.emitQueueUpdate();
 			return moved;
+		} catch (err) {
+			this.settleClaiming(next.job.id);
+			throw err;
 		} finally {
 			this.claimed.delete(claimPath);
 		}
@@ -265,6 +325,9 @@ export class FileJobBackend implements JobBackend {
 	// which ends the type's drain for this pass.
 	private async execute(moved: { file: TFile; job: OrchestrationJob }): Promise<RunOutcome> {
 		if (!this.isWorkflowEnabled()) {
+			// This id will never reach `running.begin` below — settle its claim here so a
+			// concurrent cancelJob() doesn't wait forever for a run that isn't coming.
+			this.settleClaiming(moved.job.id);
 			await this.failEntry(moved, `Workflow "${moved.job.type}" is disabled in settings`);
 			return 'ran';
 		}
@@ -273,6 +336,10 @@ export class FileJobBackend implements JobBackend {
 		// running/, which is what keeps Orchestrator.scan()'s stale sweep from
 		// resurrecting a job that is still winding down.
 		const run = this.running.begin(moved.job.id);
+		// Settle AFTER begin(), never before: a cancelJob() waiting on this id must
+		// observe `running.isRunning(id) === true` the moment it wakes, or it would
+		// read the same false negative this fix exists to remove — just shifted later.
+		this.settleClaiming(moved.job.id);
 		let settlement: RunSettlement = 'completed';
 		try {
 			const result = await runWorkflowWithTimeout(
