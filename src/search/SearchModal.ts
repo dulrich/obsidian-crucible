@@ -19,12 +19,17 @@ export class VaultSearchModal extends Modal {
 	 */
 	private searchGeneration = 0;
 
-	// Rerank state. `rerankButton` is null (not merely hidden) whenever no reranker is
-	// configured — WP-5 requires the action to stay absent rather than surface and error.
-	// `currentResults` is whatever is on screen right now (post-search or post-rerank);
-	// `rerankRowMeta` is non-null only after a rerank has actually rendered, and is cleared by
-	// every fresh search so a stale before/after annotation can never survive onto new results.
+	// Rerank state. WP-9: the row and button always render — a hidden affordance is
+	// undiscoverable, so an unconfigured reranker instead renders a disabled button plus an
+	// explanation and a Configure… link (superseding WP-5's "stays absent" behavior).
+	// `rerankConfigured` gates every place that would otherwise enable the button on results —
+	// see updateRerankAvailability/setRerankPending — so "no reranker configured" always wins
+	// over "results exist." `currentResults` is whatever is on screen right now (post-search or
+	// post-rerank); `rerankRowMeta` is non-null only after a rerank has actually rendered, and
+	// is cleared by every fresh search so a stale before/after annotation can never survive onto
+	// new results.
 	private rerankButton: HTMLButtonElement | null = null;
+	private rerankConfigured = false;
 	private currentResults: SearchResult[] = [];
 	private rerankRowMeta: Map<string, RerankRowMeta> | null = null;
 
@@ -78,14 +83,25 @@ export class VaultSearchModal extends Modal {
 
 		// The Rerank action, WP-5: a deliberate, explicitly-invoked button — never reachable from
 		// the input handler above, so the type-ahead debounce/3-character gate stay untouched.
-		// Hidden entirely (not just disabled) when no reranker is configured, per the brief:
-		// "the button stays hidden rather than erroring."
-		if (this.plugin.settings.searchRerankEnabled && this.plugin.settings.searchRerankModel) {
-			const rerankRow = this.contentEl.createDiv({ cls: 'crucible-search-rerank-row' });
-			this.rerankButton = rerankRow.createEl('button', { cls: 'crucible-search-rerank-button', text: 'Rerank results' });
-			this.rerankButton.disabled = true;
-			this.rerankButton.onclick = () => void this.runRerank();
+		// WP-9: the row always renders now — hiding it entirely (WP-5's original behavior) made
+		// the feature undiscoverable for users who never learn it exists. When unconfigured, the
+		// button renders disabled with the same guard copy SearchManager.rerank() throws (single
+		// source of truth for the explanation), plus a Configure… link next to it — a disabled
+		// <button> swallows clicks, so the click affordance has to live beside it, not on it.
+		const rerankRow = this.contentEl.createDiv({ cls: 'crucible-search-rerank-row' });
+		const unavailableReason = rerankUnavailableReason(this.plugin.settings.searchRerankEnabled, !!this.plugin.settings.searchRerankModel);
+		this.rerankConfigured = unavailableReason === null;
+		if (unavailableReason) {
+			rerankRow.createSpan({ cls: 'crucible-search-rerank-hint', text: unavailableReason });
+			const configureButton = rerankRow.createEl('button', { cls: 'crucible-search-rerank-configure', text: 'Configure…' });
+			configureButton.onclick = () => {
+				this.close();
+				this.plugin.openSettingsToTab('orchestrator');
+			};
 		}
+		this.rerankButton = rerankRow.createEl('button', { cls: 'crucible-search-rerank-button', text: 'Rerank results' });
+		this.rerankButton.disabled = true;
+		this.rerankButton.onclick = () => void this.runRerank();
 
 		this.statusEl = this.contentEl.createDiv({ cls: 'crucible-search-status' });
 		this.resultsEl = this.contentEl.createDiv({ cls: 'crucible-search-results' });
@@ -180,7 +196,7 @@ export class VaultSearchModal extends Modal {
 	// Explicit, button-only action — this is never invoked from the `input` handler in onOpen(),
 	// so the type-ahead debounce and 3-character gate are untouched by rerank latency.
 	private async runRerank(): Promise<void> {
-		if (!this.rerankButton || this.rerankButton.disabled) return;
+		if (!this.rerankButton || this.rerankButton.disabled || !this.rerankConfigured) return;
 		const query = this.inputEl.value.trim();
 		if (!query || this.currentResults.length === 0) return;
 
@@ -208,13 +224,15 @@ export class VaultSearchModal extends Modal {
 
 	private setRerankPending(pending: boolean): void {
 		if (!this.rerankButton) return;
-		this.rerankButton.disabled = pending || this.currentResults.length === 0;
+		this.rerankButton.disabled = pending || !this.rerankConfigured || this.currentResults.length === 0;
 		this.rerankButton.setText(pending ? 'Reranking…' : 'Rerank results');
 	}
 
+	// `rerankConfigured` always wins here — without it, a search returning results would
+	// re-enable the button on an unconfigured reranker the moment results render.
 	private updateRerankAvailability(): void {
 		if (!this.rerankButton) return;
-		this.rerankButton.disabled = this.currentResults.length === 0;
+		this.rerankButton.disabled = !this.rerankConfigured || this.currentResults.length === 0;
 	}
 
 	private async openResult(result: SearchResult): Promise<void> {
@@ -226,6 +244,19 @@ export class VaultSearchModal extends Modal {
 		await this.app.workspace.getLeaf(false).openFile(file);
 		this.close();
 	}
+}
+
+// WP-9: the copy shown next to the disabled Rerank button when it isn't configured. Reuses
+// the exact guard strings SearchManager.rerank() throws (single source of truth — do not
+// invent new copy here or there) and picks the one matching the actual missing piece: the
+// enabled-flag check comes first because a disabled model, even if one happens to be set,
+// is the more fundamental reason. Returns null when reranking is fully configured, which the
+// caller treats as "hide the hint and Configure… link." Exported as a pure function so the
+// selection logic is testable without a live Modal or SearchManager.
+export function rerankUnavailableReason(enabled: boolean, hasModel: boolean): string | null {
+	if (!enabled) return 'Reranking is disabled. Enable it in Settings → Orchestrate → Search.';
+	if (!hasModel) return 'No reranker model configured in Settings → Orchestrate → Search.';
+	return null;
 }
 
 // Discards a rerank response that resolved after a newer search superseded it — the same

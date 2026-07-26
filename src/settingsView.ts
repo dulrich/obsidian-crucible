@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, IconName } from 'obsidian';
 import CruciblePlugin from './main';
-import { CrucibleSettingTab } from './settings';
+import { CrucibleSettingTab, CrucibleSettingsTab } from './settings';
 
 export const CRUCIBLE_SETTINGS_VIEW_TYPE = 'crucible-settings-view';
 
@@ -38,5 +38,11 @@ export class CrucibleSettingsView extends ItemView {
 			this.settingTab = null;
 		}
 		this.contentEl.empty();
+	}
+
+	/** Deep-link entry point used by `CruciblePlugin.openSettingsToTab` when this workspace-tab
+	 * view is the already-open surface — see `CrucibleSettingTab.openToTab` for the mechanics. */
+	openToTab(tab: CrucibleSettingsTab): void {
+		this.settingTab?.openToTab(tab);
 	}
 }

@@ -970,13 +970,24 @@ If your plugin does not need CSS, delete this file.
 }
 
 /* Deliberately its own row below the search form, not a third grid column on
-   .crucible-search-form — the button only exists when a reranker is configured, so it must
-   not perturb the form's fixed two-column layout when it is absent. */
+   .crucible-search-form — the row always renders (WP-9: disabled-not-hidden when
+   unconfigured), so it must not perturb the form's fixed two-column layout. */
 .crucible-search-rerank-row {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 0.5rem;
 }
 
+/* Grows to absorb the row's leading space so the Configure… link and the (disabled) Rerank
+   button stay pinned to the right, matching the row's original single-button layout. */
+.crucible-search-rerank-hint {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.crucible-search-rerank-configure,
 .crucible-search-rerank-button {
   width: auto;
 }
