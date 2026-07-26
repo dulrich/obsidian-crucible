@@ -120,8 +120,13 @@ function capabilitiesFromServerTags(tags: string[]): ProviderModelCapability[] {
  * never act on"), that heuristic only ever produces a warning (`crossEncoderWarningText`), never a
  * suggested capability. Inferring a `rerank` capability from it would be exactly the kind of
  * acting-on-it this field exists to prevent.
+ *
+ * Exported (WP-1) so `src/settings/modelCatalogBrowser.ts` can bucket a catalog into its
+ * All/Chat/Embedding/Image/Rerank/Untagged chip filter using the exact same signal
+ * `deriveCatalogSuggestion` would offer to Accept — a second, drifting capability-inference
+ * implementation in the browser is exactly the kind of duplication this module exists to avoid.
  */
-function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCapability[] | undefined {
+export function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCapability[] | undefined {
 	const inferred = new Set<ProviderModelCapability>();
 	let hasSignal = false;
 
@@ -380,16 +385,52 @@ export function clearProviderModelCatalog(provider: Provider, clearSessionCache:
 }
 
 /**
- * The model id field's suggestion filter (`ProviderModelSuggest`, `suggesters.ts`). Kept here,
- * obsidian-free, rather than inline in that class, specifically so "free text survives" — an id
- * absent from the catalog must never be coerced, rejected, or forced to match something — is
- * directly unit-testable without bundling `suggesters.ts` (which transitively pulls in Obsidian
- * UI classes and several network-calling modules). This function only ever narrows what's
- * *offered*; `ProviderModelSuggest` never overwrites the input's value except on an explicit user
- * pick, so an empty result here simply means no dropdown — typing is untouched either way.
+ * The model id field's suggestion filter (`ProviderModelSuggest`, `suggesters.ts`) AND (WP-1) the
+ * catalog browser panel's filter text input. Kept here, obsidian-free, rather than inline in
+ * either caller, specifically so "free text survives" — an id absent from the catalog must never
+ * be coerced, rejected, or forced to match something — is directly unit-testable without
+ * bundling `suggesters.ts` (which transitively pulls in Obsidian UI classes and several
+ * network-calling modules). This function only ever narrows what's *offered*; `ProviderModelSuggest`
+ * never overwrites the input's value except on an explicit user pick, so an empty result here
+ * simply means no dropdown — typing is untouched either way.
+ *
+ * WP-1: also matches a catalog entry's `displayName` (case-insensitive substring, same as `id`),
+ * the OpenRouter server-side display name captured by the embeddings-leg work in WP-2.
  */
 export function filterCatalogModelsForQuery(models: ProviderCatalogModel[], query: string): ProviderCatalogModel[] {
 	const trimmed = query.trim().toLowerCase();
 	if (!trimmed) return models;
-	return models.filter(m => m.id.toLowerCase().includes(trimmed));
+	return models.filter(m => {
+		if (m.id.toLowerCase().includes(trimmed)) return true;
+		return typeof m.displayName === 'string' && m.displayName.toLowerCase().includes(trimmed);
+	});
+}
+
+/**
+ * The type-ahead suggest list's hard cap (`ProviderModelSuggest.getSuggestions`, unchanged at
+ * 100 — see that class's own doc comment for why). WP-1 adds the "+N more" tail row this constant
+ * and `buildProviderModelSuggestRows` exist to compute; the cap itself is not new.
+ */
+export const PROVIDER_MODEL_SUGGEST_LIMIT = 100;
+
+/** What `buildProviderModelSuggestRows` returns: the (already query-filtered, already capped) rows to render, plus how many further matches were cut off — 0 when nothing was. */
+export interface ProviderModelSuggestPage {
+	rows: ProviderCatalogModel[];
+	overflowCount: number;
+}
+
+/**
+ * WP-1: shared by `ProviderModelSuggest.getSuggestions` (`suggesters.ts`) to compute both the
+ * capped row list and how many matches didn't fit, so the suggest dropdown can append a
+ * non-selectable "+N more — use the catalog browser below" tail row. Pure and obsidian-free
+ * specifically so the boundary math (99 vs 100 vs 101 matches) is unit-testable without
+ * bundling `suggesters.ts`, which cannot be bundled standalone (its `AbstractInputSuggest`/
+ * `TFile`/etc. imports have no runtime `"obsidian"` module for esbuild to resolve — see
+ * `tests/settingsPickerRanking.test.mjs`'s doc comment).
+ */
+export function buildProviderModelSuggestRows(models: ProviderCatalogModel[], query: string): ProviderModelSuggestPage {
+	const filtered = filterCatalogModelsForQuery(models, query);
+	const rows = filtered.slice(0, PROVIDER_MODEL_SUGGEST_LIMIT);
+	const overflowCount = Math.max(0, filtered.length - PROVIDER_MODEL_SUGGEST_LIMIT);
+	return { rows, overflowCount };
 }
