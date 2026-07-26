@@ -318,6 +318,24 @@ interface FallbackModelEntry {
 	supported_parameters?: unknown;
 	// WP-2: OpenRouter's display name ("OpenAI: Text Embedding Ada 002"), present on both legs.
 	name?: string;
+	// WP-2: llama-swap's `/v1/models` lists only canonical ids ("bge-m3-f16"); each entry carries
+	// its configured aliases ("bge-m3") here instead. A provider model row configured with the
+	// alias id would otherwise never match `list.find(m => m.id === ctx.modelId)`. Optional at
+	// every level and tolerant of malformed shapes — this is a type assertion over server JSON,
+	// not a validated schema, so `aliases` is read as `unknown` and array-checked at the call site.
+	meta?: { llamaswap?: { aliases?: unknown } };
+}
+
+// Alias-aware companion to `list.find(m => m.id === ctx.modelId)`: an exact id match always wins
+// (server-reported truth beats a configured alias), falling back to a llama-swap alias hit only
+// when no entry's own id matches. Tolerates absent/malformed `meta` — never throws.
+function findFallbackModelEntry(list: FallbackModelEntry[], modelId: string): FallbackModelEntry | undefined {
+	const exact = list.find(m => m.id === modelId);
+	if (exact) return exact;
+	return list.find(m => {
+		const aliases = m.meta?.llamaswap?.aliases;
+		return Array.isArray(aliases) && aliases.includes(modelId);
+	});
 }
 
 // Shared entry mapper for OpenRouter/OpenAI-compatible-shaped `/models` list entries — used by both
@@ -361,7 +379,11 @@ async function fallbackModelsDescribeModel(ctx: HttpCallContext): Promise<Provid
 		throw new Error(`${label(ctx.provider)} models API returned an error body`);
 	}
 	const list = (body as { data?: FallbackModelEntry[] }).data ?? [];
-	const match = list.find(m => m.id === ctx.modelId);
+	// findFallbackModelEntry matches on the entry's own id first, falling back to a llama-swap
+	// alias hit (meta.llamaswap.aliases) — see its doc comment. Either way `match.id` is the
+	// canonical id the server actually reports, which is what `servedModel` below returns: server-
+	// reported truth, never the alias the row happened to be configured with.
+	const match = findFallbackModelEntry(list, ctx.modelId);
 	warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId, [match?.id, match?.backend], (msg) => new Notice(msg));
 	return {
 		servedModel: match?.id,
