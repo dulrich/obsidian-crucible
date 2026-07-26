@@ -328,6 +328,36 @@ test('warnIfCrossEncoderEmbedder does not throw for a matching id, and is a no-o
 	assert.doesNotThrow(() => warnIfCrossEncoderEmbedder('p2', 'Test', 'bge-m3'));
 });
 
+// ── WP-8: the cross-encoder warning is promoted to a session-deduped, visible Notice ───────
+//
+// shared.ts stays 'obsidian'-free (this file's whole first bundle depends on that), so the Notice
+// itself is never constructed here — `warnIfCrossEncoderEmbedder`'s `notify` callback is the seam
+// the two provider clients use to wire a real `new Notice(...)` in. This asserts the seam's
+// contract directly: same session dedup gate as logWarn, no throw, hints moved from a rest
+// parameter to an array without changing behavior.
+
+test('warnIfCrossEncoderEmbedder calls notify exactly once per (providerId, modelId) this session, and never for a non-matching id', () => {
+	const calls = [];
+	warnIfCrossEncoderEmbedder('p-notice-1', 'Test', 'bge-reranker-first', [], (msg) => calls.push(msg));
+	warnIfCrossEncoderEmbedder('p-notice-1', 'Test', 'bge-reranker-first', [], (msg) => calls.push(msg));
+	assert.equal(calls.length, 1, 'a second call for the same (providerId, modelId) must not notify again this session');
+	assert.match(calls[0], /cross-encoder/i);
+
+	const normalCalls = [];
+	warnIfCrossEncoderEmbedder('p-notice-1', 'Test', 'bge-m3', [], (msg) => normalCalls.push(msg));
+	assert.equal(normalCalls.length, 0, 'a normal (non-cross-encoder) id must never notify');
+});
+
+test('warnIfCrossEncoderEmbedder still checks hints (now an array parameter, not a rest) for the cross-encoder match', () => {
+	const calls = [];
+	warnIfCrossEncoderEmbedder('p-notice-2', 'Test', 'some-model-id', ['cross-encoder-arch'], (msg) => calls.push(msg));
+	assert.equal(calls.length, 1);
+});
+
+test('warnIfCrossEncoderEmbedder is safe to call with no notify callback at all (the existing call-site shape)', () => {
+	assert.doesNotThrow(() => warnIfCrossEncoderEmbedder('p-notice-3', 'Test', 'bge-reranker-plain'));
+});
+
 test('describeModel() against a reranker-shaped LM Studio model does not throw (warns internally)', async () => {
 	// Fixture matches a live LM Studio probe (2026-07-25): text-embedding-bge-reranker-v2-m3
 	// reports type: "embeddings" at quantization Q8_0.

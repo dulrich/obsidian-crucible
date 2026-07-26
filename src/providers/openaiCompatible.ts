@@ -1,4 +1,4 @@
-import { requestUrl } from 'obsidian';
+import { Notice, requestUrl } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult } from '../types';
 import {
 	HttpCallContext,
@@ -82,6 +82,12 @@ interface LmStudioNativeModelEntry {
 	arch?: string;
 	state?: string;
 	compatibility_type?: string;
+	// WP-8: verified live against a running LM Studio (2026-07-25) — the native listing's context
+	// size field is `max_context_length`, not the OpenRouter-shaped `context_length` the fallback
+	// `/models` branch below reads. Same wire-format caution as `quantization` vs `quant`: don't
+	// assume the two branches share a field name just because they both end up in
+	// `ProviderCatalogModel.contextLength`.
+	max_context_length?: number;
 }
 
 // LM Studio (and any server mimicking its native API) answers an endpoint it does not implement
@@ -164,7 +170,7 @@ export const openAICompatibleClient: HttpProviderClient = {
 	async describeModel(ctx: HttpCallContext): Promise<ProviderModelDescription> {
 		// Cheap, network-independent pass first: an id that already reads as a reranker must warn
 		// even if every request below fails or the server is unreachable.
-		warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId);
+		warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId, [], (msg) => new Notice(msg));
 
 		const native = await tryLmStudioNativeDescribeModel(ctx);
 		if (native) return native;
@@ -267,7 +273,7 @@ async function tryLmStudioNativeDescribeModel(ctx: HttpCallContext): Promise<Pro
 	if (!isNativeModelsBody(body)) return null;
 
 	const match = body.data.find(entry => entry.id === ctx.modelId);
-	warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId, match?.id, match?.arch);
+	warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId, [match?.id, match?.arch], (msg) => new Notice(msg));
 	if (!match) return { servedModel: undefined, precision: undefined, fingerprint: undefined };
 
 	const quant = match.quantization ?? match.quant;
@@ -312,7 +318,7 @@ async function fallbackModelsDescribeModel(ctx: HttpCallContext): Promise<Provid
 	}
 	const list = (body as { data?: FallbackModelEntry[] }).data ?? [];
 	const match = list.find(m => m.id === ctx.modelId);
-	warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId, match?.id, match?.backend);
+	warnIfCrossEncoderEmbedder(ctx.provider.id, label(ctx.provider), ctx.modelId, [match?.id, match?.backend], (msg) => new Notice(msg));
 	return {
 		servedModel: match?.id,
 		precision: undefined,
@@ -351,6 +357,7 @@ async function tryLmStudioNativeListModels(ctx: HttpListCallContext): Promise<Pr
 				type: entry.type,
 				arch: entry.arch,
 				quantization: quant,
+				contextLength: typeof entry.max_context_length === 'number' ? entry.max_context_length : undefined,
 				looksLikeCrossEncoder: looksLikeCrossEncoder(entry.id, entry.arch),
 			};
 		});

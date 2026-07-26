@@ -142,6 +142,18 @@ function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCapability
 		for (const cap of capabilitiesFromServerTags(entry.serverCapabilities)) inferred.add(cap);
 	}
 
+	// WP-8: OpenRouter-style `architecture.input_modalities` (surfaced here as
+	// `ProviderCatalogModel.inputModalities`) is real capability signal with no equivalent in the
+	// `type`-tag branches above — OpenRouter's `/models` never sets `type`. Any reported input
+	// modality means the model accepts completion requests at all (`chat`); an `image` modality
+	// additionally means it can see images (`image-extraction`), mirroring the `vlm` branch above
+	// for a kind that reports modalities instead of a type tag.
+	if (entry.inputModalities && entry.inputModalities.length > 0) {
+		hasSignal = true;
+		inferred.add('chat');
+		if (entry.inputModalities.includes('image')) inferred.add('image-extraction');
+	}
+
 	return hasSignal ? Array.from(inferred) : undefined;
 }
 
@@ -153,17 +165,27 @@ function inferCapabilities(entry: ProviderCatalogModel): ProviderModelCapability
  * the only list-adjacent endpoint that reports embedding width at all) — never fabricated for a
  * kind that doesn't report it, per the plan's explicit "don't guess" instruction.
  *
- * `embeddingVariant` is the catalog's raw `quantization` string, unnormalized (e.g. "F16", not
- * "f16") — matching `ProviderCatalogModel.quantization`'s own doc comment: normalization
- * (`normalizePrecision`) happens once, at *use* time (`SearchManager`), not at accept time, so
- * the value shown and accepted here is exactly what the server said.
+ * `embeddingVariant` prefers the catalog's own raw `quantization` string, unnormalized (e.g. "F16",
+ * not "f16") — matching `ProviderCatalogModel.quantization`'s own doc comment: normalization
+ * (`normalizePrecision`) happens once, at *use* time (`SearchManager`), not at accept time, so the
+ * value shown and accepted here is exactly what the server said.
+ *
+ * `describedPrecision` (WP-8) is a fallback for kinds whose *list* endpoint carries no quantization
+ * at all — OpenRouter, plain OpenAI, Infinity, or a bare-`/models` local server (vLLM, llama.cpp,
+ * LocalAI) — but whose per-model `describeModel()` probe might still know something. It is used
+ * ONLY when the catalog entry itself has no signal: a real, verbatim server value always wins over
+ * an already-normalized fallback, and the fallback is silently absent (never guessed) when
+ * `describeModel()` also came back empty (e.g. Infinity, which exposes no dtype at either
+ * endpoint). Passing it is the caller's job (`ai.ts`) — this function stays a pure, synchronous
+ * transform with no knowledge of how a caller obtained the fallback value.
  */
-export function deriveCatalogSuggestion(entry: ProviderCatalogModel): CatalogSuggestion {
+export function deriveCatalogSuggestion(entry: ProviderCatalogModel, describedPrecision?: string): CatalogSuggestion {
 	const suggestion: CatalogSuggestion = {};
 	const capabilities = inferCapabilities(entry);
 	if (capabilities !== undefined) suggestion.capabilities = capabilities;
 	if (entry.embeddingLength !== undefined) suggestion.embeddingDimensions = entry.embeddingLength;
 	if (entry.quantization !== undefined) suggestion.embeddingVariant = entry.quantization;
+	else if (describedPrecision !== undefined) suggestion.embeddingVariant = describedPrecision;
 	return suggestion;
 }
 
@@ -177,6 +199,12 @@ export function catalogEntrySummaryTokens(entry: ProviderCatalogModel): string[]
 	if (entry.contextLength) tokens.push(`${entry.contextLength} ctx`);
 	if (entry.embeddingLength) tokens.push(`${entry.embeddingLength}d`);
 	if (entry.serverCapabilities && entry.serverCapabilities.length > 0) tokens.push(entry.serverCapabilities.join('/'));
+	// WP-8: OpenRouter's rich, previously-unread fields. `inputModalities` is worth naming outright
+	// (e.g. "text/image"); `supportedParameters` is often a long list (tools, temperature, seed,
+	// response_format, ...), so a count is surfaced rather than the whole thing — reading it here
+	// is the point (per the plan's "currently 100% unread" note), not fabricating a token per value.
+	if (entry.inputModalities && entry.inputModalities.length > 0) tokens.push(entry.inputModalities.join('/'));
+	if (entry.supportedParameters && entry.supportedParameters.length > 0) tokens.push(`${entry.supportedParameters.length} params`);
 	return tokens;
 }
 
