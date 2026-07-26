@@ -153,7 +153,7 @@ Configure the reranker as its own provider entry; there is no rerank-specific UR
 
 **crucible-inference (§12a) makes this asymmetry moot.** llama-swap serves both `/v1/rerank` and
 bare `/rerank`, so the embedding and reranking provider entries can both be configured with the
-same `http://127.0.0.1:4800/v1` base URL — there is no longer a base URL to get wrong. Two more
+same `http://127.0.0.1:4806/v1` base URL — there is no longer a base URL to get wrong. Two more
 rules specific to that router, worth knowing regardless of which route you actually run:
 
 - **Its config's `models`/`aliases` are the plugin's API surface — append-only.** Crucible's
@@ -518,12 +518,12 @@ later, cross-repo step; see "Migration status" below for where that stands as of
 
 Crucible: **one base URL for both provider entries** —
 
-- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4800/v1`, model id `bge-m3`.
-- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4800/v1`, model id `bge-reranker-v2`.
+- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `bge-m3`.
+- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `bge-reranker-v2`.
 
 Both aliases are chosen to match the model ids already stored by route (c) below, specifically so
 that migrating a vault off that route onto this one is a **base-URL-only change** — repoint both
-provider entries from `4804`/`4805` to `4800` and leave the model ids alone. See Rule 2 (§4) for
+provider entries from `4804`/`4805` to `4806` and leave the model ids alone. See Rule 2 (§4) for
 why the rerank entry no longer needs a bare, no-`/v1` base URL the way Infinity's does.
 
 What running it feels like:
@@ -555,7 +555,7 @@ this design still untested; it is checked before the older services are retired,
 **Migration status.** As of this guide, `docker/llamacpp-vulkan/` builds and documents this router
 (image tag `crucible-llamacpp-vulkan:b10121-swap243`), but wiring it into a fleet's compose file,
 running the smoke test against the live service, testing the chat-eviction interleave, and
-flipping Crucible's provider base URLs from `4804`/`4805` to `4800` are separate, later steps —
+flipping Crucible's provider base URLs from `4804`/`4805` to `4806` are separate, later steps —
 not yet landed as of this writing. Until they are, route (c) below (the systemd-activated GPU
 pair) is still what a fleet built against this repo actually runs day to day; this subsection
 documents where that is headed, and its image is safe to build and run standalone in the meantime.

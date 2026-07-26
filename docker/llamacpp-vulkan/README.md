@@ -1,7 +1,7 @@
 # crucible-inference — llama.cpp on Vulkan + llama-swap
 
 One always-on GPU inference router serving Crucible's embedding and reranking backends (and,
-eventually, chat models) from a single container on **127.0.0.1:4800**.
+eventually, chat models) from a single container on **127.0.0.1:4806**.
 
 This replaces the old shape — two separate `llama-server` containers, each behind its own
 systemd socket that started/stopped the container on demand — with **one router process**
@@ -13,8 +13,8 @@ image's old dual-single-model shape, but it is retired once the router cutover l
 
 | | Infinity (CPU) | this (Vulkan GPU) | |
 |---|---|---|---|
-| Embedding `bge-m3`, batch 96 | 8.5 chunks/s | **90.0 chunks/s** | 10.6× |
-| Reranking `bge-reranker-v2-m3`, 30 docs | 7.3 s | **0.147 s** | 50× |
+| Embedding `bge-m3`, batch 96 | 3.7 chunks/s | **95.0 chunks/s** | 25.7× |
+| Reranking `bge-reranker-v2-m3`, 30 docs | 9.48 s | **0.280 s** | 34× |
 | Cold start after idle | n/a (always resident) | **1.3 s** | |
 | Warm request | | 67 ms | |
 
@@ -54,7 +54,7 @@ sequencing.
 docker run ... crucible-llamacpp-vulkan:b10121-swap243
 # equivalent to:
 docker run ... crucible-llamacpp-vulkan:b10121-swap243 \
-  llama-swap -config /app/config.yaml -listen :4800
+  llama-swap -config /app/config.yaml -listen :4806
 
 # The old single-model shape still works unchanged, for anything not yet migrated:
 docker run ... crucible-llamacpp-vulkan:b10121-swap243 \
@@ -88,8 +88,8 @@ file itself for the full annotated shape; the essentials:
 ## Smoke testing
 
 ```bash
-docker/llamacpp-vulkan/smoke-inference.sh                       # default target :4800
-docker/llamacpp-vulkan/smoke-inference.sh --url http://127.0.0.1:4800
+docker/llamacpp-vulkan/smoke-inference.sh                       # default target :4806
+docker/llamacpp-vulkan/smoke-inference.sh --url http://127.0.0.1:4806
 docker/llamacpp-vulkan/smoke-inference.sh --wait-ttl            # also proves ttl-unload (~30 min sleep)
 ```
 
@@ -208,13 +208,13 @@ This directory is mid-migration from the old per-model socket-activated shape to
 llama-swap router. As of this file:
 
 - The Dockerfile, `entrypoint.sh`, `config.yaml`, and `smoke-inference.sh` in this directory
-  build and describe the **new** router shape (`crucible-inference` on port 4800).
+  build and describe the **new** router shape (`crucible-inference` on port 4806).
 - The `systemd/` unit files, `crucible-inference-ctl`, and the compose services
   `crucible-embed-gpu`/`crucible-rerank-gpu` (context-control) are still the **live** path —
   they are not touched by this change and continue to work exactly as documented in git history.
 - Bringing up `crucible-inference` in compose, running the smoke test against the real service,
   testing the chat-evicts-retrieval interleave, flipping Crucible's provider base URLs from
-  4804/4805 to 4800, and retiring the systemd sockets are separate, later steps (cutover) — not
+  4804/4805 to 4806, and retiring the systemd sockets are separate, later steps (cutover) — not
   part of authoring this container image and its config.
 
 ## The CPU services are still there
