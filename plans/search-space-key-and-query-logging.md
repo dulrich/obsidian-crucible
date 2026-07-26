@@ -144,6 +144,13 @@ User-confirmed 2026-07-25:
   abort on a transient embedder blip, which is the failure mode the lenient branch exists to
   prevent, and would trade a silent wrong result for a fragile one. The distinction is the error's
   *class*, not the caller's strictness.
+- **The backfill's existing guard is in the right place and checks the wrong predicate — fix that
+  first.** `SearchEmbedMissingWorkflow` already refuses to run when semantic search is off or no
+  model is configured (`SearchIndexWorkflow.ts:92-95`), which is exactly the right instinct. But it
+  tests `activeEmbeddingModelId()`, which only asserts the id string is **non-empty**
+  (`SearchManager.ts:349-353`). The 2026-07-25 ref was non-empty and simply did not resolve against
+  the provider catalog, so the guard passed. Make it *resolve* the ref rather than measure the
+  string; this is the cheapest and highest-value change in the WP.
 - **Validate the ref where it is chosen, not only where it is used.** Add a resolve helper
   (`providerId` + `modelId` → model, or a typed "orphaned" result) and use it in the search
   settings section to render an inline warning when `searchEmbeddingModel` or `searchRerankModel`
@@ -175,8 +182,23 @@ User-confirmed 2026-07-25:
   `mod-warning` and routed through `ConfirmModal`, with a `gap` in the action cell per the UI
   standards. Pills follow the fleet taxonomy: coverage is a **status** pill, a space's chunk count
   at rest is **neutral** — a count is not an alarm.
-- **Surface a health warning when the vault has chunks but zero vectors while semantic search is
-  on.** That single condition is today's incident, and it is cheap to detect.
+- **Surface embedding *coverage*, not a zero-vector alarm.** An earlier draft of this WP specified
+  "warn when the vault has chunks but zero vectors", and the 2026-07-25 run proves that condition
+  is the wrong one: the index went from 0% to 34% covered the moment the fixed batches started
+  landing, so a zero-vector alarm would have fallen silent while two-thirds of the vault stayed
+  permanently unembedded. The displayed figure must be `embedded / total` per vault, computed
+  server-side (`COUNT(*) WHERE embedding IS NULL`), with the remedy named inline — `Search: embed
+  missing vectors`, which repairs exactly this without a reset.
+- **Distinguish transient incompleteness from settled incompleteness.** Coverage is legitimately
+  below 100% during any rebuild or backfill, so alarming on it directly would fire on every normal
+  run and train the user to ignore it. Show coverage always; reserve any *warning* treatment for a
+  gap that persists with no search jobs in flight. The queue view already owns work-in-progress —
+  this section owns what the index contains.
+- **Do not live-poll the companion during indexing.** The same run showed 17 health-probe timeouts,
+  clustered immediately before each ~500-chunk flush: `node:sqlite`'s `DatabaseSync` is
+  synchronous, so a bulk upsert blocks the single-threaded server and no request is answered until
+  it completes. A stats panel that polls on a timer will both time out and add load precisely when
+  the index is busiest. Fetch on open and on explicit refresh.
 - Do **not** add a rebuild-progress view here. That is the queue's job and it already has one; this
   section describes the index's contents, not the work in flight.
 - Tests: stats aggregate correctly with two vaults in one database and never cross the boundary
