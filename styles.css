@@ -625,7 +625,8 @@ If your plugin does not need CSS, delete this file.
 }
 
 .crucible-ingestion-section.is-collapsed .crucible-ingestion-section-body,
-.crucible-ingestion-section.is-collapsed .crucible-ingestion-queue-controls {
+.crucible-ingestion-section.is-collapsed .crucible-ingestion-queue-controls,
+.crucible-ingestion-section.is-collapsed .crucible-service-health-row {
   display: none;
 }
 
@@ -863,6 +864,39 @@ If your plugin does not need CSS, delete this file.
 
 .crucible-pill.is-contrast {
   color: var(--text-normal);
+}
+
+/* STATUS pill variants — the taxonomy's other family, first used by the queue
+   monitor's service-health pills (breaker open/half-open). ANSI hue label + border
+   (from currentcolor, inherited from .crucible-pill) + a 5%-tint background, per the
+   design system's status-pill spec. Obsidian has no raw hue token to pull a literal
+   5%-over-panel mix from without reaching for an --n1-* token, so the tint is
+   computed from the same Obsidian semantic var the label/border already use —
+   color-mix keeps this file's "Obsidian vars only" rule intact while still landing on
+   the spec's 5% figure. Only error/warn exist today (open/half-open); add is-ok /
+   is-info the same way if a future status needs them. */
+.crucible-pill.is-error {
+  color: var(--text-error);
+  background-color: color-mix(in srgb, var(--text-error) 5%, transparent);
+}
+
+.crucible-pill.is-warn {
+  color: var(--text-warning);
+  background-color: color-mix(in srgb, var(--text-warning) 5%, transparent);
+}
+
+/* Queue monitor's service-health pill row: same gapped-row shape as the queue
+   controls row below it, empty (and so invisible) when no service has ever reported
+   in. */
+.crucible-service-health-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0 0.75rem 0.5rem;
+}
+
+.crucible-service-health-row:empty {
+  display: none;
 }
 
 /* The pinned-concurrency pill states its reason in a tooltip, so it takes the help

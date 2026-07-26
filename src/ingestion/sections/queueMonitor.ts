@@ -1,6 +1,8 @@
 import { Notice, TFile } from 'obsidian';
 import type { JobType, OrchestrationJob } from '../../orchestration/types';
 import type { StopJobOutcome } from '../../orchestration/cancellation';
+import type { ServiceHealthSnapshot } from '../../orchestration/serviceHealth';
+import { runServiceOutageRequeueFlow } from '../../orchestration/failedJobRepair';
 import { ConfirmModal } from '../../confirmModal';
 import { renderSortableTable } from '../render/sortableTable';
 import { renderFileLink } from '../render/cells';
@@ -42,6 +44,48 @@ const CLEAR_QUEUED_CONFIRM =
 	+ 'One caveat: while auto-enqueue is on, cleared in-memory entries can be re-added by their source about a '
 	+ 'minute later, so turn the source off as well if you want them to stay gone.';
 
+// Service-health pills: the fleet taxonomy split by breaker state. `open` and
+// `half-open` are genuine status (something is or might be wrong), so they use the
+// status-pill family; a `closed` service is only rendered at all once it has failed
+// before (a stale `lastKind` is the tell — see ServiceHealthRegistry.reportSuccess,
+// which resets state but deliberately leaves lastKind/lastReason in place), and even
+// then it is a neutral pill: recovered is not a status to alarm on. A service the
+// registry has never heard from has no entry in `snapshot()` at all, so it renders
+// nothing — no special-casing needed here.
+function serviceHealthPill(snapshot: ServiceHealthSnapshot): { cls: string; text: string } | null {
+	switch (snapshot.state) {
+		case 'open': {
+			const retry = snapshot.retryAt ? retryCountdownText(snapshot.retryAt) : null;
+			return { cls: 'crucible-pill is-error', text: `${snapshot.service} open${retry ? ` · retry in ${retry}` : ''}` };
+		}
+		case 'half-open':
+			return { cls: 'crucible-pill is-warn', text: `${snapshot.service} half-open` };
+		case 'closed':
+			return snapshot.lastKind ? { cls: 'crucible-pill is-muted', text: `${snapshot.service} closed` } : null;
+	}
+}
+
+function retryCountdownText(retryAt: number): string {
+	const remainingMs = retryAt - Date.now();
+	if (remainingMs <= 0) return 'now';
+	const seconds = Math.ceil(remainingMs / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	const restSeconds = seconds % 60;
+	return restSeconds > 0 ? `${minutes}m ${restSeconds}s` : `${minutes}m`;
+}
+
+function renderServiceHealthPills(host: DashboardHost, container: HTMLElement): void {
+	container.empty();
+	const registry = host.plugin.serviceHealth;
+	if (!registry) return;
+	for (const snapshot of registry.snapshot()) {
+		const pill = serviceHealthPill(snapshot);
+		if (!pill) continue;
+		container.createSpan({ cls: pill.cls, text: pill.text });
+	}
+}
+
 function fileJobTargetPath(job: OrchestrationJob): string | undefined {
 	const path = job.params?.targetPath ?? job.params?.path;
 	return typeof path === 'string' ? path : undefined;
@@ -76,6 +120,15 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 		'All queued and running jobs across the file-backed and in-memory queues.',
 		false,
 	);
+
+	// Service-health pills, near the top so a dependency outage reads before any one
+	// row that's deferred because of it. Live: re-rendered on every breaker
+	// transition, and the subscription is released on dashboard teardown since this
+	// section is built once in mount() rather than per-refresh.
+	const healthRow = card.createDiv({ cls: 'crucible-service-health-row' });
+	renderServiceHealthPills(host, healthRow);
+	const unsubscribeHealth = host.plugin.serviceHealth?.onTransition(() => renderServiceHealthPills(host, healthRow));
+	if (unsubscribeHealth) host.registerDisposer(unsubscribeHealth);
 
 	// Deliberately just a panic switch here: one motion stops ALL auto-draining
 	// while preserving the Autorun/Auto-enrich/per-type configuration underneath,
@@ -116,6 +169,25 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 					: 'Nothing was queued.');
 			} finally {
 				clearBtn.disabled = false;
+			}
+			await host.refresh('queueMonitor');
+		})();
+	});
+
+	// Retroactive repair for a service-outage cohort in failed/ (failedJobRepair.ts).
+	// Not destructive — a requeued job just runs again — so no mod-warning; it still
+	// sits in this row's gapped flex layout, which is what the spacing rule actually
+	// requires next to Clear queued's destructive button.
+	const requeueBtn = controls.createEl('button', { text: 'Requeue service-outage failures' });
+	requeueBtn.title = 'Scan failed/ for jobs that failed because a dependency was down (not the job itself) and '
+		+ 'move them back to queued/, after a dry-run confirmation.';
+	requeueBtn.addEventListener('click', () => {
+		void (async () => {
+			requeueBtn.disabled = true;
+			try {
+				await runServiceOutageRequeueFlow(host.plugin);
+			} finally {
+				requeueBtn.disabled = false;
 			}
 			await host.refresh('queueMonitor');
 		})();
