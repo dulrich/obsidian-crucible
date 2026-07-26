@@ -23,6 +23,10 @@ await esbuild.build({
 			"export { Orchestrator } from './src/orchestration/Orchestrator';",
 			"export { OrchestrationAutoRunner, SERVICE_HEALTH_TICK_MS } from './src/orchestration/OrchestrationAutoRunner';",
 			"export * from './src/orchestration/serviceHealth';",
+			// The end-to-end sanity test below drives the REAL SearchUpsertFileWorkflow (not a
+			// hand-rolled outage stub) through this same real registry/backend/runner wiring.
+			"export { SearchUpsertFileWorkflow } from './src/orchestration/workflows/SearchIndexWorkflow';",
+			"export { SearchServiceUnavailableError } from './src/search/types';",
 		].join('\n'),
 		resolveDir: '.',
 		sourcefile: 'drain-breaker-test-entry.ts',
@@ -66,6 +70,8 @@ const {
 	SERVICE_HEALTH_TICK_MS,
 	ServiceHealthRegistry,
 	SERVICE_OPEN_WINDOW_MS,
+	SearchUpsertFileWorkflow,
+	SearchServiceUnavailableError,
 } = await import(pathToFileURL(outfile).href);
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -96,6 +102,10 @@ function makeStore(initial = {}) {
 		listFolder: async (status) => [...(folders[status] ?? [])],
 		appendNotes: async () => {},
 		setError: async (file, message) => { errors.push({ path: file.path, message }); },
+		// failEntry stamps failureKind right after setError (WP-5); without this stub the
+		// TypeError is swallowed by failEntry's never-throws catch, the job strands in
+		// running/, and any test awaiting a failed/ landing hangs forever.
+		setFailureKind: async () => {},
 		setOutputPaths: async () => {},
 		setPartial: async () => {},
 		setProgress: async () => {},
@@ -572,4 +582,137 @@ test('a successful memory job reports every declared service healthy', async () 
 	// Manual per-job Run: bypasses the gate, exactly as the queue monitor's Run does.
 	assert.equal(await orchestrator.runJob(MEMORY_TYPE, 'note:a.md'), 'ran');
 	assert.equal(plugin.serviceHealth.stateOf('youtube-api'), 'closed');
+});
+
+// --- 7. probe-token hygiene rider (orchestrator review finding on WP-2) ----
+
+// `Orchestrator.servicesHealthyFor(type)` (the consuming form) is called immediately
+// before every claim, and for a half-open service that consumes the single-flight probe
+// token. Ordinarily the claimed job's own outcome reports a verdict — success or a
+// service-level failure — which resolves the token. These two tests are the cases where
+// no verdict ever reaches the registry: the claim finds nothing to run, or the job
+// settles at the JOB level (a bug or a locked note — nothing about the SERVICE). Without
+// `Orchestrator.releaseProbesFor`, the token strands until the 5-minute stale reclaim,
+// during which the non-consuming kick check (`probeInFlight`) refuses to even start a
+// drain — a false wedge that looks exactly like the outage it was trying to test.
+
+test('an empty claim while half-open releases the probe token instead of stranding it', async () => {
+	const clock = { now: 8_000_000 };
+	const plugin = makePlugin();
+	plugin.serviceHealth = new ServiceHealthRegistry(() => clock.now);
+	for (let i = 0; i < 3; i++) plugin.serviceHealth.reportFailure('youtube-api', 'refused', 'down');
+	clock.now += SERVICE_OPEN_WINDOW_MS;
+	plugin.serviceHealth.tick();
+	assert.equal(plugin.serviceHealth.stateOf('youtube-api'), 'half-open');
+
+	const ran = [];
+	const orchestrator = new Orchestrator(plugin, makeStore());
+	orchestrator.register(MEMORY_TYPE, { async run(job) { ran.push(job.id); return { status: 'done' }; } }, MEMORY_CONFIG);
+	const runner = makeRunner(plugin, orchestrator);
+
+	// The memory queue is empty: the worker acquires the probe token (it must, to even
+	// attempt a claim) and then finds nothing there to run.
+	runner.kickAll();
+	await settle();
+
+	assert.deepEqual(ran, [], 'nothing ran — there was nothing queued');
+	assert.equal(plugin.serviceHealth.stateOf('youtube-api'), 'half-open',
+		'no job ran, so no verdict — the breaker itself is unmoved');
+	assert.equal(plugin.serviceHealth.snapshotFor('youtube-api').probeInFlight, false,
+		'THE regression: an empty claim used to strand the token here for the full 5-minute stale window');
+
+	// Now something arrives. Without the fix, this kick's non-consuming pre-check would
+	// see probeInFlight still true and refuse to even start a drain.
+	await orchestrator.enqueue(MEMORY_TYPE, { key: 'note:a.md' });
+	runner.kickAll();
+	await settle(20);
+
+	assert.deepEqual(ran, [`mem:${MEMORY_TYPE}:note:a.md`], 'the next kick could probe because the token was returned');
+	runner.dispose();
+});
+
+test('a job-level failure while half-open releases the probe without a verdict', async () => {
+	const clock = { now: 9_000_000 };
+	const plugin = makePlugin();
+	plugin.serviceHealth = new ServiceHealthRegistry(() => clock.now);
+	for (let i = 0; i < 3; i++) plugin.serviceHealth.reportFailure(SVC, 'refused', 'down');
+	clock.now += SERVICE_OPEN_WINDOW_MS;
+	plugin.serviceHealth.tick();
+	assert.equal(plugin.serviceHealth.stateOf(SVC), 'half-open');
+
+	const store = makeStore({ queued: [queuedEntry('job-a')] });
+	const orchestrator = new Orchestrator(plugin, store);
+	let calls = 0;
+	// A job-level failure — no `serviceUnhealthy` — says nothing about the SERVICE at
+	// all (a malformed param, a bug, a locked note); it must not resolve the probe
+	// either way, but it must still hand the token back so the next probe can happen.
+	orchestrator.register(FILE_TYPE, {
+		async run() { calls++; throw new Error('boom: unrelated job-level bug'); },
+	}, FILE_CONFIG);
+	const runner = makeRunner(plugin, orchestrator);
+
+	runner.kickAll();
+	await settle();
+
+	assert.equal(calls, 1, 'the probe job did run — that is what makes it a probe');
+	assert.equal(store.folders.failed.length, 1, 'a job-level failure, recorded as such');
+	assert.equal(plugin.serviceHealth.stateOf(SVC), 'half-open', 'a job-level failure says nothing about the service');
+	assert.equal(plugin.serviceHealth.snapshotFor(SVC).probeInFlight, false,
+		'THE regression: the token used to strand here until the 5-minute stale reclaim');
+
+	// Next claim may probe again — prove it rather than just checking the flag.
+	store.folders.queued.push(queuedEntry('job-b'));
+	runner.kickAll();
+	await settle();
+	assert.equal(calls, 2, 'a later probe was possible because the first one released cleanly');
+
+	runner.dispose();
+});
+
+// --- 8. end-to-end: workflow -> backend -> registry -> drain (the sprint promise) ----
+
+// Every other test in this file proves the breaker mechanics against a HAND-ROLLED
+// `outageWorkflow` stub. This is the one test the sprint promised: a companion-refused
+// outage, observed by the REAL SearchUpsertFileWorkflow exactly as `client.ts` would
+// classify it, flows through the real deferral/backend/registry/drain wiring end to end.
+test('a companion-refused outage flows workflow -> backend -> registry -> drain stops', async () => {
+	const plugin = makePlugin({ settings: { searchEnabled: true, searchServiceUrl: 'http://127.0.0.1:4801' } });
+	plugin.serviceHealth = new ServiceHealthRegistry();
+	plugin.searchManager = {
+		companionAvailable: async () => true,
+		companionUnavailableReason: () => null,
+		markCompanionOffline: () => {},
+		// deletePath is what SearchUpsertFileWorkflow calls when the target path resolves to
+		// no file — the plugin.app.vault stub below always returns null, so every job takes
+		// this branch. This is the one place the simulated outage is injected: everything
+		// upstream of it (job claim, the workflow's own gate-and-catch scaffold) is real.
+		deletePath: async () => { throw new SearchServiceUnavailableError('connect ECONNREFUSED 127.0.0.1:4801', 'refused'); },
+	};
+
+	const queued = Array.from({ length: 10 }, (_, i) => ({
+		file: { path: `queue/inbox/search-${i}.md` },
+		job: { id: `search-${i}`, type: 'search_upsert_file', status: 'queued', params: { path: `note-${i}.md` } },
+	}));
+	const store = makeStore({ queued });
+	const orchestrator = new Orchestrator(plugin, store);
+	orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(),
+		{ persistence: 'file', maxParallel: 1, minIntervalMs: 0, services: [SVC] });
+	const runner = makeRunner(plugin, orchestrator);
+	// search_upsert_file isn't in makePlugin()'s default autoRun map — opt it in, exactly
+	// like the fixture already does for the other types this file drains.
+	plugin.settings.orchestrationJobTypeControls.search_upsert_file = { autoRun: true };
+
+	for (let i = 0; i < 20; i++) {
+		runner.kickAll();
+		await settle();
+	}
+
+	assert.equal(plugin.serviceHealth.stateOf(SVC), 'open',
+		'the REAL workflow\'s serviceUnhealthy flowed all the way through the backend to the registry, which opened the breaker');
+	assert.equal(store.folders.failed.length, 0,
+		'a service outage observed through the real workflow must still never write a failure file');
+	assert.equal(store.folders.queued.length, 10, 'the queue behind the outage is untouched, ready to resume on recovery');
+	assert.equal(store.folders.running.length, 0);
+
+	runner.dispose();
 });

@@ -128,6 +128,39 @@ export class Orchestrator {
 		return this.jobTypes().filter(type => this.getConfig(type).services?.includes(service));
 	}
 
+	/**
+	 * Hands back a half-open probe token this type's worker acquired but never resolved.
+	 *
+	 * `servicesHealthyFor(type)` (the consuming form) is called immediately before a
+	 * claim; ordinarily the claimed job's own outcome reports a verdict to the registry
+	 * — `reportSuccess`/`reportFailure` — which itself clears the token. But three
+	 * things can happen between acquiring the token and a verdict landing: the claim
+	 * finds nothing (`'empty'`), the type turns out to be disabled (`'disabled'`), or
+	 * the job settles at the JOB level — a deferral or failure with no `serviceUnhealthy`
+	 * — which says nothing about the service at all. None of those touch the registry,
+	 * so without this the token strands until `ServiceHealthRegistry.tick`'s 5-minute
+	 * stale reclaim, during which the non-consuming kick check
+	 * (`servicesHealthyFor(type, { acquireProbe: false })`) sees `probeInFlight` still
+	 * true and refuses to even start a drain — a false wedge that looks exactly like the
+	 * outage it was trying to test.
+	 *
+	 * Safe by construction: single-flight probe acquisition means the token released
+	 * here, if any, is the one THIS worker took immediately before its claim. Calling it
+	 * after a real verdict already landed (a success closed the breaker, a service
+	 * failure re-opened it) is a harmless no-op — `isHalfOpen` is false either way.
+	 */
+	releaseProbesFor(type: JobType): void {
+		const services = this.getConfig(type).services;
+		if (!services || services.length === 0) return;
+		const registry = this.plugin.serviceHealth;
+		if (!registry) return;
+		for (const service of services) {
+			if (registry.isHalfOpen(service) && registry.snapshotFor(service).probeInFlight) {
+				registry.releaseProbe(service);
+			}
+		}
+	}
+
 	enqueue(type: JobType, params?: Record<string, unknown>, options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null> {
 		const backend = this.backends.get(type);
 		return backend ? backend.enqueue(params ?? {}, options) : Promise.resolve(null);
