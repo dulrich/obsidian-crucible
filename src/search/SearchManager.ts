@@ -1,5 +1,5 @@
 import { App, Notice, TFile } from 'obsidian';
-import { CrucibleSettings, Provider, ProviderModelRef } from '../types';
+import { CrucibleSettings, Provider, ProviderEmbeddingResult, ProviderModel, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
 import { normalizePrecision } from '../providers/shared';
 import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
@@ -9,6 +9,7 @@ import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
 import {
 	embeddingSpaceId,
 	SearchChunk,
+	SearchEmbeddingConfigError,
 	SearchEmbeddingMismatchError,
 	SearchEmbeddingUnavailableError,
 	SearchFileState,
@@ -123,12 +124,72 @@ export interface SearchIndexOptions {
 	signal?: AbortSignal;
 }
 
-// Everything that isn't already one of the two typed embedding errors becomes "the embedder
-// didn't answer", which the backfill workflow defers and retries. A width mismatch stays
-// itself, because retrying a misconfiguration forever is not a recovery.
+// Everything that isn't already one of the three typed embedding errors becomes "the embedder
+// didn't answer", which the backfill workflow defers and retries. A width mismatch or a config
+// error stays itself — audit finding F4: before this line grouped SearchEmbeddingConfigError
+// with the retryable kind too, an orphaned {providerId, modelId} ref (a renamed catalog entry,
+// e.g.) came out of embedTexts() as a plain Error, got converted to
+// SearchEmbeddingUnavailableError right here, and was deferred-and-retried forever — 35 of 55
+// rebuild batches reported `done` with zero embeddings. Retrying a misconfiguration is not a
+// recovery, so both permanent kinds must pass through unchanged.
 function asEmbeddingBackfillError(e: unknown): Error {
-	if (e instanceof SearchEmbeddingMismatchError || e instanceof SearchEmbeddingUnavailableError) return e;
+	if (e instanceof SearchEmbeddingMismatchError || e instanceof SearchEmbeddingConfigError || e instanceof SearchEmbeddingUnavailableError) return e;
 	return new SearchEmbeddingUnavailableError(`embedding failed: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+// True for either permanent embedding-error kind — an unresolved ref or a resolved model
+// returning the wrong width. Neither self-heals, so wherever this is true the caller must not
+// take the "log and degrade to FTS-only" branch that exists for a transient outage.
+function isEmbeddingConfigError(e: unknown): e is SearchEmbeddingConfigError | SearchEmbeddingMismatchError {
+	return e instanceof SearchEmbeddingConfigError || e instanceof SearchEmbeddingMismatchError;
+}
+
+// Providers report a non-2xx HTTP response as a plain Error whose message embeds the status
+// code — see e.g. openaiCompatible.ts/ollama.ts: "<label> embeddings API returned <status>:
+// <body>". A 4xx here is the provider rejecting the model/request outright (an unknown model id,
+// a malformed request the server refuses) — a configuration problem, not a transient one — so it
+// is reclassified rather than left to retry forever under SearchEmbeddingUnavailableError. 5xx
+// and anything without a recognizable status (timeouts, connection resets) are left alone; the
+// generic fallback in asEmbeddingBackfillError treats those as retryable, which is correct for a
+// `restart: unless-stopped` container blipping.
+const EMBEDDING_HTTP_STATUS_PATTERN = /\bAPI returned (\d{3}):/;
+
+function reclassifyProviderEmbedError(e: unknown): Error {
+	if (e instanceof Error) {
+		const match = e.message.match(EMBEDDING_HTTP_STATUS_PATTERN);
+		const status = match ? Number(match[1]) : undefined;
+		if (status !== undefined && status >= 400 && status < 500) {
+			return new SearchEmbeddingConfigError(e.message);
+		}
+		return e;
+	}
+	return new Error(String(e));
+}
+
+/**
+ * The one place `{providerId, modelId}` is turned into an actual provider + model, or a typed
+ * reason it can't be. Pure and settings-only (no provider/network calls) so it is reusable from
+ * settings UI as well as from indexing — see the search settings section's dangling-ref inline
+ * warning, which resolves `searchEmbeddingModel`/`searchRerankModel` through this exact function
+ * so "does this ref still exist" can never drift between the picker's description and the index
+ * path's error.
+ *
+ * `'unset'` (no ref, or an empty modelId) is not an error — "no embedding model configured" is a
+ * legitimate steady state. `'orphaned'` is the case this whole WP exists for: a non-empty ref
+ * that does not resolve against the current catalog, which `activeEmbeddingModelId()`'s old
+ * non-emptiness check could not tell apart from a healthy one.
+ */
+export type ProviderModelRefResolution =
+	| { status: 'unset' }
+	| { status: 'orphaned' }
+	| { status: 'ok'; provider: Provider; model: ProviderModel };
+
+export function resolveProviderModelRef(providers: Provider[], ref: ProviderModelRef | undefined): ProviderModelRefResolution {
+	if (!ref?.modelId?.trim()) return { status: 'unset' };
+	const provider = providers.find(p => p.id === ref.providerId);
+	const model = provider?.models.find(m => m.id === ref.modelId);
+	if (!provider || !model) return { status: 'orphaned' };
+	return { status: 'ok', provider, model };
 }
 
 export class SearchManager {
@@ -153,6 +214,13 @@ export class SearchManager {
 	private readonly queryEmbeddingCache = new Map<string, number[] | undefined>();
 	private embedQueryFailedAt: number | null = null;
 	private embedQueryFailureNotified = false;
+
+	// Same once-per-session idea as embedQueryFailureNotified, kept as a separate flag because it
+	// guards a separate surface: a plain rebuild's indexing loop, not the interactive query path.
+	// A rebuild enqueues one job per ~100-file batch, and every batch of a misconfigured run hits
+	// the same config error — without this, that would be one Notice per batch instead of one for
+	// the whole run.
+	private indexEmbeddingConfigNoticeShown = false;
 
 	constructor(
 		private readonly app: App,
@@ -236,7 +304,7 @@ export class SearchManager {
 		// nothing to embed with is a configuration error, not a transient one, so it must not be
 		// deferred-and-retried forever.
 		if (requireEmbeddings && !this.activeEmbeddingModelId()) {
-			throw new Error('Search: cannot backfill embeddings — semantic search is off or no embedding model is configured (Crucible → Settings → Orchestrate → Search).');
+			throw new Error('Search: cannot backfill embeddings — semantic search is off, no embedding model is configured, or the configured model no longer exists in its provider\'s catalog (Crucible → Settings → Orchestrate → Search).');
 		}
 		// Resolved once for the whole operation: it is what both halves of the vector contract are
 		// measured against — which space stored vectors must already be in to count as covered,
@@ -263,6 +331,19 @@ export class SearchManager {
 				}
 			} catch (e) {
 				if (requireEmbeddings) throw asEmbeddingBackfillError(e);
+				// A plain rebuild is normally lenient — an embedder blip degrades this batch to
+				// FTS-only rather than failing it, because keyword search working beats the file
+				// being absent. But a config error (an orphaned ref, a mismatched width) is not a
+				// blip: it will not resolve on the next batch, the next file, or ever. Taking the
+				// lenient branch here is exactly the 2026-07-25 incident — 35 of 55 batches
+				// reported `done` with zero embeddings and no visible error anywhere. So this is
+				// the one case a plain rebuild still fails loudly for, even though requireEmbeddings
+				// is false: a Notice (once per session — see noticeEmbeddingConfigErrorOnce) plus
+				// propagating the error so the batch's job records a visible failure.
+				if (isEmbeddingConfigError(e)) {
+					this.noticeEmbeddingConfigErrorOnce(e);
+					throw e;
+				}
 				logWarn('search', 'embedding generation failed; indexing FTS-only chunks for batch', e);
 			}
 			await this.withFlushInFlight(() => client.upsertChunks(batch));
@@ -370,17 +451,25 @@ export class SearchManager {
 
 	/**
 	 * The model id vectors should currently be produced under, or null when vectors are not
-	 * part of the contract at all (semantic off, or no model picked).
+	 * part of the contract at all (semantic off, no model picked, or — the fix this method
+	 * exists for — a picked ref that no longer resolves against the provider catalog).
 	 *
-	 * Null is load-bearing: it is what keeps embedding coverage *out* of the skip condition when
-	 * semantic search is disabled. Folding coverage in unconditionally would make every file in
-	 * an FTS-only vault look permanently stale, so every indexing pass would re-read and re-upsert
-	 * the whole vault forever.
+	 * This *resolves* the ref through `resolveProviderModelRef` rather than only checking the
+	 * id string is non-empty. The old non-emptiness check is exactly why the 2026-07-25 incident
+	 * happened: `SearchEmbedMissingWorkflow`'s backfill guard calls this to decide whether it is
+	 * safe to run, and a renamed-in-the-catalog ref is non-empty but does not resolve — the guard
+	 * passed, the backfill ran, and every batch silently produced zero vectors. Returning null for
+	 * an orphaned ref (same as "unset") makes the guard actually guard.
+	 *
+	 * Null is otherwise load-bearing exactly as before: it is what keeps embedding coverage *out*
+	 * of the skip condition when semantic search is disabled. Folding coverage in unconditionally
+	 * would make every file in an FTS-only vault look permanently stale, so every indexing pass
+	 * would re-read and re-upsert the whole vault forever.
 	 */
 	private activeEmbeddingModelId(): string | null {
 		if (!this.settings.searchSemanticEnabled) return null;
-		const modelId = this.settings.searchEmbeddingModel?.modelId?.trim();
-		return modelId ? modelId : null;
+		const resolution = resolveProviderModelRef(this.settings.providers, this.settings.searchEmbeddingModel);
+		return resolution.status === 'ok' ? resolution.model.id : null;
 	}
 
 	/**
@@ -623,6 +712,16 @@ export class SearchManager {
 		return embedded;
 	}
 
+	// A plain rebuild that hits a config error still runs many more batches (the rebuild
+	// workflow already enqueued all of them before the first one started), and every one of
+	// those will fail the same way. One Notice for the whole run, not one per batch — the job
+	// list itself is where the per-batch detail belongs (each failed job carries e.message).
+	private noticeEmbeddingConfigErrorOnce(e: Error): void {
+		if (this.indexEmbeddingConfigNoticeShown) return;
+		this.indexEmbeddingConfigNoticeShown = true;
+		new Notice(`Search: embedding configuration error, indexing stopped for this batch — ${e.message}`);
+	}
+
 	private async embedQuery(query: string): Promise<number[] | undefined> {
 		if (!this.settings.searchSemanticEnabled) return undefined;
 		const ref = this.settings.searchEmbeddingModel;
@@ -665,10 +764,18 @@ export class SearchManager {
 	}
 
 	private async embedTexts(ref: ProviderModelRef, texts: string[]): Promise<number[][]> {
-		const provider = this.settings.providers.find(p => p.id === ref.providerId);
-		if (!provider) throw new Error(`Embedding provider not found: ${ref.providerId}`);
-		const model = provider.models.find(m => m.id === ref.modelId);
-		if (!model) throw new Error(`Embedding model not found: ${ref.modelId}`);
+		// Resolved through the one shared function rather than a local find() — this is the
+		// exact lookup an orphaned ref (a catalog entry renamed out from under the saved ref)
+		// fails: SearchEmbeddingConfigError here, not a plain Error, is what lets
+		// asEmbeddingBackfillError and the plain-rebuild flush() catch tell "this will never
+		// resolve" apart from "the embedder is briefly unreachable".
+		const resolution = resolveProviderModelRef(this.settings.providers, ref);
+		if (resolution.status !== 'ok') {
+			const provider = this.settings.providers.find(p => p.id === ref.providerId);
+			if (!provider) throw new SearchEmbeddingConfigError(`Embedding provider not found: ${ref.providerId}`);
+			throw new SearchEmbeddingConfigError(`Embedding model not found: ${ref.modelId}`);
+		}
+		const { provider, model } = resolution;
 		const batchSize = Math.max(1, Math.min(this.settings.searchIndexBatchSize || 24, 96));
 		// Both of these are already computed/configured and were being discarded. Checking them
 		// per sub-batch means a width problem surfaces after ≤96 texts instead of after a whole
@@ -680,7 +787,15 @@ export class SearchManager {
 		let observed: number | undefined;
 		const out: number[][] = [];
 		for (let i = 0; i < texts.length; i += batchSize) {
-			const result = await this.providerManager.embed(provider, model.id, texts.slice(i, i + batchSize));
+			let result: ProviderEmbeddingResult;
+			try {
+				result = await this.providerManager.embed(provider, model.id, texts.slice(i, i + batchSize));
+			} catch (e) {
+				// A provider-rejected request (4xx: unknown model, malformed request) is reclassified
+				// to a config error here — see reclassifyProviderEmbedError. Everything else (5xx,
+				// timeouts, connection resets) passes through unchanged and stays retryable.
+				throw reclassifyProviderEmbedError(e);
+			}
 			// `dimensions` is what the provider client reported; the first row's length is the
 			// fallback for a client that did not report one.
 			const dimensions = result.dimensions ?? result.embeddings[0]?.length;

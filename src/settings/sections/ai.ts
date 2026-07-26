@@ -1,7 +1,7 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
 import { Notice, Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
-import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderCatalogModel, ProviderKind, ProviderModel, providerModality } from "../../types";
+import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderCatalogModel, ProviderKind, ProviderModel, ProviderModelRef, providerModality } from "../../types";
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
 import { FileSuggest, FolderSuggest, ProviderModelSuggest } from "../../suggesters";
@@ -282,6 +282,23 @@ function buildProvenanceText(provider: Provider, entry: ProviderCatalogModel): s
 	return tokens.length > 0 ? `${label} reports: ${tokens.join(', ')}` : `${label} reports this model, but no further metadata.`;
 }
 
+// SE-WP-6: names which of the two search `{providerId, modelId}` refs currently point at this
+// exact model, so the model-id editor above can warn before a rename orphans one — deliberately
+// direct ref equality, not resolveProviderModelRef() (src/search/SearchManager.ts): that function
+// answers "does the *saved* ref still resolve", this answers "is the *current* model, before any
+// edit, the one a setting is pointing at" — a different question asked at a different time. Scoped
+// to search's two refs (the only ones SE-WP-6 covers); agents/chains hold the same
+// `{providerId, modelId}` shape and presumably orphan the same way, but fixing those surfaces is
+// out of scope here — see the WP-6 report.
+function searchRefsPointingAt(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): string[] {
+	const s = tab.plugin.settings;
+	const pointsHere = (ref: ProviderModelRef | undefined) => !!ref && ref.providerId === provider.id && ref.modelId === model.id;
+	const labels: string[] = [];
+	if (pointsHere(s.searchEmbeddingModel)) labels.push('the search embedding model');
+	if (pointsHere(s.searchRerankModel)) labels.push('the search reranker model');
+	return labels;
+}
+
 function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElement, provider: Provider) {
 	new Setting(containerEl).setName('Models').setHeading();
 	containerEl.createEl('p', {
@@ -300,6 +317,19 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 			if (modelIndex > 0) list.createEl('hr', { cls: 'crucible-row-divider' });
 			const modelRow = list.createDiv({ cls: 'crucible-provider-model-row' });
 			const probeState = getOrCreateProbeState(model);
+
+			// SE-WP-6: this is the field whose edit caused the 2026-07-25 incident — renaming a
+			// model's id here does not rewrite any `{providerId, modelId}` ref that already
+			// points at it (search embedding/reranker, and the same shape in agents/chains).
+			// Warn *before* the rename, not only after — the settings-render half of this fix
+			// (orchestration.ts's dangling-ref inline warning) can only catch it once broken.
+			const referencedBy = searchRefsPointingAt(tab, provider, model);
+			if (referencedBy.length > 0) {
+				modelRow.createDiv({
+					cls: 'crucible-inline-warning',
+					text: `Currently used as ${referencedBy.join(' and ')} (Settings → Orchestrate → Search). Changing this id will orphan that setting until it is re-picked.`,
+				});
+			}
 
 			new Setting(modelRow)
 				.setName('Model')

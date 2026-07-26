@@ -61,6 +61,29 @@ export class SearchEmbeddingMismatchError extends Error {
 	}
 }
 
+/**
+ * The configured `{providerId, modelId}` embedding ref cannot ever succeed as it stands: the
+ * provider is gone, the model id is not (or no longer) in that provider's catalog, or the
+ * provider rejected the request outright with a 4xx. None of these self-heal on the next batch,
+ * on the next restart, or ever — unlike `SearchEmbeddingUnavailableError`, retrying changes
+ * nothing.
+ *
+ * The incident this exists for: renaming a model's id in the provider catalog does not rewrite
+ * the saved ref, so `provider.models.find(m => m.id === ref.modelId)` silently stops matching.
+ * Before this type existed every embed failure — orphaned ref or a genuinely offline embedder —
+ * came out of `embedTexts` as the same plain `Error`, which is indistinguishable from the
+ * transient case, so a stale ref got deferred and retried forever. Grouped with
+ * `SearchEmbeddingMismatchError` wherever "is this a config error" is asked (both are permanent,
+ * neither self-heals) — kept as a separate class because the *cause* (an unresolved ref vs. a
+ * resolved model returning the wrong width) is worth keeping in the error's own name.
+ */
+export class SearchEmbeddingConfigError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'SearchEmbeddingConfigError';
+	}
+}
+
 export interface SearchDocumentMetadata {
 	title: string;
 	created?: string;
