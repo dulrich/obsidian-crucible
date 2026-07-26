@@ -1,3 +1,5 @@
+import type { ServiceFailureKind, ServiceId } from './serviceHealth';
+
 // `cancelled` is a terminal bucket of its own, deliberately not a flavour of
 // `failed`: a cancelled job must not read as a diagnostic failure, and must not be
 // eligible for any retry policy applied to failures. Its queue folder is
@@ -72,6 +74,22 @@ export interface WorkflowResult {
 	failureReason?: WorkflowFailureReason;
 	notes?: string;
 	retryAfterMs?: number;
+	/**
+	 * Names the *dependency* whose outage caused this deferral, so the backend can
+	 * report it to `ServiceHealthRegistry` and the drain can stop claiming jobs of
+	 * every type that needs the same service.
+	 *
+	 * Only ever set alongside `status: 'deferred'`. A service-level problem must never
+	 * come back as `'failed'` — that is exactly the mis-classification that turned one
+	 * companion outage into 2,022 failure files. Workflows themselves never touch the
+	 * registry: they describe what they saw and the backend does the reporting, which
+	 * keeps workflow tests registry-free.
+	 */
+	serviceUnhealthy?: {
+		service: ServiceId;
+		kind: ServiceFailureKind;
+		reason: string;
+	};
 }
 
 export interface ScanReport {

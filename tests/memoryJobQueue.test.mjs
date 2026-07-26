@@ -182,3 +182,102 @@ test('snapshot sorts running ahead of pending', () => {
 	const order = queue.snapshot().map(e => `${e.key}:${e.status}`);
 	assert.deepEqual(order, ['a:running', 'b:pending']);
 });
+
+// --- releaseToPending: the transition that made a memory job able to defer -----
+//
+// Before it existed, MemoryJobBackend.runEntry had no 'deferred' branch at all, so a
+// workflow answering "come back later" fell through to the success path and the entry
+// was marked DONE. The work silently never happened, and `refill` skips any key it
+// already tracks, so the auto-source would not re-offer it either.
+
+test('releaseToPending returns a running entry to pending, with one onChange', () => {
+	const { queue, changes } = makeQueue();
+	queue.enqueue('a', { videoId: 'a' });
+	queue.claimNext();
+	changes.length = 0;
+
+	assert.equal(queue.releaseToPending('a'), true);
+	const entry = queue.getEntry('a');
+	assert.equal(entry.status, 'pending');
+	assert.equal(entry.finishedAt, undefined, 'it did not finish — nothing terminal happened');
+	assert.equal(entry.error, undefined, 'and a deferral is emphatically not a failure');
+	assert.equal(changes.length, 1, 'each onChange emits an event and kicks a drain; one transition is one change');
+});
+
+test('releaseToPending only accepts a RUNNING entry', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {});
+	assert.equal(queue.releaseToPending('a'), false, 'a pending entry was never claimed');
+
+	queue.claimNext();
+	queue.markDone('a');
+	assert.equal(queue.releaseToPending('a'), false, 'and a terminal entry is settled');
+	assert.equal(queue.releaseToPending('nope'), false, 'an unknown key is not an error');
+});
+
+test('a released entry is claimable again, and keeps its params and lane', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', { videoId: 'a' }, { title: 'T' }, 'user');
+	queue.claimNext();
+	queue.releaseToPending('a');
+
+	const again = queue.claimNext();
+	assert.equal(again.key, 'a');
+	assert.deepEqual(again.params, { videoId: 'a' });
+	assert.equal(again.lane, 'user', 'a user-lane job stays a user-lane job across a deferral');
+});
+
+test('a cooloff makes the released entry unclaimable until it expires', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {});
+	queue.claimNext();
+	queue.releaseToPending('a', 60_000);
+
+	assert.equal(queue.getEntry('a').status, 'pending');
+	assert.equal(queue.hasPending(), false, 'pending, but not yet claimable');
+	assert.equal(queue.claimNext(), null,
+		'without this, releasing hands the entry straight back to the drain that just deferred it');
+});
+
+test('an expired cooloff releases the entry to the drain again', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {});
+	queue.claimNext();
+	queue.releaseToPending('a', -1); // no cooloff at all
+
+	assert.equal(queue.hasPending(), true);
+	assert.equal(queue.claimNext().key, 'a');
+});
+
+test('a cooled-off entry does not block a different entry from draining', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {});
+	queue.claimNext();
+	queue.releaseToPending('a', 60_000);
+	queue.enqueue('b', {});
+
+	assert.equal(queue.hasPending(), true);
+	assert.equal(queue.claimNext().key, 'b', 'one deferred entry must not stall the whole queue');
+});
+
+test('a user enqueue overrides a cooloff, like the manual per-job Run does', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {}, {}, 'background');
+	queue.claimNext();
+	queue.releaseToPending('a', 60_000);
+
+	assert.equal(queue.enqueue('a', { fresh: true }, {}, 'user'), true, 'promoted to the user lane');
+	assert.equal(queue.hasPending(), true, 'a user asking for it now outranks the cooloff');
+	assert.equal(queue.claimNext().key, 'a');
+});
+
+test('a cooled-off entry is still claimable by key for a manual Run', () => {
+	const { queue } = makeQueue();
+	queue.enqueue('a', {});
+	queue.claimNext();
+	queue.releaseToPending('a', 60_000);
+
+	const claimed = queue.claimEntry('a');
+	assert.ok(claimed, 'claimEntry is the manual Run: it ignores the cooloff exactly as claimById does');
+	assert.equal(claimed.status, 'running');
+});

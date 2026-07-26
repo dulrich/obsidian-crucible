@@ -73,6 +73,10 @@ export class MemoryJobBackend implements JobBackend {
 		return this.running.isCancelling(key);
 	}
 
+	isRunning(key: string): boolean {
+		return this.running.isRunning(key);
+	}
+
 	// The queued half of Cancel for a memory type: a pending entry is stopped by
 	// marking it cancelled, which also keeps the auto-source from immediately
 	// re-seeding the key (see MemoryJobQueue.cancelIfPending). There is no store to
@@ -89,6 +93,7 @@ export class MemoryJobBackend implements JobBackend {
 		const job = this.synthJob(entry.key, entry.params, entry.lane);
 		const run = this.running.begin(entry.key);
 		let settlement: RunSettlement = 'completed';
+		let outcome: RunOutcome = 'ran';
 		try {
 			const result = await runWorkflowWithTimeout(
 				this.plugin, this.workflow, job, resolveTimeoutMs(this.plugin, this.config), run.signal,
@@ -96,6 +101,24 @@ export class MemoryJobBackend implements JobBackend {
 			if (result.status === 'cancelled') {
 				settlement = 'cancelled';
 				this.queue.markCancelled(entry.key, result.notes);
+			} else if (result.status === 'deferred') {
+				// The branch that did not exist: a deferred memory job used to fall through
+				// to the `else` and be marked DONE, so the work silently never happened. It
+				// goes back to pending instead, keeping its slot and its dedupe suppression.
+				//
+				// `'blocked'` is reserved for the SERVICE-level case, because that is the one
+				// where continuing to claim is pointless for every other entry too. A
+				// job-level deferral ends only that entry's turn; the queue's other entries
+				// may well be fine, so the worker keeps going and the cooloff below (the same
+				// `max(1s, retryAfterMs ?? 30s)` the file backend writes into `deferUntil`) is
+				// what stops the released entry being re-claimed by the very drain that just
+				// deferred it.
+				const unhealthy = result.serviceUnhealthy;
+				if (unhealthy) {
+					this.plugin.serviceHealth?.reportFailure(unhealthy.service, unhealthy.kind, unhealthy.reason, result.retryAfterMs);
+					outcome = 'blocked';
+				}
+				this.queue.releaseToPending(entry.key, Math.max(1000, result.retryAfterMs ?? 30_000));
 			} else if (result.status === 'failed') {
 				const error = result.error ?? 'Workflow returned failed status';
 				this.queue.markFailed(entry.key, error);
@@ -107,6 +130,10 @@ export class MemoryJobBackend implements JobBackend {
 				if (result.failureReason === 'no-api-key') this.queue.setAutoSourceEnabled(false);
 			} else {
 				this.queue.markDone(entry.key);
+				// The job finished, so every dependency it declared was alive — the half-open
+				// probe's success path for memory types.
+				const registry = this.plugin.serviceHealth;
+				if (registry) for (const service of this.config.services ?? []) registry.reportSuccess(service);
 				this.emitMetadataEnriched(entry.key, entry.params, result);
 			}
 		} catch (e) {
@@ -119,7 +146,7 @@ export class MemoryJobBackend implements JobBackend {
 			// in its terminal state rather than racing the bookkeeping above.
 			run.finish(settlement);
 		}
-		return 'ran';
+		return outcome;
 	}
 
 	hasPending(): boolean {

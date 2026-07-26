@@ -26,6 +26,13 @@ export interface MemoryJobEntry {
 	note?: string;
 	addedAt: number;
 	finishedAt?: number;
+	/**
+	 * Epoch ms before which a released (deferred) entry must not be re-claimed. The
+	 * in-memory mirror of a file job's `deferUntil` frontmatter: without it, releasing
+	 * an entry back to pending hands it straight to the drain that just deferred it.
+	 * A manual per-job Run ignores it, exactly as `claimById` ignores the file gate.
+	 */
+	deferUntil?: number;
 }
 
 export interface MemoryJobSeed {
@@ -77,6 +84,9 @@ export class MemoryJobQueue {
 				existing.lane = 'user';
 				existing.params = params;
 				existing.display = display;
+				// A user asking for it now overrides a deferral cooloff, mirroring the manual
+				// per-job Run and the file backend's claimById.
+				existing.deferUntil = undefined;
 				this.onChange(this.entries.size);
 				return true;
 			}
@@ -120,8 +130,9 @@ export class MemoryJobQueue {
 	}
 
 	hasPending(): boolean {
+		const now = Date.now();
 		for (const e of this.entries.values()) {
-			if (e.status === 'pending') return true;
+			if (e.status === 'pending' && !isDeferred(e, now)) return true;
 		}
 		return false;
 	}
@@ -150,8 +161,9 @@ export class MemoryJobQueue {
 	// Atomically claims the next pending entry (no await before the status flip, so
 	// concurrent workers never claim the same entry). Returns a live reference.
 	claimNext(): MemoryJobEntry | null {
+		const now = Date.now();
 		const pending = Array.from(this.entries.values())
-			.filter(entry => entry.status === 'pending')
+			.filter(entry => entry.status === 'pending' && !isDeferred(entry, now))
 			.sort((a, b) => laneRank(a.lane) - laneRank(b.lane) || a.addedAt - b.addedAt);
 		for (const entry of pending) {
 			if (entry.status === 'pending') {
@@ -172,6 +184,29 @@ export class MemoryJobQueue {
 		entry.status = 'running';
 		this.onChange(this.entries.size);
 		return entry;
+	}
+
+	/**
+	 * Puts a claimed entry back in the pending pool — the missing transition that made
+	 * a memory job unable to defer.
+	 *
+	 * Before this, `MemoryJobBackend.runEntry` had no `'deferred'` branch at all, so a
+	 * workflow that answered "come back later" fell through to the `else` and was
+	 * marked **done**: the work silently never happened, and because `refill` skips any
+	 * key already tracked in any state, the auto-source would not re-offer it until the
+	 * terminal-retention window expired. `running → pending` is the only correct answer,
+	 * and it is one `onChange` — the caller must not also emit.
+	 */
+	releaseToPending(key: string, retryAfterMs = 0): boolean {
+		const entry = this.entries.get(key);
+		if (!entry || entry.status !== 'running') return false;
+		entry.status = 'pending';
+		entry.finishedAt = undefined;
+		entry.error = undefined;
+		entry.note = undefined;
+		entry.deferUntil = retryAfterMs > 0 ? Date.now() + retryAfterMs : undefined;
+		this.onChange(this.entries.size);
+		return true;
 	}
 
 	markDone(key: string): void {
@@ -245,6 +280,10 @@ export class MemoryJobQueue {
 		}
 		if (changed) this.onChange(this.entries.size);
 	}
+}
+
+function isDeferred(entry: MemoryJobEntry, now: number): boolean {
+	return entry.deferUntil !== undefined && entry.deferUntil > now;
 }
 
 function statusRank(status: MemoryJobStatus): number {
