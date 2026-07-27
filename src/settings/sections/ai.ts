@@ -5,6 +5,7 @@ import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provide
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
 import { FileSuggest, FolderSuggest, ProviderModelSuggest } from "../../suggesters";
+import { ConfirmModal } from "../../confirmModal";
 import {
 	PROVIDER_KIND_LABELS,
 	SearchWithContainer,
@@ -30,12 +31,14 @@ import {
 	getOrCreateProbeState,
 	modelHasCapability,
 	probeEmbeddingDimensions,
+	providerHasChatCapableModel,
 	resetCatalogField,
 	setModelCapability,
 	setProbeStatus,
 } from "../modelCapabilities";
 import { renderModelCatalogBrowser } from "../modelCatalogBrowser";
 import { deriveEmbeddingSpaceIdPrefill } from "../../search/types";
+import { providerRefsPointingAt } from "../providerRefs";
 
 export function renderAiSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	if (tab.editingProviderIndex !== -1) {
@@ -104,14 +107,36 @@ function describeProvider(provider: Provider): string {
 	return `${kindLabel} · ${summary}`;
 }
 
+// idh-WP-2: deleting a provider destroys its stored API key unconditionally and can orphan up to
+// five other settings surfaces (search embedding/rerank, image description, agent bindings, chain
+// step overrides) — this always confirms, with an in-use summary built from
+// `providerRefsPointingAt` when the provider is referenced anywhere, or a simpler API-key-only
+// warning when it is not (deleting the key alone still warrants a confirm).
 async function deleteProvider(tab: CrucibleSettingTab, index: number) {
 	const provider = tab.plugin.settings.providers[index];
 	if (!provider) return;
+
+	const providerLabel = provider.name || '(unnamed)';
+	const refs = providerRefsPointingAt(tab.plugin.settings, provider);
+	const message = refs.length > 0
+		? `Used by: ${refs.join(', ')}. Its stored API key is deleted with it. This cannot be undone.`
+		: `This provider is not currently used by search, agents, or chain steps. Its stored API key is deleted with it. This cannot be undone.`;
+	const confirmed = await new ConfirmModal(tab.app, {
+		title: `Delete provider "${providerLabel}"?`,
+		message,
+		confirmText: 'Delete provider',
+		destructive: true,
+	}).openAndAwait();
+	if (!confirmed) return;
 
 	tab.plugin.settings.providers.splice(index, 1);
 	tab.editingProviderIndex = -1;
 	await tab.plugin.saveSettings();
 	await tab.plugin.providerManager.deleteApiKey(provider.id);
+	// Belt-and-suspenders alongside deleteApiKey's own clear->forget: deleteApiKey no-ops the
+	// forget half when app.secretStorage is unavailable (see SecretRegistry.clear), which would
+	// otherwise leave this provider's key registered forever with nothing left to warn about.
+	await tab.plugin.secretRegistry.forget(providerSecretKey(provider.id));
 	tab.plugin.registerAgents();
 	tab.display();
 }
@@ -1060,14 +1085,29 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 
 		const pinned = binding.pinned ?? (binding.pinned = { providerId: '', modelId: '' });
 
+		// idh-WP-2: an agent binds to a model it will chat-complete against, so both dropdowns below
+		// are filtered to chat-capable providers/models (modelHasCapability, never a raw
+		// capabilities?.includes('chat') — see that function's doc comment for the undefined-means-
+		// chat-only legacy trap). A saved selection that no longer qualifies (its model was toggled
+		// off Chat, or was the provider's only chat-capable model and lost it) is never silently
+		// dropped from the dropdown or cleared from settings — it stays offered, marked
+		// "(not chat-capable)", exactly mirroring describeRerankModel's still-in-use-but-unmarked
+		// precedent (orchestration.ts).
+		const selectedProvider = allProviders.find(p => p.id === pinned.providerId);
+		const chatCapableProviders = allProviders.filter(p => providerHasChatCapableModel(p));
+		const providerOptions = selectedProvider && !providerHasChatCapableModel(selectedProvider)
+			? [...chatCapableProviders, selectedProvider]
+			: chatCapableProviders;
+
 		new Setting(containerEl)
 			.setName('Provider')
 			.addDropdown(d => {
-				if (!pinned.providerId || !allProviders.find(p => p.id === pinned.providerId)) {
+				if (!pinned.providerId || !selectedProvider) {
 					d.addOption('', 'Select a provider...');
 				}
-				allProviders.forEach(p => {
-					d.addOption(p.id, p.name || `(unnamed ${p.kind})`);
+				providerOptions.forEach(p => {
+					const label = p.name || `(unnamed ${p.kind})`;
+					d.addOption(p.id, providerHasChatCapableModel(p) ? label : `${label} (not chat-capable)`);
 				});
 				d.setValue(pinned.providerId)
 				 .onChange(async (v) => {
@@ -1087,18 +1127,26 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 
 		const provider = allProviders.find(p => p.id === pinned.providerId);
 		const models = provider?.models ?? [];
+		const selectedModel = models.find(m => m.id === pinned.modelId);
+		const chatCapableModels = models.filter(m => modelHasCapability(m, 'chat'));
+		const modelOptions = selectedModel && !modelHasCapability(selectedModel, 'chat')
+			? [...chatCapableModels, selectedModel]
+			: chatCapableModels;
 
 		new Setting(containerEl)
 			.setName('Model')
 			.addDropdown(d => {
 				if (models.length === 0) {
 					d.addOption('', 'No models on this provider');
+				} else if (modelOptions.length === 0) {
+					d.addOption('', 'No chat-capable models on this provider');
 				} else {
-					if (!pinned.modelId || !models.find(m => m.id === pinned.modelId)) {
+					if (!pinned.modelId || !selectedModel) {
 						d.addOption('', 'Select a model...');
 					}
-					models.forEach(m => {
-						d.addOption(m.id, m.label || m.id);
+					modelOptions.forEach(m => {
+						const label = m.label || m.id;
+						d.addOption(m.id, modelHasCapability(m, 'chat') ? label : `${label} (not chat-capable)`);
 					});
 				}
 				d.setValue(pinned.modelId)
@@ -1132,7 +1180,7 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 				const provider = allProviders.find(p => p.id === ref.providerId);
 				const model = provider?.models?.find((m: ProviderModel) => m.id === ref.modelId);
 				const label = provider && model
-					? `${provider.name || provider.kind} · ${model.label || model.id}`
+					? `${provider.name || provider.kind} · ${model.label || model.id}${modelHasCapability(model, 'chat') ? '' : ' (not chat-capable)'}`
 					: `${ref.providerId}:${ref.modelId} (missing)`;
 				new Setting(list)
 					.setName(label)
@@ -1144,9 +1192,14 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 			});
 		}
 
-		const addable = collectAllRefs(allProviders).filter(
-			ref => !allow.some(a => a.providerId === ref.providerId && a.modelId === ref.modelId)
-		);
+		// idh-WP-2: only chat-capable models are offered to add — a non-chat model (or a provider
+		// with none) simply never appears here, same filter as the pinned dropdowns above.
+		const addable = collectAllRefs(allProviders).filter(ref => {
+			if (allow.some(a => a.providerId === ref.providerId && a.modelId === ref.modelId)) return false;
+			const refProvider = allProviders.find(p => p.id === ref.providerId);
+			const refModel = refProvider?.models?.find(m => m.id === ref.modelId);
+			return !!refModel && modelHasCapability(refModel, 'chat');
+		});
 
 		if (addable.length > 0) {
 			let pendingProvider = '';
