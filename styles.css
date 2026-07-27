@@ -1062,6 +1062,14 @@ If your plugin does not need CSS, delete this file.
   overflow-wrap: anywhere;
 }
 
+/* Rides inline at the end of the meta line (path · heading) rather than on its own row: it
+   qualifies where the match landed, so it belongs beside the heading it qualifies. Geometry
+   and colour come from .crucible-pill.is-muted — this rule only spaces it off the text. */
+.crucible-search-result-figure {
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
 .crucible-search-result-snippet {
   margin-top: 0.35rem;
   line-height: 1.35;

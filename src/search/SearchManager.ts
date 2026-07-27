@@ -2,7 +2,9 @@ import { App, Notice, TFile } from 'obsidian';
 import { CrucibleSettings, Provider, ProviderEmbeddingResult, ProviderModel, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
 import { normalizePrecision } from '../providers/shared';
-import { buildSearchChunks, hashSearchContent, isSearchIndexablePath } from './chunker';
+import { buildSearchChunks, hashSearchContent, ImageDescriptionChunkInput, isSearchIndexablePath } from './chunker';
+import type { ImageDescriptionStore } from './imageDescriptionStore';
+import { localizedImageInfo } from '../orchestration/utils/imageMetadata';
 import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
@@ -100,6 +102,15 @@ interface PreparedSearchFile {
 	file: TFile;
 	content: string;
 	contentHash: string;
+	/**
+	 * Resolved once in `prepareFile` (the async half) and carried to `buildPreparedFileChunks`
+	 * (the sync half) rather than re-resolved there — store reads are async and chunk building
+	 * is not, and the skip path must be able to compare the folded hash *without* paying for
+	 * chunk construction.
+	 */
+	imageDescriptions?: ImageDescriptionChunkInput[];
+	/** The facets folded into `contentHash`; threaded on so the chunker's fallback can't drift. */
+	hashFacets?: string[];
 }
 
 export interface SearchIndexOptions {
@@ -222,6 +233,18 @@ export class SearchManager {
 	// the same config error — without this, that would be one Notice per batch instead of one for
 	// the whole run.
 	private indexEmbeddingConfigNoticeShown = false;
+
+	// Injected after construction, not through the constructor: `main.ts` builds the SearchManager
+	// before the description store (the store needs `pluginDataPath`, which needs the plugin to be
+	// further along in `onload`). Null is the honest default and is exactly today's behaviour —
+	// with no store, `prepareFile` never touches `metadataCache.getFileCache`, folds no facet, and
+	// emits no image chunks, so a build that never calls the setter is byte-identical to the
+	// pre-facet one.
+	private imageDescriptions: ImageDescriptionStore | null = null;
+
+	setImageDescriptionStore(store: ImageDescriptionStore | null): void {
+		this.imageDescriptions = store;
+	}
 
 	constructor(
 		private readonly app: App,
@@ -428,11 +451,73 @@ export class SearchManager {
 	private async prepareFile(file: TFile): Promise<PreparedSearchFile | null> {
 		if (this.isExcludedFromIndex(file.path)) return null;
 		const content = await this.app.vault.read(file);
+		const images = await this.resolveImageDescriptions(file);
 		return {
 			file,
 			content,
-			contentHash: hashSearchContent(content),
+			// `hashSearchContent(content, [])` is `hashSearchContent(content)` by construction, so a
+			// note with no described images keeps the exact hash it had before this facet existed and
+			// the coverage-aware skip above is preserved untouched. A description *arriving* moves
+			// the facet, moves the hash, and re-indexes the note once — that is the mechanism, and
+			// without it the note would be skipped forever with its figures never indexed.
+			contentHash: hashSearchContent(content, images.facets),
+			imageDescriptions: images.descriptions,
+			hashFacets: images.facets,
 		};
+	}
+
+	/**
+	 * A note's described images, resolved from its embeds through the `_MD5` naming convention
+	 * into store records.
+	 *
+	 * Three properties this must have, in order of how expensive getting them wrong is:
+	 *
+	 * 1. **The facet describes exactly what is emitted.** Only records that actually produce a
+	 *    chunk (some narrative or some extraction) contribute to the combined hash — a record that
+	 *    emits nothing must not move the hash, or the note re-indexes to write the same chunks.
+	 * 2. **Deterministic.** Images are deduplicated by md5 and sorted by it, so the same note in
+	 *    the same state always yields the same chunk order, hence the same `stableChunkId`s, hence
+	 *    a full-replace upsert that regenerates exactly what it deletes.
+	 * 3. **Undescribed images are invisible.** `store.has` gates the lookup, so a note full of
+	 *    never-described figures hashes and chunks exactly as it does today (`combinedDescriptionHash`
+	 *    would skip them anyway — this just avoids the reads).
+	 */
+	private async resolveImageDescriptions(file: TFile): Promise<{ descriptions: ImageDescriptionChunkInput[]; facets: string[] }> {
+		const empty = { descriptions: [], facets: [] };
+		const store = this.imageDescriptions;
+		if (!store) return empty;
+		const embeds = this.app.metadataCache.getFileCache(file)?.embeds;
+		if (!embeds || embeds.length === 0) return empty;
+		await store.ensureLoaded();
+
+		// Same embed-walking shape as `AttachmentLocalizer.parseAttachmentRefs`: the metadata cache
+		// is the source of truth for what a note embeds, and a remote (still-unlocalized) ref has no
+		// content md5 to key a description on.
+		const md5s = new Map<string, string>();
+		for (const embed of embeds) {
+			const link = embed?.link ?? '';
+			if (!link || /^https?:\/\//i.test(link)) continue;
+			const dest = this.app.metadataCache.getFirstLinkpathDest(link, file.path);
+			const info = localizedImageInfo(dest?.path ?? link);
+			if (!info || md5s.has(info.md5)) continue;
+			if (!store.has(info.md5)) continue;
+			md5s.set(info.md5, info.path.split('/').pop() ?? info.path);
+		}
+		if (md5s.size === 0) return empty;
+
+		const descriptions: ImageDescriptionChunkInput[] = [];
+		const emitted: string[] = [];
+		for (const md5 of [...md5s.keys()].sort()) {
+			const record = await store.get(md5);
+			if (!record) continue;
+			const narrative = record.narrative.trim();
+			const extraction = record.extraction.trim();
+			if (!narrative && !extraction) continue;
+			descriptions.push({ filename: md5s.get(md5) ?? md5, narrative, extraction });
+			emitted.push(md5);
+		}
+		if (descriptions.length === 0) return empty;
+		return { descriptions, facets: [`image-desc:${store.combinedDescriptionHash(emitted)}`] };
 	}
 
 	private buildPreparedFileChunks(prepared: PreparedSearchFile): SearchChunk[] {
@@ -447,6 +532,8 @@ export class SearchManager {
 			contentHash,
 			maxChars: this.settings.searchChunkMaxChars,
 			overlapChars: this.settings.searchChunkOverlapChars,
+			...(prepared.imageDescriptions?.length ? { imageDescriptions: prepared.imageDescriptions } : {}),
+			...(prepared.hashFacets?.length ? { extraHashFacets: prepared.hashFacets } : {}),
 		});
 	}
 

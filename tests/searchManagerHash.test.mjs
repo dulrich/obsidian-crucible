@@ -22,6 +22,9 @@ const obsidianStub = {
 				export class App {}
 				export class FileSystemAdapter {}
 				export class Notice { constructor() {} }
+				export class TFile {}
+				export class TFolder {}
+				export const Platform = { isDesktopApp: true, isMobile: false };
 				export function normalizePath(path) { return path; }
 				export async function requestUrl() { throw new Error('requestUrl not stubbed'); }
 			`,
