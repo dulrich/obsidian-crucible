@@ -80,6 +80,76 @@ test('file-backed jobs list user lane before background priority', async () => {
 	]);
 });
 
+test('created tie-break inverts id order when id would sort the other way', async () => {
+	const folder = new TFolder([
+		new TFile('z-earlier.md', {
+			id: 'z-earlier',
+			type: 'search_upsert_file',
+			status: 'queued',
+			priority: 'normal',
+			lane: 'background',
+			created: '2026-07-27T12:00:00.100Z',
+			params: {},
+		}),
+		new TFile('a-later.md', {
+			id: 'a-later',
+			type: 'search_upsert_file',
+			status: 'queued',
+			priority: 'normal',
+			lane: 'background',
+			created: '2026-07-27T12:00:00.900Z',
+			params: {},
+		}),
+	]);
+	const plugin = {
+		settings: { orchestrationQueueRoot: '_crucible/orchestration/queue' },
+		app: {
+			vault: { getAbstractFileByPath: () => folder },
+			metadataCache: { getFileCache: file => ({ frontmatter: file.fm }) },
+		},
+	};
+
+	const rows = await new JobStore(plugin).listFolder('queued');
+
+	// id.localeCompare alone would put 'a-later' first ('a' < 'z'); the created tie-break
+	// must win and put the chronologically earlier job first instead.
+	assert.deepEqual(rows.map(row => row.job.id), ['z-earlier', 'a-later']);
+});
+
+test('identical created falls through to id compare', async () => {
+	const folder = new TFolder([
+		new TFile('b-second.md', {
+			id: 'b-second',
+			type: 'search_upsert_file',
+			status: 'queued',
+			priority: 'normal',
+			lane: 'background',
+			created: '2026-07-27T12:00:00.500Z',
+			params: {},
+		}),
+		new TFile('a-first.md', {
+			id: 'a-first',
+			type: 'search_upsert_file',
+			status: 'queued',
+			priority: 'normal',
+			lane: 'background',
+			created: '2026-07-27T12:00:00.500Z',
+			params: {},
+		}),
+	]);
+	const plugin = {
+		settings: { orchestrationQueueRoot: '_crucible/orchestration/queue' },
+		app: {
+			vault: { getAbstractFileByPath: () => folder },
+			metadataCache: { getFileCache: file => ({ frontmatter: file.fm }) },
+		},
+	};
+
+	const rows = await new JobStore(plugin).listFolder('queued');
+
+	assert.deepEqual(rows.map(row => row.job.id), ['a-first', 'b-second']);
+});
+
 test('legacy high-priority jobs default to the user lane', async () => {
 	const folder = new TFolder([
 		jobFile('001-background-normal', 'normal', 'background'),
