@@ -287,3 +287,104 @@ test('a width conflict inside an oversized single-path group leaves that path\'s
 	assert.ok(after.every(row => row.id.startsWith('seed-')), 'no `new-*` chunk from the rejected request must have landed');
 	db.close();
 });
+
+// ── WP-3b: rowid-keyed chunks_fts deletes ───────────────────────────────────────────────────
+//
+// Schema 6 moved every chunks_fts DELETE from keying on `vault_id`/`id` (both UNINDEXED FTS5
+// columns, forcing a full-index scan per delete) to keying on `rowid`, pinned 1:1 to the
+// owning chunks.rowid. These tests assert the observable behavior held constant across that
+// change: no duplicate/orphaned FTS rows, correct search results, correct snippets.
+
+test('re-upserting the same path replaces rather than duplicates FTS rows', async () => {
+	const db = makeDb();
+	await withServer(db, async call => {
+		const first = await call('POST', '/v1/chunks/upsert', {
+			vaultId: VAULT,
+			chunks: [chunk('a', 'A.md', 'the quick brown fox')],
+		});
+		assert.equal(first.status, 200);
+
+		// Same path, same chunk id, different text — an upsert is a full replace of the path.
+		const second = await call('POST', '/v1/chunks/upsert', {
+			vaultId: VAULT,
+			chunks: [chunk('a', 'A.md', 'the lazy dog sleeps')],
+		});
+		assert.equal(second.status, 200);
+
+		const results = await call('POST', '/v1/search', { vaultId: VAULT, query: 'fox' });
+		assert.equal(results.json.results.length, 0, 'the old text must no longer be searchable');
+
+		const hit = await call('POST', '/v1/search', { vaultId: VAULT, query: 'lazy' });
+		assert.equal(hit.json.results.length, 1, 'exactly one hit, not a duplicate from the old FTS row surviving alongside the new one');
+		assert.equal(hit.json.results[0].path, 'A.md');
+		assert.match(hit.json.results[0].snippet, /lazy/);
+	});
+	// One row in chunks_fts for this id, not two, and its rowid matches the surviving chunks row.
+	const chunkRow = db.prepare('SELECT rowid FROM chunks WHERE vault_id = ? AND id = ?').get(VAULT, 'a');
+	const ftsRows = db.prepare('SELECT rowid FROM chunks_fts WHERE vault_id = ? AND id = ?').all(VAULT, 'a');
+	assert.equal(ftsRows.length, 1);
+	assert.equal(ftsRows[0].rowid, chunkRow.rowid);
+	db.close();
+});
+
+test('replacing a path with a different chunk id leaves no orphaned FTS row for the old id', async () => {
+	const db = makeDb();
+	await withServer(db, async call => {
+		const first = await call('POST', '/v1/chunks/upsert', {
+			vaultId: VAULT,
+			chunks: [chunk('old-id', 'A.md', 'alpha content')],
+		});
+		assert.equal(first.status, 200);
+
+		// Re-index the same path under a new chunk id, as a real re-chunk (heading/ordinal
+		// change) would produce via stableChunkId.
+		const second = await call('POST', '/v1/chunks/upsert', {
+			vaultId: VAULT,
+			chunks: [chunk('new-id', 'A.md', 'beta content')],
+		});
+		assert.equal(second.status, 200);
+
+		const staleHit = await call('POST', '/v1/search', { vaultId: VAULT, query: 'alpha' });
+		assert.equal(staleHit.json.results.length, 0, 'the old chunk id\'s FTS row must be gone, not orphaned');
+	});
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks_fts WHERE vault_id = ? AND path = ?').get(VAULT, 'A.md').n, 1);
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE vault_id = ? AND path = ?').get(VAULT, 'A.md').n, 1);
+	db.close();
+});
+
+test('/v1/chunks/delete removes the FTS row along with the chunk row, leaving the index empty', async () => {
+	const db = makeDb();
+	await withServer(db, async call => {
+		const upsert = await call('POST', '/v1/chunks/upsert', {
+			vaultId: VAULT,
+			chunks: [chunk('a', 'A.md', 'delete me please')],
+		});
+		assert.equal(upsert.status, 200);
+
+		const del = await call('POST', '/v1/chunks/delete', { vaultId: VAULT, paths: ['A.md'] });
+		assert.equal(del.status, 200);
+
+		const results = await call('POST', '/v1/search', { vaultId: VAULT, query: 'delete' });
+		assert.equal(results.json.results.length, 0);
+	});
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE vault_id = ?').get(VAULT).n, 0);
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks_fts WHERE vault_id = ?').get(VAULT).n, 0);
+	db.close();
+});
+
+test('/v1/index/reset removes every FTS row for the vault, not just the chunks rows', async () => {
+	const db = makeDb();
+	await withServer(db, async call => {
+		const upsert = await call('POST', '/v1/chunks/upsert', {
+			vaultId: VAULT,
+			chunks: [chunk('a', 'A.md', 'one'), chunk('b', 'B.md', 'two'), chunk('c', 'C.md', 'three')],
+		});
+		assert.equal(upsert.status, 200);
+
+		const reset = await call('POST', '/v1/index/reset', { vaultId: VAULT });
+		assert.equal(reset.status, 200);
+	});
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks WHERE vault_id = ?').get(VAULT).n, 0);
+	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks_fts WHERE vault_id = ?').get(VAULT).n, 0);
+	db.close();
+});

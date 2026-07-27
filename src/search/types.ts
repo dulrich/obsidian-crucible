@@ -172,7 +172,14 @@ export function embeddingSpaceId(modelId: string, precision?: string): string {
 // pairing rule here: between a plugin update and a container rebuild, health reports
 // `ok: false` and search is *unavailable*, not degraded. Rebuild the companion image in the
 // same landing.
-export const SEARCH_REQUIRED_SCHEMA_VERSION = 5;
+// Bumped to 6 when `chunks_fts` deletes moved from keying on `vault_id`/`id` (UNINDEXED FTS5
+// columns, forcing a full-index scan per delete — measured 24.2ms/delete at the live
+// 53k-chunk size, ~17s per 500-chunk upsert flush) to keying on `rowid`. An older companion
+// binary's `chunks_fts.rowid` is not pinned to the owning `chunks.rowid`, so a client talking
+// to it would have no rowid contract to rely on even though nothing in the wire protocol
+// itself changed — the mismatch is entirely server-internal, but the pairing rule still
+// applies uniformly rather than special-casing "this bump changed no client-visible field."
+export const SEARCH_REQUIRED_SCHEMA_VERSION = 6;
 
 export interface SearchHealth {
 	ok: boolean;

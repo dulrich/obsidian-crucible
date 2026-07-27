@@ -37,7 +37,21 @@ import { fileURLToPath } from 'node:url';
 // vanished from that vault's `/v1/files/state`, and a reset of *either* vault took both
 // vaults' rows with it. Reproduced, not inferred. Every statement that keyed on `id` alone is
 // now `(vault_id, id)`; see migrateChunksPrimaryKey for the rebuild.
-export const SCHEMA_VERSION = 5;
+//
+// Bumped to 6 when every `chunks_fts` DELETE moved from keying on `vault_id`/`id` (both
+// UNINDEXED FTS5 columns) to keying on `rowid`. Measured (wp3-throughput-2026-07-26, see
+// src/search/AGENTS.md): at the live 53k-chunk size each per-chunk delete full-scanned the
+// entire FTS index — 24.2ms/delete, ~17s per 500-chunk upsert flush, worsening as O(index
+// size) with vault growth. `chunks_fts.rowid` is now pinned to the owning `chunks.rowid` at
+// insert time (`INSERT INTO chunks_fts(rowid, ...)`), obtained at upsert via `RETURNING
+// rowid`, so every delete is a direct rowid lookup instead of a scan. Schema 1-5 databases
+// already refill `chunks_fts` from `chunks` on migration (migrateChunksPrimaryKey /
+// migrateFtsSchema, both now rowid-pinning by construction since they share
+// FTS_REFILL_SQL); a database already at schema 5 needs a *dedicated* one-time refill
+// because neither of those migrations' structural triggers (missing PK shape, missing
+// `prefix=`) fire on it — see migrateFtsRowidPinning, keyed on `PRAGMA user_version` since
+// FTS5's rowid pinning leaves no trace in `sqlite_master` SQL text to structurally detect.
+export const SCHEMA_VERSION = 6;
 export const SERVICE_VERSION = 'dev-fts-rrf-vector';
 
 // bm25() takes one weight per column, including the UNINDEXED ones (they never match, so
@@ -85,8 +99,14 @@ const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   prefix='2 3'
 )`;
 
-const FTS_REFILL_SQL = `INSERT INTO chunks_fts (id, vault_id, path, title, heading, text)
-SELECT id, vault_id, path, title, heading, text FROM chunks`;
+// `rowid` rides across explicitly, pinning `chunks_fts.rowid` to the owning `chunks.rowid`.
+// This is schema 6's whole point: every runtime DELETE against `chunks_fts` can then key on
+// `rowid` (an O(1) btree lookup) instead of `vault_id`/`id` (both UNINDEXED, so a delete keyed
+// on either forces a full-table scan). Every migration that rebuilds `chunks_fts` shares this
+// constant, so a rebuild triggered by an unrelated schema change (e.g. migrateChunksPrimaryKey
+// on a pre-5 database) also lands correctly rowid-pinned for free.
+const FTS_REFILL_SQL = `INSERT INTO chunks_fts (rowid, id, vault_id, path, title, heading, text)
+SELECT rowid, id, vault_id, path, title, heading, text FROM chunks`;
 
 // The whole reason schema 4 costs nothing. An index built before `embedding_space` existed
 // identified its vectors by model id alone, and the client's space id degrades to exactly that
@@ -218,7 +238,30 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	// reports false — hence the `||` rather than returning only its result.
 	const pkMigrated = migrateChunksPrimaryKey(db);
 	const ftsMigrated = migrateFtsSchema(db);
-	return pkMigrated || ftsMigrated;
+	// Both migrations above rebuild chunks_fts via FTS_REFILL_SQL when they run, and that SQL
+	// now pins chunks_fts.rowid to chunks.rowid — so if either ran, the table is already
+	// correctly rowid-pinned and a second rebuild would only cost time, not fix anything.
+	const rowidMigrated = migrateFtsRowidPinning(db, { alreadyRebuilt: pkMigrated || ftsMigrated });
+	return pkMigrated || ftsMigrated || rowidMigrated;
+}
+
+// `PRAGMA user_version` is a 4-byte integer SQLite persists in the database file header for
+// exactly this purpose — a version cookie the application controls. Every other migration in
+// this file detects "needs to run" structurally (a PRIMARY KEY shape in `sqlite_master`, a
+// `prefix=` substring in the FTS table's stored SQL), but rowid pinning has no structural
+// trace: `INSERT INTO chunks_fts(rowid, ...)` and a plain auto-assigned-rowid insert produce
+// byte-identical `sqlite_master` SQL for chunks_fts, so there is nothing in the schema text to
+// test. `user_version` is the version check for exactly the migrations that have no structural
+// signature.
+function getUserVersion(db) {
+	const row = db.prepare('PRAGMA user_version').get();
+	return Number(row?.user_version ?? 0);
+}
+
+function setUserVersion(db, version) {
+	// PRAGMA does not accept a bound parameter, only a literal; `version` is always the
+	// module-internal SCHEMA_VERSION constant, never request input.
+	db.exec(`PRAGMA user_version = ${Number(version)}`);
 }
 
 // Schema 4 → 5: `chunks` keyed by `(vault_id, id)` instead of `id` alone.
@@ -296,6 +339,48 @@ export function migrateFtsSchema(db) {
 		throw e;
 	}
 	return true;
+}
+
+// Schema 5 → 6: every `chunks_fts` DELETE moves from keying on `vault_id`/`id` (both
+// UNINDEXED, so a delete keyed on either forces a full-table scan — measured 24.2ms/delete at
+// the live 53k-chunk size) to keying on `rowid` (an O(1) btree lookup). That requires
+// `chunks_fts.rowid` to actually equal the owning `chunks.rowid`, which only a rebuild through
+// the now rowid-pinning FTS_REFILL_SQL establishes — see the SCHEMA_VERSION=6 comment.
+//
+// `options.alreadyRebuilt` lets the caller skip the rebuild here when migrateChunksPrimaryKey
+// or migrateFtsSchema already rebuilt chunks_fts in this same createSchema() call: they share
+// FTS_REFILL_SQL, so their rebuild is already rowid-pinned and repeating it would only cost
+// the (measured ~2.7s at 53k chunks) rebuild time for no correctness gain. The version cookie
+// is still written in that case, so a later startup doesn't re-check via a different path.
+//
+// The version target is a fixed literal (6), deliberately NOT the live SCHEMA_VERSION
+// constant: this migration's job is "has the rowid-pinning rebuild happened", a question with
+// one fixed answer forever. Comparing against SCHEMA_VERSION would tie this migration's
+// re-trigger condition to every future, unrelated schema bump — a schema 7 change with no
+// user_version write of its own would make `getUserVersion(db) >= SCHEMA_VERSION` false again
+// and force a full, needless chunks_fts rebuild on every subsequent startup.
+//
+// Returns true when this function performed the rebuild itself (not when it only wrote the
+// version cookie for a rebuild one of its siblings already did).
+const FTS_ROWID_PINNING_VERSION = 6;
+export function migrateFtsRowidPinning(db, options = {}) {
+	if (getUserVersion(db) >= FTS_ROWID_PINNING_VERSION) return false;
+	let rebuilt = false;
+	if (!options.alreadyRebuilt) {
+		db.exec('BEGIN');
+		try {
+			db.exec('DROP TABLE IF EXISTS chunks_fts');
+			db.exec(FTS_TABLE_SQL);
+			db.exec(FTS_REFILL_SQL);
+			db.exec('COMMIT');
+		} catch (e) {
+			db.exec('ROLLBACK');
+			throw e;
+		}
+		rebuilt = true;
+	}
+	setUserVersion(db, FTS_ROWID_PINNING_VERSION);
+	return rebuilt;
 }
 
 export function openDatabase(dbPath) {
@@ -1075,6 +1160,10 @@ export function createRequestHandler(db, options = {}) {
 	// CONFLICT(id)` an upsert from vault B silently re-labelled vault A's row as B's, which is
 	// how one vault's index destroyed another's. `vault_id` is no longer in the SET list
 	// because it is now part of the conflict key and can only ever equal `excluded.vault_id`.
+	// `RETURNING rowid` is schema 6's other half: the caller needs the chunk's `chunks.rowid` —
+	// unchanged by an ON CONFLICT UPDATE, freshly assigned by a plain INSERT — to pin the
+	// matching `chunks_fts` row to the same rowid. Works identically for both branches, so the
+	// caller does not need to know which one fired.
 	const upsertChunk = db.prepare(`
 INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model, embedding_space)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1091,6 +1180,7 @@ ON CONFLICT(vault_id, id) DO UPDATE SET
   embedding_dim = excluded.embedding_dim,
   embedding_model = excluded.embedding_model,
   embedding_space = excluded.embedding_space
+RETURNING rowid
 `);
 	const selectVaultEmbeddingDim = db.prepare('SELECT embedding_dim AS dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL LIMIT 1');
 	// The space twin of selectVaultEmbeddingDim, and read at the same moment for the same reason.
@@ -1098,13 +1188,25 @@ ON CONFLICT(vault_id, id) DO UPDATE SET
 	// as a conflicting space: they carry no claim to contradict.
 	const selectVaultEmbeddingSpace = db.prepare('SELECT embedding_space AS space FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL AND embedding_space IS NOT NULL LIMIT 1');
 	const hydrateChunk = db.prepare(HYDRATE_CHUNK_SQL);
-	// Vault-scoped like its `chunks` counterpart: an id-only delete here would evict another
-	// vault's FTS row for a colliding id, leaving that vault's chunk searchable nowhere while
-	// its `chunks` row still existed — the silent half of the same bug.
-	const deleteFtsById = db.prepare('DELETE FROM chunks_fts WHERE vault_id = ? AND id = ?');
-	const insertFts = db.prepare('INSERT INTO chunks_fts (id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?)');
+	// Schema 6: keyed on `rowid`, an O(1) btree lookup, instead of `vault_id`/`id` — both
+	// UNINDEXED FTS5 columns, so a delete keyed on either forced a full scan of the whole FTS
+	// index (measured 24.2ms/delete at the live 53k-chunk size; see the SCHEMA_VERSION=6
+	// comment at the top of the file). `chunks_fts.rowid` is pinned to the owning
+	// `chunks.rowid` by FTS_REFILL_SQL and by `insertFts` below, so this is still exactly as
+	// vault-scoped as the old `(vault_id, id)` key was — the rowid it deletes can only ever be
+	// one specific chunk of one specific vault, it just no longer has to be told which vault
+	// to find that out.
+	const deleteFtsByRowid = db.prepare('DELETE FROM chunks_fts WHERE rowid = ?');
+	const insertFts = db.prepare('INSERT INTO chunks_fts (rowid, id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?, ?)');
 	const deleteByPath = db.prepare('DELETE FROM chunks WHERE vault_id = ? AND path = ?');
-	const selectIdsByPath = db.prepare('SELECT id FROM chunks WHERE vault_id = ? AND path = ?');
+	// Renamed from selectIdsByPath: both call sites only ever fed the result straight into an
+	// FTS delete, and that delete is now rowid-keyed, so `rowid` is the only column either one
+	// needs.
+	const selectRowidsByPath = db.prepare('SELECT rowid FROM chunks WHERE vault_id = ? AND path = ?');
+	// Reset scans `chunks` (indexed on `vault_id` via idx_chunks_vault_path) for the rowids to
+	// delete, rather than `DELETE FROM chunks_fts WHERE vault_id = ?` — that key is UNINDEXED
+	// on chunks_fts too, the same cost this whole schema bump removes everywhere else.
+	const selectRowidsByVault = db.prepare('SELECT rowid FROM chunks WHERE vault_id = ?');
 	// One row per path: the *dominant* content-hash group (a path mid-rewrite can briefly hold
 	// rows from two hashes). The embedding aggregates therefore describe that same group, which
 	// is the only group the caller's contentHash comparison can match.
@@ -1136,7 +1238,6 @@ ORDER BY chunk_count DESC
 LIMIT 1
 `);
 	const resetChunks = db.prepare('DELETE FROM chunks WHERE vault_id = ?');
-	const resetFts = db.prepare('DELETE FROM chunks_fts WHERE vault_id = ?');
 	const searchStatement = db.prepare(SEARCH_SQL);
 
 	return async (req, res) => {
@@ -1169,8 +1270,11 @@ LIMIT 1
 				const vaultId = requireString(body.vaultId, 'vaultId');
 				db.exec('BEGIN');
 				try {
+					// Rowids are read from `chunks` (vault_id-indexed via idx_chunks_vault_path)
+					// *before* resetChunks deletes them — chunks_fts carries no independent record
+					// of which rowids belonged to this vault, only chunks does.
+					for (const row of selectRowidsByVault.all(vaultId)) deleteFtsByRowid.run(row.rowid);
 					resetChunks.run(vaultId);
-					resetFts.run(vaultId);
 					db.exec('COMMIT');
 				} catch (e) {
 					db.exec('ROLLBACK');
@@ -1186,7 +1290,7 @@ LIMIT 1
 				db.exec('BEGIN');
 				try {
 					for (const path of paths) {
-						for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(vaultId, row.id);
+						for (const row of selectRowidsByPath.all(vaultId, path)) deleteFtsByRowid.run(row.rowid);
 						deleteByPath.run(vaultId, path);
 					}
 					db.exec('COMMIT');
@@ -1276,7 +1380,7 @@ LIMIT 1
 							// The first chunk seen for a (vaultId, path) clears every existing row
 							// for that path: an upsert is a full replace, not a merge.
 							if (!clearedPaths.has(pathKey)) {
-								for (const row of selectIdsByPath.all(vaultId, path)) deleteFtsById.run(vaultId, row.id);
+								for (const row of selectRowidsByPath.all(vaultId, path)) deleteFtsByRowid.run(row.rowid);
 								deleteByPath.run(vaultId, path);
 								clearedPaths.add(pathKey);
 							}
@@ -1310,7 +1414,10 @@ LIMIT 1
 								}
 							}
 
-							upsertChunk.run(
+							// `.get()`, not `.run()`: the RETURNING clause makes this a row-producing
+							// statement, and the chunk's rowid is what pins the chunks_fts row below
+							// to the right rowid — see the comment on `upsertChunk`'s declaration.
+							const { rowid } = upsertChunk.get(
 								id,
 								vaultId,
 								path,
@@ -1326,8 +1433,8 @@ LIMIT 1
 								embedding ? embedding.model : null,
 								embedding ? embedding.space : null,
 							);
-							deleteFtsById.run(vaultId, id);
-							insertFts.run(id, vaultId, path, title, heading, text);
+							deleteFtsByRowid.run(rowid);
+							insertFts.run(rowid, id, vaultId, path, title, heading, text);
 						}
 						db.exec('COMMIT');
 					} catch (e) {
