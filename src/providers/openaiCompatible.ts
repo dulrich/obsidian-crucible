@@ -270,7 +270,7 @@ export const openAICompatibleClient: HttpProviderClient = {
 	// two-pass prompts. Remote providers (OpenAI, OpenRouter) must not receive the field at all,
 	// not merely have it ignored — an unrecognized field on a stricter remote API is a request
 	// shape difference this module keeps byte-identical to today's extractImage otherwise.
-	async describeImagePass(ctx, base64, mimeType, prompt): Promise<string> {
+	async describeImagePass(ctx, base64, mimeType, prompt, maxTokens): Promise<string> {
 		const headers = isOpenRouter(ctx.provider) ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx);
 		const body: Record<string, unknown> = {
 			model: ctx.modelId,
@@ -284,6 +284,10 @@ export const openAICompatibleClient: HttpProviderClient = {
 				},
 			],
 			temperature: 0,
+			// idh-WP-1: universal on chat/completions (unlike reasoning_effort below, no isLocal
+			// gate) — bounds the worst case after a temp-0 repetition loop generated to the 32k
+			// context ceiling with no cap at all. See IMAGE_DESCRIPTION_*_MAX_TOKENS in ./shared.
+			max_tokens: maxTokens,
 		};
 		if (isLocal(ctx.provider)) body.reasoning_effort = 'none';
 

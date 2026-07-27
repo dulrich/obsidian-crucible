@@ -295,6 +295,55 @@ test('a record with no narrative and no extraction contributes neither a chunk n
 	assert.equal(chunks[0].contentHash, hashSearchContent(CONTENT));
 });
 
+// ── idh-WP-1: kind:'failed' records must emit no chunks and no facet ─────────
+
+test('a failed-description record contributes neither a chunk nor a hash change', async () => {
+	const store = makeStore();
+	await store.put({ md5: MD5_A, narrative: '', extraction: '', kind: 'failed', failure: 'timed out' });
+	const manager = makeManager({ store, embeds: [IMAGE_A] });
+
+	const chunks = await manager.buildFileChunks(makeFile(NOTE));
+	assert.equal(chunks.some(c => isImageChunkHeading(c.heading)), false);
+	// A failure appearing in the store must not move the note's contentHash — same invariant as
+	// the "record with no narrative and no extraction" case, but here it's asserted by kind, not
+	// by the fields happening to be empty.
+	assert.equal(chunks[0].contentHash, hashSearchContent(CONTENT));
+});
+
+test('an arriving failure record does not re-index an already-indexed note (no facet, so no hash change)', async () => {
+	const store = makeStore();
+	const client = makeClient({ [NOTE]: hashSearchContent(CONTENT) });
+	const manager = makeManager({ store, embeds: [IMAGE_A], client });
+
+	assert.equal((await manager.indexFiles([makeFile(NOTE)])).files, 0, 'skips before any failure record exists');
+
+	await store.put({ md5: MD5_A, narrative: '', extraction: '', kind: 'failed', failure: 'provider threw' });
+
+	const result = await manager.indexFiles([makeFile(NOTE)]);
+	assert.equal(result.files, 0, 'a failure landing must not be mistaken for new content to index');
+	assert.equal(client.upserted.length, 0);
+});
+
+test('a described image and a failed image on the same note: only the described one contributes, to both chunks and the combined hash', async () => {
+	const store = makeStore();
+	await store.put({ md5: MD5_A, narrative: 'Figure A.', extraction: 'A', kind: 'vision' });
+	await store.put({ md5: MD5_B, narrative: '', extraction: '', kind: 'failed', failure: 'timed out' });
+
+	const manager = makeManager({ store, embeds: [IMAGE_A, IMAGE_B] });
+	const chunks = await manager.buildFileChunks(makeFile(NOTE));
+	const imageHeadings = chunks.filter(c => isImageChunkHeading(c.heading)).map(c => c.heading);
+
+	assert.deepEqual(imageHeadings, [`Image: ${MD5_A}_MD5.png`, `Image: ${MD5_A}_MD5.png (text)`]);
+	// The combined hash matches what MD5_A alone would produce — MD5_B (failed) is excluded from
+	// the md5 list fed to combinedDescriptionHash, not just from the chunk list.
+	assert.equal(chunks[0].contentHash, hashSearchContent(CONTENT, [`image-desc:${store.combinedDescriptionHash([MD5_A])}`]));
+	assert.notEqual(
+		chunks[0].contentHash,
+		hashSearchContent(CONTENT, [`image-desc:${store.combinedDescriptionHash([MD5_A, MD5_B])}`]),
+		'a hash that folded the failed record in would disagree with the correct one',
+	);
+});
+
 test('a note with no embeds at all never touches the store', async () => {
 	const store = makeStore();
 	await store.put({ md5: MD5_A, narrative: 'Figure A.', extraction: 'A', kind: 'vision' });
