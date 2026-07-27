@@ -479,7 +479,9 @@ export class FileJobBackend implements JobBackend {
 			case 'blogs_tracker_consolidate': return s.orchestrationBlogsTrackerEnabled;
 			case 'link_scan': return s.orchestrationLinkScanEnabled;
 			case 'transcript_refine': return s.orchestrationTranscriptRefineEnabled;
-			case 'image_metadata_extract': return s.imageMetadataExtractionEnabled;
+			case 'image_describe_note':
+			case 'image_describe_backfill':
+			case 'image_describe_batch': return s.imageMetadataExtractionEnabled;
 			default: return true;
 		}
 	}

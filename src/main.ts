@@ -1,6 +1,6 @@
 import { Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, TFolder, Editor } from 'obsidian';
 import { CrucibleSettingTab, CrucibleSettingsTab } from "./settings";
-import { CrucibleSettings, DEFAULT_SETTINGS, Provider, providerModality } from "./types";
+import { CrucibleSettings, DEFAULT_SETTINGS, Provider } from "./types";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
@@ -36,11 +36,11 @@ import { NoteLockOverlay } from './noteLockOverlay';
 import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
 import type { AutoSourceFn } from './orchestration/EnrichmentQueueAdapter';
 import { migrateJobTypeControls, readTypeAutorun, setTypeControl } from './orchestration/autorunGate';
-import { chainRunJobConfig, commandRunJobConfig, imageMetadataJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
+import { chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
 import { ServiceHealthRegistry } from './orchestration/serviceHealth';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
-import { ImageMetadataExtractWorkflow } from './orchestration/workflows/ImageMetadataExtractWorkflow';
+import { ImageDescribeBackfillWorkflow, ImageDescribeBatchWorkflow, ImageDescribeNoteWorkflow } from './orchestration/workflows/ImageDescribeWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
@@ -51,7 +51,7 @@ import { ImageDescriptionStorage, ImageDescriptionStore } from './search/imageDe
 import { FileOpenIndex } from './fileOpenIndex';
 import { SearchDeletePathWorkflow, SearchEmbedMissingWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
-import { localizedImageInfo } from './orchestration/utils/imageMetadata';
+import { shouldEnqueueImageDescribe } from './orchestration/utils/imageDescribe';
 import { logError, logWarn } from './log';
 import { AutoLocalizeScheduler } from './autoLocalizeScheduler';
 import { registerInternalCommands } from './internalCommands';
@@ -165,7 +165,7 @@ export default class CruciblePlugin extends Plugin {
 			this.settings,
 			(state: boolean) => { this.isMaterializing = state; },
 			this.noteLocks,
-			(imagePath, sourceNotePath) => this.enqueueImageMetadataExtraction(imagePath, sourceNotePath),
+			(imagePath, sourceNotePath) => this.enqueueImageDescribeForNote(imagePath, sourceNotePath),
 		);
 		this.autoLocalizeScheduler = new AutoLocalizeScheduler({
 			resolveFile: path => {
@@ -228,7 +228,9 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow(), youtubeChannelEnrichSweepJobConfig());
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
 		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
-		this.orchestrator.register('image_metadata_extract', new ImageMetadataExtractWorkflow(), imageMetadataJobConfig());
+		this.orchestrator.register('image_describe_note', new ImageDescribeNoteWorkflow(), imageDescribeNoteJobConfig());
+		this.orchestrator.register('image_describe_backfill', new ImageDescribeBackfillWorkflow(), imageDescribeBackfillJobConfig());
+		this.orchestrator.register('image_describe_batch', new ImageDescribeBatchWorkflow(), imageDescribeBatchJobConfig());
 		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
 		this.orchestrator.register('search_embed_missing', new SearchEmbedMissingWorkflow(), searchEmbedMissingJobConfig());
 		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
@@ -385,25 +387,17 @@ export default class CruciblePlugin extends Plugin {
 		return this.app.workspace.getActiveViewOfType(MarkdownView)?.editor ?? undefined;
 	}
 
-	enqueueImageMetadataExtraction(imagePath: string, sourceNotePath?: string): void {
-		if (!this.canEnqueueImageMetadataExtraction()) return;
-		if (!localizedImageInfo(imagePath)) return;
-		const inputPaths = [imagePath, sourceNotePath].filter((p): p is string => typeof p === 'string' && p.length > 0);
-		void this.orchestrator.enqueue('image_metadata_extract', {
-			imagePath,
-			sourceNotePath,
-			schemaVersion: this.settings.imageMetadataExtractionSchemaVersion,
-		}, { priority: 'low', lane: 'background', inputPaths });
-	}
-
-	private canEnqueueImageMetadataExtraction(): boolean {
-		if (!this.settings.imageMetadataExtractionEnabled) return false;
-		const ref = this.settings.imageMetadataExtractionModel;
-		if (!ref) return false;
-		const provider = this.settings.providers.find(p => p.id === ref.providerId);
-		if (!provider || providerModality(provider.kind) === 'cli') return false;
-		const model = provider.models.find(m => m.id === ref.modelId);
-		return model?.capabilities?.includes('image-extraction') === true;
+	// Called per-image by AttachmentLocalizer once a localize finishes (four call sites — see
+	// the localize-hook quirk). The job itself is per-NOTE (dedupe key note:<sourceNotePath>),
+	// so several calls from the same note's localize pass collapse onto one queued
+	// image_describe_note job via FileJobBackend's existing dedupe — no separate per-note
+	// batching needed here.
+	enqueueImageDescribeForNote(imagePath: string, sourceNotePath?: string): void {
+		if (!sourceNotePath) return;
+		if (!shouldEnqueueImageDescribe(this.settings, imagePath)) return;
+		void this.orchestrator.enqueue('image_describe_note', {
+			targetPath: sourceNotePath,
+		}, { priority: 'low', lane: 'background', inputPaths: [sourceNotePath, imagePath] });
 	}
 
 	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so

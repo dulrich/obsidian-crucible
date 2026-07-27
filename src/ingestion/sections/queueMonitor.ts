@@ -93,13 +93,22 @@ function fileJobTargetPath(job: OrchestrationJob): string | undefined {
 
 function fileJobTitle(job: OrchestrationJob): string {
 	switch (job.type) {
-		case 'image_metadata_extract': return typeof job.params?.imagePath === 'string' ? `Image metadata: ${job.params.imagePath.split('/').pop()}` : 'Image metadata extraction';
+		case 'image_describe_note': return typeof job.params?.targetPath === 'string' ? `Image descriptions: ${job.params.targetPath.split('/').pop()}` : 'Image descriptions';
+		case 'image_describe_backfill': return 'Image description backfill';
+		case 'image_describe_batch': return imageDescribeBatchTitle(job);
 		case 'search_rebuild': return 'Vault search index';
 		case 'search_embed_missing': return 'Vault embedding backfill';
 		case 'search_upsert_batch': return searchBatchTitle(job);
 		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';
 		default: return job.id;
 	}
+}
+
+function imageDescribeBatchTitle(job: OrchestrationJob): string {
+	const batchIndex = typeof job.params?.batchIndex === 'number' ? job.params.batchIndex : -1;
+	const batchCount = typeof job.params?.batchCount === 'number' ? job.params.batchCount : -1;
+	if (batchIndex >= 0 && batchCount > 0) return `Image description batch ${batchIndex + 1} / ${batchCount}`;
+	return 'Image description batch';
 }
 
 function searchBatchTitle(job: OrchestrationJob): string {
