@@ -10,7 +10,7 @@ disagree about gates or mechanics, the nearest child wins (fleet Rule 0).
 | Orchestration | `src/orchestration/AGENTS.md` | Queue, `JobBackend`s, workflows, triggers, tracker/intake pipelines |
 | Providers | `src/providers/AGENTS.md` | Provider kinds and wire protocols, rerank vs embedding endpoints |
 | Theme | `theme/AGENTS.md` | The surround axis, `theme.css` specificity law, token vendoring |
-| Inference container | `docker/llamacpp-vulkan/AGENTS.md` | Vulkan/GPU verification, capability probing |
+| Inference services | `/home/_shared_code/inference-engine/` (own repo since 2026-07-26) | llama-swap router + GLiNER2 sidecar; Vulkan/GPU verification, capability probing live in its `llama/AGENTS.md` |
 
 Everything cross-cutting — the NUL/`console.*` gates, the frontmatter write barrier, the
 note-lock family, chain/command registration, lint, localize, templates, settings UI — stays in
@@ -126,7 +126,6 @@ A valid rerun packet includes:
     ingestion/          # Ingestion data/render/sections helpers
     sourceEval/         # Source-evaluation dashboard internals
   scripts/              # search-companion.mjs + measurement/bench scripts
-  docker/llamacpp-vulkan/  # Local inference container -> has its own AGENTS.md
   theme/                # N1 Console Obsidian theme -> has its own AGENTS.md
   tests/                # node --test suites (*.test.mjs)
   docs/                 # User-facing documentation
@@ -208,7 +207,7 @@ The one-line hooks below say *where to walk*, not what to do — read the full e
 
 **In `theme/AGENTS.md`:** the surround axis, the (0,1,1) specificity law, the block-1/block-2 name split, exactly four `!important`s, token vendoring.
 
-**In `docker/llamacpp-vulkan/AGENTS.md`:** a healthy local inference service has told you nothing — `llvmpipe`, arch-list lies, HTTP-200 capability probes.
+**In `inference-engine/llama/AGENTS.md`** (own repo, `/home/_shared_code/inference-engine/` — the container graduated out of `docker/llamacpp-vulkan/` on 2026-07-26)**:** a healthy local inference service has told you nothing — `llvmpipe`, arch-list lies, HTTP-200 capability probes.
 
 ## Quirks
 

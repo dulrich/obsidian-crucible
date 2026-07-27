@@ -109,46 +109,28 @@ Semantic search and the opt-in reranker need a model server; the fleet declares 
 leaving it as a thing you have to remember to start. Four services sit beside `crucible-search`,
 one model each, in two pairs:
 
-| Service | Port | Model | Purpose | Profile |
-|---|---|---|---|---|
-| `crucible-embedder` | `127.0.0.1:4802` | `BAAI/bge-m3` (1024d, fp32 ONNX) | `POST /v1/embeddings` — OpenAI-compatible | `cpu-inference` |
-| `crucible-reranker` | `127.0.0.1:4803` | `BAAI/bge-reranker-v2-m3` (torch) | `POST /rerank` | `cpu-inference` |
-| `crucible-embed-gpu` | `127.0.0.1:4804` | `bge-m3` GGUF f16 | `POST /v1/embeddings` | `gpu-inference` |
-| `crucible-rerank-gpu` | `127.0.0.1:4805` | `bge-reranker-v2-m3` GGUF Q8_0 | `POST /rerank` | `gpu-inference` |
+| Service | Port | Models | Purpose |
+|---|---|---|---|
+| `inference-engine-llama` | `127.0.0.1:4806` (permanent alias; `4811` canonical once free) | `bge-m3` f16 · `bge-reranker-v2` Q8_0 · `gemma-4-12b` · `nemotron-4b` | One llama-swap router: `POST /v1/embeddings`, `/rerank`, `/v1/chat/completions` |
 
-The CPU pair runs the [Infinity](https://github.com/michaelfeil/infinity) inference server
-(`michaelf34/infinity:0.0.77-cpu`); the GPU pair runs `llama-server` (llama.cpp) on Vulkan, built
-and documented in [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md). Like
-`crucible-search`, all four publish to `127.0.0.1` only — an embedder port also carries an
-unauthenticated, full-access inference API.
+One always-on `llama-swap` process spawns/unloads `llama-server` children per model on demand
+(`ttl`-based). It replaced the whole earlier apparatus at the 2026-07-26 cutover — the Infinity
+CPU pair (`4802`/`4803`), the socket-activated GPU pair (`4804`/`4805`), and their systemd units.
+As of the same date the container is built from the **inference-engine initiative repo**
+(`/home/_shared_code/inference-engine/llama/` — it graduated out of this repo's
+`docker/llamacpp-vulkan/`), which also carries its router config, smoke test, and operator docs;
+the fleet wiring stays in `context-control/compose.home.yml`. Like `crucible-search` it
+publishes to `127.0.0.1` only — the port carries an unauthenticated, full-access inference API.
+See [Local inference](local-inference.md) §12a for the provider entries a vault points at it.
 
-Both pairs sit behind compose profiles, so a bare `hc up` starts neither: the CPU pair is the
-reference implementation and the no-GPU fallback, and the GPU pair is started on demand by systemd
-socket activation rather than by compose. `4804`/`4805` are **socket** addresses that always
-listen; the containers' own published ports (`14804`/`14805`) are an implementation detail and
-nothing should be configured against them — a client pointed there bypasses the on-demand start
-and hits a stopped container.
-
-**The GPU pair above is mid-migration to a single router, `crucible-inference` on
-`127.0.0.1:4806`** — one always-on `llama-swap` process that spawns/unloads the same
-`bge-m3`/`bge-reranker-v2-m3` `llama-server` children on demand (`ttl`-based, not
-socket-activated), replacing `crucible-embed-gpu`/`crucible-rerank-gpu` and the systemd socket
-apparatus entirely. The container image and its router config already exist in this repo's
-[`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md); wiring `crucible-inference` into
-this fleet's compose file, running its smoke test live, and flipping this fleet's provider base
-URLs from `4804`/`4805` to `4806` are separate, later steps not yet landed as of this writing — see
-[Local inference](local-inference.md) §12a for the full setup and its "Migration status" note, and
-§12a/Rule 2 for why the new router needs only one base URL for both jobs instead of the asymmetric
-pair described below. Until that cutover lands, the table above is what this fleet actually runs.
-
-**The two engine flags differ on purpose.** The embedder runs `--engine optimum` (ONNX); the
-reranker runs `--engine torch`. `optimum` resolves ONNX weights from the HF repo, and
+**The retired Infinity pair's two engine flags differed on purpose** (kept for the trap): the
+embedder ran `--engine optimum` (ONNX); the reranker ran `--engine torch`. `optimum` resolves ONNX weights from the HF repo, and
 `BAAI/bge-reranker-v2-m3` publishes PyTorch weights only — under `optimum` it dies during engine
 selection with `No onnx files found`, before downloading a byte, at any memory limit. `bge-m3`
 does ship `onnx/model.onnx`, so the embedder keeps the faster ONNX path. Check which weights a
 repo actually publishes before aligning these.
 
-**Why the CPU pair is Infinity and the GPU pair is not.** ROCm is blocked on this box and the
+**Why the retired CPU pair was Infinity and the GPU path is not.** ROCm is blocked on this box and the
 host is not the reason: host ROCm 7.2.2 supports gfx1201 (RX 9070 / RDNA4) fine, but the newest
 published AMD Infinity image ships torch `2.5.1+rocm6.2`, whose compiled arch list stops at
 `gfx1100`/`gfx942` (and `latest-amd` is five months *older* still); gfx1201 needs ROCm 6.4+.
@@ -158,14 +140,14 @@ request. Do not attempt to force it with `HSA_OVERRIDE_GFX_VERSION`: that wedges
 enough to cost a desktop session. Full findings, the hang signature and recovery paths are in
 `context-control/references/rdna4-gpu-hang.md`.
 
-**Vulkan is not blocked**, which is why the GPU pair exists at all: RADV drives gfx1201 today, and
+**Vulkan is not blocked**, which is why the GPU path exists at all: RADV drives gfx1201 today, and
 llama.cpp's Vulkan backend runs both workloads on it. That path has its own silent-failure mode —
 a Vulkan loader with no usable hardware driver still enumerates the `llvmpipe` software
 rasteriser as a valid device, so a too-old Mesa yields a server that answers every request
 correctly and runs slower than the CPU containers it replaced. See
-[`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) for the base-image constraint and
-the startup assertion that catches it, and [Local inference](local-inference.md) for the general
-form of both traps.
+`/home/_shared_code/inference-engine/llama/` (README + AGENTS.md) for the base-image constraint
+and the startup assertion that catches it, and [Local inference](local-inference.md) for the
+general form of both traps.
 
 **Switching the embedder between these pairs triggers a re-embed, and that is conservatism rather
 than a correctness requirement.** Schema 4's `embedding_space` treats Infinity's fp32 ONNX vectors

@@ -5,7 +5,7 @@ and its consumers in `src/providers.ts` / `src/agents.ts` / `src/modelPicker.ts`
 `AGENTS.md` is the canonical contract; this file adds what is only true here.
 
 Related areas: the container that serves these endpoints locally is
-`docker/llamacpp-vulkan/AGENTS.md`; the embedding-model lifecycle that consumes them is
+`/home/_shared_code/inference-engine/llama/AGENTS.md` (inference-engine repo); the embedding-model lifecycle that consumes them is
 `src/search/AGENTS.md`; the user-facing writeup is `docs/local-inference.md`.
 
 ## Quirks

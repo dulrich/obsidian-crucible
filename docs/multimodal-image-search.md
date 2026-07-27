@@ -79,7 +79,7 @@ do not put it on this card.**
 The 26B is the better describer by a clear margin on the content that motivates the feature, and
 it is *not* slower — but it only ran here by spilling 4,716 MiB to host memory and sitting at
 99.4% VRAM while the live retrieval service held ~3.1 GiB for `bge-m3`. That is the same shape
-as the `llvmpipe` trap in `docker/llamacpp-vulkan/AGENTS.md`: it starts, passes health, answers
+as the `llvmpipe` trap in `/home/_shared_code/inference-engine/llama/AGENTS.md`: it starts, passes health, answers
 correctly, and is quietly not doing what you think. The tell is arithmetic — a 26B **A4B** MoE
 has ~4B active parameters against the 12B's 12B dense, so resident it should decode
 *substantially faster*, and instead it managed 53.4 tok/s against the 12B's 51.8. On a ≥24 GB
@@ -93,7 +93,7 @@ rule from the embedding work — *rank, never assert an absolute value.* A descr
 retrieval surface. Anything that renders a described value back to the user must link the image
 and let the user look.
 
-Serving flags, for whenever this reaches `docker/llamacpp-vulkan/config.yaml`: the vision path
+Serving flags, for whenever this reaches the inference-engine router config (`/home/_shared_code/inference-engine/llama/config.yaml`): the vision path
 needs `--mmproj` alongside `-m`, and `gemma-4-12B-it-GGUF` does ship one
 (`mmproj-gemma-4-12B-it-BF16.gguf`, 167 MiB) — the plan left that open. Every request must carry
 `reasoning_effort: "none"`.

@@ -151,7 +151,7 @@ with **no** `/v1`, while its embedder — started with `--url-prefix /v1` — is
 `http://host:4802/v1`. llama.cpp serves `/rerank` *and* `/v1/rerank`, so either works there.
 Configure the reranker as its own provider entry; there is no rerank-specific URL field.
 
-**crucible-inference (§12a) makes this asymmetry moot.** llama-swap serves both `/v1/rerank` and
+**The inference-engine router (§12a) makes this asymmetry moot.** llama-swap serves both `/v1/rerank` and
 bare `/rerank`, so the embedding and reranking provider entries can both be configured with the
 same `http://127.0.0.1:4806/v1` base URL — there is no longer a base URL to get wrong. Two more
 rules specific to that router, worth knowing regardless of which route you actually run:
@@ -206,9 +206,9 @@ space if a future GGUF disagrees — producing well-formed vectors of the right 
 mean something else. (`--pooling rank` on a *reranker* is different: that is what selects rerank
 behaviour.)
 
-A containerised, socket-activated version of both services lives in
-[`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md), including the systemd units and
-the GPU assertion described in §8.
+The containerised version of this is the inference-engine repo's router
+(`/home/_shared_code/inference-engine/llama/` — see §12a), including the GPU assertion
+described in §8.
 
 ### LM Studio
 
@@ -454,26 +454,12 @@ Five things about these numbers matter more than the numbers:
 
 ## 10. Worked example — AMD RDNA4 (gfx1201)
 
-One machine's specifics, included because the *shape* of the problem generalises.
-
-- **ROCm is blocked, and not by the host.** Host ROCm 7.2.2 supports gfx1201 fine. The published
-  AMD Infinity image ships torch `2.5.1+rocm6.2`, whose compiled arch list stops at
-  `gfx1100`/`gfx942`; gfx1201 needs ROCm 6.4+. `torch.cuda.is_available()` still returns `True` on
-  that image, so it passes its healthcheck and dies on the first kernel.
-- **Do not force it with `HSA_OVERRIDE_GFX_VERSION`.** Presenting one architecture as another
-  produces invalid GPU programs, which is the workload class that wedges this GPU hard enough to
-  cost a desktop session. Signature, triggers, recovery paths (SSH or SysRq `S`-`U`-`B`; capture
-  `/sys/class/drm/card1/device/devcoredump/data` *before* rebooting — it is in-memory only) are in
-  `context-control/references/rdna4-gpu-hang.md`. Read it before any GPU experiment on this class
-  of hardware; it is deliberately not duplicated here.
-- **Vulkan is not blocked.** RADV drives gfx1201 today and has run sustained embedding and rerank
-  workloads without instability. The hazard is invalid GPU programs, not mature inference kernels.
-- **The Mesa version is load-bearing.** gfx1201 needs Mesa ≥ 26. A container based on Debian
-  trixie or Ubuntu 24.04 ships 24.x/25.0.x and falls back to `llvmpipe` *silently* (§8) —
-  `debian:sid-slim` ships 26.1.5. "Stabilising" the base image is the failure, not the fix.
-- **The bundled ROCm llama.cpp build has never been probed.** llama.cpp compiles for a different
-  target set than PyTorch, so it may support gfx1201 where torch does not. Since Vulkan already
-  works, this is optimisation rather than enablement.
+Moved (2026-07-26) to the inference-engine initiative repo alongside the container it describes:
+`/home/_shared_code/inference-engine/docs/rdna4-gfx1201-notes.md`. The two consumer-relevant
+facts stay here: **do not force ROCm on this class of hardware** (`HSA_OVERRIDE_GFX_VERSION`
+produces invalid GPU programs, the workload class that wedges the card — see
+`context-control/references/rdna4-gpu-hang.md`), and **Vulkan/RADV is the working path**, with
+the silent `llvmpipe` fallback of §8 as its one trap.
 
 ---
 
@@ -481,8 +467,9 @@ One machine's specifics, included because the *shape* of the problem generalises
 
 - [Search companion](search-companion.md) — the search service itself, the embedding-space schema,
   and the fleet's current inference services.
-- [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) — the socket-activated GPU
-  embedding/reranking containers, their systemd units, and the GPU assertion.
+- `/home/_shared_code/inference-engine/` — the initiative repo that owns the llama-swap router
+  container (`llama/`: build, config, aliases, smoke test, GPU assertion) and the GLiNER2-family
+  CPU sidecar (`onnx/`). It graduated out of this repo's `docker/llamacpp-vulkan/` on 2026-07-26.
 - `context-control/references/rdna4-gpu-hang.md` — GPU hang signature and recovery.
 - The eval-harness repo's local-inference-bench archive (`/home/_shared_code/eval-harness`) — the
   measurement protocol and full raw results behind the numbers above.
@@ -499,22 +486,20 @@ reranking is opt-in on top of whichever you choose. (a) is the recommended route
 documented because they're still valid ways to run the same jobs, or because you may already have
 one of them running; (f) is the fleet-wiring reference rather than a route of its own.
 
-### a. crucible-inference (recommended)
+### a. inference-engine (recommended)
 
-One always-on router in front of both jobs, replacing what used to be two separately-managed
+One always-on router in front of every job, replacing what used to be two separately-managed
 processes: no separate embed/rerank services to remember, and no separate on/off lifecycle to
-reason about beyond the router itself.
+reason about beyond the router itself. Since 2026-07-26 the container, its router config
+(`config.yaml`), the smoke script, and the operator docs live in the **inference-engine
+initiative repo** (`/home/_shared_code/inference-engine/llama/`, container
+`inference-engine-llama`); the fleet wiring (port mapping, `/dev/dri` passthrough, `mem_limit`)
+is in `context-control/compose.home.yml`.
 
 ```bash
-docker/llamacpp-vulkan/smoke-inference.sh                 # confirms /health, /v1/models,
-                                                            # /v1/embeddings, /rerank all answer
+/home/_shared_code/inference-engine/llama/smoke-inference.sh   # confirms /health, /v1/models,
+                                                               # /v1/embeddings, /rerank, chat all answer
 ```
-
-The container image, its router config (`config.yaml`), and this smoke script already exist in
-this repo's [`docker/llamacpp-vulkan/`](../docker/llamacpp-vulkan/README.md) and can be built and
-run standalone with a bare `docker build`/`docker run` — see that page. Wiring `crucible-inference`
-into a fleet's compose file (port mapping, `/dev/dri` passthrough, `mem_limit`) is a separate,
-later, cross-repo step; see "Migration status" below for where that stands as of this guide.
 
 Crucible: **one base URL for every provider entry, including chat** —
 
@@ -561,23 +546,22 @@ Whether `gemma-4-12b`/`nemotron-4b` specifically load and answer correctly is ch
 `smoke-inference.sh`'s chat-completion checks against a live reload, not assumed from the VRAM
 fit math alone (see `config.yaml`'s `chat` group comment for that math).
 
-**Migration status.** `docker/llamacpp-vulkan/` builds and documents this router (image tag
-`crucible-llamacpp-vulkan:b10121-swap243`). The retrieval leg (`bge-m3`/`bge-reranker-v2`) is
-**fully cut over** as of 2026-07-26: it's wired into `context-control/compose.home.yml`, both
-retrieval provider entries point at `4806`, and route (c) below (the systemd-activated GPU pair)
-is retired — see "Migration status" in `docker/llamacpp-vulkan/README.md` for the full record.
-The chat leg (`gemma-4-12b`/`nemotron-4b`) is the newer, not-yet-validated half: the config
-exists and the smoke script now checks it, but nothing has loaded or exercised either chat model
-against the live service yet, and no vault has a chat provider entry pointed at `4806` yet — that
-follows once the live smoke run passes.
+**Migration status.** Fully cut over as of 2026-07-26 (image tag
+`crucible-llamacpp-vulkan:b10121-swap243`): retrieval and chat legs both pass the live smoke
+(embeddings, rerank, and both chat models answered at the post-move verification), route (c)
+below is retired, and the router now belongs to the inference-engine repo — see
+`/home/_shared_code/inference-engine/llama/README.md` for the full migration record. `4806`
+remains the vault-facing port permanently; `4811` becomes the canonical publish for new
+consumers.
 
 ### b. LM Studio
 
 No longer a route to depend on — (a) is the always-on service now. What LM Studio remains
 excellent at: downloading and swapping GGUF models through a GUI, and evaluating a candidate
-model's quality and speed before committing it to the router's `config.yaml`. `crucible-inference`
-mounts `~/.lmstudio/models` read-only for exactly this reason — a model downloaded here is already
-in place for the router to pick up, which is why LM Studio stays installed as a downloader/eval
+model's quality and speed before committing it to the router's `config.yaml`. The router
+(`inference-engine-llama`) mounts the shared GGUF home `/home/_shared_models` read-only — a model
+graduating from LM Studio evaluation is moved there (`<publisher>/<repo>` layout) for the router
+to pick up, which is why LM Studio stays installed as a downloader/eval
 bench rather than being fully retired.
 
 1. Start LM Studio's local server (default `127.0.0.1:1234`) and load an embedding model.
@@ -606,7 +590,8 @@ Gotchas:
 ### c. Superseded: llama.cpp Vulkan container + systemd socket activation
 
 **Retired at cutover — this is what route (a) above replaces, not a route to set up new.** Same
-`docker/llamacpp-vulkan/` image, but run as two single-model containers instead of one router
+image (built from what was then `docker/llamacpp-vulkan/`, now
+`/home/_shared_code/inference-engine/llama/`), but run as two single-model containers instead of one router
 process, each started and stopped on demand by its own systemd socket
 (`crucible-embed.socket` on `4804`, `crucible-rerank.socket` on `4805`) rather than by a router
 `ttl`. The instructions below are kept for anyone who already has this running and needs to
@@ -718,12 +703,11 @@ Gotchas:
 
 This guide is about the model server. The separate service Crucible talks to for chunk storage
 and search ranking is documented in [Search companion](search-companion.md) — see its "Inference
-services" section specifically, which documents this fleet's inference containers
-(`crucible-embedder`, `crucible-reranker`, `crucible-embed-gpu`, `crucible-rerank-gpu`, and the
-`crucible-inference` router migrating in to replace the last two) as running instances of routes
-(d), (c), and (a) above. Not a duplicate setup — read that page for how the fleet wires these
-routes together and where the migration to (a) currently stands, and this one for how to reason
-about any one route on its own.
+services" section specifically, which documents this fleet's one inference container (the
+`inference-engine-llama` router — route (a) above; it replaced the retired `crucible-embedder`/
+`crucible-reranker`/`crucible-embed-gpu`/`crucible-rerank-gpu` set at the 2026-07-26 cutover).
+Not a duplicate setup — read that page for how the fleet wires the routes together, and this one
+for how to reason about any one route on its own.
 
 ### Publishing prebuilt images
 

@@ -7,7 +7,7 @@ tests `tests/searchCompanion*.test.mjs` / `tests/searchVaultIsolation.test.mjs`.
 `AGENTS.md` is the canonical contract; this file adds what is only true here.
 
 Related areas: the embedding/rerank provider clients are `src/providers/AGENTS.md`; the
-container serving local models is `docker/llamacpp-vulkan/AGENTS.md`; the indexing jobs run on
+container serving local models is `/home/_shared_code/inference-engine/llama/AGENTS.md` (inference-engine repo); the indexing jobs run on
 the queue described in `src/orchestration/AGENTS.md`. User-facing writeup:
 `docs/search-companion.md`.
 
