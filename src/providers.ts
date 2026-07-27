@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
-import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
+import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, IMAGE_DESCRIPTION_EXTRACTION_PROMPT, IMAGE_DESCRIPTION_NARRATIVE_PROMPT, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
 import { openAICompatibleClient } from './providers/openaiCompatible';
 import { anthropicClient } from './providers/anthropic';
 import { googleClient } from './providers/google';
@@ -30,11 +30,12 @@ const HTTP_PROVIDER_CLIENTS: Partial<Record<ProviderKind, HttpProviderClient>> =
 // union (rather than a string label) is what lets the CLI-provider rejection message below stay
 // a lookup instead of a ternary chain: adding a capability that forgets an entry here is a
 // compile error, not a wrong sentence at runtime.
-type OptionalHttpCapability = 'embed' | 'extractImage' | 'rerank' | 'describeModel' | 'listModels';
+type OptionalHttpCapability = 'embed' | 'extractImage' | 'describeImagePass' | 'rerank' | 'describeModel' | 'listModels';
 
 const CLI_UNSUPPORTED_VERB: Record<OptionalHttpCapability, string> = {
 	embed: 'generate embeddings',
 	extractImage: 'extract image metadata',
+	describeImagePass: 'describe images',
 	rerank: 'rerank results',
 	describeModel: 'describe the loaded model',
 	listModels: 'list available models',
@@ -197,6 +198,22 @@ export class ProviderManager {
 		}
 		const client = this.requireCapability(provider, 'extractImage', 'image extraction');
 		return await client.extractImage(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType);
+	}
+
+	// WP-1's two-pass description call (`docs/multimodal-image-search.md`, Decision 2): one call
+	// per pass ('narrative' | 'extraction'), each stored as its own chunk by WP-2 rather than
+	// concatenated — see the prompt constants' own comment for why. Gated the same way as
+	// extractImageMetadata just above: requireCapability on the client method, not on a
+	// ProviderModelCapability check — capability *presence* is an HTTP-client concern, capability
+	// *selection* (which model the user picked for this) is the settings UI's job, same division
+	// extractImageMetadata already draws.
+	async describeImage(provider: Provider, modelId: string, imageBytes: ArrayBuffer, mimeType: string, pass: 'narrative' | 'extraction'): Promise<string> {
+		if (!modelId) {
+			throw new Error(`No image description model selected for provider "${provider.name || provider.id}"`);
+		}
+		const client = this.requireCapability(provider, 'describeImagePass', 'image description');
+		const prompt = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_PROMPT : IMAGE_DESCRIPTION_EXTRACTION_PROMPT;
+		return await client.describeImagePass(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType, prompt);
 	}
 
 	// WP-5: rerank has two backends. Primary is the provider's native rerank() (currently only

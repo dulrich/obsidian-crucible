@@ -30,6 +30,11 @@ export interface HttpProviderClient {
 	complete(ctx: HttpCallContext, system: string, user: string): Promise<ProviderCompletionResult>;
 	embed?(ctx: HttpCallContext, inputs: string[]): Promise<ProviderEmbeddingResult>;
 	extractImage?(ctx: HttpCallContext, base64: string, mimeType: string): Promise<ProviderImageExtractionResult>;
+	// The two-pass image description call (narrative / extraction — see IMAGE_DESCRIPTION_*_PROMPT
+	// above). Takes the already-resolved prompt text rather than a 'narrative'|'extraction' literal
+	// so this layer stays a dumb HTTP call; ProviderManager.describeImage (src/providers.ts) picks
+	// the prompt. Plain string result — no JSON envelope, unlike extractImage.
+	describeImagePass?(ctx: HttpCallContext, base64: string, mimeType: string, prompt: string): Promise<string>;
 	rerank?(ctx: HttpCallContext, query: string, documents: string[]): Promise<ProviderRerankResult>;
 	// Asks the running server what it actually loaded for ctx.modelId, rather than trusting the
 	// requested id/settings string. See ProviderModelDescription (src/types.ts) for what each
@@ -50,6 +55,15 @@ export const IMAGE_EXTRACTION_SYSTEM_PROMPT = [
 ].join('\n');
 
 export const IMAGE_EXTRACTION_USER_PROMPT = 'Describe this image and extract any visible text, including text in charts, infographics, screenshots, tables, and diagrams.';
+
+// Two-pass image description prompts (`docs/multimodal-image-search.md`, Decision 2 — stored as
+// two separate chunks rather than one concatenation, because a focused narrative paragraph and a
+// long transcribed table have different shapes and should compete independently in bm25/vector
+// scoring). Plain-text output: this is a retrieval surface, not a citation source, so no JSON
+// envelope — unlike IMAGE_EXTRACTION_*_PROMPT above, which asks for structured JSON.
+export const IMAGE_DESCRIPTION_NARRATIVE_PROMPT = 'In one dense paragraph, describe what this image is (chart, diagram, photo, table, screenshot, etc.), its title or subject, and the trend or point it makes. Plain prose only, no JSON, no markdown formatting.';
+
+export const IMAGE_DESCRIPTION_EXTRACTION_PROMPT = 'Transcribe this image as structured plain text: its title, subtitle, axis labels and ranges, series names, data values, annotations, table content, and component labels, in that order where present. Plain text only, no JSON, no markdown formatting.';
 
 export function normalizeRawFinishReason(reason: unknown): string | undefined {
 	if (typeof reason !== 'string') return undefined;
