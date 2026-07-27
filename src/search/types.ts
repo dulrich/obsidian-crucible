@@ -271,6 +271,22 @@ export interface SearchFileState {
 	embeddingSpace?: string;
 }
 
+/**
+ * Which ranking the companion should apply to this request. Two candidate directions from the
+ * WP-4 quality diagnosis, implemented behind this flag so a bake-off can measure them against
+ * each other before either becomes the default:
+ *
+ * - `current` — the shipped ranking (strict per-chunk AND, loose-OR only as a zero-hit rescue).
+ * - `blend` — always run the loose-OR fallback too and union its pooled rows into the pool.
+ * - `coverage` — add a document-level term-coverage leg as a fourth RRF-fused rank.
+ * - `blend+coverage` — both.
+ *
+ * Omitting the field means `current`, so a plugin that never sets it gets exactly today's
+ * behavior; the companion answers a *present but unrecognized* value with a 400 rather than
+ * quietly ranking by something other than what was asked for.
+ */
+export type SearchRankingMode = 'current' | 'blend' | 'coverage' | 'blend+coverage';
+
 export interface SearchQueryOptions {
 	query: string;
 	limit: number;
@@ -281,5 +297,11 @@ export interface SearchQueryOptions {
 	 * rather than scoring across spaces. Omitted when there is no query embedding to place.
 	 */
 	embeddingSpace?: string;
+	/**
+	 * Opt out of the companion's default ranking for this one request. Left undefined by every
+	 * plugin call site today — the field is not sent at all then, so no companion behavior
+	 * changes — and set only by measurement harnesses until a bake-off picks a winner.
+	 */
+	rankingMode?: SearchRankingMode;
 	filters?: Record<string, unknown>;
 }

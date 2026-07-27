@@ -7,6 +7,7 @@
 // test ever touches the live companion on 127.0.0.1:4801.
 import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -15,14 +16,21 @@ import { pathToFileURL } from 'node:url';
 import esbuild from 'esbuild';
 
 import {
+	COVERAGE_MIN_TERMS,
+	DEFAULT_RANKING_MODE,
+	RANKING_MODES,
 	SCHEMA_VERSION,
+	blendPooledRows,
 	buildFtsQuery,
+	createRequestHandler,
 	createSchema,
 	createVectorBackend,
 	fuseSearchRows,
 	migrateChunksPrimaryKey,
 	migrateFtsRowidPinning,
 	migrateFtsSchema,
+	parseRankingMode,
+	rankingModeFlags,
 	runSearch,
 	titleMatchScore,
 	tokenizeQuery,
@@ -65,6 +73,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`);
 
 function search(db, query, limit = 10) {
 	return runSearch(db, { vaultId: VAULT, query, limit, vectors: vectorsFor(db) });
+}
+
+// The same call with a ranking mode named explicitly. `search()` above deliberately never
+// passes the field at all — that is the unflagged path every plugin call site takes, and the
+// byte-identity test below is exactly the comparison between the two.
+function searchMode(db, query, rankingMode, limit = 10) {
+	return runSearch(db, { vaultId: VAULT, query, limit, rankingMode, vectors: vectorsFor(db) });
 }
 
 test('title match outranks a body match for the same term', () => {
@@ -225,6 +240,240 @@ test('titleMatchScore ranks exact over prefix over substring over partial', () =
 	assert.equal(none, 0);
 	// Path-shaped tokens normalize the same way on both sides.
 	assert.equal(titleMatchScore(['widget.md'], { title: 'Widget md', path: 'a/Widget.md' }), 1);
+});
+
+// ---------------------------------------------------------------------------------------
+// Ranking modes (`rankingMode`): the two candidate directions from the WP-4 quality
+// diagnosis, behind a per-request flag. `'current'` is the default and must stay exactly
+// today's behavior — the bake-off, not this WP, decides whether the default moves.
+// ---------------------------------------------------------------------------------------
+
+// The fixture the WP-4 report specified: a target whose query terms are split across two of
+// its own chunks so that NO single chunk satisfies the strict AND, plus a decoy that does
+// satisfy it in one chunk (which is what starves the zero-hit loose-OR rescue at vault
+// scale), plus a one-term-only note that must not be dragged in by the coverage floor.
+const SPLIT_TERMS_QUERY = 'matt pocock context skills';
+function makeSplitTermsDb() {
+	return makeDb([
+		{ id: 't1', path: 'Target.md', title: 'Killing the bloat', heading: 'Intro', text: 'matt pocock walks through the whole approach here' },
+		{ id: 't2', path: 'Target.md', title: 'Killing the bloat', heading: 'Measure', text: 'measure the context window, then prune the skills you never load' },
+		{ id: 'd1', path: 'Decoy.md', title: 'Unrelated roundup', heading: 'Links', text: 'matt pocock context skills all name-dropped in one throwaway paragraph' },
+		{ id: 'c1', path: 'Common.md', title: 'Onboarding', heading: '', text: 'skills are listed here and nothing else from the query is' },
+	]);
+}
+
+test('current mode is the default, and naming it explicitly changes nothing', () => {
+	// Three shapes at once: a plain multi-term hit, a query that trips the zero-hit loose-OR
+	// rescue, and the split-terms fixture the new modes exist for.
+	for (const query of [SPLIT_TERMS_QUERY, 'matt pocock', 'pocock onboarding', 'skills']) {
+		const unflagged = search(makeSplitTermsDb(), query);
+		const explicit = searchMode(makeSplitTermsDb(), query, 'current');
+		assert.equal(explicit.rankingMode, DEFAULT_RANKING_MODE);
+		assert.equal(explicit.match, unflagged.match, `match must not move for "${query}"`);
+		assert.equal(explicit.fallbackUsed, unflagged.fallbackUsed);
+		assert.equal(explicit.total, unflagged.total);
+		// Identical result set AND ordering, down to every attribution field — JSON.stringify
+		// so an added/reordered key fails here rather than surviving a deepEqual.
+		assert.equal(JSON.stringify(explicit.results), JSON.stringify(unflagged.results));
+		// No coverage leg ran, so its two attribution keys must be absent entirely (the
+		// `scoreVector` "omitted, not 0" rule), leaving the payload exactly what it has been.
+		for (const row of unflagged.results) {
+			assert.deepEqual(Object.keys(row.attribution), ['base', 'textRank', 'titleRank', 'titleBoost', 'vectorRank', 'rrf', 'pooledChunks']);
+			assert.equal(row.scoreVector, undefined);
+		}
+	}
+	// And the bug itself, pinned: under `current` the target is unreachable because no single
+	// chunk satisfies the AND, while the decoy coincidentally does — so the rescue never fires.
+	const outcome = search(makeSplitTermsDb(), SPLIT_TERMS_QUERY);
+	assert.equal(outcome.fallbackUsed, false);
+	assert.deepEqual(outcome.results.map(row => row.path), ['Decoy.md']);
+});
+
+test('blend mode unions the loose-OR pool in, and the strict-AND rows keep the head of the text leg', () => {
+	const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'blend');
+	const paths = outcome.results.map(row => row.path);
+	assert.ok(paths.includes('Target.md'), 'the split-terms target must be reachable under blend');
+	assert.ok(paths.includes('Decoy.md'), 'the strict-AND decoy must still rank, not be displaced');
+	// `match` still reports the primary — the strict AND is what ran first and gates the head
+	// of the pool — with the loose-OR form reported separately rather than overwriting it.
+	assert.equal(outcome.match, buildFtsQuery(SPLIT_TERMS_QUERY).primary);
+	assert.equal(outcome.matchFallback, buildFtsQuery(SPLIT_TERMS_QUERY).fallback);
+	// `fallbackUsed` reports contribution, not merely "the second query ran": under blend it
+	// always runs, so "it ran" would be true on every multi-term search and say nothing.
+	assert.equal(outcome.fallbackUsed, true);
+	// The decoy matched the strict AND, so it holds textRank 1; every blended-in row sits
+	// behind the strict matches on the text leg rather than being merge-sorted among them.
+	const decoy = outcome.results.find(row => row.path === 'Decoy.md');
+	const target = outcome.results.find(row => row.path === 'Target.md');
+	assert.equal(decoy.attribution.textRank, 1);
+	assert.ok(target.attribution.textRank > 1);
+	// The loose-OR match set is a superset of the strict one, so `total` is the OR's own
+	// distinct-path count — all three notes, counted once each.
+	assert.equal(outcome.total, 3);
+});
+
+test('blend leaves a query the strict AND already answers alone', () => {
+	const db = makeSplitTermsDb();
+	// Both terms live in one chunk of the decoy and one of the target's, so the AND matches and
+	// the OR adds only Common.md — the head of the ranking must not move.
+	const current = searchMode(db, 'matt pocock', 'current');
+	const blended = searchMode(db, 'matt pocock', 'blend');
+	assert.equal(current.results[0].path, blended.results[0].path);
+	assert.equal(blended.results[0].attribution.textRank, 1);
+	// A single-term query's AND clause *is* that term, so the loose-OR form matches exactly the
+	// same set: blend is inert by construction and must not pay for a second FTS scan.
+	const single = searchMode(db, 'skills', 'blend');
+	assert.equal(single.matchFallback, null);
+	assert.equal(single.fallbackUsed, false);
+	assert.equal(JSON.stringify(single.results), JSON.stringify(searchMode(db, 'skills', 'current').results));
+});
+
+test('coverage mode rescues a document whose terms are split across its own chunks', () => {
+	const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'coverage');
+	const paths = outcome.results.map(row => row.path);
+	assert.ok(paths.includes('Target.md'), 'the split-terms target must be reachable under coverage');
+	assert.ok(paths.includes('Decoy.md'), 'the strict-AND decoy must still rank, not be excluded');
+	assert.equal(outcome.coverageUsed, true);
+	// The FTS clause is untouched: the strict AND is still the only thing that fills the bm25
+	// pool, which is why the target arrives with no text rank at all — exactly like a
+	// vector-only hit. The coverage leg adds a rank, it does not loosen the match.
+	assert.equal(outcome.match, buildFtsQuery(SPLIT_TERMS_QUERY).primary);
+	assert.equal(outcome.fallbackUsed, false);
+	const target = outcome.results.find(row => row.path === 'Target.md');
+	assert.equal(target.attribution.textRank, null);
+	assert.ok(target.attribution.coverageRank > 0);
+	// All four query terms appear somewhere in the target, just never together in one chunk.
+	assert.equal(target.attribution.coverageScore, 1);
+	assert.ok(target.snippet.length > 0, 'a coverage-only row is hydrated with a text snippet');
+	// The one-term note stays out: one term is not coverage, it is what bm25 already ranks.
+	assert.equal(paths.includes('Common.md'), false);
+	assert.equal(COVERAGE_MIN_TERMS, 2);
+});
+
+test('blend+coverage applies both, and every mode keeps the decoy ranked', () => {
+	const reachable = {};
+	for (const mode of ['blend', 'coverage', 'blend+coverage']) {
+		const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, mode);
+		reachable[mode] = outcome.results.map(row => row.path);
+		assert.ok(reachable[mode].includes('Target.md'), `${mode} must reach the split-terms target`);
+		assert.ok(reachable[mode].includes('Decoy.md'), `${mode} must keep the strict-AND decoy`);
+	}
+	const both = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'blend+coverage');
+	assert.equal(both.fallbackUsed, true);
+	assert.equal(both.coverageUsed, true);
+	assert.equal(both.matchFallback, buildFtsQuery(SPLIT_TERMS_QUERY).fallback);
+	// Under blend the target is already in the bm25 pool, so coverage scores it in place
+	// rather than hydrating a second row for it — one path, one entry, never two.
+	assert.equal(both.results.filter(row => row.path === 'Target.md').length, 1);
+	const target = both.results.find(row => row.path === 'Target.md');
+	assert.ok(target.attribution.textRank > 0);
+	assert.equal(target.attribution.coverageScore, 1);
+});
+
+test('the coverage leg is inert below two terms and reports nothing when it does not run', () => {
+	const db = makeSplitTermsDb();
+	const single = searchMode(db, 'skills', 'coverage');
+	assert.equal(single.coverageUsed, false);
+	// Not merely "no rows": with no coverage list, the attribution keys are absent entirely, so
+	// a mode that could not contribute is indistinguishable in payload from one that never ran.
+	for (const row of single.results) assert.equal(Object.hasOwn(row.attribution, 'coverageRank'), false);
+	assert.equal(JSON.stringify(single.results), JSON.stringify(searchMode(db, 'skills', 'current').results));
+});
+
+test('rankingMode parsing: absent means current, unknown is a 400, not a silent degrade', () => {
+	assert.deepEqual([...RANKING_MODES], ['current', 'blend', 'coverage', 'blend+coverage']);
+	assert.equal(parseRankingMode(undefined), 'current');
+	assert.equal(parseRankingMode(null), 'current');
+	assert.equal(parseRankingMode(''), 'current');
+	assert.equal(parseRankingMode('BLEND'), 'blend');
+	assert.equal(parseRankingMode(' blend+coverage '), 'blend+coverage');
+	// A typo in a bake-off harness must fail loudly: silently measuring the default four times
+	// is indistinguishable from a real null result, which is the one outcome this flag exists
+	// to avoid. 400 (not 500) because the client maps 5xx to "companion unreachable".
+	assert.throws(() => parseRankingMode('blended'), error => error.status === 400 && /unknown rankingMode/.test(error.message));
+	// The flag decomposes into two independent switches — that is what makes the four modes a
+	// clean 2x2 for the bake-off rather than four unrelated code paths.
+	assert.deepEqual(rankingModeFlags('current'), { mode: 'current', blend: false, coverage: false });
+	assert.deepEqual(rankingModeFlags('blend'), { mode: 'blend', blend: true, coverage: false });
+	assert.deepEqual(rankingModeFlags('coverage'), { mode: 'coverage', blend: false, coverage: true });
+	assert.deepEqual(rankingModeFlags('blend+coverage'), { mode: 'blend+coverage', blend: true, coverage: true });
+});
+
+// The HTTP surface, over an ephemeral loopback port and a throwaway in-memory database — the
+// live companion on 4801 is never touched. This is the only place `parseRankingMode` is wired
+// in, so a mode that works through `runSearch` but is dropped by the handler would pass every
+// test above and still ship inert.
+async function withSearchServer(db, fn) {
+	const server = createServer(createRequestHandler(db));
+	await new Promise(listening => server.listen(0, '127.0.0.1', listening));
+	const base = `http://127.0.0.1:${server.address().port}`;
+	const post = async body => {
+		const response = await fetch(`${base}/v1/search`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+		});
+		return { status: response.status, json: await response.json() };
+	};
+	try {
+		return await fn(post);
+	} finally {
+		await new Promise(closed => server.close(closed));
+	}
+}
+
+test('POST /v1/search carries rankingMode through, and a 200 default response keeps its exact shape', async () => {
+	await withSearchServer(makeSplitTermsDb(), async post => {
+		const base = { vaultId: VAULT, query: SPLIT_TERMS_QUERY, limit: 10 };
+
+		const unflagged = await post(base);
+		assert.equal(unflagged.status, 200);
+		assert.deepEqual(unflagged.json.results.map(row => row.path), ['Decoy.md']);
+		// The default response gains no keys: `rankingMode`, `coverageUsed` and `matchFallback`
+		// exist only for a caller who opted out of the default.
+		assert.deepEqual(Object.keys(unflagged.json), ['mode', 'semanticAvailable', 'schemaVersion', 'match', 'fallbackUsed', 'total', 'hasMore', 'results']);
+
+		const explicit = await post({ ...base, rankingMode: 'current' });
+		assert.equal(explicit.status, 200);
+		assert.equal(explicit.json.rankingMode, undefined, 'naming the default must not change the payload either');
+		assert.equal(JSON.stringify(explicit.json), JSON.stringify(unflagged.json));
+
+		for (const mode of ['blend', 'coverage', 'blend+coverage']) {
+			const outcome = await post({ ...base, rankingMode: mode });
+			assert.equal(outcome.status, 200);
+			assert.equal(outcome.json.rankingMode, mode);
+			const paths = outcome.json.results.map(row => row.path);
+			assert.ok(paths.includes('Target.md'), `${mode} must reach the target over HTTP too`);
+			assert.ok(paths.includes('Decoy.md'), `${mode} must keep the decoy over HTTP too`);
+		}
+
+		// A typo is a 4xx the caller can fix, never a 5xx — the client maps every 5xx to
+		// "the companion is not reachable" and would send the user to restart a healthy one.
+		const bad = await post({ ...base, rankingMode: 'blended' });
+		assert.equal(bad.status, 400);
+		assert.match(bad.json.error, /unknown rankingMode/);
+	});
+});
+
+test('blendPooledRows keeps the primary row for a path both queries returned', () => {
+	const primary = [
+		{ path: 'A.md', score_text: -9, from: 'primary' },
+		{ path: 'B.md', score_text: -8, from: 'primary' },
+	];
+	const fallback = [
+		{ path: 'B.md', score_text: -30, from: 'fallback' },
+		{ path: 'C.md', score_text: -2, from: 'fallback' },
+	];
+	const blended = blendPooledRows(primary, fallback);
+	assert.deepEqual(blended.rows.map(row => row.path), ['A.md', 'B.md', 'C.md']);
+	// B came back from both; the primary row wins because its bm25 reflects a real strict
+	// match, and the two scores are not comparable across different MATCH expressions anyway.
+	assert.equal(blended.rows[1].from, 'primary');
+	assert.equal(blended.added, 1);
+	// Nothing new to add is not a blend: the array is returned untouched.
+	const nothing = blendPooledRows(primary, [{ path: 'A.md', from: 'fallback' }]);
+	assert.equal(nothing.added, 0);
+	assert.equal(nothing.rows, primary);
 });
 
 test('a schema-1 index migrates to the prefix FTS table, the embedding columns, and the composite key', () => {
