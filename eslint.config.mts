@@ -35,5 +35,10 @@ export default tseslint.config(
 		// without this, ESLint lints every live worktree and the gate goes red on files
 		// that aren't part of the working tree at all.
 		".claude/**",
+		// `runs/` is gitignored scratch (dispatch briefs, reports, one-off diagnostic
+		// scripts). A stray `.mjs` dropped there by a worker must not be able to redden the
+		// repo lint gate — the gate is for the working tree, not for scratch that will never
+		// be committed.
+		"runs/**",
 	]),
 );
