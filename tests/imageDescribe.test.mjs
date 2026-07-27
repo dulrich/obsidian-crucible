@@ -54,6 +54,7 @@ const {
 	referencingNotePaths,
 	resolveNoteImages,
 	shouldEnqueueImageDescribe,
+	withTimeout,
 } = await import(pathToFileURL(outfile).href);
 
 const TFile = globalThis.__ObsTFile;
@@ -104,8 +105,23 @@ function createFakeProviderManager() {
 	};
 }
 
-function createFakePlugin({ files = new Map(), storeSeed = new Map() } = {}) {
-	const providerManager = createFakeProviderManager();
+// idh-WP-1: a provider manager whose describeImage rejects whenever `shouldFail(pass, bytes)`
+// returns true — used to drive per-image failure isolation without waiting on a real
+// `IMAGE_DESCRIBE_PASS_TIMEOUT_MS` timer (a provider throw and a `withTimeout` rejection are
+// indistinguishable to `describeOneImage`'s catch, so this exercises the same code path).
+function createFailingProviderManager(shouldFail, failureMessage = 'model exploded') {
+	const calls = [];
+	return {
+		calls,
+		async describeImage(provider, modelId, bytes, mime, pass) {
+			calls.push({ providerId: provider.id, modelId, mime, pass, byteLength: bytes.byteLength });
+			if (shouldFail(pass, bytes)) throw new Error(failureMessage);
+			return `${pass}-description`;
+		},
+	};
+}
+
+function createFakePlugin({ files = new Map(), storeSeed = new Map(), providerManager = createFakeProviderManager() } = {}) {
 	const noteLocks = createFakeNoteLocks();
 	const imageDescriptions = createFakeStore(storeSeed);
 	const vault = {
@@ -151,7 +167,7 @@ test('describeMd5Images: an already-described md5 is skipped before any vault re
 
 	const result = await describeMd5Images(plugin, provider, 'model-1', [image]);
 
-	assert.deepEqual(result, { describedCount: 0, skippedCount: 1, missingCount: 0 });
+	assert.deepEqual(result, { describedCount: 0, skippedCount: 1, missingCount: 0, failedCount: 0 });
 	assert.equal(plugin.providerManager.calls.length, 0);
 });
 
@@ -184,7 +200,7 @@ test('describeMd5Images: a missing vault file is counted as missing, not describ
 
 	const result = await describeMd5Images(plugin, provider, 'model-1', [image]);
 
-	assert.deepEqual(result, { describedCount: 0, skippedCount: 0, missingCount: 1 });
+	assert.deepEqual(result, { describedCount: 0, skippedCount: 0, missingCount: 1, failedCount: 0 });
 	assert.equal(plugin.providerManager.calls.length, 0);
 });
 
@@ -230,6 +246,120 @@ test('describeMd5Images: an already-aborted signal stops before the first image 
 
 	await assert.rejects(() => describeMd5Images(plugin, provider, 'model-1', [image], { signal: controller.signal }));
 	assert.equal(plugin.providerManager.calls.length, 0);
+});
+
+// ── withTimeout ──────────────────────────────────────────────────────────────
+
+test('withTimeout: rejects with a labeled message once ms elapses, without waiting on the original promise', async () => {
+	const start = Date.now();
+	let lateSettled = false;
+	const neverInTime = new Promise(resolve => setTimeout(() => { lateSettled = true; resolve('too late'); }, 100));
+
+	await assert.rejects(
+		() => withTimeout(neverInTime, 20, 'slow op'),
+		(err) => {
+			assert.match(err.message, /slow op timed out after 20ms/);
+			return true;
+		},
+	);
+	assert.ok(Date.now() - start < 100, 'rejects at the timeout, not when the original promise eventually settles');
+	assert.equal(lateSettled, false, 'the original promise has not resolved yet at the moment withTimeout rejects');
+
+	// Let the original promise settle in the background. If withTimeout failed to attach a
+	// handler to it, this would surface as an unhandled promise rejection / fail the test file —
+	// there is nothing else to assert here except that the process stays healthy.
+	await new Promise(resolve => setTimeout(resolve, 100));
+	assert.equal(lateSettled, true);
+});
+
+test('withTimeout: resolves normally when the promise settles before ms elapses', async () => {
+	const fast = new Promise(resolve => setTimeout(() => resolve('done'), 5));
+	assert.equal(await withTimeout(fast, 1000, 'fast op'), 'done');
+});
+
+test('withTimeout: propagates the original promise\'s rejection when it rejects before ms elapses', async () => {
+	const fails = new Promise((_resolve, reject) => setTimeout(() => reject(new Error('boom')), 5));
+	await assert.rejects(() => withTimeout(fails, 1000, 'fast op'), /boom/);
+});
+
+// ── describeMd5Images: per-image failure isolation ──────────────────────────
+
+test('describeMd5Images: a provider failure on one image writes a kind:\'failed\' record and the loop continues to describe the next image', async () => {
+	const poisonBytes = new Uint8Array([9, 9]).buffer; // byteLength 2, distinguishes from the healthy image below
+	const okBytes = new Uint8Array([1, 2, 3]).buffer; // byteLength 3
+	const files = new Map([
+		['a/poison_MD5.png', { bytes: poisonBytes }],
+		['a/ok_MD5.png', { bytes: okBytes }],
+	]);
+	const providerManager = createFailingProviderManager((pass, bytes) => bytes.byteLength === 2, 'model exploded on this image');
+	const plugin = createFakePlugin({ files, providerManager });
+	const images = [
+		{ path: 'a/poison_MD5.png', md5: 'poison', ext: 'png' },
+		{ path: 'a/ok_MD5.png', md5: 'ok', ext: 'png' },
+	];
+
+	const result = await describeMd5Images(plugin, provider, 'model-1', images);
+
+	// The loop isolated the poison image and still described the healthy one — a failed file job
+	// mid-batch never propagates and aborts the remaining images (`FileJobBackend.ts`: failed jobs
+	// move to `failed/` and are never retried, which is exactly why this isolation is required).
+	assert.deepEqual(result, { describedCount: 1, skippedCount: 0, missingCount: 0, failedCount: 1 });
+
+	const failedRecord = plugin.imageDescriptions.map.get('poison');
+	assert.equal(failedRecord.kind, 'failed');
+	assert.equal(failedRecord.narrative, '');
+	assert.equal(failedRecord.extraction, '');
+	assert.match(failedRecord.failure, /model exploded on this image/);
+
+	const okRecord = plugin.imageDescriptions.map.get('ok');
+	assert.equal(okRecord.kind, 'vision');
+
+	// The skip-if-has check keeps skipping a failed record on a later run — has() is true, no
+	// special case needed.
+	assert.equal(plugin.imageDescriptions.has('poison'), true);
+});
+
+test('describeMd5Images: a transcode failure also writes a kind:\'failed\' record rather than throwing out of the loop', async (t) => {
+	const originalOffscreenCanvas = globalThis.OffscreenCanvas;
+	const originalCreateImageBitmap = globalThis.createImageBitmap;
+	t.after(() => {
+		globalThis.OffscreenCanvas = originalOffscreenCanvas;
+		globalThis.createImageBitmap = originalCreateImageBitmap;
+	});
+	globalThis.createImageBitmap = async () => ({ width: 2, height: 2 });
+	globalThis.OffscreenCanvas = class {
+		getContext() { return { drawImage() {} }; }
+		async convertToBlob() { throw new Error('canvas exploded'); }
+	};
+
+	const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
+	const files = new Map([['a/badwebp_MD5.webp', { bytes }]]);
+	const plugin = createFakePlugin({ files });
+	const image = { path: 'a/badwebp_MD5.webp', md5: 'bad-webp', ext: 'webp' };
+
+	const result = await describeMd5Images(plugin, provider, 'model-1', [image]);
+
+	assert.deepEqual(result, { describedCount: 0, skippedCount: 0, missingCount: 0, failedCount: 1 });
+	assert.equal(plugin.providerManager.calls.length, 0, 'the provider is never reached once transcode fails');
+	const record = plugin.imageDescriptions.map.get('bad-webp');
+	assert.equal(record.kind, 'failed');
+	assert.match(record.failure, /canvas exploded/);
+});
+
+test('describeMd5Images: a long failure message is truncated in the stored record', async () => {
+	const bytes = new Uint8Array([1, 2]).buffer;
+	const files = new Map([['a/verbose_MD5.png', { bytes }]]);
+	const longMessage = 'x'.repeat(2000);
+	const providerManager = createFailingProviderManager(() => true, longMessage);
+	const plugin = createFakePlugin({ files, providerManager });
+	const image = { path: 'a/verbose_MD5.png', md5: 'verbose', ext: 'png' };
+
+	await describeMd5Images(plugin, provider, 'model-1', [image]);
+
+	const record = plugin.imageDescriptions.map.get('verbose');
+	assert.equal(record.kind, 'failed');
+	assert.ok(record.failure.length < longMessage.length, 'the stored failure is shorter than the raw thrown message');
+	assert.ok(record.failure.length <= 501, 'truncated to ~500 chars plus an ellipsis marker');
 });
 
 // ── shouldEnqueueImageDescribe ───────────────────────────────────────────────

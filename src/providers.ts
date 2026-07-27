@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
-import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, IMAGE_DESCRIPTION_EXTRACTION_PROMPT, IMAGE_DESCRIPTION_NARRATIVE_PROMPT, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
+import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS, IMAGE_DESCRIPTION_EXTRACTION_PROMPT, IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS, IMAGE_DESCRIPTION_NARRATIVE_PROMPT, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
 import { openAICompatibleClient } from './providers/openaiCompatible';
 import { anthropicClient } from './providers/anthropic';
 import { googleClient } from './providers/google';
@@ -213,7 +213,8 @@ export class ProviderManager {
 		}
 		const client = this.requireCapability(provider, 'describeImagePass', 'image description');
 		const prompt = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_PROMPT : IMAGE_DESCRIPTION_EXTRACTION_PROMPT;
-		return await client.describeImagePass(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType, prompt);
+		const maxTokens = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS : IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS;
+		return await client.describeImagePass(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType, prompt, maxTokens);
 	}
 
 	// WP-5: rerank has two backends. Primary is the provider's native rerank() (currently only

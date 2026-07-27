@@ -31,7 +31,13 @@ export interface ImageDescriptionRecord {
 	narrative: string;
 	/** Structured transcription: titles, axis labels, series names, values, table content. */
 	extraction: string;
-	kind: 'vision' | 'svg-text' | 'imported';
+	/**
+	 * `'failed'` (idh-WP-1) is a durable poison marker: `narrative`/`extraction` are always `''`,
+	 * and `has()` returning true for it is the point — a later run skips the poison image instead
+	 * of retrying it forever. It carries `failure`, never `providerId`/`modelId` (no successful
+	 * call happened).
+	 */
+	kind: 'vision' | 'svg-text' | 'imported' | 'failed';
 	providerId?: string;
 	modelId?: string;
 	/** ISO timestamp of when this record was written. */
@@ -39,6 +45,8 @@ export interface ImageDescriptionRecord {
 	schemaVersion: number;
 	/** Deterministic hash of `narrative + '\n' + extraction` — see the module doc. */
 	descriptionHash: string;
+	/** `kind: 'failed'` only — the thrown error's message, truncated (see `FAILURE_MESSAGE_MAX_CHARS`). */
+	failure?: string;
 }
 
 /**
@@ -63,6 +71,8 @@ export interface PutImageDescriptionInput {
 	kind: ImageDescriptionRecord['kind'];
 	providerId?: string;
 	modelId?: string;
+	/** `kind: 'failed'` only. See `ImageDescriptionRecord.failure`. */
+	failure?: string;
 }
 
 /**
@@ -91,10 +101,11 @@ function isValidRecord(value: unknown): value is ImageDescriptionRecord {
 	if (!record || typeof record !== 'object') return false;
 	if (typeof record.md5 !== 'string' || !record.md5) return false;
 	if (typeof record.narrative !== 'string' || typeof record.extraction !== 'string') return false;
-	if (record.kind !== 'vision' && record.kind !== 'svg-text' && record.kind !== 'imported') return false;
+	if (record.kind !== 'vision' && record.kind !== 'svg-text' && record.kind !== 'imported' && record.kind !== 'failed') return false;
 	if (typeof record.describedAt !== 'string') return false;
 	if (typeof record.schemaVersion !== 'number') return false;
 	if (typeof record.descriptionHash !== 'string') return false;
+	if (record.failure !== undefined && typeof record.failure !== 'string') return false;
 	return true;
 }
 
@@ -136,16 +147,23 @@ export class ImageDescriptionStore {
 	async put(input: PutImageDescriptionInput): Promise<ImageDescriptionRecord> {
 		await this.ensureLoaded();
 		const descriptionHash = fnv1a(`${input.narrative}\n${input.extraction}`);
+		// Optional fields are spread in only when actually provided, not assigned `undefined`
+		// unconditionally — `JSON.stringify` drops an `undefined`-valued key on write, so an
+		// unconditional assignment here would make the record `put()` returns (in-memory) diverge
+		// from what a later `get()` returns (round-tripped through storage) whenever the caller
+		// omits one of these. `failure` (idh-WP-1) inherits the same treatment as the pre-existing
+		// `providerId`/`modelId` fields for the same reason.
 		const record: ImageDescriptionRecord = {
 			md5: input.md5,
 			narrative: input.narrative,
 			extraction: input.extraction,
 			kind: input.kind,
-			providerId: input.providerId,
-			modelId: input.modelId,
 			describedAt: new Date().toISOString(),
 			schemaVersion: IMAGE_DESCRIPTION_SCHEMA_VERSION,
 			descriptionHash,
+			...(input.providerId !== undefined ? { providerId: input.providerId } : {}),
+			...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
+			...(input.failure !== undefined ? { failure: input.failure } : {}),
 		};
 		await this.storage.write(this.pathFor(input.md5), `${JSON.stringify(record)}\n`);
 		this.index.set(input.md5, descriptionHash);
@@ -174,6 +192,30 @@ export class ImageDescriptionStore {
 		}
 		if (lines.length === 0) return '';
 		return fnv1a(lines.join('\n'));
+	}
+
+	/**
+	 * idh-WP-1 self-heal: deletes `kind: 'vision'` records whose `extraction` exceeds
+	 * `maxExtractionChars` — the on-disk trace of a runaway generation that finished (or was cut
+	 * off by a timeout) before ever failing outright, so it never got a `kind: 'failed'` record and
+	 * still passes `has()`. Deleting it drops the md5 out of the index, so a subsequent backfill
+	 * enumeration sees it as pending again and re-describes it under the new `max_tokens` caps.
+	 * Only `vision` records are eligible — `svg-text`/`imported` extraction length is a property of
+	 * the source content, not a symptom of a runaway model call, and `failed` records already carry
+	 * no extraction to prune.
+	 */
+	async pruneDegenerate(maxExtractionChars: number): Promise<string[]> {
+		await this.ensureLoaded();
+		const pruned: string[] = [];
+		for (const md5 of [...this.index.keys()]) {
+			const record = await this.readRecord(this.pathFor(md5));
+			if (!record || record.kind !== 'vision') continue;
+			if (record.extraction.length <= maxExtractionChars) continue;
+			await this.storage.remove(this.pathFor(md5));
+			this.index.delete(md5);
+			pruned.push(md5);
+		}
+		return pruned;
 	}
 
 	private pathFor(md5: string): string {

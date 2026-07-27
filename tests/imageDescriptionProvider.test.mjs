@@ -72,7 +72,12 @@ await esbuild.build({
 	outfile: sharedOutfile,
 	logLevel: 'silent',
 });
-const { IMAGE_DESCRIPTION_NARRATIVE_PROMPT, IMAGE_DESCRIPTION_EXTRACTION_PROMPT } = await import(pathToFileURL(sharedOutfile).href);
+const {
+	IMAGE_DESCRIPTION_NARRATIVE_PROMPT,
+	IMAGE_DESCRIPTION_EXTRACTION_PROMPT,
+	IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS,
+	IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS,
+} = await import(pathToFileURL(sharedOutfile).href);
 
 const fakeSecrets = { get: async () => 'test-key' };
 const fakeApp = {};
@@ -144,6 +149,36 @@ test('describeImage: the narrative pass sends the narrative prompt, the extracti
 	assert.equal(extractionBody.messages[0].content[0].text, IMAGE_DESCRIPTION_EXTRACTION_PROMPT);
 
 	assert.notEqual(IMAGE_DESCRIPTION_NARRATIVE_PROMPT, IMAGE_DESCRIPTION_EXTRACTION_PROMPT);
+});
+
+test('describeImage: max_tokens is 512 for the narrative pass and 2048 for the extraction pass, sent unconditionally', async () => {
+	resetRequests();
+	globalThis.__providerResponder = jsonOk('text');
+
+	// idh-WP-1: max_tokens is universal on chat/completions (unlike reasoning_effort, which is
+	// gated to local providers) — a bounded worst case after a temp-0 repetition loop generated to
+	// the 32k context ceiling with no cap. Assert it on both a local and a remote provider so the
+	// "unconditional" half of that claim is actually exercised, not just assumed.
+	const localProvider = {
+		id: 'local-lmstudio', name: 'LM Studio', kind: 'openai-compatible',
+		baseUrl: 'http://127.0.0.1:1234/v1',
+		models: [{ id: 'gemma-4', label: 'gemma-4' }],
+	};
+	const remoteProvider = { id: 'openai-main', name: 'OpenAI', kind: 'openai', models: [{ id: 'gpt-4o', label: 'gpt-4o' }] };
+
+	for (const p of [localProvider, remoteProvider]) {
+		const manager = new ProviderManager(fakeApp, fakeSecrets);
+
+		await manager.describeImage(p, p.models[0].id, imageBytes, 'image/png', 'narrative');
+		const narrativeBody = JSON.parse(globalThis.__providerRequests.at(-1).body);
+		assert.equal(narrativeBody.max_tokens, IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS);
+		assert.equal(IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS, 512);
+
+		await manager.describeImage(p, p.models[0].id, imageBytes, 'image/png', 'extraction');
+		const extractionBody = JSON.parse(globalThis.__providerRequests.at(-1).body);
+		assert.equal(extractionBody.max_tokens, IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS);
+		assert.equal(IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS, 2048);
+	}
 });
 
 test('describeImage: a provider kind with no describeImagePass support fails with a precise capability error', async () => {

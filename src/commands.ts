@@ -397,7 +397,8 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 				message: 'This queues a vision-model description pass (a narrative pass and a structured-extraction pass) over '
 					+ 'every uniquely-referenced localized image not already described — roughly 4,700 images at this vault\'s '
 					+ 'current size, around 12.6 hours of local model time. It runs in the background in ~100-image batches and '
-					+ 'is safely interruptible and resumable: already-described images are skipped on any re-run.',
+					+ 'is safely interruptible and resumable: already-described images are skipped on any re-run, and images '
+					+ 'that previously failed (timed out or errored) are skipped too, not retried automatically.',
 				confirmText: 'Queue backfill',
 			}).openAndAwait();
 			if (!confirmed) return;

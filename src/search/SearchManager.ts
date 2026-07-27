@@ -510,6 +510,11 @@ export class SearchManager {
 		for (const md5 of [...md5s.keys()].sort()) {
 			const record = await store.get(md5);
 			if (!record) continue;
+			// idh-WP-1: a failure record must emit no chunks and no facet — its arrival must not
+			// move any note's contentHash. Explicit kind check rather than relying on the
+			// (also-true) empty-narrative/-extraction fields below, since the facet contract this
+			// guards is load-bearing enough to not depend on an incidental coincidence.
+			if (record.kind === 'failed') continue;
 			const narrative = record.narrative.trim();
 			const extraction = record.extraction.trim();
 			if (!narrative && !extraction) continue;
