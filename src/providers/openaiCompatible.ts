@@ -258,6 +258,52 @@ export const openAICompatibleClient: HttpProviderClient = {
 		const rawFinishReason = normalizeRawFinishReason(choice.finish_reason);
 		return parseImageExtractionResult(choice.message?.content ?? '', normalizeChatCompletionFinishReason(rawFinishReason), rawFinishReason);
 	},
+
+	// The two-pass description call behind ProviderManager.describeImage. Copies extractImage's
+	// content-part message shape (a text part + an image_url data URI part), but with a single
+	// user message (no system prompt — plain-text output needs no JSON-shape instruction) and no
+	// response parsing beyond trimming, since the prompt itself asks for plain prose/text.
+	//
+	// `reasoning_effort: 'none'` for local providers only is a correctness requirement, not a
+	// latency tweak: local gemma-4 (served via LM Studio/llama.cpp, `isLocal(ctx.provider)`)
+	// returns an EMPTY `content` on this endpoint without it — confirmed against the benched
+	// two-pass prompts. Remote providers (OpenAI, OpenRouter) must not receive the field at all,
+	// not merely have it ignored — an unrecognized field on a stricter remote API is a request
+	// shape difference this module keeps byte-identical to today's extractImage otherwise.
+	async describeImagePass(ctx, base64, mimeType, prompt): Promise<string> {
+		const headers = isOpenRouter(ctx.provider) ? { ...authHeaders(ctx), ...OPENROUTER_HEADERS } : authHeaders(ctx);
+		const body: Record<string, unknown> = {
+			model: ctx.modelId,
+			messages: [
+				{
+					role: 'user',
+					content: [
+						{ type: 'text', text: prompt },
+						{ type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } },
+					],
+				},
+			],
+			temperature: 0,
+		};
+		if (isLocal(ctx.provider)) body.reasoning_effort = 'none';
+
+		const response = await requestUrl({
+			url: `${apiBaseUrl(ctx.provider)}/chat/completions`,
+			method: 'POST',
+			headers,
+			body: JSON.stringify(body),
+			throw: false,
+		});
+
+		if (response.status !== 200) {
+			throw new Error(buildHttpErrorMessage(`${label(ctx.provider)} image description API`, response));
+		}
+
+		const data = response.json as { choices?: { message?: { content?: string } }[] };
+		const choice = data.choices?.[0];
+		if (!choice) throw new Error(`${label(ctx.provider)} image description API returned no choices`);
+		return (choice.message?.content ?? '').trim();
+	},
 };
 
 // Tries LM Studio's native `/api/v0/models` (host root, not under apiBaseUrl()'s `/v1`). Returns
