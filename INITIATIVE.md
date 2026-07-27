@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[search-quality-bakeoff-entity-facet-and-model-identity]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 ---
