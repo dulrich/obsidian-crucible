@@ -102,3 +102,49 @@ Load-bearing new assertions: embedding fields hidden without the capability and 
 6. R1/R2 scope as re-pinned this session (the remediation plan's citations drifted; the corrected pins above govern).
 
 **Total ≈ 1.55 kSLOC, ~1.14M raw tokens; ~1.13M Claude-path / ~0.95M Codex-path Opus/Sol-equivalent tokens** (model-cost.mjs: 7 dispatched WPs — six to Sonnet/Terra, WP-7 to Opus/Sol — with per-dispatch overhead; WP-8/9 direct on the orchestrator).
+
+---
+
+## Outcome (sprint close, 2026-07-26)
+
+All nine WPs closed. Landed commits (obsidian-crucible unless noted):
+
+- **WP-1** model row editor — landed (wave 1).
+- **WP-2** alias-aware describeModel — landed c34b357. **Parked gap → follow-up wave:** the
+  probe-suggestion path in `src/settings/sections/ai.ts` matches the catalog by raw id only, so
+  alias-configured rows never render the Accept row. Fix: cache `servedModel` from the describe
+  probe (`describedPrecisionByModel` is the precedent) and re-match by canonical id (~30–60 SLOC
+  + `providerModelConfigUI.test.mjs`).
+- **WP-3** throughput — stop-at-diagnosis; superseded by **WP-3b** (landed 1642b5b): rowid-keyed
+  `chunks_fts`, schema 6, live DB migrated lossless (53,019 chunks).
+- **WP-4** quality miss — stop-at-diagnosis, empirically completed post-hoc: per-chunk implicit
+  AND is the root cause; the loose-OR fallback (zero-hit-gated) starves at vault scale; the
+  vector leg does NOT rescue (real embedding: target rank 54/245, textRank null, vectorRank 70).
+  Report + addendum: `runs/dispatch/wp4-quality-miss-report.md`. **Follow-up direction (user,
+  2026-07-26): implement BOTH candidate directions and pick the winner empirically.** Same wave
+  adds the frontmatter **author/entity facet**: the chunker already parses full frontmatter
+  (`src/search/chunker.ts:84-96`) but FTS indexes only path/title/heading/text, so
+  `author: Matt Pocock` is unsearchable — an omission, not a build. Design the facet as ONE
+  entity mechanism with two sources (frontmatter now; GLiNER2 body-text extraction later — held
+  for a later pass, must stay compatible). GLiNER2 cannot be a crucible-inference alias
+  (encoder + span head, no GGUF/llama.cpp support); when it comes, it is a small CPU sibling
+  container (ONNX runtime, crucible-search shape), per the WP-7 enrichment template.
+- **WP-5** R1+R2 remediations — landed (wave 1).
+- **WP-6** chat models — landed 5cd33f4; live smoke all-green (gemma-4-12b + nemotron-4b,
+  evict/reload interleave exercised).
+- **WP-7** multimodal bench + design — landed 108cc85 (+ eval-harness b784394). gemma-4-12B
+  ships for image→text descriptions; implementation is a future sprint.
+- **WP-8** GGUF consolidation — done. **Actual home is `/home/_shared_models`** (user-created
+  sibling of `_shared_code`, superseding this plan's `/home/_shared_code/models`); 87G moved,
+  compose default repointed (context-control 6523ffc), container recreated, full smoke green
+  on the new mount.
+- **WP-9** retirement walk — done (user-executed root ops, verified): LM Studio package +
+  `~/.lmstudio` + `lms`, ollama (service/binary/store/user — its two models were redundant:
+  bge-m3 duplicate, qwen3.5 superseded by the Qwen3.6 quants; the Jul 25 pull was the ESI
+  bench arm), AnythingLLM launcher, unsloth-studio. Remaining crumb: `groupdel ollama` after
+  removing `dulrich` from the group.
+
+**Follow-up agenda beyond the next wave** (user, 2026-07-26): evaluate splitting
+crucible-inference into its own initiative repo with the plugin depending on it optionally —
+news-ingestion runs a separate embeddings + GLiNER2 setup, giving two proof points that could
+merge (and news-ingestion inherits this sprint's llama-swap learnings).
