@@ -516,15 +516,20 @@ run standalone with a bare `docker build`/`docker run` — see that page. Wiring
 into a fleet's compose file (port mapping, `/dev/dri` passthrough, `mem_limit`) is a separate,
 later, cross-repo step; see "Migration status" below for where that stands as of this guide.
 
-Crucible: **one base URL for both provider entries** —
+Crucible: **one base URL for every provider entry, including chat** —
 
 - Embedding: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `bge-m3`.
 - Rerank: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `bge-reranker-v2`.
+- Chat: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `gemma-4-12b` (or
+  `nemotron-4b` for the small/fast option) — same "Crucible Inference" provider, same host and
+  port, just a different alias/model id and the Chat capability instead of Embedding/Rerank.
 
-Both aliases are chosen to match the model ids already stored by route (c) below, specifically so
-that migrating a vault off that route onto this one is a **base-URL-only change** — repoint both
-provider entries from `4804`/`4805` to `4806` and leave the model ids alone. See Rule 2 (§4) for
-why the rerank entry no longer needs a bare, no-`/v1` base URL the way Infinity's does.
+The embedding and rerank aliases are chosen to match the model ids already stored by route (c)
+below, specifically so that migrating a vault off that route onto this one is a **base-URL-only
+change** — repoint both provider entries from `4804`/`4805` to `4806` and leave the model ids
+alone. See Rule 2 (§4) for why the rerank entry no longer needs a bare, no-`/v1` base URL the
+way Infinity's does. The chat aliases (`gemma-4-12b`, `nemotron-4b`) have no such legacy id to
+match — they're new, so they're just short and stable.
 
 What running it feels like:
 
@@ -545,20 +550,26 @@ Crucible's stored provider settings reference by id. Add new aliases freely; nev
 delete one a vault might already be pointed at, or every vault using it silently breaks (Rule 2,
 §4).
 
-**A chat model is not on this router yet.** `config.yaml` carries a commented-out `chat` group
-stub for when one joins — chat models are large enough that they need `swap: true, exclusive:
-true` (evict the group's previous member, and evict the retrieval pair too, before starting a chat
-request), a materially different policy from the `retrieval` group's "both models coexist"
-default. Whether that eviction-and-restore cycle is safe under RADV on this GPU is the one part of
-this design still untested; it is checked before the older services are retired, not assumed.
+**Chat models are configured.** `config.yaml`'s `chat` group holds `gemma-4-12b` and
+`nemotron-4b` — chat models are large enough that they need `swap: true, exclusive: true` (evict
+the group's previous member, and evict the retrieval pair too, before starting a chat request), a
+materially different policy from the `retrieval` group's "both models coexist" default. The
+eviction-and-restore *mechanics* were proven safe under RADV on this GPU at cutover (two full
+evict→reload cycles, byte-identical retrieval embeddings after each reload, no amdgpu errors);
+that test used a throwaway chat member to exercise the mechanism, not today's actual model list.
+Whether `gemma-4-12b`/`nemotron-4b` specifically load and answer correctly is checked by
+`smoke-inference.sh`'s chat-completion checks against a live reload, not assumed from the VRAM
+fit math alone (see `config.yaml`'s `chat` group comment for that math).
 
-**Migration status.** As of this guide, `docker/llamacpp-vulkan/` builds and documents this router
-(image tag `crucible-llamacpp-vulkan:b10121-swap243`), but wiring it into a fleet's compose file,
-running the smoke test against the live service, testing the chat-eviction interleave, and
-flipping Crucible's provider base URLs from `4804`/`4805` to `4806` are separate, later steps —
-not yet landed as of this writing. Until they are, route (c) below (the systemd-activated GPU
-pair) is still what a fleet built against this repo actually runs day to day; this subsection
-documents where that is headed, and its image is safe to build and run standalone in the meantime.
+**Migration status.** `docker/llamacpp-vulkan/` builds and documents this router (image tag
+`crucible-llamacpp-vulkan:b10121-swap243`). The retrieval leg (`bge-m3`/`bge-reranker-v2`) is
+**fully cut over** as of 2026-07-26: it's wired into `context-control/compose.home.yml`, both
+retrieval provider entries point at `4806`, and route (c) below (the systemd-activated GPU pair)
+is retired — see "Migration status" in `docker/llamacpp-vulkan/README.md` for the full record.
+The chat leg (`gemma-4-12b`/`nemotron-4b`) is the newer, not-yet-validated half: the config
+exists and the smoke script now checks it, but nothing has loaded or exercised either chat model
+against the live service yet, and no vault has a chat provider entry pointed at `4806` yet — that
+follows once the live smoke run passes.
 
 ### b. LM Studio
 

@@ -64,21 +64,40 @@ Bind-mounted **read-only** at `/app/config.yaml`; the Dockerfile does not `COPY`
 it (adding a model, changing a `ttl`) needs no image rebuild — only a container restart. See the
 file itself for the full annotated shape; the essentials:
 
+| Alias | Group | Role | ttl | Notes |
+|---|---|---|---|---|
+| `bge-m3` | `retrieval` | embedding | 1800s | f16, 1024d |
+| `bge-reranker-v2` | `retrieval` | rerank | 1800s | Q8_0, `/rerank` only |
+| `gemma-4-12b` | `chat` | chat | 1800s | Q4_K_M, `-c 32768`, `--jinja`; cutover-tested |
+| `nemotron-4b` | `chat` | chat | 1800s | Q4_K_M, `-c 32768`, `--jinja`; small/fast option |
+
 - **Aliases are the API surface, append-only.** `bge-m3` and `bge-reranker-v2` are the exact
   `modelId` values Crucible's live plugin settings (`data.json`) already store for the embed and
   rerank provider entries — that's what makes pointing a vault at this service a base-URL-only
   change instead of a model-id rewrite. Never rename or delete an alias once a vault may be
-  using it; only add new ones.
-- **`retrieval` group** (`swap: false, exclusive: false, persistent: false`) holds both models —
-  small enough, and used closely enough together by one search/rerank flow, that neither should
-  evict the other. `ttl: 1800` (30 min) unloads an idle model and returns its VRAM; `persistent`
-  staying `false` is what lets that `ttl` actually apply.
-- **A commented-out `chat` group stub** (`swap: true, exclusive: true`) is there for whenever a
-  chat model joins this router — see the comment in `config.yaml` for why chat needs the
-  opposite settings from retrieval, and the untested VRAM-eviction risk that implies.
-- `-b/-ub 8192`, `-ngl 99`, and the **absence** of `--pooling` are carried over verbatim from the
-  compose invocations this service replaces — don't add `--pooling` back; the GGUF metadata and
-  `--embeddings`/`--reranking` already select the right pooling.
+  using it; only add new ones. `gemma-4-12b` and `nemotron-4b` are the first two additions.
+- **`retrieval` group** (`swap: false, exclusive: false, persistent: false`) holds both retrieval
+  models — small enough, and used closely enough together by one search/rerank flow, that
+  neither should evict the other. `ttl: 1800` (30 min) unloads an idle model and returns its
+  VRAM; `persistent` staying `false` is what lets that `ttl` actually apply.
+- **`chat` group** (`swap: true, exclusive: true, persistent: false`) holds `gemma-4-12b` and
+  `nemotron-4b` — the opposite policy from `retrieval`, because a chat model is large enough
+  that it cannot safely coexist with another chat model or the retrieval pair under this GPU's
+  VRAM. `exclusive: true` means a chat request evicts `bge-m3`/`bge-reranker-v2` first; a
+  retrieval request afterward reloads without evicting the chat model. The eviction mechanics
+  were verified at cutover (two full evict→reload cycles, byte-identical embeddings, no amdgpu
+  errors); the specific model list above is new and gets the live smoke test (including the
+  chat-completion checks below) before being treated as validated in production. See
+  `config.yaml`'s `chat` group comment for the full VRAM fit math — measured host GPU VRAM,
+  per-model weight sizes, and why `gemma-4-26B-A4B`/27B/31B/35B-A3B are excluded.
+- `-b/-ub 8192`, `-ngl 99`, and the **absence** of `--pooling` on the retrieval macro are carried
+  over verbatim from the compose invocations this service replaces — don't add `--pooling` back;
+  the GGUF metadata and `--embeddings`/`--reranking` already select the right pooling. The chat
+  macro (`llama_server_chat_common`) deliberately uses smaller `-b 2048 -ub 512` (llama.cpp's own
+  defaults) instead — a large ubatch helps batch-embedding throughput but only costs VRAM for a
+  single-conversation chat decode, and that VRAM matters more here given the fit math above.
+  `--jinja` renders each chat model's own embedded GGUF chat template instead of a hardcoded
+  built-in one — required for gemma4's reasoning-style template.
 
 ## Smoke testing
 
@@ -96,8 +115,12 @@ not a script fact); `/rerank` for `bge-reranker-v2` against 3 documents returns 
 with a unique index in `[0,2]` and a numeric `relevance_score` each; `/api/v0/models` (an LM
 Studio-only endpoint llama-swap doesn't implement) fails fast — any 4xx/5xx within ~5s, not a
 hang — per the fleet's standing "an endpoint that never fails loudly can still be silently
-broken" lesson. The `ttl`-unload check is opt-in and slow (`--wait-ttl`) because the retrieval
-group's `ttl` is 1800s; without the flag it's reported as skipped, not silently omitted.
+broken" lesson; `/v1/chat/completions` for each configured chat alias (`gemma-4-12b`,
+`nemotron-4b`) with `max_tokens: 256` returns a non-empty `content` (the first request evicts
+the retrieval group, per the `chat` group's `exclusive: true`, so this check budgets a longer
+timeout for the cold spawn). The `ttl`-unload check is opt-in and slow (`--wait-ttl`) because the
+retrieval group's `ttl` is 1800s; without the flag it's reported as skipped, not silently
+omitted.
 
 Exits non-zero on any failed check.
 
@@ -201,9 +224,20 @@ that file. `docker build` fails closed on a mismatch (`sha256sum -c -`).
 
 **Cutover complete (2026-07-26).** `crucible-inference` is the live and only inference path:
 the compose service runs always-on in `context-control/compose.home.yml`, Crucible's two
-provider entries point at `127.0.0.1:4806`, and the smoke test plus the chat-evicts-retrieval
-interleave (two evict→reload cycles, byte-identical embeddings after each reload, no amdgpu
-errors) passed against the real service before anything was retired.
+retrieval provider entries point at `127.0.0.1:4806`, and the smoke test plus the
+chat-evicts-retrieval interleave (two evict→reload cycles, byte-identical embeddings after each
+reload, no amdgpu errors) passed against the real service before anything was retired. That
+interleave test used gemma-4-12B as a throwaway chat member to prove the eviction mechanics —
+`config.yaml` did not yet carry a real `chat` group.
+
+**Chat models added, not yet part of "cutover complete" above.** `config.yaml` now configures
+`gemma-4-12b` and `nemotron-4b` in a real `chat` group (see the model table and VRAM fit math
+earlier in this file); this authoring pass did not start the container, load either model, or
+touch the live service — the orchestrator reloads `crucible-inference` and runs
+`smoke-inference.sh`'s new chat-completion checks against it separately. Once that passes,
+adding a plugin-side chat provider entry (`openai-compatible`, base URL
+`http://127.0.0.1:4806/v1`, model id `gemma-4-12b` or `nemotron-4b`) is a Crucible settings
+change, not a code change.
 
 Retired in the same cutover, all recoverable from git history if ever needed:
 
