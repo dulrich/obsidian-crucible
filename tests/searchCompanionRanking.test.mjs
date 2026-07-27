@@ -20,6 +20,8 @@ import {
 	createSchema,
 	createVectorBackend,
 	fuseSearchRows,
+	migrateChunksPrimaryKey,
+	migrateFtsRowidPinning,
 	migrateFtsSchema,
 	runSearch,
 	titleMatchScore,
@@ -271,7 +273,61 @@ INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 
 	// Content is rebuilt losslessly from `chunks`, and prefix queries now work.
 	const outcome = search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['Legacy.md']);
-	assert.equal(SCHEMA_VERSION, 5);
+	// Schema 6: a schema-1 database migrates through the whole chain (PK rebuild, then FTS
+	// prefix rebuild) in one `createSchema` call, and both of those rebuilds share
+	// FTS_REFILL_SQL — so `chunks_fts.rowid` is already pinned to `chunks.rowid` by the time
+	// `createSchema` returns, with no separate rowid-pinning rebuild left to run.
+	const chunkRow = db.prepare('SELECT rowid FROM chunks WHERE id = ?').get('legacy');
+	const ftsRow = db.prepare('SELECT rowid FROM chunks_fts WHERE id = ?').get('legacy');
+	assert.equal(ftsRow.rowid, chunkRow.rowid);
+	assert.equal(migrateFtsRowidPinning(db, { alreadyRebuilt: true }), false, 'user_version was already written by createSchema, so a second pass must be a no-op');
+	assert.equal(SCHEMA_VERSION, 6);
+});
+
+test('a schema-5 index (composite key + FTS prefix already present) still gets the rowid-pinning rebuild', () => {
+	// Simulates a real pre-6 database: `chunks` already has the composite PK, `chunks_fts`
+	// already has `prefix=`, so neither migrateChunksPrimaryKey nor migrateFtsSchema's
+	// structural triggers fire — the gap this test guards is exactly the one those two
+	// migrations cannot see, because FTS5 leaves no schema-text trace of rowid pinning.
+	const db = new DatabaseSync(':memory:');
+	db.exec(`
+CREATE TABLE chunks (
+  id TEXT NOT NULL, vault_id TEXT NOT NULL, path TEXT NOT NULL,
+  content_hash TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, heading TEXT NOT NULL,
+  text TEXT NOT NULL, mtime INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+  metadata_json TEXT NOT NULL, embedding BLOB, embedding_dim INTEGER, embedding_model TEXT,
+  embedding_space TEXT,
+  PRIMARY KEY (vault_id, id)
+);
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+  id UNINDEXED, vault_id UNINDEXED, path UNINDEXED, title, heading, text, prefix='2 3'
+);
+-- An extra, permanent row before 'a', not deleted, so 'a' lands at chunks.rowid 2 while its
+-- chunks_fts counterpart (inserted alone, below) auto-assigns rowid 1 — a genuine mismatch to
+-- migrate, not a coincidental match because each table happens to hold exactly one row.
+-- (A delete-then-reinsert does NOT produce this: SQLite reassigns rowid 1 to the next insert
+-- once a rowid table is emptied, which is not the scenario a live, populated index is in.)
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json)
+  VALUES ('sibling', '${VAULT}', 'Sibling.md', 'hash', 'Sibling', '', 'unrelated content', 0, 0, '{}');
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json)
+  VALUES ('a', '${VAULT}', 'A.md', 'hash', 'A', '', 'kubernetes deployment', 0, 0, '{}');
+INSERT INTO chunks_fts (id, vault_id, path, title, heading, text)
+  VALUES ('a', '${VAULT}', 'A.md', 'A', '', 'kubernetes deployment');
+`);
+	const beforeChunkRow = db.prepare('SELECT rowid FROM chunks WHERE id = ?').get('a');
+	const beforeFtsRow = db.prepare('SELECT rowid FROM chunks_fts WHERE id = ?').get('a');
+	assert.equal(beforeChunkRow.rowid, 2);
+	assert.notEqual(beforeFtsRow.rowid, beforeChunkRow.rowid, 'fixture must start genuinely unpinned');
+	assert.equal(migrateChunksPrimaryKey(db), false, 'PK already composite; must not re-trigger');
+	assert.equal(migrateFtsSchema(db), false, 'prefix already present; must not re-trigger');
+	assert.equal(createSchema(db), true, 'the rowid-pinning migration must still run');
+	assert.equal(createSchema(db), false, 'and must be a no-op on the next startup');
+	const chunkRow = db.prepare('SELECT rowid FROM chunks WHERE id = ?').get('a');
+	const ftsRow = db.prepare('SELECT rowid FROM chunks_fts WHERE id = ?').get('a');
+	assert.equal(ftsRow.rowid, chunkRow.rowid);
+	// Searchability survived the rebuild.
+	const outcome = search(db, 'kubern');
+	assert.deepEqual(outcome.results.map(row => row.path), ['A.md']);
 });
 
 // End-to-end sign check: a companion payload run through the real client normalizer must
