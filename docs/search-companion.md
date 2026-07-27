@@ -111,7 +111,7 @@ one model each, in two pairs:
 
 | Service | Port | Models | Purpose |
 |---|---|---|---|
-| `inference-engine-llama` | `127.0.0.1:4806` (permanent alias; `4811` canonical once free) | `bge-m3` f16 · `bge-reranker-v2` Q8_0 · `gemma-4-12b` · `nemotron-4b` | One llama-swap router: `POST /v1/embeddings`, `/rerank`, `/v1/chat/completions` |
+| `inference-engine-llama` | `127.0.0.1:4811` | `bge-m3` f16 · `bge-reranker-v2` Q8_0 · `gemma-4-12b` · `nemotron-4b` | One llama-swap router: `POST /v1/embeddings`, `/rerank`, `/v1/chat/completions` |
 
 One always-on `llama-swap` process spawns/unloads `llama-server` children per model on demand
 (`ttl`-based). It replaced the whole earlier apparatus at the 2026-07-26 cutover — the Infinity
