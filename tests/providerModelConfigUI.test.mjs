@@ -10,6 +10,7 @@
 // test that doesn't have to bundle the settings pane or stub Obsidian's suggest/DOM machinery to
 // reach it.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -649,4 +650,89 @@ test('probeEmbeddingDimensions throws (never silently no-ops) on an empty/missin
 	await assert.rejects(() => probeEmbeddingDimensions(async () => ({ embeddings: [] }), m, state));
 	await assert.rejects(() => probeEmbeddingDimensions(async () => ({ embeddings: [[]] }), m, state));
 	assert.equal(m.embeddingDimensions, undefined, 'a failed probe must not have written anything');
+});
+
+// ── WP-5 — alias-catalog Accept-row glue ──────────────────────────────────────────────────────
+//
+// `resolveModelCatalogEntry` and the render-time wiring around it live in
+// src/settings/sections/ai.ts, which this file deliberately does not bundle — same call as
+// tests/searchRerankAffordance.test.mjs's for src/search/SearchModal.ts's settings-deep-link
+// plumbing: ai.ts's exported `renderAiSettings` transitively reaches the real
+// src/suggesters.ts/src/agents.ts/src/providers.ts/src/settings/shared.ts/bind.ts import graph
+// (each pulling further real Obsidian values), so stubbing enough of 'obsidian' to bundle it is
+// disproportionate to two small helpers. `resolveModelCatalogEntry` itself is pure (id-in,
+// id-out, zero Obsidian/DOM surface) and asserted directly below by reading the source; the
+// portable-space-key half of WP-5 that shares this file's concerns —
+// `deriveEmbeddingSpaceIdPrefill` — was placed in src/search/types.ts specifically so it COULD be
+// bundled and exercised for real (see tests/searchEmbeddingSpace.test.mjs).
+
+const aiSectionSrc = readFileSync(path.join(import.meta.dirname, '..', 'src', 'settings', 'sections', 'ai.ts'), 'utf8');
+
+function extractFunctionBody(src, signatureStart) {
+	const start = src.indexOf(signatureStart);
+	assert.ok(start >= 0, `could not find "${signatureStart}" in src/settings/sections/ai.ts`);
+	const braceStart = src.indexOf('{', start);
+	let depth = 0;
+	for (let i = braceStart; i < src.length; i++) {
+		if (src[i] === '{') depth++;
+		else if (src[i] === '}') {
+			depth--;
+			if (depth === 0) return src.slice(braceStart, i + 1);
+		}
+	}
+	throw new Error(`unbalanced braces reading "${signatureStart}"`);
+}
+
+test('STRUCTURAL: resolveModelCatalogEntry matches the raw id first, falls back to servedModel only when the raw match fails', () => {
+	const body = extractFunctionBody(aiSectionSrc, 'export function resolveModelCatalogEntry(');
+	// Exact-id match computed and checked before anything servedModel-related.
+	const exactIdx = body.indexOf('catalogModels.find(m => m.id === rawId)');
+	const servedIdx = body.indexOf('catalogModels.find(m => m.id === servedModel)');
+	assert.ok(exactIdx >= 0, 'must match the catalog by the row\'s own raw id');
+	assert.ok(servedIdx >= 0, 'must fall back to matching by the resolved servedModel');
+	assert.ok(exactIdx < servedIdx, 'the raw-id match must be attempted (and returned) before the servedModel fallback is reached');
+	assert.match(body, /if\s*\(exact\)\s*return exact;/, 'an exact raw-id match must short-circuit and win outright');
+	assert.match(body, /if\s*\(!servedModel\)\s*return undefined;/, 'no servedModel known (still probing, or the probe failed) must not be treated as a match');
+});
+
+test('STRUCTURAL: describedServedModelFor and describedPrecisionFor share one cached probe (ensureDescribedProbe) — no duplicate network call', () => {
+	const servedFn = extractFunctionBody(aiSectionSrc, 'export function describedServedModelFor(');
+	const precisionFn = extractFunctionBody(aiSectionSrc, 'export function describedPrecisionFor(');
+	assert.match(servedFn, /ensureDescribedProbe\(tab, provider, model\)/, 'describedServedModelFor must read from the shared probe cache, not fire its own describeModel() call');
+	assert.match(precisionFn, /ensureDescribedProbe\(tab, provider, model\)/, 'describedPrecisionFor must also route through the shared probe cache');
+	// Only one call site anywhere in the file may actually invoke providerManager.describeModel —
+	// everything else, including both functions above, must read the cached result.
+	const describeModelCallSites = (aiSectionSrc.match(/providerManager\.describeModel\(/g) ?? []).length;
+	assert.equal(describeModelCallSites, 1, 'providerManager.describeModel() must be called from exactly one place (ensureDescribedProbe)');
+});
+
+test('STRUCTURAL: on a raw-id catalog miss, the row re-matches by the describeModel-resolved servedModel before rendering the Accept row', () => {
+	const idx = aiSectionSrc.indexOf('const rawCatalogMatch = catalogModels.find(m => m.id === model.id);');
+	assert.ok(idx >= 0, 'the raw-id lookup must still be attempted first');
+	const nearby = aiSectionSrc.slice(idx, idx + 500);
+	assert.match(nearby, /const catalogEntry = rawCatalogMatch \?\?/, 'catalogEntry must fall back past a raw-id miss, not stop there');
+	assert.match(nearby, /resolveModelCatalogEntry\(model\.id, catalogModels, describedServedModelFor\(tab, provider, model\)\)/, 'the fallback must re-match via the canonical (servedModel) id, not silently stay empty');
+});
+
+test('STRUCTURAL: picking a path-shaped catalog id prefills the portable embeddingSpaceId override without clobbering an existing value', () => {
+	const pickCallback = extractFunctionBody(aiSectionSrc, 'new ProviderModelSuggest(tab.app, t.inputEl, () => catalogModels, (entry) => {');
+	assert.match(
+		pickCallback,
+		/const spaceIdPrefill = deriveEmbeddingSpaceIdPrefill\(entry\.id, model\.embeddingSpaceId\);/,
+		'the pick callback must derive the prefill from the PICKED id (entry.id) and the model\'s CURRENT embeddingSpaceId',
+	);
+	assert.match(
+		pickCallback,
+		/if\s*\(spaceIdPrefill\)\s*model\.embeddingSpaceId = spaceIdPrefill;/,
+		'must only assign when deriveEmbeddingSpaceIdPrefill actually returned something — an undefined prefill (already set, or not path-shaped) must leave the field untouched',
+	);
+});
+
+test('STRUCTURAL: a settings row exposes the embeddingSpaceId override, bound to ProviderModel.embeddingSpaceId', () => {
+	assert.ok(
+		aiSectionSrc.includes("setName('Embedding space id (advanced override)')"),
+		'the advanced override needs its own visible field — a user must be able to inspect/edit what got auto-prefilled, or set it manually for a runtime with no catalog at all',
+	);
+	assert.match(aiSectionSrc, /setValue\(model\.embeddingSpaceId \?\? ''\)/, 'the field must read the live model.embeddingSpaceId value');
+	assert.match(aiSectionSrc, /if\s*\(trimmed\)\s*model\.embeddingSpaceId = trimmed;\s*else delete model\.embeddingSpaceId;/, 'clearing the field must delete the key (matches embeddingVariant\'s own empty-string handling), not persist an empty string');
 });

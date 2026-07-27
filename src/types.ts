@@ -312,6 +312,25 @@ export interface ProviderModel {
 	 * probed from another runtime are one space rather than two.
 	 */
 	embeddingVariant?: string;
+	/**
+	 * The portable identity to key the vector space on, replacing `id` in the space-key
+	 * derivation when set — never sent to the provider (the request field always carries the
+	 * served id verbatim, exactly as `id` does today).
+	 *
+	 * Exists because `id` is sometimes not a model identity at all: a llama-server (or vLLM)
+	 * container commonly serves a **container-internal mount path**
+	 * (`/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf`), which is host- and mount-specific —
+	 * moving the compose mount, or switching to a container that mounts the same weights from a
+	 * different path, would silently produce a different space key and force a full re-embed for
+	 * no reason. Setting this field states the portable identity explicitly rather than inferring
+	 * one from a string that was never meant to carry it.
+	 *
+	 * Precedence in `SearchManager.activeEmbeddingSpaceId`: an explicit, non-blank value here wins
+	 * over everything, including the path-basename normalization applied to a path-shaped `id`
+	 * (see `isPathShapedModelId`/`normalizePathShapedModelId` in `search/types.ts`); leaving it
+	 * empty reproduces today's key byte-for-byte, which is the no-re-embed guarantee.
+	 */
+	embeddingSpaceId?: string;
 }
 
 // Note the asymmetry with HttpProviderClient's optional-capability methods: those describe what a
