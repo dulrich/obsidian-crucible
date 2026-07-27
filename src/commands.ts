@@ -7,6 +7,7 @@ import { FilePickerModal } from './orchestration/FilePickerModal';
 import type CruciblePlugin from './main';
 import { VaultSearchModal } from './search/SearchModal';
 import { isSearchIndexablePath } from './search/chunker';
+import { SEARCH_QUERY_EXPORT_FILENAME, buildQueryExport, serializeQueryExport } from './search/queryLog';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
@@ -456,6 +457,54 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 			const file = plugin.app.workspace.getActiveFile();
 			if (!file) return;
 			plugin.searchIndexCoordinator.reindex(file);
+		},
+	});
+
+	// Turns the passive query log into an S2-shaped query file ({id, text, source, targetPaths})
+	// so a ranking change can be measured against real searches with real targets instead of
+	// hand-authored ones. Written next to the log in the plugin's data dir — deliberately not
+	// into the vault, where it would be a note containing every query's terms.
+	plugin.registerCrucibleCommand({
+		id: 'search-export-query-log',
+		name: 'Search: export query log',
+		group: 'Search',
+		mutating: false,
+		run: async () => {
+			const entries = await plugin.searchQueryLog.snapshot();
+			if (entries.length === 0) {
+				new Notice('Query log is empty — nothing to export.');
+				return;
+			}
+			const result = buildQueryExport(entries);
+			if (result.queries.length === 0) {
+				// Not a failure, and said as such: a query nobody clicked through carries no
+				// target, and exporting it with an empty targetPaths would score as a miss.
+				new Notice(`No exportable queries yet: ${result.withoutTarget} logged ${result.withoutTarget === 1 ? 'query has' : 'queries have'} no opened result to use as a target.`);
+				return;
+			}
+			const path = plugin.pluginDataPath(SEARCH_QUERY_EXPORT_FILENAME);
+			await plugin.app.vault.adapter.write(path, serializeQueryExport(result.queries));
+			new Notice(`Exported ${result.queries.length} queries to ${path} (${result.withoutTarget} skipped: no result opened).`);
+		},
+	});
+
+	// Destructive, and on user data rather than a rebuildable index — hence the confirm.
+	plugin.registerCrucibleCommand({
+		id: 'search-clear-query-log',
+		name: 'Search: clear query log',
+		group: 'Search',
+		mutating: false,
+		run: async () => {
+			const confirmed = await new ConfirmModal(plugin.app, {
+				title: 'Clear the search query log?',
+				message: 'Deletes every recorded search and the log file itself. This cannot be undone, and any '
+					+ 'previously exported query file is left untouched.',
+				confirmText: 'Clear log',
+				destructive: true,
+			}).openAndAwait();
+			if (!confirmed) return;
+			const discarded = await plugin.searchQueryLog.clear();
+			new Notice(`Cleared ${discarded} logged ${discarded === 1 ? 'search' : 'searches'}.`);
 		},
 	});
 }
