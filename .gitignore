@@ -56,3 +56,4 @@ GEMINI.local.md
 # Measurement artifacts — archived in eval-harness/local-inference-bench,
 # scrubbed from this repo's history 2026-07-26. Never commit run data here.
 runs/
+search-query-log.json
