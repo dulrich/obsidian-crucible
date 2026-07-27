@@ -280,7 +280,7 @@ test('after the migration, an already-embedded vault is still fully covered: not
 });
 
 test('SCHEMA_VERSION and SEARCH_REQUIRED_SCHEMA_VERSION move together, or an older binary silently mixes spaces', () => {
-	assert.equal(SCHEMA_VERSION, 5);
+	assert.equal(SCHEMA_VERSION, 6);
 	assert.equal(SEARCH_REQUIRED_SCHEMA_VERSION, SCHEMA_VERSION);
 });
 
