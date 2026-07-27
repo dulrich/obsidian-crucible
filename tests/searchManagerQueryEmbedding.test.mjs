@@ -30,6 +30,9 @@ await esbuild.build({
 				contents: `
 					export class App {}
 					export class FileSystemAdapter {}
+					export class TFile {}
+					export class TFolder {}
+					export const Platform = { isDesktopApp: true, isMobile: false };
 					export class Notice {
 						constructor(message) { globalThis.__searchManagerNotices.push(message); }
 					}

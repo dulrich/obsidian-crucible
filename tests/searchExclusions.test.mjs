@@ -25,6 +25,12 @@ await esbuild.build({
 				contents: [
 					'export class Notice { constructor() {} }',
 					'export class FileSystemAdapter {}',
+					// SearchManager reaches localizedImageInfo (the `_MD5` name parser) through
+					// src/orchestration/utils/imageMetadata.ts, which transitively pulls src/utils.ts
+					// and src/frontmatter.ts into this bundle — hence these three extra exports.
+					'export class TFile {}',
+					'export class TFolder {}',
+					'export const Platform = { isDesktopApp: true, isMobile: false };',
 					'export function normalizePath(path) { return path; }',
 					'export async function requestUrl() { throw new Error("requestUrl unavailable in tests"); }',
 				].join('\n'),

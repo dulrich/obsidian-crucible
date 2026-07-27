@@ -203,6 +203,11 @@ export default class CruciblePlugin extends Plugin {
 			this.createImageDescriptionStorage(this.pluginDataPath('image-descriptions')),
 			this.pluginDataPath('image-descriptions'),
 		);
+		// Post-construction injection: the SearchManager is built above, before the store exists
+		// (pluginDataPath needs onload to be further along), so it takes the store through a
+		// setter. Without this call the image-description facet is silently inert — prepareFile
+		// folds no facet and emits no image chunks.
+		this.searchManager.setImageDescriptionStore(this.imageDescriptions);
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
