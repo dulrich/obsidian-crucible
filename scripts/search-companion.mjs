@@ -51,13 +51,36 @@ import { fileURLToPath } from 'node:url';
 // because neither of those migrations' structural triggers (missing PK shape, missing
 // `prefix=`) fire on it — see migrateFtsRowidPinning, keyed on `PRAGMA user_version` since
 // FTS5's rowid pinning leaves no trace in `sqlite_master` SQL text to structurally detect.
-export const SCHEMA_VERSION = 6;
+//
+// Bumped to 7 for the **entity facet**: `chunks.entities` (an additive column) plus a dedicated
+// indexed `entities` column on `chunks_fts`, so a note carrying `author: Matt Pocock` in its
+// frontmatter answers the query `matt pocock` even when that name appears nowhere in its body.
+// FTS5 cannot ALTER a virtual table to add a column, so this is a drop/refill of chunks_fts from
+// chunks — the migrateFtsSchema precedent, lossless because chunks holds every indexed column.
+// `chunks` itself is only ALTERed, never rebuilt: embeddings ride across untouched and nothing
+// re-embeds. See migrateFtsEntitiesColumn. The client's half of the pairing is
+// SEARCH_REQUIRED_SCHEMA_VERSION in `src/search/types.ts`; an older companion binary would accept
+// `chunk.entities` on the wire and silently drop it, which is a permanent invisible gap rather
+// than a visible failure — exactly what the pairing rule turns into "rebuild required".
+export const SCHEMA_VERSION = 7;
 export const SERVICE_VERSION = 'dev-fts-rrf-vector';
 
 // bm25() takes one weight per column, including the UNINDEXED ones (they never match, so
 // their weights are inert but the arity must line up). Unweighted bm25 let a body mention
 // outrank a title match; title >> heading >> text is the whole point of the ranking upgrade.
-const BM25_WEIGHTS = [0, 0, 0, 10.0, 5.0, 1.0];
+//
+// `entities` (schema 7) sits at 8.0: strong evidence, deliberately *below* title. Three reasons,
+// and none of them are measured — the bake-off does not cover this column, so the value is chosen
+// to be conservative rather than tuned. (1) A note *named* for something answers a query about it
+// better than a note merely *authored* by someone of that name, so title must keep the top slot.
+// (2) The entity field is a handful of tokens where title is a phrase and text is a page; FTS5's
+// bm25 normalizes term frequency against the whole row's length, so a hit in a tiny field already
+// scores high before any weight is applied, and matching title's 10.0 would compound that twice.
+// (3) The failure mode of too high is worse than too low here: an over-weighted author turns
+// every query containing a common first name into that author's back catalogue, whereas an
+// under-weighted one still surfaces the note (it is the only leg that matches it at all) just
+// further down. Raise it only against a measurement.
+const BM25_WEIGHTS = [0, 0, 0, 10.0, 5.0, 1.0, 8.0];
 
 const MAX_QUERY_TERMS = 24;
 const DEFAULT_LIMIT = 12;
@@ -99,8 +122,12 @@ export const COVERAGE_MIN_TERMS = 2;
 // Scoped by `(vault_id, id)`, like every other chunk statement since schema 5. A chunk id is
 // only unique *within* a vault, so an id-only lookup here could hydrate another vault's chunk
 // into this vault's results — a cross-vault content leak, not merely a wrong snippet.
-const HYDRATE_CHUNK_SQL = 'SELECT id, path, title, heading, text, metadata_json FROM chunks WHERE vault_id = ? AND id = ?';
+const HYDRATE_CHUNK_SQL = 'SELECT id, path, title, heading, text, entities, metadata_json FROM chunks WHERE vault_id = ? AND id = ?';
 
+// `entities` is appended *after* `text` on purpose: `snippet(chunks_fts, 5, ...)` in SEARCH_SQL
+// addresses the snippet column by index, so inserting the new column anywhere earlier would
+// silently start snippeting the wrong field. Appending also keeps BM25_WEIGHTS positionally
+// aligned with every weight that was already tuned.
 const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   id UNINDEXED,
   vault_id UNINDEXED,
@@ -108,6 +135,7 @@ const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   title,
   heading,
   text,
+  entities,
   prefix='2 3'
 )`;
 
@@ -117,8 +145,8 @@ const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 // on either forces a full-table scan). Every migration that rebuilds `chunks_fts` shares this
 // constant, so a rebuild triggered by an unrelated schema change (e.g. migrateChunksPrimaryKey
 // on a pre-5 database) also lands correctly rowid-pinned for free.
-const FTS_REFILL_SQL = `INSERT INTO chunks_fts (rowid, id, vault_id, path, title, heading, text)
-SELECT rowid, id, vault_id, path, title, heading, text FROM chunks`;
+const FTS_REFILL_SQL = `INSERT INTO chunks_fts (rowid, id, vault_id, path, title, heading, text, entities)
+SELECT rowid, id, vault_id, path, title, heading, text, entities FROM chunks`;
 
 // The whole reason schema 4 costs nothing. An index built before `embedding_space` existed
 // identified its vectors by model id alone, and the client's space id degrades to exactly that
@@ -155,6 +183,7 @@ WITH matched AS MATERIALIZED (
          c.path AS path,
          c.title AS title,
          c.heading AS heading,
+         c.entities AS entities,
          c.metadata_json AS metadata_json,
          snippet(chunks_fts, 5, '', '', '...', 18) AS snippet,
          bm25(chunks_fts, ${BM25_WEIGHTS.map(weight => weight.toFixed(1)).join(', ')}) AS score_text
@@ -167,6 +196,7 @@ pooled AS (
          id,
          title,
          heading,
+         entities,
          metadata_json,
          snippet,
          MIN(score_text) AS score_text,
@@ -174,7 +204,7 @@ pooled AS (
   FROM matched
   GROUP BY path
 )
-SELECT id, path, title, heading, metadata_json, snippet, score_text, pooled_chunks,
+SELECT id, path, title, heading, entities, metadata_json, snippet, score_text, pooled_chunks,
        COUNT(*) OVER () AS total_paths
 FROM pooled
 ORDER BY score_text, path
@@ -220,7 +250,8 @@ export function chunksTableSql(name, extraColumnSql = '') {
   embedding BLOB,
   embedding_dim INTEGER,
   embedding_model TEXT,
-  embedding_space TEXT,${extraColumnSql}
+  embedding_space TEXT,
+  entities TEXT NOT NULL DEFAULT '',${extraColumnSql}
   PRIMARY KEY (vault_id, id)
 )`;
 }
@@ -229,6 +260,7 @@ export function chunksTableSql(name, extraColumnSql = '') {
 const CHUNKS_COLUMNS = [
 	'id', 'vault_id', 'path', 'content_hash', 'title', 'heading', 'text',
 	'mtime', 'ordinal', 'metadata_json', 'embedding', 'embedding_dim', 'embedding_model', 'embedding_space',
+	'entities',
 ];
 
 export function createSchema(db) {
@@ -253,6 +285,12 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	if (!chunkColumns.includes('embedding_dim')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_dim INTEGER');
 	if (!chunkColumns.includes('embedding_model')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_model TEXT');
 	if (!chunkColumns.includes('embedding_space')) db.exec('ALTER TABLE chunks ADD COLUMN embedding_space TEXT');
+	// Schema 7's half of the entity facet on the `chunks` side is exactly one additive ALTER —
+	// no rebuild, no row rewrite, embeddings untouched. Existing rows land at `''`, which is
+	// honestly "no entity facet known for this chunk yet" and not a claim that the note has no
+	// author; they populate on the next upsert, which the client's contentHash fold guarantees
+	// happens on the first indexing sweep after the upgrade (see hashSearchContent).
+	if (!chunkColumns.includes('entities')) db.exec("ALTER TABLE chunks ADD COLUMN entities TEXT NOT NULL DEFAULT ''");
 	db.exec(BACKFILL_EMBEDDING_SPACE_SQL);
 	db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
 	// Order matters: the additive ALTERs above must have run first, or the rebuild's
@@ -265,7 +303,11 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	// now pins chunks_fts.rowid to chunks.rowid — so if either ran, the table is already
 	// correctly rowid-pinned and a second rebuild would only cost time, not fix anything.
 	const rowidMigrated = migrateFtsRowidPinning(db, { alreadyRebuilt: pkMigrated || ftsMigrated });
-	return pkMigrated || ftsMigrated || rowidMigrated;
+	// Same `alreadyRebuilt` chaining, one link further along: any of the three above rebuilt
+	// chunks_fts through FTS_TABLE_SQL, which already declares `entities`, so a fourth rebuild
+	// would only re-pay the (measured ~2.7s at 53k chunks) cost for nothing.
+	const entitiesMigrated = migrateFtsEntitiesColumn(db, { alreadyRebuilt: pkMigrated || ftsMigrated || rowidMigrated });
+	return pkMigrated || ftsMigrated || rowidMigrated || entitiesMigrated;
 }
 
 // `PRAGMA user_version` is a 4-byte integer SQLite persists in the database file header for
@@ -404,6 +446,99 @@ export function migrateFtsRowidPinning(db, options = {}) {
 	}
 	setUserVersion(db, FTS_ROWID_PINNING_VERSION);
 	return rebuilt;
+}
+
+// Schema 6 → 7: `chunks_fts` gains an indexed `entities` column (the entity facet — see the
+// SCHEMA_VERSION comment). FTS5 has no `ALTER TABLE ... ADD COLUMN`, and
+// `CREATE VIRTUAL TABLE IF NOT EXISTS` is a no-op against an existing table, so the only way to
+// add a column to a live index is the migrateFtsSchema shape: drop and refill from `chunks` in
+// one transaction.
+//
+// **Why that is lossless, and the argument is structural rather than empirical.** `chunks_fts`
+// holds no state of its own: every column it declares is copied verbatim from `chunks` by
+// FTS_REFILL_SQL, and `chunks` is the durable table. So the FTS table is a pure function of
+// `chunks`, and dropping a pure function's cached output cannot lose information — the same
+// reasoning migrateFtsSchema and migrateChunksPrimaryKey (which also refills it) already rest on.
+// The `chunks` side of this bump is one additive ALTER, so no row is rewritten, no embedding is
+// touched, and nothing re-embeds. Rows that predate the column refill with `entities = ''` and
+// are re-upserted with real entity text on the next indexing sweep.
+//
+// **Detection is structural AND cookied, deliberately both.** Unlike rowid pinning, this change
+// *does* leave a trace in `sqlite_master` — the column name is in chunks_fts's stored SQL — and
+// the structural test is the authoritative one because it cannot be defeated by a cookie that is
+// missing, stale, or written by a database file restored from elsewhere. `user_version` is
+// advanced to 7 alongside it so the version cookie stays monotone with SCHEMA_VERSION and
+// migrateFtsRowidPinning's `>= 6` check keeps reporting satisfied.
+//
+// The version target is a fixed literal for the same reason FTS_ROWID_PINNING_VERSION is: this
+// migration answers "has the entities rebuild happened", a question with one permanent answer.
+// Comparing against SCHEMA_VERSION would re-trigger it on every future unrelated bump.
+//
+// Returns true only when this function performed the rebuild itself.
+const FTS_ENTITIES_VERSION = 7;
+export function migrateFtsEntitiesColumn(db, options = {}) {
+	const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'").get();
+	const sql = typeof row?.sql === 'string' ? row.sql : '';
+	if (!sql) return false;
+	// Bounded on both sides so the test is the column *name* and not a substring of some future
+	// option or column (`entities_json`, `prefix='entities'`).
+	const hasColumn = /(^|[\s(,])entities(\s|,|\))/i.test(sql);
+	let rebuilt = false;
+	if (!hasColumn && !options.alreadyRebuilt) {
+		db.exec('BEGIN');
+		try {
+			db.exec('DROP TABLE chunks_fts');
+			db.exec(FTS_TABLE_SQL);
+			db.exec(FTS_REFILL_SQL);
+			db.exec('COMMIT');
+		} catch (e) {
+			db.exec('ROLLBACK');
+			throw e;
+		}
+		rebuilt = true;
+	}
+	if (getUserVersion(db) < FTS_ENTITIES_VERSION) setUserVersion(db, FTS_ENTITIES_VERSION);
+	return rebuilt;
+}
+
+// The entity facet's flattening rule: a chunk's `entities` arrive structured
+// (`{ text, type, source }` — see `SearchEntity` in `src/search/types.ts`) and exactly one part
+// of them, the text, reaches FTS. That asymmetry is the forward-compatibility design, not an
+// oversight: GLiNER2-sourced entities will arrive in the same array with `source: 'model'` and a
+// model-assigned `type`, land in this same column, and be scored at this same bm25 weight —
+// producing no schema event at all. Persisting `type`/`source` would only be needed for a
+// *typed* query surface ("notes whose author is X" as distinct from "notes mentioning X"), which
+// nothing asks for; when something does, it is an additive `entities_json` column, and it does
+// not disturb this column, its weight, or anything indexed here.
+//
+// Three inbound forms are accepted, so a producer is never blocked on the object shape: an array
+// of entity objects, an array of bare strings, and a single scalar. Everything else — nested
+// arrays, nulls, objects without a usable `text` — is dropped rather than stringified, because
+// `[object Object]` in an index column is a junk term that matches nothing and dilutes bm25.
+//
+// Deduplication is by text alone (not by type), and the bounds are the same as the client's, so
+// this reproduces `entityIndexText` in `src/search/chunker.ts` exactly. That agreement is
+// load-bearing: the client folds its version of this string into `contentHash`, so if the two
+// rules diverged, the hash would describe text the index does not hold.
+const MAX_CHUNK_ENTITIES = 32;
+const MAX_ENTITY_TEXT_CHARS = 200;
+export function normalizeChunkEntities(value) {
+	if (value === undefined || value === null) return '';
+	const list = Array.isArray(value) ? value : [value];
+	const texts = [];
+	const seen = new Set();
+	for (const entry of list) {
+		const raw = entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? entry.text : entry;
+		if (typeof raw !== 'string' && typeof raw !== 'number') continue;
+		const text = String(raw).replace(/\s+/g, ' ').trim().slice(0, MAX_ENTITY_TEXT_CHARS);
+		if (!text) continue;
+		const key = text.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		texts.push(text);
+		if (texts.length >= MAX_CHUNK_ENTITIES) break;
+	}
+	return texts.join('\n');
 }
 
 export function openDatabase(dbPath) {
@@ -831,6 +966,40 @@ export function titleMatchScore(terms, row = {}) {
 	return partial > 0 ? Math.min(partial, 0.65) : 0;
 }
 
+// Which of the query's terms this row's entity facet accounts for — the reason an entity hit is
+// *visible* rather than merely effective.
+//
+// Without it the facet is invisible in the response: an author match raises the row's bm25 (the
+// `entities` column carries weight 8.0) and nothing anywhere says why, so a result that looks
+// unrelated to every word on the page is indistinguishable from a ranking bug. The rest of
+// `attribution` exists for exactly that reason and this is its entity-facet entry.
+//
+// Returns `null` — not `[]` — for a row whose entity text is empty, so the attribution keys are
+// omitted entirely rather than asserting "this row has entities, none matched". `[]` is that
+// second, different statement and is reported as such. This is the same "omitted, not 0" rule
+// `scoreVector` and the coverage keys follow.
+//
+// Matching is whole-word-or-prefix against the normalized entity text, which mirrors what the
+// FTS clause actually did: every term is a whole word except the trailing one, which
+// buildFtsQuery prefix-expands as `term*`. Applying the prefix rule to every term slightly
+// over-reports a non-trailing partial (`mat` would credit `Matt`); the alternative under-reports
+// the trailing term on every type-ahead query, which is the common case.
+export function matchedEntityTerms(terms, entitiesText) {
+	const normalized = normalizeForMatch(entitiesText);
+	if (!normalized) return null;
+	// Leading-space padding turns one `includes` into "starts at a word boundary", which is both
+	// the whole-word and the prefix test at once — and it keeps working for a term that
+	// normalizes to more than one word (`bge-m3/f16`-shaped tokens do).
+	const haystack = ` ${normalized}`;
+	const hits = [];
+	for (const term of Array.isArray(terms) ? terms : []) {
+		const needle = normalizeForMatch(term);
+		if (!needle || hits.includes(term)) continue;
+		if (haystack.includes(` ${needle}`)) hits.push(term);
+	}
+	return hits;
+}
+
 // Reciprocal-rank fusion over three rankings of the same candidate set: the weighted bm25
 // order (already the row order coming out of SQL), the title/path-match order, and the
 // cosine order from the vector scan. Fusing ranks rather than hand-tuning one score is the
@@ -868,6 +1037,10 @@ export function fuseSearchRows(rows, options = {}) {
 		row,
 		base: -Number(row.score_text ?? 0),
 		titleBoost: titleMatchScore(terms, row),
+		// Attribution only — the entity facet's effect on ranking is already inside `score_text`
+		// (it is an indexed bm25 column, not a separate leg), so nothing here feeds the fusion.
+		// Reporting it is the point: see matchedEntityTerms.
+		entityTerms: matchedEntityTerms(terms, row.entities),
 		textRank,
 		titleRank: 0,
 		vectorRank: 0,
@@ -924,6 +1097,11 @@ export function fuseSearchRows(rows, options = {}) {
 			rrf: entry.rrf,
 			pooledChunks: Number(entry.row.pooled_chunks ?? 1),
 		};
+		// Appended only for a row that actually carries an entity facet, so a vault with no
+		// `author:` frontmatter anywhere gets the same object, key for key, it got before schema
+		// 7 — the same rule the coverage keys below follow. An empty array is a real answer
+		// ("this note names entities, none of them answered your query"), not a missing one.
+		if (entry.entityTerms) attribution.entityTerms = entry.entityTerms;
 		// Appended only when the coverage leg actually ran, so a default-mode response is the
 		// same object, with the same keys in the same order, that it was before this existed.
 		if (coverageScores) {
@@ -1092,6 +1270,10 @@ function runVectorLeg(db, options) {
 			path: row.path,
 			title: row.title,
 			heading: row.heading,
+			// Hydrated for attribution parity: a vector-only row still reports which of the
+			// query's terms its entity facet accounts for, so "why is this here" reads the same
+			// whichever leg produced the row.
+			entities: row.entities,
 			metadata_json: row.metadata_json,
 			snippet: makeTextSnippet(row.text),
 			// No bm25 score: this chunk did not match the query text at all. That is the
@@ -1199,6 +1381,8 @@ function runCoverageLeg(db, options) {
 			path: row.path,
 			title: row.title,
 			heading: row.heading,
+			// Same attribution parity as the vector leg's hydrated rows.
+			entities: row.entities,
 			metadata_json: row.metadata_json,
 			snippet: makeTextSnippet(row.text),
 			score_text: null,
@@ -1426,8 +1610,8 @@ export function createRequestHandler(db, options = {}) {
 	// matching `chunks_fts` row to the same rowid. Works identically for both branches, so the
 	// caller does not need to know which one fired.
 	const upsertChunk = db.prepare(`
-INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model, embedding_space)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model, embedding_space, entities)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(vault_id, id) DO UPDATE SET
   path = excluded.path,
   content_hash = excluded.content_hash,
@@ -1440,7 +1624,8 @@ ON CONFLICT(vault_id, id) DO UPDATE SET
   embedding = excluded.embedding,
   embedding_dim = excluded.embedding_dim,
   embedding_model = excluded.embedding_model,
-  embedding_space = excluded.embedding_space
+  embedding_space = excluded.embedding_space,
+  entities = excluded.entities
 RETURNING rowid
 `);
 	const selectVaultEmbeddingDim = db.prepare('SELECT embedding_dim AS dim FROM chunks WHERE vault_id = ? AND embedding IS NOT NULL LIMIT 1');
@@ -1458,7 +1643,7 @@ RETURNING rowid
 	// one specific chunk of one specific vault, it just no longer has to be told which vault
 	// to find that out.
 	const deleteFtsByRowid = db.prepare('DELETE FROM chunks_fts WHERE rowid = ?');
-	const insertFts = db.prepare('INSERT INTO chunks_fts (rowid, id, vault_id, path, title, heading, text) VALUES (?, ?, ?, ?, ?, ?, ?)');
+	const insertFts = db.prepare('INSERT INTO chunks_fts (rowid, id, vault_id, path, title, heading, text, entities) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 	const deleteByPath = db.prepare('DELETE FROM chunks WHERE vault_id = ? AND path = ?');
 	// Renamed from selectIdsByPath: both call sites only ever fed the result straight into an
 	// FTS delete, and that delete is now rowid-keyed, so `rowid` is the only column either one
@@ -1641,6 +1826,11 @@ LIMIT 1
 							const text = requireString(chunk.text, 'chunk.text');
 							const mtime = Number(chunk.mtime ?? 0);
 							const ordinal = Number(chunk.ordinal ?? 0);
+							// Never a 400: a malformed entity is dropped, not refused. Unlike a
+							// wrong-width vector — which cannot be stored coherently at all and so
+							// must fail loudly — a junk `author:` value is user-authored text that
+							// should cost the note its facet, not its entire indexing.
+							const entities = normalizeChunkEntities(chunk.entities);
 							const pathKey = `${vaultId}\n${path}`;
 							// The first chunk seen for a (vaultId, path) clears every existing row
 							// for that path: an upsert is a full replace, not a merge.
@@ -1697,9 +1887,10 @@ LIMIT 1
 								embedding ? embedding.dim : null,
 								embedding ? embedding.model : null,
 								embedding ? embedding.space : null,
+								entities,
 							);
 							deleteFtsByRowid.run(rowid);
-							insertFts.run(rowid, id, vaultId, path, title, heading, text);
+							insertFts.run(rowid, id, vaultId, path, title, heading, text, entities);
 						}
 						db.exec('COMMIT');
 					} catch (e) {

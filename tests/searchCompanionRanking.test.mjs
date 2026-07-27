@@ -530,7 +530,13 @@ INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 
 	const ftsRow = db.prepare('SELECT rowid FROM chunks_fts WHERE id = ?').get('legacy');
 	assert.equal(ftsRow.rowid, chunkRow.rowid);
 	assert.equal(migrateFtsRowidPinning(db, { alreadyRebuilt: true }), false, 'user_version was already written by createSchema, so a second pass must be a no-op');
-	assert.equal(SCHEMA_VERSION, 6);
+	// Schema 7: the entity facet reaches a schema-1 database through the same single
+	// `createSchema` call — the additive `chunks.entities` ALTER, and the `entities` column on
+	// the rebuilt `chunks_fts` (already there, because the PK/prefix rebuilds above share
+	// FTS_TABLE_SQL). See tests/searchEntityFacet.test.mjs for the 6 -> 7 path in isolation.
+	assert.ok(db.prepare('PRAGMA table_info(chunks)').all().map(row => row.name).includes('entities'));
+	assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunks_fts'").get().sql, /entities/);
+	assert.equal(SCHEMA_VERSION, 7);
 });
 
 test('a schema-5 index (composite key + FTS prefix already present) still gets the rowid-pinning rebuild', () => {
