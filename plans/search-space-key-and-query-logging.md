@@ -6,6 +6,17 @@ registers that slug; the scope grew past the name on 2026-07-25.*
 *Recommended model/effort — Claude: Sonnet/medium for WP-1 and WP-3, Opus/high for WP-2 and WP-4;
 Codex: Terra/medium for WP-1 and WP-3, Sol/medium-high for WP-2 and WP-4.*
 
+**Disposition (2026-07-26) — this plan is fully dispositioned and deregistered from
+`pending-plans`.** Per-WP: **WP-1** (portable space keys) and **WP-2** (passive query logging)
+moved unchanged into `plans/search-quality-bakeoff-entity-facet-and-model-identity.md` (its WP-5
+and WP-1 respectively). **WP-3** (broken embedding config fails loudly) was implemented by
+`plans/sprint-exit-queue-health-and-scrub.md` WP-6, landed `df5f656` — this annotation was the
+missing record. **WP-4** (index inspection dashboard) is **deferred for future study** by user
+decision: the live index is a single clean space; the embedding-space retag incident's durable
+fix remains earmarked for it, and a future entity-facet inspection surface would land there too.
+**WP-5** (busy companion ≠ dead) was implemented by sprint-exit WP-2/WP-3 (`ed48f16`, `ee81369`)
+as already annotated below.
+
 ## Context
 
 All four work packages come out of ESI WP-5 Stage 2, and every one was found by the user doing
