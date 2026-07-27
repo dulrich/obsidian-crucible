@@ -153,7 +153,7 @@ Configure the reranker as its own provider entry; there is no rerank-specific UR
 
 **The inference-engine router (§12a) makes this asymmetry moot.** llama-swap serves both `/v1/rerank` and
 bare `/rerank`, so the embedding and reranking provider entries can both be configured with the
-same `http://127.0.0.1:4806/v1` base URL — there is no longer a base URL to get wrong. Two more
+same `http://127.0.0.1:4811/v1` base URL — there is no longer a base URL to get wrong. Two more
 rules specific to that router, worth knowing regardless of which route you actually run:
 
 - **Its config's `models`/`aliases` are the plugin's API surface — append-only.** Crucible's
@@ -503,15 +503,15 @@ is in `context-control/compose.home.yml`.
 
 Crucible: **one base URL for every provider entry, including chat** —
 
-- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `bge-m3`.
-- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `bge-reranker-v2`.
-- Chat: `openai-compatible`, base URL `http://127.0.0.1:4806/v1`, model id `gemma-4-12b` (or
+- Embedding: `openai-compatible`, base URL `http://127.0.0.1:4811/v1`, model id `bge-m3`.
+- Rerank: `openai-compatible`, base URL `http://127.0.0.1:4811/v1`, model id `bge-reranker-v2`.
+- Chat: `openai-compatible`, base URL `http://127.0.0.1:4811/v1`, model id `gemma-4-12b` (or
   `nemotron-4b` for the small/fast option) — same "Crucible Inference" provider, same host and
   port, just a different alias/model id and the Chat capability instead of Embedding/Rerank.
 
 The embedding and rerank aliases are chosen to match the model ids already stored by route (c)
 below, specifically so that migrating a vault off that route onto this one is a **base-URL-only
-change** — repoint both provider entries from `4804`/`4805` to `4806` and leave the model ids
+change** — repoint both provider entries from `4804`/`4805` to `4811` and leave the model ids
 alone. See Rule 2 (§4) for why the rerank entry no longer needs a bare, no-`/v1` base URL the
 way Infinity's does. The chat aliases (`gemma-4-12b`, `nemotron-4b`) have no such legacy id to
 match — they're new, so they're just short and stable.
@@ -550,9 +550,9 @@ fit math alone (see `config.yaml`'s `chat` group comment for that math).
 `crucible-llamacpp-vulkan:b10121-swap243`): retrieval and chat legs both pass the live smoke
 (embeddings, rerank, and both chat models answered at the post-move verification), route (c)
 below is retired, and the router now belongs to the inference-engine repo — see
-`/home/_shared_code/inference-engine/llama/README.md` for the full migration record. `4806`
-remains the vault-facing port permanently; `4811` becomes the canonical publish for new
-consumers.
+`/home/_shared_code/inference-engine/llama/README.md` for the full migration record. `4811`
+is the router's one published port; the transitional `4806` publish was retired 2026-07-27
+after the last vault repointed its provider entries.
 
 ### b. LM Studio
 
