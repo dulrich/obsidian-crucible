@@ -508,6 +508,12 @@ Crucible: **one base URL for every provider entry, including chat** —
 - Chat: `openai-compatible`, base URL `http://127.0.0.1:4811/v1`, model id `gemma-4-12b` (or
   `nemotron-4b` for the small/fast option) — same "Crucible Inference" provider, same host and
   port, just a different alias/model id and the Chat capability instead of Embedding/Rerank.
+- Vision: the `gemma-4-12b` alias also serves image content parts on `/v1/chat/completions` —
+  its router entry loads `--mmproj` beside the weights (added 2026-07-27 for
+  `plans/image-descriptions-search.md`). Mark the provider `image-extraction` capable to use it
+  for Image descriptions. Requests must carry `reasoning_effort: "none"` (Crucible's
+  `describeImagePass` does this for local providers automatically) or the model spends the
+  completion budget on `reasoning_content` and returns empty `content`.
 
 The embedding and rerank aliases are chosen to match the model ids already stored by route (c)
 below, specifically so that migrating a vault off that route onto this one is a **base-URL-only
