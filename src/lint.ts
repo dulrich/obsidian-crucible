@@ -216,6 +216,17 @@ export class Linter {
 			return true;
 		}
 
+		// Whether this pass actually changed the file on disk — derived below, inside the
+		// locked section, by re-reading after every write and comparing against the content
+		// this pass started from. This is the cheapest honest check available here: lintFile
+		// already reads the file once for calculateWordCount, so one extra vault.read() after
+		// the writes costs little, and a raw content comparison can't be fooled the way an
+		// mtime comparison could — Obsidian's mtime granularity/update timing isn't guaranteed
+		// fine enough to distinguish two lint passes seconds apart. Threading a "did we write"
+		// boolean back out of updateFrontmatter/vault.process instead would mean changing
+		// updateFrontmatter's contract, which is a cross-cutting chokepoint owned outside this
+		// change — so the signal is derived locally, from the bytes, instead.
+		let modified = false;
 		try {
 			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
 				const content = await this.app.vault.read(file);
@@ -261,6 +272,9 @@ export class Linter {
 						return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
 					});
 				}
+
+				const finalContent = await this.app.vault.read(file);
+				modified = finalContent !== content;
 			}));
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
@@ -270,7 +284,10 @@ export class Linter {
 
 		if (!silent) {
 			const plugins = this.app.plugins;
-			if (plugins && plugins.enabledPlugins.has('dataview')) {
+			// Only yank the current dataview view when this pass actually wrote something —
+			// firing it unconditionally re-rendered dataview on every manual/chain lint even
+			// when nothing changed.
+			if (modified && plugins && plugins.enabledPlugins.has('dataview')) {
 				const commands = this.app.commands;
 				if (commands) {
 					commands.executeCommandById('dataview:dataview-rebuild-current-view');

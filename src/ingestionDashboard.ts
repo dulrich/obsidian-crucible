@@ -23,11 +23,21 @@ import { renderEnqueueAllMetadataButton, renderYoutubeNoMetadata } from './inges
 import { createControlCentersSection, type ControlCentersSection } from './ingestion/sections/controlCenters';
 import { createOrphanedAttachmentsSection, type OrphanedAttachmentsSection } from './ingestion/sections/orphanedAttachments';
 import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ignored';
+import { minIntervalGate, refreshWithScrollPreserved } from './ingestion/render/refresh';
 
 const DEBOUNCE_MS = 150;
 // Vault-scan sections (uncaptured lists, no-metadata, orphans) recompute the
 // whole vault, so they get a longer debounce than the cheap, event-driven ones.
 const SCAN_DEBOUNCE_MS = 1000;
+// Queue-monitor bursts (a queue drain firing 'enrichment-queue-updated' /
+// 'orchestration-queue-updated' repeatedly) coalesce at JobBackend.ts's 250ms and
+// land here every DEBOUNCE_MS (150ms) — a full table rebuild ~4x/sec. That cadence
+// is fine for a cheap section but queueMonitor's is not, so its actual refresh is
+// additionally cadence-gated to at most once per this interval (see
+// registerListeners' use of minIntervalGate). This does NOT change DEBOUNCE_MS or
+// the 250ms coalesce — both stay as the event-arrival cadence; this only throttles
+// how often the resulting full rebuild is allowed to run.
+const QUEUE_MONITOR_MIN_INTERVAL_MS = 1000;
 
 // Lifecycle/registry controller for the Ingestion dashboard: owns mounting,
 // listener wiring, and the section registry (header chrome, count/meta slots,
@@ -155,8 +165,12 @@ export class IngestionDashboardUI {
 		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
 		const debouncedBlogControl = debounce(() => void this.refresh('blogControl'), SCAN_DEBOUNCE_MS, true);
 		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), SCAN_DEBOUNCE_MS, true);
+		// The queue monitor's own render is cadence-gated on top of the DEBOUNCE_MS
+		// trigger below — see QUEUE_MONITOR_MIN_INTERVAL_MS above. The intake button
+		// refreshes are cheap (no full teardown) and stay on the plain 150ms debounce.
+		const gatedQueueMonitorRefresh = minIntervalGate(() => this.refresh('queueMonitor'), QUEUE_MONITOR_MIN_INTERVAL_MS);
 		const debouncedQueueMonitor = debounce(() => {
-			void this.refresh('queueMonitor');
+			gatedQueueMonitorRefresh();
 			void this.intake.refreshIntakeButton('blog');
 			void this.intake.refreshIntakeButton('youtube');
 		}, DEBOUNCE_MS, true);
@@ -358,7 +372,11 @@ export class IngestionDashboardUI {
 	private async refresh(id: SectionId): Promise<void> {
 		const ctx = this.sections.get(id);
 		if (!ctx) return;
-		await ctx.refresh();
+		// Every section refresh does a full teardown/rebuild of `ctx.body` (renderSortableTable's
+		// `parent.empty()`, renderQueueMonitor's `body.empty()`, ...). Wrapping the dispatch here —
+		// rather than each section's own render function — is the single wiring point that covers
+		// every section, present and future, without touching their render logic.
+		await refreshWithScrollPreserved(ctx.body, () => ctx.refresh());
 	}
 
 	private async renderSection(id: SectionId, body: HTMLElement, ctx: SectionContext): Promise<void> {
