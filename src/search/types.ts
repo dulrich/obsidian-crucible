@@ -198,6 +198,88 @@ export function embeddingSpaceId(modelId: string, precision?: string): string {
 	return tag ? `${model}/${tag}` : model;
 }
 
+// Recognized local-model weights file extensions — the tell that a configured/served id is a
+// filesystem path rather than a model identity (a served id like `bge-m3` or a Hub-style
+// `BAAI/bge-m3` never carries one of these).
+const MODEL_WEIGHTS_FILE_EXTENSIONS = /\.(?:gguf|ggml|bin|safetensors|onnx|pt|pth)$/i;
+
+/**
+ * Does `modelId` look like a filesystem path rather than a model identity?
+ *
+ * Two independent tells, either sufficient on its own: an absolute path (llama-server/vLLM mount
+ * points are always absolute, e.g. `/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf`), or a
+ * trailing weights-file extension (covers a relative mount or a bare filename some configs
+ * report, e.g. `bge-m3-f16.gguf`).
+ *
+ * Deliberately NOT triggered by a bare slash — `BAAI/bge-m3` (Hugging Face Hub org/repo
+ * shorthand, what the live index holds today) is a legitimate, portable model id and must key its
+ * own space exactly as before. A mount path is path-shaped; a Hub-style id merely contains a
+ * separator its own ecosystem uses on purpose.
+ */
+export function isPathShapedModelId(modelId: string): boolean {
+	const trimmed = modelId.trim();
+	if (!trimmed) return false;
+	return trimmed.startsWith('/') || MODEL_WEIGHTS_FILE_EXTENSIONS.test(trimmed);
+}
+
+/**
+ * The portable slice of a path-shaped model id: its basename, weights extension stripped.
+ *
+ * `/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf` → `bge-m3-f16`. A mitigation, not a fix —
+ * two servers hosting the same weights under differently-named files (`bge-m3-f16` vs LM
+ * Studio's `text-embedding-bge-m3@f16`) still key different spaces, so this must never be
+ * presented as making spaces portable *across* servers, only as removing the mount-path/host
+ * specificity *within* one.
+ *
+ * Only meaningful when `isPathShapedModelId(modelId)` is true; callers that skip that check on a
+ * non-path id merely get the id back unchanged (basename of a string with no `/` is the string
+ * itself, and it carries no weights extension to strip), so calling this unconditionally is safe
+ * but the two-step (check, then normalize) form is what documents intent at call sites.
+ */
+export function normalizePathShapedModelId(modelId: string): string {
+	const trimmed = modelId.trim();
+	const lastSlash = trimmed.lastIndexOf('/');
+	const basename = lastSlash >= 0 ? trimmed.slice(lastSlash + 1) : trimmed;
+	return basename.replace(MODEL_WEIGHTS_FILE_EXTENSIONS, '');
+}
+
+/**
+ * The model-identity half of the space key, per the WP-1/WP-5 precedence: an explicit
+ * `ProviderModel.embeddingSpaceId` wins outright (it is a stated fact, not an inference); failing
+ * that, a path-shaped `id` keys on its normalized basename; failing that, `id` is used verbatim —
+ * exactly today's behaviour, which is the no-re-embed guarantee for every model id that was never
+ * path-shaped to begin with.
+ *
+ * Takes only the two plain fields it needs (not the whole `ProviderModel`) so this module — which
+ * has no other dependency on `../types` — stays a leaf the companion-facing types can import
+ * freely.
+ */
+export function resolveEmbeddingSpaceModelId(model: { id: string; embeddingSpaceId?: string }): string {
+	const explicit = model.embeddingSpaceId?.trim();
+	if (explicit) return explicit;
+	return isPathShapedModelId(model.id) ? normalizePathShapedModelId(model.id) : model.id;
+}
+
+/**
+ * The settings-UI half of the portable-space-key fix: what to prefill `ProviderModel.
+ * embeddingSpaceId` with after a catalog pick lands `pickedId` in the model's `id` field, or
+ * `undefined` to leave the field untouched. Lives beside `isPathShapedModelId`/
+ * `normalizePathShapedModelId` (the primitives it composes) rather than in the settings section
+ * that calls it, so it stays testable without bundling the settings pane — see
+ * `src/settings/sections/ai.ts`'s `ProviderModelSuggest` `onChoose` callback for the call site.
+ *
+ * Two guards, both load-bearing: (1) never overwrites a value already present — a user-entered
+ * override, or one an earlier pick already prefilled, always wins over a later pick; (2) only
+ * fires when `pickedId` is path-shaped (`isPathShapedModelId`) — a plain served id, including a
+ * Hub-style `BAAI/bge-m3`, is already a fine, portable space key and must not gain a redundant
+ * override. See `ProviderModel.embeddingSpaceId`'s doc comment (`src/types.ts`) for why a
+ * path-shaped served id — a container mount path — is the one case worth defaulting away from.
+ */
+export function deriveEmbeddingSpaceIdPrefill(pickedId: string, currentValue: string | undefined): string | undefined {
+	if (currentValue?.trim()) return undefined;
+	return isPathShapedModelId(pickedId) ? normalizePathShapedModelId(pickedId) : undefined;
+}
+
 // The companion index schema this plugin build knows how to query. Bumped to 2 when
 // `chunks_fts` gained FTS5 `prefix='2 3'`; bumped to 3 when embeddings moved from
 // `embedding_json TEXT` to `embedding BLOB` + `embedding_dim` + `embedding_model` and the

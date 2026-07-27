@@ -98,7 +98,14 @@ for (const [entry, outfile] of [
 }
 
 const { SearchManager } = await import(pathToFileURL(managerOutfile));
-const { embeddingSpaceId, SEARCH_REQUIRED_SCHEMA_VERSION } = await import(pathToFileURL(typesOutfile));
+const {
+	deriveEmbeddingSpaceIdPrefill,
+	embeddingSpaceId,
+	isPathShapedModelId,
+	normalizePathShapedModelId,
+	resolveEmbeddingSpaceModelId,
+	SEARCH_REQUIRED_SCHEMA_VERSION,
+} = await import(pathToFileURL(typesOutfile));
 const { hashSearchContent } = await import(pathToFileURL(chunkerOutfile));
 
 function makeDb() {
@@ -301,6 +308,72 @@ test('an unknown precision yields the bare model id — never "undefined", never
 	assert.equal(embeddingSpaceId('  bge-m3  ', '  q4_k_m  '), 'bge-m3/q4_k_m');
 });
 
+// ── 2b. Portable space keys (WP-5 / old plan WP-1) ────────────────────────────────────────
+
+test('isPathShapedModelId: an absolute mount path or a weights-file extension trips it, a plain served id or a Hub-style org/repo id does not', () => {
+	// The exact live incident string.
+	assert.equal(isPathShapedModelId('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf'), true);
+	// A relative mount / bare filename some configs report — the extension alone is sufficient.
+	assert.equal(isPathShapedModelId('bge-m3-f16.gguf'), true);
+	for (const ext of ['bin', 'safetensors', 'onnx', 'pt', 'pth', 'ggml']) {
+		assert.equal(isPathShapedModelId(`weights.${ext}`), true, ext);
+	}
+	// A plain served id: no slash, no weights extension.
+	assert.equal(isPathShapedModelId('bge-m3'), false);
+	// Hugging Face Hub org/repo shorthand — a real, portable model id that happens to contain a
+	// slash, and what the live index holds today. Must NOT be treated as path-shaped.
+	assert.equal(isPathShapedModelId('BAAI/bge-m3'), false);
+	assert.equal(isPathShapedModelId(''), false);
+	assert.equal(isPathShapedModelId('   '), false);
+});
+
+test('normalizePathShapedModelId: basename, weights extension stripped', () => {
+	assert.equal(normalizePathShapedModelId('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf'), 'bge-m3-f16');
+	assert.equal(normalizePathShapedModelId('bge-m3-f16.gguf'), 'bge-m3-f16');
+	// A non-path id passed in anyway (callers are expected to check isPathShapedModelId first, but
+	// this must still be a safe no-op): no slash, no weights extension to strip.
+	assert.equal(normalizePathShapedModelId('BAAI/bge-m3'), 'bge-m3');
+	assert.equal(normalizePathShapedModelId('bge-m3'), 'bge-m3');
+});
+
+test('resolveEmbeddingSpaceModelId: explicit embeddingSpaceId wins over path normalization, which wins over the raw id; empty reproduces the raw id byte-for-byte', () => {
+	// The no-re-embed guarantee: nothing set anywhere, byte-for-byte the model id.
+	assert.equal(resolveEmbeddingSpaceModelId({ id: 'bge-m3' }), 'bge-m3');
+	// A path-shaped served id, no override: basename-keyed.
+	assert.equal(
+		resolveEmbeddingSpaceModelId({ id: '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf' }),
+		'bge-m3-f16',
+	);
+	// An explicit override wins even when the raw id is ALSO path-shaped — the whole point of the
+	// field is to let the user override an inference that would otherwise apply.
+	assert.equal(
+		resolveEmbeddingSpaceModelId({ id: '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf', embeddingSpaceId: 'bge-m3' }),
+		'bge-m3',
+	);
+	// An explicit override on a perfectly ordinary served id also wins outright.
+	assert.equal(resolveEmbeddingSpaceModelId({ id: 'bge-m3', embeddingSpaceId: 'custom-space' }), 'custom-space');
+	// Blank/whitespace-only override is not a real override — falls through exactly as if unset.
+	assert.equal(resolveEmbeddingSpaceModelId({ id: 'bge-m3', embeddingSpaceId: '   ' }), 'bge-m3');
+});
+
+test('deriveEmbeddingSpaceIdPrefill (WP-5 UI half): prefills only a path-shaped pick into an empty field, never overwrites', () => {
+	// Path-shaped pick, empty field: prefilled.
+	assert.equal(
+		deriveEmbeddingSpaceIdPrefill('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf', undefined),
+		'bge-m3-f16',
+	);
+	assert.equal(deriveEmbeddingSpaceIdPrefill('/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf', ''), 'bge-m3-f16');
+	// A plain served id, even a Hub-style one containing a slash: nothing to prefill.
+	assert.equal(deriveEmbeddingSpaceIdPrefill('bge-m3', undefined), undefined);
+	assert.equal(deriveEmbeddingSpaceIdPrefill('BAAI/bge-m3', undefined), undefined);
+	// A value already present — user-typed, or an earlier pick's prefill — is never overwritten,
+	// even by a second path-shaped pick.
+	assert.equal(deriveEmbeddingSpaceIdPrefill('/models/other/bge-m3-q4.gguf', 'user-typed-value'), undefined);
+	assert.equal(deriveEmbeddingSpaceIdPrefill('/models/other/bge-m3-q4.gguf', 'bge-m3-f16'), undefined);
+	// Whitespace-only current value is not really "present" — treated as empty, so it still fires.
+	assert.equal(deriveEmbeddingSpaceIdPrefill('/models/other/bge-m3-q4.gguf', '   '), 'bge-m3-q4');
+});
+
 // ── SearchManager harness ────────────────────────────────────────────────────────────────
 
 function settings(overrides = {}) {
@@ -332,7 +405,11 @@ function makeFile(filePath) {
 
 // `base` (a live companion) and `fileStates` (a canned map) are alternatives: the migration case
 // needs the real round trip, the coverage cases only need one stored state.
-function makeManager({ base, contentByPath = new Map(), fileStates, onUpsert = () => {}, describeModel, modelExtras } = {}) {
+// `modelId` (WP-5) is the id BOTH the provider's catalog entry and `searchEmbeddingModel`'s ref
+// carry — it defaults to 'bge-m3' so every pre-WP-5 call site is unaffected, and a test that
+// needs a path-shaped served id passes it here rather than juggling `modelExtras.id` and a
+// separately-overridden ref by hand.
+function makeManager({ base, contentByPath = new Map(), fileStates, onUpsert = () => {}, describeModel, modelExtras, modelId = 'bge-m3' } = {}) {
 	const app = {
 		metadataCache: { isUserIgnored: () => false },
 		vault: { read: async (file) => contentByPath.get(file.path) ?? '' },
@@ -341,7 +418,11 @@ function makeManager({ base, contentByPath = new Map(), fileStates, onUpsert = (
 		embed: async (_provider, _modelId, inputs) => ({ embeddings: inputs.map(() => axisVector(0)), dimensions: WIDTH }),
 		...(describeModel ? { describeModel } : {}),
 	};
-	const manager = new SearchManager(app, settings({ searchServiceUrl: base ?? 'http://127.0.0.1:4899', modelExtras }), providerManager);
+	const manager = new SearchManager(app, settings({
+		searchServiceUrl: base ?? 'http://127.0.0.1:4899',
+		modelExtras: { id: modelId, ...(modelExtras ?? {}) },
+		searchEmbeddingModel: { providerId: 'local', modelId },
+	}), providerManager);
 	if (!base) {
 		manager.client = () => ({
 			fileStates: async () => fileStates ?? new Map(),
@@ -443,6 +524,68 @@ test('a probed precision beats a declared variant; a declared variant is used wh
 	});
 	await brokenProbe.indexFiles([file]);
 	assert.equal(failed[0][0].embeddingSpace, 'bge-m3');
+});
+
+// ── 3b. Portable space keys through the real SearchManager path (WP-5) ───────────────────
+
+test('a path-shaped served id (a container mount path) keys the space on its normalized basename, not the full path', async () => {
+	const file = makeFile('mount-path.md');
+	const content = '# Mount path\n\nBody';
+	const upserted = [];
+	// The exact live-incident string: "Fetch Models" populating a llama-server mount path.
+	const manager = makeManager({
+		contentByPath: new Map([[file.path, content]]),
+		fileStates: new Map(),
+		onUpsert: chunks => upserted.push(chunks),
+		modelId: '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf',
+	});
+	assert.equal((await manager.indexFiles([file])).files, 1);
+	assert.equal(upserted[0][0].embeddingSpace, 'bge-m3-f16');
+	// The REQUEST still carries the full path — this is a space-key-only normalization, never
+	// applied to what is sent to the provider.
+	assert.equal(upserted[0][0].embeddingModel, '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf');
+});
+
+test('an explicit ProviderModel.embeddingSpaceId wins over both the path normalization and the raw id', async () => {
+	const file = makeFile('explicit-space.md');
+	const content = '# Explicit space\n\nBody';
+
+	// Wins even when the served id is ALSO path-shaped.
+	const overPathShaped = [];
+	const managerA = makeManager({
+		contentByPath: new Map([[file.path, content]]),
+		fileStates: new Map(),
+		onUpsert: chunks => overPathShaped.push(chunks),
+		modelId: '/models/CompendiumLabs/bge-m3-gguf/bge-m3-f16.gguf',
+		modelExtras: { embeddingSpaceId: 'bge-m3' },
+	});
+	assert.equal((await managerA.indexFiles([file])).files, 1);
+	assert.equal(overPathShaped[0][0].embeddingSpace, 'bge-m3');
+
+	// Wins over a perfectly ordinary served id too.
+	const overPlainId = [];
+	const managerB = makeManager({
+		contentByPath: new Map([[file.path, content]]),
+		fileStates: new Map(),
+		onUpsert: chunks => overPlainId.push(chunks),
+		modelExtras: { embeddingSpaceId: 'custom-space' },
+	});
+	assert.equal((await managerB.indexFiles([file])).files, 1);
+	assert.equal(overPlainId[0][0].embeddingSpace, 'custom-space');
+});
+
+test('an empty (unset) embeddingSpaceId on a non-path-shaped id reproduces today\'s key byte-for-byte — the no-re-embed guarantee', async () => {
+	const file = makeFile('unset-space.md');
+	const content = '# Unset\n\nBody';
+	const upserted = [];
+	const manager = makeManager({
+		contentByPath: new Map([[file.path, content]]),
+		fileStates: new Map(),
+		onUpsert: chunks => upserted.push(chunks),
+		// No embeddingSpaceId, no path-shaped id, no precision: exactly today's `bge-m3`.
+	});
+	assert.equal((await manager.indexFiles([file])).files, 1);
+	assert.equal(upserted[0][0].embeddingSpace, 'bge-m3');
 });
 
 test('with semantic off the space leaves the skip condition entirely, exactly as the model id did', async () => {
