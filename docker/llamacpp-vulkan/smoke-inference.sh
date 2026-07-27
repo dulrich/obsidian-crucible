@@ -141,7 +141,33 @@ else
 	bad "/api/v0/models returned $unsupported_code (expected 4xx/5xx) in ${elapsed}s"
 fi
 
-# ── 6. GET /running — ttl unload (optional, slow) ───────────────────────────────────────────
+# ── 6. /v1/chat/completions (one check per configured chat model) ──────────────────────────
+# The `chat` group in config.yaml is swap:true/exclusive:true, so the FIRST request below
+# evicts the retrieval group (and any other chat model) and cold-spawns its own llama-server
+# child — expect this to be slower than the retrieval checks above, hence the longer timeout.
+# max_tokens is >=128 deliberately: gemma-4's chat template is a reasoning template, and a
+# reasoning model spends its early completion tokens on `reasoning_content` before it ever
+# emits `content` — a smaller budget (16 was the value that first exposed this at cutover)
+# yields an empty `content` and a false FAIL even though the model answered correctly. Only
+# `content` is asserted non-empty here; `reasoning_content` (if present) is not inspected.
+CHAT_ALIASES="gemma-4-12b nemotron-4b"
+for chat_alias in $CHAT_ALIASES; do
+	note "checking POST /v1/chat/completions (model=$chat_alias) ..."
+	chat_json=$(curl -s --max-time 120 "$URL/v1/chat/completions" \
+		-H 'Content-Type: application/json' \
+		-d "$(printf '{"model":"%s","max_tokens":256,"messages":[{"role":"user","content":"Reply with the single word: pong"}]}' "$chat_alias")") || chat_json=""
+	chat_content=$(echo "$chat_json" | jq -r '
+		(.choices[0].message.content // empty)
+		| if type == "string" and length > 0 then . else empty end
+	' 2>/dev/null)
+	if [ -n "$chat_content" ]; then
+		pass "/v1/chat/completions ($chat_alias) returned non-empty content"
+	else
+		bad "/v1/chat/completions ($chat_alias) did not return non-empty content. Response: $chat_json"
+	fi
+done
+
+# ── 7. GET /running — ttl unload (optional, slow) ───────────────────────────────────────────
 if [ "$WAIT_TTL" -eq 1 ]; then
 	ttl_seconds=1800
 	note "checking GET /running shows the retrieval group unloading after ttl (${ttl_seconds}s) — this will sleep through the full ttl, ~30 minutes ..."
