@@ -8,6 +8,7 @@ import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
 import {
 	embeddingSpaceId,
+	resolveEmbeddingSpaceModelId,
 	SearchChunk,
 	SearchEmbeddingConfigError,
 	SearchEmbeddingMismatchError,
@@ -467,9 +468,20 @@ export class SearchManager {
 	 * would re-read and re-upsert the whole vault forever.
 	 */
 	private activeEmbeddingModelId(): string | null {
+		return this.activeEmbeddingModel()?.id ?? null;
+	}
+
+	/**
+	 * The resolved `ProviderModel` vectors should currently be produced under, or null under the
+	 * same conditions as `activeEmbeddingModelId` (semantic off, unset, or orphaned ref). Returns
+	 * the whole model — not just its id — because the portable space-key override
+	 * (`ProviderModel.embeddingSpaceId`, WP-5) lives on the model, not on the request-model id
+	 * string; `activeEmbeddingModelId` stays the thin `.id` projection every existing caller wants.
+	 */
+	private activeEmbeddingModel(): ProviderModel | null {
 		if (!this.settings.searchSemanticEnabled) return null;
 		const resolution = resolveProviderModelRef(this.settings.providers, this.settings.searchEmbeddingModel);
-		return resolution.status === 'ok' ? resolution.model.id : null;
+		return resolution.status === 'ok' ? resolution.model : null;
 	}
 
 	/**
@@ -481,11 +493,19 @@ export class SearchManager {
 	 * it *once* per operation rather than per file: `indexFiles` hoists it above the loop, and
 	 * `search()` resolves it alongside the query embedding. The probe is cached per provider+model
 	 * for the session inside `ProviderManager`, so this is not a round-trip per call either way.
+	 *
+	 * The identity fed to `embeddingSpaceId` is `resolveEmbeddingSpaceModelId(model)` — the
+	 * portable space id (WP-5), never `model.id` directly. That keeps the *request* field (what
+	 * `activeEmbeddingPrecision`/`embedTexts` send the provider) exactly the served id, while the
+	 * *space key* may differ from it: an explicit `embeddingSpaceId` wins outright, a path-shaped
+	 * served id (a container mount path) falls back to its normalized basename, and a plain id
+	 * reproduces today's key byte-for-byte.
 	 */
 	private async activeEmbeddingSpaceId(): Promise<string | null> {
-		const modelId = this.activeEmbeddingModelId();
-		if (!modelId) return null;
-		return embeddingSpaceId(modelId, await this.activeEmbeddingPrecision(modelId));
+		const model = this.activeEmbeddingModel();
+		if (!model) return null;
+		const spaceModelId = resolveEmbeddingSpaceModelId(model);
+		return embeddingSpaceId(spaceModelId, await this.activeEmbeddingPrecision(model.id));
 	}
 
 	/**

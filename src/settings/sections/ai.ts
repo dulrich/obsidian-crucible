@@ -35,6 +35,7 @@ import {
 	setProbeStatus,
 } from "../modelCapabilities";
 import { renderModelCatalogBrowser } from "../modelCatalogBrowser";
+import { deriveEmbeddingSpaceIdPrefill } from "../../search/types";
 
 export function renderAiSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	if (tab.editingProviderIndex !== -1) {
@@ -343,35 +344,83 @@ function maybeLazyFetchCatalog(tab: CrucibleSettingTab, provider: Provider): voi
 // this WeakMap exists only to read that result *synchronously* during a render (describeModel is
 // async; a render is not) and to guarantee the probe is kicked off at most once per model row.
 // `status: 'pending'` and a resolved `precision: undefined` are deliberately distinct from "never
-// asked" (`describedPrecisionByModel.get(model)` returning `undefined`) — seeing "no precision"
+// asked" (`describedProbeByModel.get(model)` returning `undefined`) — seeing "no precision"
 // once is enough; it must not re-probe every render.
-interface DescribedPrecisionEntry {
+//
+// WP-5 (alias-catalog glue): the same probe response also carries `servedModel` — the canonical
+// id the server actually resolved (e.g. a llama-swap alias `bge-m3` probed and answered as
+// `bge-m3-f16`). It rides along on this one entry rather than a second WeakMap so a row that
+// already triggered the precision fallback probe gets the alias-match benefit for free, with no
+// second network round trip.
+interface DescribedProbeEntry {
 	status: 'pending' | 'done';
 	precision?: string;
+	servedModel?: string;
 }
-const describedPrecisionByModel = new WeakMap<ProviderModel, DescribedPrecisionEntry>();
+const describedProbeByModel = new WeakMap<ProviderModel, DescribedProbeEntry>();
+
+// Kicks off (or reads back) the one `describeModel` probe both `describedPrecisionFor` and
+// `describedServedModelFor` read from. Returns the in-flight/settled entry, or `undefined` when
+// there is nothing to probe (`model.id` empty) — callers derive their own field from it rather
+// than duplicating the pending/done bookkeeping.
+function ensureDescribedProbe(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): DescribedProbeEntry | undefined {
+	const existing = describedProbeByModel.get(model);
+	if (existing) return existing;
+	if (!model.id) return undefined;
+
+	describedProbeByModel.set(model, { status: 'pending' });
+	void tab.plugin.providerManager.describeModel(provider, model.id)
+		.then((description) => {
+			describedProbeByModel.set(model, { status: 'done', precision: description.precision, servedModel: description.servedModel });
+			// Only worth a re-render if the probe actually found something to suggest — degrade
+			// silently otherwise, same as a rejection below (unsupported kind, unreachable server).
+			if (description.precision !== undefined || description.servedModel !== undefined) tab.display();
+		})
+		.catch(() => {
+			describedProbeByModel.set(model, { status: 'done', precision: undefined, servedModel: undefined });
+		});
+	return undefined;
+}
 
 // WP-3: exported so `renderModelCatalogBrowser`'s Use button (`modelCatalogBrowser.ts`) can thread
 // the exact same best-effort fallback into `useCatalogEntry` — see that function's doc comment for
 // why it takes this as an injected callback rather than importing it directly (this file already
 // imports `renderModelCatalogBrowser` from there, and a reverse import would be a cycle).
 export function describedPrecisionFor(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): string | undefined {
-	const existing = describedPrecisionByModel.get(model);
-	if (existing) return existing.status === 'done' ? existing.precision : undefined;
-	if (!model.id) return undefined;
+	const entry = ensureDescribedProbe(tab, provider, model);
+	return entry?.status === 'done' ? entry.precision : undefined;
+}
 
-	describedPrecisionByModel.set(model, { status: 'pending' });
-	void tab.plugin.providerManager.describeModel(provider, model.id)
-		.then((description) => {
-			describedPrecisionByModel.set(model, { status: 'done', precision: description.precision });
-			// Only worth a re-render if the probe actually found something to suggest — degrade
-			// silently otherwise, same as a rejection below (unsupported kind, unreachable server).
-			if (description.precision !== undefined) tab.display();
-		})
-		.catch(() => {
-			describedPrecisionByModel.set(model, { status: 'done', precision: undefined });
-		});
-	return undefined;
+// WP-5 (alias-catalog glue): the canonical id a `describeModel` probe resolved `model.id` to, or
+// undefined while the probe is pending/unresolvable. Read by `resolveModelCatalogEntry` on a
+// raw-id catalog miss — a row configured with a llama-swap (or similar) alias never matches the
+// catalog by its own id, because the catalog enumerates canonical served ids.
+export function describedServedModelFor(tab: CrucibleSettingTab, provider: Provider, model: ProviderModel): string | undefined {
+	const entry = ensureDescribedProbe(tab, provider, model);
+	return entry?.status === 'done' ? entry.servedModel : undefined;
+}
+
+/**
+ * Which catalog entry should drive the Accept-row suggestion for this model row.
+ *
+ * An exact match on the row's own configured id always wins — that is server-reported truth for
+ * what the row is actually configured to request. `servedModel` (the canonical id a describeModel
+ * probe resolved the row's id to, when the row's id is itself an alias) is the fallback, and only
+ * matters when the exact match already failed: a row configured with `bge-m3` against a llama-swap
+ * catalog that lists only `bge-m3-f16` used to render no Accept row at all, even though the probe
+ * had already identified exactly which catalog entry it was.
+ *
+ * Pure and exported so this precedence is testable without rendering the settings pane.
+ */
+export function resolveModelCatalogEntry(
+	rawId: string,
+	catalogModels: ProviderCatalogModel[],
+	servedModel: string | undefined,
+): ProviderCatalogModel | undefined {
+	const exact = catalogModels.find(m => m.id === rawId);
+	if (exact) return exact;
+	if (!servedModel) return undefined;
+	return catalogModels.find(m => m.id === servedModel);
 }
 
 function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElement, provider: Provider) {
@@ -444,6 +493,13 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 						// WP-3 item 2 (auto-alias): only when the label is still empty — a value
 						// the user already typed always wins, pick or no pick.
 						fillModelLabelIfEmpty(model, entry);
+						// WP-5 (portable space keys): when the picked served id is path-shaped (a
+						// container mount point), prefill the portable override rather than letting
+						// that path silently become the vector-space key — see
+						// `deriveEmbeddingSpaceIdPrefill`'s doc comment. Never overwrites a value
+						// already present.
+						const spaceIdPrefill = deriveEmbeddingSpaceIdPrefill(entry.id, model.embeddingSpaceId);
+						if (spaceIdPrefill) model.embeddingSpaceId = spaceIdPrefill;
 						setTimeout(() => {
 							void tab.plugin.saveSettings();
 							tab.display();
@@ -593,6 +649,25 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					t.inputEl.addClass('pi-width-half');
 				});
 
+				// WP-5 (portable space keys): a plain manual override, not a probed field — nothing
+				// ever writes it except the user typing here or the path-shaped auto-prefill on a
+				// catalog pick (see the ProviderModelSuggest onChoose above), so unlike
+				// embeddingDimensions/embeddingVariant this row carries no probe-accepted badge.
+				new Setting(modelRow)
+					.setName('Embedding space id (advanced override)')
+					.setDesc('Optional — only needed when the model id above is a filesystem path; see the notice below.')
+					.addText(t => {
+						t.setPlaceholder('e.g. bge-m3-f16')
+							.setValue(model.embeddingSpaceId ?? '')
+							.onChange(async (v) => {
+								const trimmed = v.trim();
+								if (trimmed) model.embeddingSpaceId = trimmed;
+								else delete model.embeddingSpaceId;
+								await tab.plugin.saveSettings();
+							});
+						t.inputEl.addClass('pi-width-half');
+					});
+
 				// WP-1: the detail trimmed off the two setDescs above folds into the consolidated
 				// notices block below rather than disappearing.
 				noticeEntries.push({
@@ -603,12 +678,27 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					text: 'Embedding precision (fallback): Crucible asks the server first, and a reported value always wins. The same weights at a different precision are a different vector space, so setting this when it matters (e.g. f16 vs fp32) keeps the two from being mixed. Leave empty unless you know: changing it re-embeds the vault.',
 					variant: 'info',
 				});
+				noticeEntries.push({
+					text: 'Embedding space id (advanced override): the model id above is what Crucible sends the server, but a mount-path or host-specific id (e.g. a llama.cpp container\'s /models/.../bge-m3-f16.gguf) makes a poor vector-space key — moving the mount would look like a different model and force a full re-embed. Set this to the portable identity the space should be keyed on instead; picking a path-shaped id from the catalog above prefills it automatically. Leave empty unless the model id is a path.',
+					variant: 'info',
+				});
 			}
 
 			// D2 rule 2 (Surface): only rendered when the current id matches a fetched catalog
 			// entry. Nothing here writes to `model` — the Accept button in the notices block below
 			// is the only control in this row that does.
-			const catalogEntry = catalogModels.find(m => m.id === model.id);
+			//
+			// WP-5 (alias-catalog glue): a raw-id match always wins, but a row configured with a
+			// llama-swap (or similar) alias — `bge-m3`, say — never matches a catalog that
+			// enumerates canonical served ids (`bge-m3-f16`), so the Accept row silently never
+			// appeared even though the model was correctly identified. On a raw-id miss, fall back
+			// to the canonical id `describedServedModelFor`'s probe resolved (only calling it once
+			// the exact match is known to have failed, so a normally-configured row never triggers
+			// an extra probe).
+			const rawCatalogMatch = catalogModels.find(m => m.id === model.id);
+			const catalogEntry = rawCatalogMatch ?? (model.id && catalogModels.length > 0
+				? resolveModelCatalogEntry(model.id, catalogModels, describedServedModelFor(tab, provider, model))
+				: undefined);
 			let suggestion: CatalogSuggestion | undefined;
 			if (catalogEntry) {
 				const warning = crossEncoderWarningText(catalogEntry);
