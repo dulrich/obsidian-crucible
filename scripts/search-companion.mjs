@@ -79,6 +79,18 @@ export const RRF_TITLE_WEIGHT = 1.0;
 // deserve more say — it is deliberately not a score blend, because bm25 and cosine are not
 // commensurable scales but their ranks are.
 export const RRF_VECTOR_WEIGHT = 1.0;
+// The document-level term-coverage list (rankingMode 'coverage'/'blend+coverage') joins on the
+// same footing as the title and vector lists, for the same reason: its scale (a fraction of the
+// query's terms) is not commensurable with bm25 or cosine, but its rank is. Weight 1.0 is the
+// unbiased starting point the bake-off measures against, not a tuned value.
+export const RRF_COVERAGE_WEIGHT = 1.0;
+// A path must cover at least this many distinct query terms to enter the coverage list at all.
+// One term is not "coverage" — it is what bm25 already ranks, and at vault scale a single common
+// term covers thousands of paths, so a floor of 1 would hand the coverage list to noise before
+// the poolSize truncation could even see it. Two is the smallest floor that means "these terms
+// co-occur in this document", which is the signal the leg exists to add. Consequently the leg is
+// inert for one-term queries (where the strict AND already retrieves every covering path).
+export const COVERAGE_MIN_TERMS = 2;
 
 // Hydration for a path the vector scan found but the FTS pool never returned. Those rows
 // have no bm25 score and no FTS snippet (they did not match), so the snippet is built from
@@ -168,6 +180,17 @@ FROM pooled
 ORDER BY score_text, path
 LIMIT ?
 `;
+
+// The document-level term-coverage leg's one statement, run once per query term (rankingMode
+// 'coverage'/'blend+coverage' only — it is never prepared-and-run on the default path).
+//
+// Deliberately NOT the pooled SEARCH_SQL: coverage asks a presence question, not a scoring one,
+// so it must not pay for bm25() or snippet() — and because it selects no FTS5 auxiliary
+// function it needs neither the MATERIALIZED CTE nor the single-min() aggregate rule that hold
+// SEARCH_SQL together. It also takes no LIMIT: a truncated per-term path list would be a
+// *wrong* coverage count (silently, and biased by FTS rowid order), not a cheaper one. The
+// truncation that bounds the leg happens after counting, on the ranked list.
+const COVERAGE_SQL = 'SELECT id, path FROM chunks_fts WHERE vault_id = ? AND chunks_fts MATCH ?';
 
 // The canonical `chunks` shape, parameterized by table name so the primary-key migration
 // builds its replacement table from the same declaration the fresh-database path uses —
@@ -716,11 +739,17 @@ function quoteFts(value) {
 // `fallback` is the loose OR form, used only when the AND form returns nothing — a query
 // that matches nothing is worse than a loose one. Terms stay `""`-escaped and capped at 24
 // because an FTS5 syntax error surfaces as a 500.
+//
+// `expanded` is the per-term FTS5 expression list the two clauses are assembled from (the
+// trailing term already prefix-expanded). It is exported on the result so the coverage leg
+// can ask "does THIS one term appear anywhere in this path" using exactly the same notion of
+// a term the primary clause uses — a second, subtly different quoting/expansion rule would
+// make coverage disagree with bm25 about what matched.
 export function buildFtsQuery(query) {
 	const terms = tokenizeQuery(query);
 	if (terms.length === 0) {
 		const literal = quoteFts(String(query ?? '').trim());
-		return { terms, phrase: literal, primary: literal, fallback: literal };
+		return { terms, phrase: literal, primary: literal, fallback: literal, expanded: [] };
 	}
 	const quoted = terms.map(quoteFts);
 	const phrase = quoteFts(terms.join(' '));
@@ -730,6 +759,45 @@ export function buildFtsQuery(query) {
 		phrase,
 		primary: `(${phrase}) OR (${expanded.join(' AND ')})`,
 		fallback: `(${expanded.join(' OR ')})`,
+		expanded,
+	};
+}
+
+// Ranking modes (`rankingMode` on POST /v1/search). Two candidate directions from the WP-4
+// diagnosis, selectable per request so a bake-off can measure them against each other before
+// either becomes the default. `'current'` is exactly today's behavior and stays the default:
+// this whole surface is inert unless a caller asks for it.
+//
+//   current         the shipped ranking: strict AND primary, loose-OR only as a zero-hit rescue
+//   blend           always run the loose-OR fallback too and union its pooled rows in
+//   coverage        add a document-level term-coverage leg as a fourth RRF rank
+//   blend+coverage  both
+//
+// The two are orthogonal on purpose — blend widens the *bm25 candidate pool*, coverage adds a
+// *separate retrieval leg* (structurally the vector leg's twin) without touching the FTS
+// clause at all — so the four modes form a clean 2x2 for the bake-off.
+export const RANKING_MODES = Object.freeze(['current', 'blend', 'coverage', 'blend+coverage']);
+export const DEFAULT_RANKING_MODE = 'current';
+
+// An unrecognized mode is a 400, not a silent degrade to `'current'`. A typo in a bake-off
+// harness that quietly measured the default four times would be indistinguishable from a real
+// null result, which is the one failure this flag exists to avoid. Absent/empty is not a typo —
+// that is every existing client, and it means `'current'`.
+export function parseRankingMode(value) {
+	if (value === undefined || value === null || value === '') return DEFAULT_RANKING_MODE;
+	const mode = String(value).trim().toLowerCase();
+	if (!RANKING_MODES.includes(mode)) {
+		throw new HttpError(400, `unknown rankingMode "${String(value)}"; expected one of ${RANKING_MODES.join(', ')}`);
+	}
+	return mode;
+}
+
+export function rankingModeFlags(mode) {
+	const resolved = RANKING_MODES.includes(mode) ? mode : DEFAULT_RANKING_MODE;
+	return {
+		mode: resolved,
+		blend: resolved === 'blend' || resolved === 'blend+coverage',
+		coverage: resolved === 'coverage' || resolved === 'blend+coverage',
 	};
 }
 
@@ -771,19 +839,30 @@ export function titleMatchScore(terms, row = {}) {
 // coexist in one ordering.
 //
 // `vectorRows` carries rows the vector scan found that FTS never returned; their `textRank`
-// is 0 (absent from the bm25 list) rather than a made-up large rank.
+// is 0 (absent from the bm25 list) rather than a made-up large rank. `coverageRows` is the
+// exact same arrangement for the optional document-level term-coverage leg, which is why the
+// two share `makeEntry` rather than growing a second row shape.
+//
+// The coverage list is opt-in (`rankingMode`): with `coverageScores` absent, nothing about
+// this function's output changes — not the ordering, and not the payload, since the two
+// coverage attribution keys are then never written at all. That is the same "omitted, not 0"
+// rule `scoreVector` already follows.
 //
 // Sign convention: bm25 is negative/lower-is-better inside SQL and is negated here, so
 // every score the client sees (`score`, `scoreText`, `scoreRrf`, `attribution.base`) is
-// positive and higher-is-better. Cosine (`scoreVector`) is already higher-is-better.
+// positive and higher-is-better. Cosine (`scoreVector`) is already higher-is-better, and so
+// is coverage (a 0..1 fraction of the query's terms found anywhere in the document).
 export function fuseSearchRows(rows, options = {}) {
 	const terms = options.terms ?? [];
 	const k = options.k ?? RRF_K;
 	const titleWeight = options.titleWeight ?? RRF_TITLE_WEIGHT;
 	const vectorWeight = options.vectorWeight ?? RRF_VECTOR_WEIGHT;
+	const coverageWeight = options.coverageWeight ?? RRF_COVERAGE_WEIGHT;
 	const vectorScores = options.vectorScores ?? null;
 	const vectorRows = options.vectorRows ?? [];
-	const limit = options.limit ?? (rows.length + vectorRows.length);
+	const coverageScores = options.coverageScores ?? null;
+	const coverageRows = options.coverageRows ?? [];
+	const limit = options.limit ?? (rows.length + vectorRows.length + coverageRows.length);
 
 	const makeEntry = (row, textRank) => ({
 		row,
@@ -792,7 +871,9 @@ export function fuseSearchRows(rows, options = {}) {
 		textRank,
 		titleRank: 0,
 		vectorRank: 0,
+		coverageRank: 0,
 		vectorScore: vectorScores?.has(row.path) ? vectorScores.get(row.path) : null,
+		coverageScore: coverageScores?.has(row.path) ? coverageScores.get(row.path) : null,
 		rrf: 0,
 	});
 	// Tie-breaks fall back to bm25 order; an entry absent from that list sorts last among
@@ -801,6 +882,7 @@ export function fuseSearchRows(rows, options = {}) {
 
 	const entries = rows.map((row, index) => makeEntry(row, index + 1));
 	for (const row of vectorRows) entries.push(makeEntry(row, 0));
+	for (const row of coverageRows) entries.push(makeEntry(row, 0));
 
 	const titled = entries
 		.filter(entry => entry.titleBoost > 0)
@@ -812,30 +894,28 @@ export function fuseSearchRows(rows, options = {}) {
 		.sort((a, b) => (b.vectorScore - a.vectorScore) || (textOrder(a) - textOrder(b)));
 	vectored.forEach((entry, index) => { entry.vectorRank = index + 1; });
 
+	// Coverage ties are common by construction (every path covering 3 of 5 terms scores the
+	// same), so the bm25 tie-break carries real weight here: among equally-covering paths the
+	// one the strict AND already liked stays ahead, and coverage-only paths sort behind them
+	// in the order the leg produced.
+	const covered = entries
+		.filter(entry => entry.coverageScore !== null)
+		.sort((a, b) => (b.coverageScore - a.coverageScore) || (textOrder(a) - textOrder(b)));
+	covered.forEach((entry, index) => { entry.coverageRank = index + 1; });
+
 	for (const entry of entries) {
 		entry.rrf = (entry.textRank ? 1 / (k + entry.textRank) : 0)
 			+ (entry.titleRank ? titleWeight / (k + entry.titleRank) : 0)
-			+ (entry.vectorRank ? vectorWeight / (k + entry.vectorRank) : 0);
+			+ (entry.vectorRank ? vectorWeight / (k + entry.vectorRank) : 0)
+			+ (entry.coverageRank ? coverageWeight / (k + entry.coverageRank) : 0);
 	}
 	entries.sort((a, b) => (b.rrf - a.rrf) || (textOrder(a) - textOrder(b)));
 
-	return entries.slice(0, Math.max(0, limit)).map(entry => ({
-		chunkId: entry.row.id,
-		path: entry.row.path,
-		title: entry.row.title,
-		heading: entry.row.heading,
-		snippet: entry.row.snippet,
-		score: entry.rrf,
-		scoreText: entry.base,
-		// Omitted (not 0) when this row never entered the vector list, so an FTS-only
-		// response is exactly the payload it was before the vector leg existed.
-		scoreVector: entry.vectorScore === null ? undefined : entry.vectorScore,
-		scoreRrf: entry.rrf,
-		metadata: safeJson(entry.row.metadata_json),
+	return entries.slice(0, Math.max(0, limit)).map(entry => {
 		// Per-stage attribution: the base score, every boost that fired, and the fused
 		// value, so ranking is tunable by observation instead of guesswork. `boosts` is the
 		// open slot for client-side stages (link adjacency, recency) to record themselves.
-		attribution: {
+		const attribution = {
 			base: entry.base,
 			textRank: entry.textRank || null,
 			titleRank: entry.titleRank || null,
@@ -843,8 +923,29 @@ export function fuseSearchRows(rows, options = {}) {
 			vectorRank: entry.vectorRank || null,
 			rrf: entry.rrf,
 			pooledChunks: Number(entry.row.pooled_chunks ?? 1),
-		},
-	}));
+		};
+		// Appended only when the coverage leg actually ran, so a default-mode response is the
+		// same object, with the same keys in the same order, that it was before this existed.
+		if (coverageScores) {
+			attribution.coverageRank = entry.coverageRank || null;
+			attribution.coverageScore = entry.coverageScore;
+		}
+		return {
+			chunkId: entry.row.id,
+			path: entry.row.path,
+			title: entry.row.title,
+			heading: entry.row.heading,
+			snippet: entry.row.snippet,
+			score: entry.rrf,
+			scoreText: entry.base,
+			// Omitted (not 0) when this row never entered the vector list, so an FTS-only
+			// response is exactly the payload it was before the vector leg existed.
+			scoreVector: entry.vectorScore === null ? undefined : entry.vectorScore,
+			scoreRrf: entry.rrf,
+			metadata: safeJson(entry.row.metadata_json),
+			attribution,
+		};
+	});
 }
 
 // Which embedding space — if any — this request's vector scan may cover.
@@ -1011,17 +1112,158 @@ export function makeTextSnippet(text, tokens = 18) {
 	return words.length > tokens ? `${head}...` : head;
 }
 
+// The document-level term-coverage leg (rankingMode 'coverage'/'blend+coverage'): how many of
+// the query's terms appear in ANY chunk of a given path, regardless of whether any single chunk
+// holds them all. It is the WP-4 diagnosis' candidate 2 — the root cause there is that FTS5's
+// implicit AND is per *chunk*, so a note whose terms are legitimately present but scattered
+// across its own headings can never satisfy a multi-term AND, and at vault scale the loose-OR
+// rescue is starved because some unrelated document coincidentally does.
+//
+// Structurally this is the vector leg's twin, and deliberately so: a separate retrieval whose
+// ranking joins the fusion, contributing hydrated rows for paths the FTS pool never returned
+// (`score_text: null` — they did not match the FTS clause, and inventing a bm25 rank for them
+// would be a lie). It therefore changes nothing about what qualifies for the *bm25* candidate
+// pool; the strict AND stays exactly the query it was.
+//
+// Cost shape, since this is the leg's only real risk: one FTS MATCH per query term, presence-
+// only (no bm25/snippet), so it is cheaper per term than a search but scales with how much of
+// the index each term matches — the same variable that governs search latency generally (see
+// src/search/AGENTS.md). That is measured by the bake-off, not guessed at here.
+function runCoverageLeg(db, options) {
+	const outcome = { used: false, scores: null, rows: [] };
+	const terms = Array.isArray(options.terms) ? options.terms : [];
+	const expanded = Array.isArray(options.expanded) ? options.expanded : [];
+	// Fewer than two terms cannot express co-occurrence, and a one-term query's strict AND is
+	// that single term — the FTS pool already holds every path this leg could name.
+	if (terms.length < COVERAGE_MIN_TERMS || expanded.length !== terms.length) return outcome;
+
+	const statement = options.statement ?? db.prepare(COVERAGE_SQL);
+	// Distinct terms per path, and per chunk: the path count is the coverage score, the chunk
+	// count picks which chunk to hydrate for a path the FTS pool never returned (the one that
+	// covers the most of the query is the one worth showing the user).
+	const pathTerms = new Map();
+	const chunkTerms = new Map();
+	const chunkPath = new Map();
+	for (const expression of expanded) {
+		// A path/chunk can appear many times for one term; the Sets make the count distinct-by-
+		// term rather than by-hit, which is what "how many of the query's terms" means.
+		const seenPaths = new Set();
+		const seenChunks = new Set();
+		for (const row of statement.all(options.vaultId, expression)) {
+			if (!seenPaths.has(row.path)) {
+				seenPaths.add(row.path);
+				pathTerms.set(row.path, (pathTerms.get(row.path) ?? 0) + 1);
+			}
+			if (!seenChunks.has(row.id)) {
+				seenChunks.add(row.id);
+				chunkTerms.set(row.id, (chunkTerms.get(row.id) ?? 0) + 1);
+				chunkPath.set(row.id, row.path);
+			}
+		}
+	}
+	if (pathTerms.size === 0) return outcome;
+
+	const scores = new Map();
+	for (const [path, count] of pathTerms) {
+		if (count < COVERAGE_MIN_TERMS) continue;
+		scores.set(path, count / terms.length);
+	}
+	if (scores.size === 0) return outcome;
+	outcome.used = true;
+
+	// Truncate the *ranked* list, never the per-term path lists: counting first and cutting
+	// afterwards is what keeps every surviving coverage score exact.
+	const ranked = [...scores.entries()]
+		.sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+		.slice(0, Math.max(0, options.poolSize ?? scores.size));
+	outcome.scores = new Map(ranked);
+
+	// Best-covering chunk per path, for the paths that need hydrating.
+	const bestChunk = new Map();
+	for (const [chunkId, count] of chunkTerms) {
+		const path = chunkPath.get(chunkId);
+		const previous = bestChunk.get(path);
+		if (previous === undefined || count > previous.count) bestChunk.set(path, { id: chunkId, count });
+	}
+
+	const known = options.knownPaths ?? new Set();
+	const hydrate = options.hydrate ?? db.prepare(HYDRATE_CHUNK_SQL);
+	for (const [path] of ranked) {
+		if (known.has(path)) continue;
+		const best = bestChunk.get(path);
+		if (!best) continue;
+		const row = hydrate.get(options.vaultId, best.id);
+		if (!row) continue;
+		outcome.rows.push({
+			id: row.id,
+			path: row.path,
+			title: row.title,
+			heading: row.heading,
+			metadata_json: row.metadata_json,
+			snippet: makeTextSnippet(row.text),
+			score_text: null,
+			pooled_chunks: 1,
+		});
+	}
+	return outcome;
+}
+
+// Union the loose-OR fallback's pooled rows into the primary AND's, for rankingMode 'blend'.
+//
+// A path present in both keeps the *primary* row: its bm25 reflects a real strict match, and
+// the two scores are not comparable anyway (different MATCH expressions mean different term
+// sets and different IDF), which is also why the fallback-only rows are appended in their own
+// bm25 order rather than merge-sorted into the primary's. `fuseSearchRows` reads position as
+// textRank, so appending is exactly the statement "every strict-AND match outranks every
+// loose-OR-only one on the text leg" — the blend widens recall without demoting the rows the
+// current mode already trusts.
+export function blendPooledRows(primaryRows, fallbackRows) {
+	const seen = new Set(primaryRows.map(row => row.path));
+	const added = [];
+	for (const row of fallbackRows) {
+		if (seen.has(row.path)) continue;
+		seen.add(row.path);
+		added.push(row);
+	}
+	return { rows: added.length > 0 ? primaryRows.concat(added) : primaryRows, added: added.length };
+}
+
 export function runSearch(db, options) {
 	const vaultId = options.vaultId;
 	const limit = clampLimit(options.limit);
 	const statement = options.statement ?? db.prepare(SEARCH_SQL);
 	const built = buildFtsQuery(options.query);
 	const poolSize = Math.max(limit * SEARCH_POOL_FACTOR, SEARCH_POOL_MIN);
+	const ranking = rankingModeFlags(options.rankingMode ?? DEFAULT_RANKING_MODE);
 
 	let match = built.primary;
+	let matchFallback = null;
 	let rows = statement.all(vaultId, match, poolSize);
 	let fallbackUsed = false;
-	if (rows.length === 0 && built.fallback !== built.primary) {
+	let blendedTotal = null;
+	// `fallbackUsed` reports what actually contributed to this response, and that reading is
+	// the same in both branches — it just cannot be observed the same way. Under 'current' the
+	// loose-OR only ever runs *instead of* the primary (which returned nothing), so "it ran" and
+	// "it contributed" are the same event and the flag keeps its exact historical assignment,
+	// true even in the degenerate case where the rescue itself also matched nothing. Under
+	// 'blend' both queries always run, so "it ran" would be true on every multi-term search and
+	// carry no information; the flag therefore reports whether the loose-OR contributed any path
+	// the strict AND had not already found.
+	// The two-term floor is not cosmetic: with one term the AND clause *is* that term, so the
+	// loose-OR form matches exactly the same set and blending it in can only cost a second full
+	// FTS scan for zero added paths — and a one- or two-character prefix query is the most
+	// expensive scan the companion runs (see src/search/AGENTS.md's latency table).
+	if (ranking.blend && built.terms.length >= 2 && built.fallback !== built.primary) {
+		matchFallback = built.fallback;
+		const fallbackRows = statement.all(vaultId, matchFallback, poolSize);
+		const blended = blendPooledRows(rows, fallbackRows);
+		rows = blended.rows;
+		fallbackUsed = blended.added > 0;
+		// The loose-OR match set is a strict superset of the primary's (a document matching the
+		// phrase, or every term in one chunk, matches the OR of those terms too), so the OR's
+		// own distinct-path count is exactly the blended candidate total — no double counting.
+		if (fallbackRows.length > 0) blendedTotal = Number(fallbackRows[0].total_paths ?? fallbackRows.length);
+	} else if (rows.length === 0 && built.fallback !== built.primary) {
 		match = built.fallback;
 		fallbackUsed = true;
 		rows = statement.all(vaultId, match, poolSize);
@@ -1037,22 +1279,41 @@ export function runSearch(db, options) {
 		knownPaths: new Set(rows.map(row => row.path)),
 	});
 
+	const coverage = ranking.coverage
+		? runCoverageLeg(db, {
+			vaultId,
+			terms: built.terms,
+			expanded: built.expanded,
+			poolSize,
+			statement: options.coverageStatement,
+			hydrate: options.hydrate,
+			// Both already-present sets, so one path never enters the fusion twice.
+			knownPaths: new Set([...rows.map(row => row.path), ...vector.rows.map(row => row.path)]),
+		})
+		: { used: false, scores: null, rows: [] };
+
 	// `total` stays the distinct-path FTS match count plus the paths only the vector scan
 	// found. A vector-only path that FTS would also have matched *beyond* the pool is
 	// counted twice; that only nudges the "N more" hint, and the alternative is a second
-	// MATCH per search, which is exactly the cost the pooled CTE was built to remove.
-	const ftsTotal = rows.length > 0 ? Number(rows[0].total_paths ?? rows.length) : 0;
-	const total = ftsTotal + vector.rows.length;
+	// MATCH per search, which is exactly the cost the pooled CTE was built to remove. The
+	// coverage leg's extra paths are counted on exactly the same terms.
+	const ftsTotal = blendedTotal ?? (rows.length > 0 ? Number(rows[0].total_paths ?? rows.length) : 0);
+	const total = ftsTotal + vector.rows.length + coverage.rows.length;
 	const results = fuseSearchRows(rows, {
 		terms: built.terms,
 		limit,
 		vectorScores: vector.scores,
 		vectorRows: vector.rows,
+		coverageScores: coverage.scores,
+		coverageRows: coverage.rows,
 	});
 	return {
 		match,
+		matchFallback,
+		rankingMode: ranking.mode,
 		terms: built.terms,
 		fallbackUsed,
+		coverageUsed: coverage.used,
 		total,
 		results,
 		vectorUsed: vector.used,
@@ -1239,6 +1500,10 @@ LIMIT 1
 `);
 	const resetChunks = db.prepare('DELETE FROM chunks WHERE vault_id = ?');
 	const searchStatement = db.prepare(SEARCH_SQL);
+	// Prepared alongside the search statement even though only a non-default `rankingMode`
+	// ever runs it — preparing is cheap and once, whereas preparing per request would put a
+	// compile on the hot path of the mode we may be about to make the default.
+	const coverageStatement = db.prepare(COVERAGE_SQL);
 
 	return async (req, res) => {
 		try {
@@ -1467,7 +1732,12 @@ LIMIT 1
 					// older client, which is why "no space named" still scans a single-space
 					// vault rather than refusing.
 					embeddingSpace: body.embeddingSpace,
+					// Absent means 'current', i.e. every existing client keeps exactly the
+					// ranking it has today. A *present but unrecognized* value is a 400 (see
+					// parseRankingMode), never a silent degrade to the default.
+					rankingMode: parseRankingMode(body.rankingMode),
 					hydrate: hydrateChunk,
+					coverageStatement,
 				});
 				const response = {
 					// Computed from state, not hardcoded: 'hybrid' means a query embedding
@@ -1482,6 +1752,13 @@ LIMIT 1
 					hasMore: outcome.total > outcome.results.length,
 					results: outcome.results,
 				};
+				// Only when a caller opted out of the default: a 'current' response stays the
+				// exact payload it has always been, key for key.
+				if (outcome.rankingMode !== DEFAULT_RANKING_MODE) {
+					response.rankingMode = outcome.rankingMode;
+					response.coverageUsed = outcome.coverageUsed;
+					if (outcome.matchFallback) response.matchFallback = outcome.matchFallback;
+				}
 				if (outcome.note) response.message = outcome.note;
 				return json(res, 200, response);
 			}

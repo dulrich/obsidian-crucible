@@ -101,6 +101,10 @@ export class SearchServiceClient {
 			// Which space the query vector lives in. Without it the companion cannot tell a
 			// mixed index apart from a single-space one, and would score across both.
 			embeddingSpace: options.embeddingSpace,
+			// Undefined unless a caller deliberately picks a mode, and JSON.stringify drops an
+			// undefined value outright — so the default request is byte-for-byte the one the
+			// companion has always received, and its ranking is unchanged.
+			rankingMode: options.rankingMode,
 			filters: options.filters,
 		});
 		const response = normalizeSearchResponse(json);
