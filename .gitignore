@@ -57,3 +57,7 @@ GEMINI.local.md
 # scrubbed from this repo's history 2026-07-26. Never commit run data here.
 runs/
 search-query-log.json
+# The dev vault's plugin dir is a symlink to this repo, so plugin-data writes (the
+# image-description store) land in the working tree. Vault-derived text — same
+# public-repo hazard as runs/. Never commit it.
+image-descriptions/
