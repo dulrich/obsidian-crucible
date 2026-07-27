@@ -47,7 +47,7 @@ Before signaling task completion or reporting success, you MUST execute and pass
 
 1.  **Linting:** Run `npm run lint`. This executes both ESLint (for TypeScript) and Stylelint (for CSS). All errors MUST be resolved.
 2.  **Type Checking:** Run `npx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
-3.  **Tests:** Run `npm test`. Baseline is **748 tests across 67 files, 0 failures** — a drop in the count is a deleted test, not a pass.
+3.  **Tests:** Run `npm test`. Baseline is **892 tests across 74 files, 0 failures** — a drop in the count is a deleted test, not a pass.
 4.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
 5.  **Verification:** Confirm all processes exited with code 0.
 
