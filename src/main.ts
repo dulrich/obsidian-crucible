@@ -47,6 +47,7 @@ import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
 import { SEARCH_QUERY_LOG_FILENAME, SearchQueryLog } from './search/queryLog';
+import { ImageDescriptionStorage, ImageDescriptionStore } from './search/imageDescriptionStore';
 import { FileOpenIndex } from './fileOpenIndex';
 import { SearchDeletePathWorkflow, SearchEmbedMissingWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
@@ -129,6 +130,10 @@ export default class CruciblePlugin extends Plugin {
 	// Passive, bounded, local record of executed vault searches and which result was opened
 	// (src/search/queryLog.ts). Lives in the plugin's data dir, never in the vault's note tree.
 	searchQueryLog: SearchQueryLog;
+	// The MD5-keyed image description store (src/search/imageDescriptionStore.ts,
+	// docs/multimodal-image-search.md Decision 2). Also lives in the plugin's data dir, outside
+	// the vault's note tree — WP-2/WP-3 read it at chunk-prep and enqueue time respectively.
+	imageDescriptions: ImageDescriptionStore;
 	searchIndexCoordinator: SearchIndexCoordinator;
 	fileOpenIndex: FileOpenIndex;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
@@ -189,6 +194,15 @@ export default class CruciblePlugin extends Plugin {
 			isEnabled: () => this.settings.searchQueryLogEnabled,
 			maxEntries: () => this.settings.searchQueryLogMaxEntries,
 		});
+		// Same "outside the note tree by construction" reasoning as the query log above, but the
+		// adapter's own read/write/list shapes don't structurally satisfy ImageDescriptionStorage
+		// (adapter.read throws on a missing path; adapter.list returns {files,folders}), so this
+		// gets a thin wrapper instead of a direct pass-through. The wrapper also lazily mkdir's the
+		// base dir on first write — nothing here calls mkdir eagerly at startup.
+		this.imageDescriptions = new ImageDescriptionStore(
+			this.createImageDescriptionStorage(this.pluginDataPath('image-descriptions')),
+			this.pluginDataPath('image-descriptions'),
+		);
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
@@ -614,6 +628,47 @@ export default class CruciblePlugin extends Plugin {
 	pluginDataPath(filename: string): string {
 		const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
 		return `${dir}/${filename}`;
+	}
+
+	/**
+	 * Wraps `app.vault.adapter` to satisfy `ImageDescriptionStorage` (`src/search/
+	 * imageDescriptionStore.ts`): nullable `read` instead of a throw-on-missing, `list` returning
+	 * bare file paths instead of `{files, folders}`, and a lazy, once-per-session `mkdir` of
+	 * `baseDir` before the first write (the store itself never creates directories — see its
+	 * module doc). `baseDir` is threaded in rather than re-derived from `filename` on every call
+	 * so the mkdir memoization has a single stable key.
+	 */
+	private createImageDescriptionStorage(baseDir: string): ImageDescriptionStorage {
+		const adapter = this.app.vault.adapter;
+		let ensureBaseDir: Promise<void> | null = null;
+		const ensureDir = (): Promise<void> => {
+			if (!ensureBaseDir) {
+				ensureBaseDir = (async () => {
+					if (!(await adapter.exists(baseDir))) await adapter.mkdir(baseDir);
+				})();
+			}
+			return ensureBaseDir;
+		};
+		return {
+			async read(path) {
+				if (!(await adapter.exists(path))) return null;
+				return await adapter.read(path);
+			},
+			async write(path, data) {
+				await ensureDir();
+				await adapter.write(path, data);
+			},
+			async exists(path) {
+				return await adapter.exists(path);
+			},
+			async remove(path) {
+				if (await adapter.exists(path)) await adapter.remove(path);
+			},
+			async list(dir) {
+				if (!(await adapter.exists(dir))) return [];
+				return (await adapter.list(dir)).files;
+			},
+		};
 	}
 
 	// Set a per-type auto-run (drain/execution) flag, persist it, and kick a drain
