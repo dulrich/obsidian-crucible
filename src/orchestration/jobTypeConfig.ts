@@ -7,7 +7,6 @@ import {
 	SERVICE_YOUTUBE_RSS,
 	type ServiceId,
 } from './serviceHealth';
-import { IMAGE_METADATA_SCHEMA_VERSION, localizedImageInfo } from './utils/imageMetadata';
 import { coerceVideoId } from './utils/youtubeApi';
 
 // Per-type behavior for the unified queue. File types are backed by the markdown
@@ -142,16 +141,39 @@ export function chainRunJobConfig(): JobTypeConfig {
 	});
 }
 
-export function imageMetadataJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => {
-		const imagePath = typeof p.imagePath === 'string' ? p.imagePath : '';
-		const image = localizedImageInfo(imagePath);
-		if (!image) return '';
-		const schemaVersion = typeof p.schemaVersion === 'number' && Number.isFinite(p.schemaVersion)
-			? Math.floor(p.schemaVersion)
-			: IMAGE_METADATA_SCHEMA_VERSION;
-		return `image-metadata:${image.md5}:v${schemaVersion}`;
-	});
+// One job per NOTE, matching youtubeMetadataDedupeKey's per-note keying: several notes
+// embedding the same image each get their own job (each reindexes its own note; the
+// image::<md5> resource lock inside the shared describe core is what collapses the actual
+// model call onto the first one to reach a given image, not this key).
+export function imageDescribeNoteDedupeKey(p: Record<string, unknown>): string {
+	const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
+	return targetPath ? `note:${targetPath}` : '';
+}
+
+export function imageDescribeNoteJobConfig(): JobTypeConfig {
+	return fileJobConfig(imageDescribeNoteDedupeKey);
+}
+
+// One backfill fan-out at a time — see searchEmbedMissingJobConfig's identical reasoning: this
+// job only enqueues image_describe_batch jobs, and two concurrent fan-outs would double the
+// batch count for exactly the same work.
+export function imageDescribeBackfillJobConfig(): JobTypeConfig {
+	return {
+		...fileJobConfig(() => 'image-describe-backfill'),
+		maxParallelFixed: 'One backfill fan-out at a time: this job only enqueues batches, and two concurrent fan-outs '
+			+ 'would double the batch count for exactly the same work. The duplicate batches are idempotent and would '
+			+ 'drain as no-ops, but they would still be written to the queue as job files.',
+	};
+}
+
+export function imageDescribeBatchDedupeKey(p: Record<string, unknown>): string {
+	const backfillId = typeof p.backfillId === 'string' ? p.backfillId : '';
+	const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
+	return backfillId && batchIndex >= 0 ? `image-describe:${backfillId}:${batchIndex}` : '';
+}
+
+export function imageDescribeBatchJobConfig(): JobTypeConfig {
+	return fileJobConfig(imageDescribeBatchDedupeKey);
 }
 
 export function searchFileJobConfig(): JobTypeConfig {

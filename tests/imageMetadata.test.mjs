@@ -23,26 +23,9 @@ await esbuild.build({
 			build.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian-test-stub', namespace: 'stub' }));
 			build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
 				contents: `
-					export class TFile {
-						constructor(path) {
-							this.path = path;
-							this.name = path.split('/').pop();
-							this.extension = this.name.includes('.') ? this.name.split('.').pop() : '';
-						}
-					}
-					export class TFolder {
-						constructor(path) {
-							this.path = path;
-							this.name = path.split('/').pop();
-						}
-					}
-					globalThis.__ObsTFile = TFile;
-					globalThis.__ObsTFolder = TFolder;
 					export function normalizePath(path) {
 						return String(path).replace(/\\\\/g, '/').replace(/\\/+/g, '/').replace(/^\\//, '').replace(/\\/$/, '');
 					}
-					export const Platform = { isMacOS: false };
-					export const moment = {};
 				`,
 				loader: 'js',
 			}));
@@ -52,97 +35,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const {
-	addImageMetadataSidecarSource,
-	hasCurrentImageMetadataSidecar,
-	localizedImageInfo,
-	writeImageMetadataSidecar,
-} = await import(pathToFileURL(outfile));
-
-function createFakeApp() {
-	const files = new Map();
-	const folders = new Set();
-	const TFileStub = globalThis.__ObsTFile;
-	const TFolderStub = globalThis.__ObsTFolder;
-	const app = {
-		vault: {
-			getAbstractFileByPath(filePath) {
-				if (files.has(filePath)) return new TFileStub(filePath);
-				if (folders.has(filePath)) return new TFolderStub(filePath);
-				return null;
-			},
-			async createFolder(folderPath) {
-				folders.add(folderPath);
-			},
-			async create(filePath, content) {
-				files.set(filePath, content);
-				return new TFileStub(filePath);
-			},
-			async modify(file, content) {
-				files.set(file.path, content);
-			},
-			async read(file) {
-				return files.get(file.path) ?? '';
-			},
-			getMarkdownFiles() {
-				return Array.from(files.keys()).filter(p => p.endsWith('.md')).map(p => new TFileStub(p));
-			},
-		},
-		metadataCache: {
-			// Always-fresh cache derived from the file map, so updateFrontmatter's
-			// write-consistency barrier takes its fast path in these tests.
-			getFileCache(file) {
-				const content = files.get(file.path) ?? '';
-				const m = /^---\n[\s\S]*?\n---/.exec(content);
-				if (!m) return {};
-				const frontmatter = {};
-				for (const line of m[0].split('\n').slice(1, -1)) {
-					const key = /^(\S[^:]*):/.exec(line);
-					if (key) frontmatter[key[1].trim()] = null;
-				}
-				return { frontmatter, frontmatterPosition: { start: { offset: 0 }, end: { offset: m[0].length } } };
-			},
-			on() { return {}; },
-			offref() {},
-		},
-		fileManager: {
-			async processFrontMatter(file, fn) {
-				const content = files.get(file.path) ?? '';
-				const match = /^---\n([\s\S]*?)\n---\n?/.exec(content);
-				const fm = {};
-				if (match) {
-					const lines = match[1].split('\n');
-					let activeList = null;
-					for (const line of lines) {
-						const scalar = /^([^:]+):\s*(.*)$/.exec(line);
-						if (scalar) {
-							activeList = null;
-							const [, key, value] = scalar;
-							if (value === '') {
-								fm[key] = [];
-								activeList = key;
-							} else {
-								fm[key] = value.replace(/^"|"$/g, '');
-							}
-							continue;
-						}
-						const item = /^\s+-\s+(.*)$/.exec(line);
-						if (item && activeList) fm[activeList].push(item[1].replace(/^"|"$/g, ''));
-					}
-				}
-				fn(fm);
-				const yaml = Object.entries(fm).flatMap(([key, value]) => {
-					if (Array.isArray(value)) return [key + ':', ...value.map(v => '  - "' + v + '"')];
-					return [key + ': "' + value + '"'];
-				}).join('\n');
-				const body = match ? content.slice(match[0].length) : '';
-				files.set(file.path, `---\n${yaml}\n---\n${body}`);
-			},
-		},
-		__files: files,
-	};
-	return app;
-}
+const { extractMetadataSections, imageMimeType, localizedImageInfo } = await import(pathToFileURL(outfile));
 
 test('localizedImageInfo derives MD5 sidecar path', () => {
 	const info = localizedImageInfo('notes/_attachments/a/0123456789abcdef0123456789abcdef_MD5.webp');
@@ -153,32 +46,43 @@ test('localizedImageInfo derives MD5 sidecar path', () => {
 	assert.equal(localizedImageInfo('notes/_attachments/a/image.webp'), null);
 });
 
-test('writeImageMetadataSidecar writes current schema note and merges source paths', async () => {
-	const app = createFakeApp();
-	const image = localizedImageInfo('notes/_attachments/a/0123456789abcdef0123456789abcdef_MD5.png');
+test('localizedImageInfo is case-insensitive on the MD5/extension and lowercases the returned md5', () => {
+	const info = localizedImageInfo('a/ABCDEF0123456789ABCDEF0123456789_MD5.PNG');
+	assert.equal(info?.md5, 'abcdef0123456789abcdef0123456789');
+	assert.equal(info?.ext, 'png');
+});
 
-	await writeImageMetadataSidecar(app, {
-		image,
-		sourceNotePath: 'notes/source.md',
-		providerModel: { providerId: 'openai', modelId: 'gpt-vision' },
-		result: {
-			description: 'A chart with visible labels.',
-			extractedText: 'Revenue\\n2026',
-			rawText: '{}',
-			finishReason: 'stop',
-		},
-		schemaVersion: 1,
-	});
+test('imageMimeType maps known localize extensions and falls back to image/<ext>', () => {
+	assert.equal(imageMimeType('png'), 'image/png');
+	assert.equal(imageMimeType('JPG'), 'image/jpeg');
+	assert.equal(imageMimeType('svg'), 'image/svg+xml');
+	assert.equal(imageMimeType('webp'), 'image/webp');
+	assert.equal(imageMimeType('tiff'), 'image/tiff');
+});
 
-	const content = app.__files.get(image.sidecarPath);
-	assert.match(content, /image-metadata-schema: 1/);
-	assert.match(content, /image-metadata-provider: "openai"/);
-	assert.match(content, /# Description\n\nA chart with visible labels\./);
-	assert.match(content, /# Extracted text\n\nRevenue\\n2026/);
-	assert.equal(await hasCurrentImageMetadataSidecar(app, image.sidecarPath, 1), true);
+test('extractMetadataSections pulls the Description and Extracted text bodies out of a legacy sidecar note', () => {
+	const content = [
+		'---',
+		'image-metadata-schema: 1',
+		'---',
+		'',
+		'# Description',
+		'',
+		'A chart with visible labels.',
+		'',
+		'# Extracted text',
+		'',
+		'Revenue: 2026',
+		'',
+	].join('\n');
 
-	await addImageMetadataSidecarSource(app, image.sidecarPath, 'notes/other.md');
-	await addImageMetadataSidecarSource(app, image.sidecarPath, 'notes/source.md');
-	const updated = app.__files.get(image.sidecarPath);
-	assert.match(updated, /source-note-paths:\n {2}- "notes\/other\.md"\n {2}- "notes\/source\.md"/);
+	const sections = extractMetadataSections(content);
+	assert.equal(sections.description, 'A chart with visible labels.');
+	assert.equal(sections.extractedText, 'Revenue: 2026');
+});
+
+test('extractMetadataSections returns empty strings when a section is missing', () => {
+	const sections = extractMetadataSections('# Description\n\nOnly this section.\n');
+	assert.equal(sections.description, 'Only this section.');
+	assert.equal(sections.extractedText, '');
 });

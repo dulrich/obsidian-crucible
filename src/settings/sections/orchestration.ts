@@ -133,10 +133,10 @@ function danglingRefWarning(tab: CrucibleSettingTab, ref: ProviderModelRef | und
 }
 
 function describeImageExtractionModel(tab: CrucibleSettingTab, ref: ProviderModelRef | undefined): string {
-	if (!ref) return 'No image extraction model selected. Localized image metadata will not be generated.';
+	if (!ref) return 'No image description model selected. Image descriptions will not be generated.';
 	const provider = tab.plugin.settings.providers.find(p => p.id === ref.providerId);
 	const model = provider?.models.find(m => m.id === ref.modelId);
-	if (!provider || !model) return 'Selected image extraction model is missing.';
+	if (!provider || !model) return 'Selected image description model is missing.';
 	const providerName = provider.name || provider.kind;
 	return `${providerName} · ${model.label || model.id}`;
 }
@@ -172,7 +172,9 @@ const ROUTINE_NOTICE_JOB_TYPES: JobType[] = [
 	'link_scan',
 	'youtube_metadata_fetch',
 	'command_run',
-	'image_metadata_extract',
+	'image_describe_note',
+	'image_describe_backfill',
+	'image_describe_batch',
 	'search_rebuild',
 	'search_embed_missing',
 	'search_upsert_file',
@@ -423,15 +425,15 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindToggle(searchGroup, {
-		name: 'Image metadata extraction',
-		desc: 'After Localize writes an MD5-named image, enqueue a job that creates a sibling Markdown metadata note for search.',
+		name: 'Image descriptions',
+		desc: 'After Localize writes an MD5-named image, enqueue a per-note job that describes its embedded images with a vision model (a narrative pass and a structured-extraction pass) and folds the descriptions into that note\'s search chunks.',
 		get: () => s.imageMetadataExtractionEnabled,
 		set: (v) => { s.imageMetadataExtractionEnabled = v; },
 	}, save);
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	new Setting(searchGroup)
-		.setName('Image extraction model')
+		.setName('Image description model')
 		.setDesc(describeImageExtractionModel(tab, s.imageMetadataExtractionModel))
 		.addButton(bt => bt.setButtonText('Pick').onClick(() => {
 			const refs = imageExtractionModelRefs(tab);

@@ -8,7 +8,8 @@ export type IngestionEventName =
 	| 'metadata-enriched'
 	| 'enrichment-queue-updated'
 	| 'orchestration-queue-updated'
-	| 'note-lock-changed';
+	| 'note-lock-changed'
+	| 'image-described';
 
 export interface IngestionEventPayloads {
 	'clipping-captured': { file: TFile };
@@ -18,6 +19,12 @@ export interface IngestionEventPayloads {
 	'enrichment-queue-updated': { size: number };
 	'orchestration-queue-updated': { queued: number; running: number };
 	'note-lock-changed': { path: string; locked: boolean; label: string };
+	/** Fired once per image_describe_note/batch run (after the describe pass, whether or not
+	 * any image was newly described — 'ingestion happened' includes the no-op case per the
+	 * house rule that every ingestion path emits its matching event). `notePaths` is the notes
+	 * actually reindexed, which can be fewer than the note's/batch's referencing notes if the
+	 * reindex itself was deferred (see `reindexNotes` in ImageDescribeWorkflow.ts). */
+	'image-described': { md5Count: number; notePaths: string[] };
 }
 
 type Listener<E extends IngestionEventName> = (payload: IngestionEventPayloads[E]) => void;
