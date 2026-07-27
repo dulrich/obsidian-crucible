@@ -31,10 +31,11 @@ export interface HttpProviderClient {
 	embed?(ctx: HttpCallContext, inputs: string[]): Promise<ProviderEmbeddingResult>;
 	extractImage?(ctx: HttpCallContext, base64: string, mimeType: string): Promise<ProviderImageExtractionResult>;
 	// The two-pass image description call (narrative / extraction — see IMAGE_DESCRIPTION_*_PROMPT
-	// above). Takes the already-resolved prompt text rather than a 'narrative'|'extraction' literal
-	// so this layer stays a dumb HTTP call; ProviderManager.describeImage (src/providers.ts) picks
-	// the prompt. Plain string result — no JSON envelope, unlike extractImage.
-	describeImagePass?(ctx: HttpCallContext, base64: string, mimeType: string, prompt: string): Promise<string>;
+	// above). Takes the already-resolved prompt text and per-pass max_tokens cap rather than a
+	// 'narrative'|'extraction' literal so this layer stays a dumb HTTP call; ProviderManager
+	// .describeImage (src/providers.ts) picks the prompt and cap. Plain string result — no JSON
+	// envelope, unlike extractImage.
+	describeImagePass?(ctx: HttpCallContext, base64: string, mimeType: string, prompt: string, maxTokens: number): Promise<string>;
 	rerank?(ctx: HttpCallContext, query: string, documents: string[]): Promise<ProviderRerankResult>;
 	// Asks the running server what it actually loaded for ctx.modelId, rather than trusting the
 	// requested id/settings string. See ProviderModelDescription (src/types.ts) for what each
@@ -64,6 +65,16 @@ export const IMAGE_EXTRACTION_USER_PROMPT = 'Describe this image and extract any
 export const IMAGE_DESCRIPTION_NARRATIVE_PROMPT = 'In one dense paragraph, describe what this image is (chart, diagram, photo, table, screenshot, etc.), its title or subject, and the trend or point it makes. Plain prose only, no JSON, no markdown formatting.';
 
 export const IMAGE_DESCRIPTION_EXTRACTION_PROMPT = 'Transcribe this image as structured plain text: its title, subtitle, axis labels and ranges, series names, data values, annotations, table content, and component labels, in that order where present. Plain text only, no JSON, no markdown formatting.';
+
+// idh-WP-1 hardening: a bounded worst case for each pass. Observed live without a cap: a
+// temp-0 repetition loop generated to the 32k context ceiling (`extraction=597888ms`, a
+// 76k/94k-char degenerate record) — one poison image could otherwise stall or fail a whole
+// batch. `max_tokens` is a universal chat/completions field (unlike `reasoning_effort`, it
+// needs no `isLocal` gate), so both are sent unconditionally. Extraction gets a larger budget
+// than narrative because a dense table/chart transcription is legitimately longer than a
+// one-paragraph narrative.
+export const IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS = 512;
+export const IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS = 2048;
 
 export function normalizeRawFinishReason(reason: unknown): string | undefined {
 	if (typeof reason !== 'string') return undefined;

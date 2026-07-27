@@ -171,3 +171,108 @@ test('combinedDescriptionHash: order-independent, stable, skips unknown md5s and
 	assert.equal(store.combinedDescriptionHash([]), '');
 	assert.equal(store.combinedDescriptionHash([unknown]), '');
 });
+
+// ── idh-WP-1: kind:'failed' + failure field ─────────────────────────────────
+
+test('put/get round-trip for kind:\'failed\' carries the failure message and empty narrative/extraction', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	const record = await store.put({
+		md5: MD5_A,
+		narrative: '',
+		extraction: '',
+		kind: 'failed',
+		failure: 'timed out after 120000ms',
+	});
+
+	assert.equal(record.kind, 'failed');
+	assert.equal(record.failure, 'timed out after 120000ms');
+	assert.equal(record.narrative, '');
+	assert.equal(record.extraction, '');
+	// `has()` returning true for a failed record is the point — a later run skips the poison
+	// image instead of retrying it forever.
+	assert.equal(store.has(MD5_A), true);
+
+	const fetched = await store.get(MD5_A);
+	assert.deepEqual(fetched, record);
+});
+
+test('a persisted kind:\'failed\' record round-trips through a fresh store instance (validation accepts it)', async () => {
+	const storage = createFakeStorage();
+	const store1 = new ImageDescriptionStore(storage, BASE_DIR);
+	await store1.put({ md5: MD5_A, narrative: '', extraction: '', kind: 'failed', failure: 'provider threw' });
+
+	const store2 = new ImageDescriptionStore(storage, BASE_DIR);
+	await store2.ensureLoaded();
+	assert.equal(store2.has(MD5_A), true);
+	const fetched = await store2.get(MD5_A);
+	assert.equal(fetched.kind, 'failed');
+	assert.equal(fetched.failure, 'provider threw');
+});
+
+test('a stored record with a non-string failure field is rejected as structurally malformed', async () => {
+	const storage = createFakeStorage();
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, JSON.stringify({
+		md5: MD5_A, narrative: '', extraction: '', kind: 'failed',
+		describedAt: 'now', schemaVersion: IMAGE_DESCRIPTION_SCHEMA_VERSION, descriptionHash: 'h',
+		failure: 12345, // must be a string
+	}));
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	await store.ensureLoaded();
+	assert.equal(store.has(MD5_A), false);
+	assert.equal(await store.get(MD5_A), null);
+});
+
+test('put omitting failure (kind !== \'failed\') round-trips with failure undefined', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+	const record = await store.put({ md5: MD5_A, narrative: 'n', extraction: 'e', kind: 'vision' });
+	assert.equal(record.failure, undefined);
+});
+
+// ── idh-WP-1: pruneDegenerate ────────────────────────────────────────────────
+
+test('pruneDegenerate: deletes an oversized vision record, keeps healthy/svg-text/imported records, returns pruned md5s', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	const oversizedMd5 = 'c'.repeat(32);
+	const healthyVisionMd5 = 'd'.repeat(32);
+	const svgMd5 = 'e'.repeat(32);
+	const importedMd5 = 'f'.repeat(32);
+
+	await store.put({ md5: oversizedMd5, narrative: 'A degenerate repetition loop.', extraction: 'x'.repeat(20_001), kind: 'vision' });
+	await store.put({ md5: healthyVisionMd5, narrative: 'A normal chart.', extraction: 'Q1: 10', kind: 'vision' });
+	// An svg-text/imported record with equally long "extraction" text is not a runaway-generation
+	// symptom (it reflects real source content) and must survive the prune.
+	await store.put({ md5: svgMd5, narrative: '', extraction: 'y'.repeat(25_000), kind: 'svg-text' });
+	await store.put({ md5: importedMd5, narrative: 'legacy', extraction: 'z'.repeat(25_000), kind: 'imported' });
+
+	const pruned = await store.pruneDegenerate(20_000);
+
+	assert.deepEqual(pruned, [oversizedMd5]);
+	assert.equal(store.has(oversizedMd5), false, 'the oversized image falls out of has() and re-enters the pending set on the next backfill enumeration');
+	assert.equal(await store.get(oversizedMd5), null);
+	assert.equal(store.has(healthyVisionMd5), true);
+	assert.equal(store.has(svgMd5), true);
+	assert.equal(store.has(importedMd5), true);
+});
+
+test('pruneDegenerate: a vision record exactly at the threshold is kept (strictly greater-than only)', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+	await store.put({ md5: MD5_A, narrative: 'n', extraction: 'x'.repeat(20_000), kind: 'vision' });
+
+	const pruned = await store.pruneDegenerate(20_000);
+
+	assert.deepEqual(pruned, []);
+	assert.equal(store.has(MD5_A), true);
+});
+
+test('pruneDegenerate: an empty store prunes nothing', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+	assert.deepEqual(await store.pruneDegenerate(20_000), []);
+});

@@ -27,7 +27,45 @@ export const IMAGE_DESCRIBE_BATCH_IMAGES = 100;
 /** Enqueues between macrotask yields, so a full backfill fan-out can't freeze the UI thread. */
 export const IMAGE_DESCRIBE_ENQUEUE_YIELD_EVERY = 10;
 
+// idh-WP-1 hardening (`plans/image-describe-hardening-ux.md` WP-1): observed live, a temp-0
+// repetition loop generated to the 32k context ceiling — `extraction=597888ms`, a 76k/94k-char
+// degenerate record. Every provider pass and the transcode step now get a bounded worst case.
+/** Per provider pass (narrative or extraction). `requestUrl` is not abortable — see `withTimeout`. */
+export const IMAGE_DESCRIBE_PASS_TIMEOUT_MS = 120_000;
+/** `transcodeToPng`, an in-renderer `OffscreenCanvas` conversion — much cheaper than a model call. */
+export const IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS = 30_000;
+/** `pruneDegenerate` threshold: a vision record's `extraction` longer than this is the on-disk
+ * trace of a runaway generation, self-healed by the backfill on every run. */
+export const IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS = 20_000;
+/** Truncation length for a stored `failure` message — enough to diagnose, not enough for a
+ * pathological error (e.g. one embedding a chunk of the runaway output itself) to bloat the store. */
+const FAILURE_MESSAGE_MAX_CHARS = 500;
+
 export class ImageDescribeConfigError extends Error {}
+
+/**
+ * Races `promise` against a `ms` timer (the `raceWorkflowTimeout` precedent in
+ * `orchestration/JobBackend.ts`, applied at the single-image granularity). Obsidian's
+ * `requestUrl` (and the in-renderer `OffscreenCanvas` transcode) take no `AbortSignal`, so a
+ * timeout cannot cancel the underlying work — it can only stop *waiting* on it. On timeout this
+ * rejects with an `Error` labeled `label`; `Promise.race` has already attached a handler to the
+ * original `promise` as part of racing it, so its late settlement (abandoned, but not orphaned)
+ * never surfaces as an unhandled promise rejection.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+	});
+	return Promise.race([promise, timeout]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
+}
+
+function truncateFailureMessage(e: unknown): string {
+	const message = e instanceof Error ? e.message : String(e);
+	return message.length > FAILURE_MESSAGE_MAX_CHARS ? `${message.slice(0, FAILURE_MESSAGE_MAX_CHARS)}…` : message;
+}
 
 /**
  * Resolves and validates the configured image description model, exactly the checks the old
@@ -86,6 +124,9 @@ export interface DescribeMd5ImagesResult {
 	skippedCount: number;
 	/** The vault file the image path pointed at no longer exists. */
 	missingCount: number;
+	/** A durable `kind: 'failed'` record was written this run (provider throw, timeout, or
+	 * transcode failure) — the loop continued to the next image rather than aborting the batch. */
+	failedCount: number;
 }
 
 /**
@@ -108,6 +149,7 @@ export async function describeMd5Images(
 	let describedCount = 0;
 	let skippedCount = 0;
 	let missingCount = 0;
+	let failedCount = 0;
 
 	for (const image of images) {
 		opts.signal?.throwIfAborted();
@@ -120,13 +162,14 @@ export async function describeMd5Images(
 		);
 		if (outcome === 'described') describedCount++;
 		else if (outcome === 'skipped') skippedCount++;
+		else if (outcome === 'failed') failedCount++;
 		else missingCount++;
 	}
 
-	return { describedCount, skippedCount, missingCount };
+	return { describedCount, skippedCount, missingCount, failedCount };
 }
 
-type ImageOutcome = 'described' | 'skipped' | 'missing';
+type ImageOutcome = 'described' | 'skipped' | 'missing' | 'failed';
 
 async function describeOneImage(
 	plugin: CruciblePlugin,
@@ -147,55 +190,80 @@ async function describeOneImage(
 
 	const started = Date.now();
 
-	if (image.ext === 'svg') {
-		const svgText = await plugin.app.vault.read(file);
-		const extracted = extractSvgText(svgText);
-		// SVG text goes in `extraction`, narrative stays empty — the WP-2 chunker contract: the
-		// extraction field lands under the `Image: <name> (text)` heading, which is what a
-		// transcribed-text payload is, and an empty narrative simply emits no narrative chunk.
-		await plugin.imageDescriptions.put({ md5: image.md5, narrative: '', extraction: extracted, kind: 'svg-text' });
+	// idh-WP-1 per-image failure isolation: a poison image (provider throw, timeout, transcode
+	// failure — SVG text extraction is cheap/local and not expected to fail, but is covered too
+	// for the same reason) must not stall or fail the whole batch. Failed file jobs move to
+	// `failed/` and are never retried (`FileJobBackend.ts` header comment), so an uncaught
+	// exception here would silently drop every remaining image in the batch. Writing a durable
+	// `kind: 'failed'` record and returning `'failed'` keeps `has()` true for this md5 — the point
+	// is that a later run skips the poison image instead of retrying it forever (until
+	// `pruneDegenerate` or a future manual fix clears it).
+	try {
+		if (image.ext === 'svg') {
+			const svgText = await plugin.app.vault.read(file);
+			const extracted = extractSvgText(svgText);
+			// SVG text goes in `extraction`, narrative stays empty — the WP-2 chunker contract: the
+			// extraction field lands under the `Image: <name> (text)` heading, which is what a
+			// transcribed-text payload is, and an empty narrative simply emits no narrative chunk.
+			await plugin.imageDescriptions.put({ md5: image.md5, narrative: '', extraction: extracted, kind: 'svg-text' });
+			const totalMs = Date.now() - started;
+			logWarn('image describe: svg text extracted', image.path, `${totalMs}ms`);
+			opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, totalMs });
+			return 'described';
+		}
+
+		const bytes = await plugin.app.vault.readBinary(file);
+		let finalBytes = bytes;
+		let finalMime = imageMimeType(image.ext);
+		let transcodeMs: number | undefined;
+		if (needsVisionTranscode(image.ext)) {
+			const transcodeStarted = Date.now();
+			const transcoded = await withTimeout(transcodeToPng(bytes, finalMime), IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS, 'image transcode');
+			finalBytes = transcoded.bytes;
+			finalMime = transcoded.mime;
+			transcodeMs = Date.now() - transcodeStarted;
+		}
+
+		const narrativeStarted = Date.now();
+		const narrative = await withTimeout(
+			plugin.providerManager.describeImage(provider, modelId, finalBytes, finalMime, 'narrative'),
+			IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
+			'image description (narrative pass)',
+		);
+		const narrativeMs = Date.now() - narrativeStarted;
+
+		const extractionStarted = Date.now();
+		const extraction = await withTimeout(
+			plugin.providerManager.describeImage(provider, modelId, finalBytes, finalMime, 'extraction'),
+			IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
+			'image description (extraction pass)',
+		);
+		const extractionMs = Date.now() - extractionStarted;
+
+		await plugin.imageDescriptions.put({
+			md5: image.md5,
+			narrative,
+			extraction,
+			kind: 'vision',
+			providerId: provider.id,
+			modelId,
+		});
+
 		const totalMs = Date.now() - started;
-		logWarn('image describe: svg text extracted', image.path, `${totalMs}ms`);
-		opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, totalMs });
+		logWarn(
+			'image describe: vision pass complete', image.path,
+			`transcode=${transcodeMs ?? 0}ms narrative=${narrativeMs}ms extraction=${extractionMs}ms total=${totalMs}ms`,
+		);
+		opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, transcodeMs, narrativeMs, extractionMs, totalMs });
 		return 'described';
+	} catch (e) {
+		const failure = truncateFailureMessage(e);
+		logWarn('image describe: failed, recording durable failure and continuing', image.path, failure);
+		await plugin.imageDescriptions.put({ md5: image.md5, narrative: '', extraction: '', kind: 'failed', failure });
+		const totalMs = Date.now() - started;
+		opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, totalMs });
+		return 'failed';
 	}
-
-	const bytes = await plugin.app.vault.readBinary(file);
-	let finalBytes = bytes;
-	let finalMime = imageMimeType(image.ext);
-	let transcodeMs: number | undefined;
-	if (needsVisionTranscode(image.ext)) {
-		const transcodeStarted = Date.now();
-		const transcoded = await transcodeToPng(bytes, finalMime);
-		finalBytes = transcoded.bytes;
-		finalMime = transcoded.mime;
-		transcodeMs = Date.now() - transcodeStarted;
-	}
-
-	const narrativeStarted = Date.now();
-	const narrative = await plugin.providerManager.describeImage(provider, modelId, finalBytes, finalMime, 'narrative');
-	const narrativeMs = Date.now() - narrativeStarted;
-
-	const extractionStarted = Date.now();
-	const extraction = await plugin.providerManager.describeImage(provider, modelId, finalBytes, finalMime, 'extraction');
-	const extractionMs = Date.now() - extractionStarted;
-
-	await plugin.imageDescriptions.put({
-		md5: image.md5,
-		narrative,
-		extraction,
-		kind: 'vision',
-		providerId: provider.id,
-		modelId,
-	});
-
-	const totalMs = Date.now() - started;
-	logWarn(
-		'image describe: vision pass complete', image.path,
-		`transcode=${transcodeMs ?? 0}ms narrative=${narrativeMs}ms extraction=${extractionMs}ms total=${totalMs}ms`,
-	);
-	opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, transcodeMs, narrativeMs, extractionMs, totalMs });
-	return 'described';
 }
 
 /**

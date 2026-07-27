@@ -6,6 +6,7 @@ import { logWarn } from '../../log';
 import { localizedImageInfo, type LocalizedImageInfo } from '../utils/imageMetadata';
 import {
 	IMAGE_DESCRIBE_BATCH_IMAGES,
+	IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS,
 	IMAGE_DESCRIBE_ENQUEUE_YIELD_EVERY,
 	ImageDescribeConfigError,
 	computeReferencedImagePaths,
@@ -54,7 +55,8 @@ export class ImageDescribeNoteWorkflow implements Workflow {
 			status: 'done',
 			outputPaths: [file.path],
 			notes: `Described ${result.describedCount} image(s) for ${targetPath} `
-				+ `(${result.skippedCount} already described, ${result.missingCount} missing files).`
+				+ `(${result.skippedCount} already described, ${result.missingCount} missing files, `
+				+ `${result.failedCount} failed).`
 				+ (reindexNote.note ? ` ${reindexNote.note}` : ''),
 		};
 	}
@@ -85,6 +87,14 @@ export class ImageDescribeBackfillWorkflow implements Workflow {
 		ctx.throwIfAborted();
 
 		await plugin.imageDescriptions.ensureLoaded();
+		// idh-WP-1 self-heal: a vision record whose extraction is degenerately long is the on-disk
+		// trace of a runaway generation (a temp-0 repetition loop with no cap) that finished before
+		// timing out and so never got a `kind: 'failed'` record. Pruning drops it out of `has()`,
+		// so the enumeration just below re-treats it as pending and re-describes it under the new
+		// per-pass `max_tokens` caps.
+		const prunedMd5s = await plugin.imageDescriptions.pruneDegenerate(IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS);
+		ctx.throwIfAborted();
+
 		const referenced = computeReferencedImagePaths(plugin);
 		const pending = referenced.filter(image => !plugin.imageDescriptions.has(image.md5));
 		const batches = chunk(pending.map(image => image.path), IMAGE_DESCRIBE_BATCH_IMAGES);
@@ -104,6 +114,7 @@ export class ImageDescribeBackfillWorkflow implements Workflow {
 		return {
 			status: 'done',
 			notes: `Legacy sidecars imported: ${importResult.imported}. `
+				+ `Pruned ${prunedMd5s.length} degenerate description(s) for re-describe. `
 				+ `Queued image description backfill: ${pending.length} referenced image(s) `
 				+ `(${referenced.length - pending.length} already described) in ${batches.length} batch(es).`,
 		};
@@ -151,7 +162,7 @@ export class ImageDescribeBatchWorkflow implements Workflow {
 			status: 'done',
 			outputPaths: paths,
 			notes: `Described ${label}: ${result.describedCount} new, ${result.skippedCount} already described, `
-				+ `${result.missingCount} missing; reindexed ${reindexed.indexed.length} note(s).`
+				+ `${result.missingCount} missing, ${result.failedCount} failed; reindexed ${reindexed.indexed.length} note(s).`
 				+ (reindexed.note ? ` ${reindexed.note}` : ''),
 		};
 	}
