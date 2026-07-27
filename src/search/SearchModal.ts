@@ -33,6 +33,15 @@ export class VaultSearchModal extends Modal {
 	private currentResults: SearchResult[] = [];
 	private rerankRowMeta: Map<string, RerankRowMeta> | null = null;
 
+	/**
+	 * The query-log entry for the ranking currently on screen, or null when nothing has been
+	 * logged for it (logging off, or no search has landed yet). It is what ties a later click
+	 * back to the exact search that produced the list — so it is cleared the instant a new
+	 * search is *issued*, not when one returns: between issue and render there is no ranking on
+	 * screen that a click could honestly be attributed to.
+	 */
+	private queryLogEntryId: string | null = null;
+
 	constructor(app: App, private readonly plugin: CruciblePlugin, private readonly sweepMode = false) {
 		super(app);
 	}
@@ -118,6 +127,7 @@ export class VaultSearchModal extends Modal {
 		const query = this.inputEl.value.trim();
 		if (!query) return;
 		const generation = ++this.searchGeneration;
+		this.queryLogEntryId = null;
 		this.statusEl.setText('Searching...');
 		try {
 			const response = this.sweepMode
@@ -137,6 +147,19 @@ export class VaultSearchModal extends Modal {
 			this.currentResults = response.results;
 			this.updateRerankAvailability();
 			this.renderResults(response.results);
+			// Passive logging of the search that was actually shown — after the staleness guard
+			// above, so a superseded response is never recorded as something the user saw. The
+			// call is deliberately not awaited and cannot throw (see queryLog.ts): a measurement
+			// side-channel must add no latency to, and no failure mode to, the search path.
+			this.queryLogEntryId = this.plugin.searchQueryLog.recordSearch({
+				query,
+				mode: response.mode ?? null,
+				semanticAvailable: response.semanticAvailable ?? null,
+				sweep: this.sweepMode,
+				shown: response.results.length,
+				total: response.total ?? null,
+				results: response.results,
+			});
 		} catch (e) {
 			if (generation !== this.searchGeneration) return;
 			const message = e instanceof Error ? e.message : String(e);
@@ -213,6 +236,11 @@ export class VaultSearchModal extends Modal {
 			this.currentResults = outcome.results;
 			this.rerankRowMeta = buildRerankRowMeta(before, outcome);
 			this.renderResults(this.currentResults);
+			// The reranked order replaces the logged ranking: it is the list the user is now
+			// choosing from, so it is the one a subsequent click must be scored against.
+			if (this.queryLogEntryId) {
+				this.plugin.searchQueryLog.recordRerank(this.queryLogEntryId, outcome.results);
+			}
 		} catch (e) {
 			if (isRerankStale(issuedGeneration, this.searchGeneration)) return;
 			const message = e instanceof Error ? e.message : String(e);
@@ -240,6 +268,12 @@ export class VaultSearchModal extends Modal {
 		if (!(file instanceof TFile)) {
 			new Notice(`Note not found: ${result.path}`);
 			return;
+		}
+		// The load-bearing signal: which rank the user actually chose. Recorded before the open
+		// so a slow `openFile` cannot lose it, and only for a result that resolves to a real
+		// file — a click on a stale path is a broken index, not a relevance judgment.
+		if (this.queryLogEntryId) {
+			this.plugin.searchQueryLog.recordOpen(this.queryLogEntryId, result.path);
 		}
 		await this.app.workspace.getLeaf(false).openFile(file);
 		this.close();

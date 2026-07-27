@@ -46,6 +46,7 @@ import { TriggerRegistry } from './orchestration/TriggerRegistry';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
+import { SEARCH_QUERY_LOG_FILENAME, SearchQueryLog } from './search/queryLog';
 import { FileOpenIndex } from './fileOpenIndex';
 import { SearchDeletePathWorkflow, SearchEmbedMissingWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
@@ -125,6 +126,9 @@ export default class CruciblePlugin extends Plugin {
 	private noteLockOverlay: NoteLockOverlay;
 	enrichmentQueue: EnrichmentQueueAdapter;
 	searchManager: SearchManager;
+	// Passive, bounded, local record of executed vault searches and which result was opened
+	// (src/search/queryLog.ts). Lives in the plugin's data dir, never in the vault's note tree.
+	searchQueryLog: SearchQueryLog;
 	searchIndexCoordinator: SearchIndexCoordinator;
 	fileOpenIndex: FileOpenIndex;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
@@ -175,6 +179,16 @@ export default class CruciblePlugin extends Plugin {
 		this.secretRegistry = new SecretRegistry(this);
 		this.providerManager = new ProviderManager(this.app, this.secretRegistry);
 		this.searchManager = new SearchManager(this.app, this.settings, this.providerManager);
+		// `app.vault.adapter` structurally satisfies QueryLogStorage. The file sits beside
+		// data.json in the plugin's own directory — outside the vault's note tree, so the log
+		// can never be indexed by the search leg it exists to measure. Loading is lazy (first
+		// write or read), so nothing here costs startup time.
+		this.searchQueryLog = new SearchQueryLog({
+			storage: this.app.vault.adapter,
+			filePath: this.pluginDataPath(SEARCH_QUERY_LOG_FILENAME),
+			isEnabled: () => this.settings.searchQueryLogEnabled,
+			maxEntries: () => this.settings.searchQueryLogMaxEntries,
+		});
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
@@ -588,6 +602,18 @@ export default class CruciblePlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	/**
+	 * A vault-adapter path inside this plugin's own data directory (where `data.json` lives) —
+	 * i.e. `.obsidian/plugins/<id>/<name>`. Nothing written here is part of the vault's note
+	 * tree, so it is invisible to Obsidian's indexer and to Crucible's own search leg.
+	 * `manifest.dir` is populated by Obsidian for a normally-installed plugin; the fallback
+	 * reconstructs the same path from `vault.configDir` for the cases where it is not.
+	 */
+	pluginDataPath(filename: string): string {
+		const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+		return `${dir}/${filename}`;
 	}
 
 	// Set a per-type auto-run (drain/execution) flag, persist it, and kick a drain

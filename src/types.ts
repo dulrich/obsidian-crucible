@@ -59,6 +59,7 @@ import { Currency } from './orchestration/utils/fx';
 import { GeoResult } from './orchestration/utils/weather';
 import type { JobType } from './orchestration/types';
 import type { JobTypeControlsMap } from './orchestration/autorunGate';
+import { SEARCH_QUERY_LOG_DEFAULT_MAX_ENTRIES } from './search/queryLog';
 
 declare module 'obsidian' {
 	interface App {
@@ -665,6 +666,13 @@ export interface CrucibleSettings {
 	// cost of an explicit rerank click — not a type-ahead concern, but still not "rerank all 200
 	// results" by default.
 	searchRerankTopN: number;
+	// Passive vault-search query logging (src/search/queryLog.ts): records each executed search
+	// and which result was opened, into a bounded JSON file in the plugin's own data directory.
+	// Local only, never networked, never in the vault's note tree — see that file's header for
+	// the four rules (no abandoned-search inference chief among them).
+	searchQueryLogEnabled: boolean;
+	// The bound. Oldest entries are dropped first; clamped to [10, 5000] on read.
+	searchQueryLogMaxEntries: number;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -822,4 +830,11 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	searchLinkBoostWeight: 0.05,
 	searchRerankEnabled: false,
 	searchRerankTopN: 30,
+	// On by default: this is the substrate that lets a ranking change be validated against real
+	// usage instead of hand-authored queries, and a log that only starts accumulating once
+	// someone remembers to switch it on has no history when it is finally needed. It stays
+	// local, bounded, content-free (paths and query text only — no snippets), and the toggle
+	// plus "Search: clear query log" are both one step away.
+	searchQueryLogEnabled: true,
+	searchQueryLogMaxEntries: SEARCH_QUERY_LOG_DEFAULT_MAX_ENTRIES,
 }
