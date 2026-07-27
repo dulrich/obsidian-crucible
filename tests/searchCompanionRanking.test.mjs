@@ -244,8 +244,9 @@ test('titleMatchScore ranks exact over prefix over substring over partial', () =
 
 // ---------------------------------------------------------------------------------------
 // Ranking modes (`rankingMode`): the two candidate directions from the WP-4 quality
-// diagnosis, behind a per-request flag. `'current'` is the default and must stay exactly
-// today's behavior — the bake-off, not this WP, decides whether the default moves.
+// diagnosis, behind a per-request flag. The bake-off decided the default: `'coverage'`
+// (eval-harness measurements/fsq-bakeoff-2026-07-26 — the only mode improving every metric
+// with zero rank-1 losses). `'current'` stays selectable as the pre-flip baseline.
 // ---------------------------------------------------------------------------------------
 
 // The fixture the WP-4 report specified: a target whose query terms are split across two of
@@ -262,12 +263,13 @@ function makeSplitTermsDb() {
 	]);
 }
 
-test('current mode is the default, and naming it explicitly changes nothing', () => {
-	// Three shapes at once: a plain multi-term hit, a query that trips the zero-hit loose-OR
-	// rescue, and the split-terms fixture the new modes exist for.
+test('coverage is the default, and naming it explicitly changes nothing', () => {
+	assert.equal(DEFAULT_RANKING_MODE, 'coverage');
+	// Three shapes at once: a plain multi-term hit, a query the loose-OR rescue used to catch,
+	// and the split-terms fixture the flip exists for.
 	for (const query of [SPLIT_TERMS_QUERY, 'matt pocock', 'pocock onboarding', 'skills']) {
 		const unflagged = search(makeSplitTermsDb(), query);
-		const explicit = searchMode(makeSplitTermsDb(), query, 'current');
+		const explicit = searchMode(makeSplitTermsDb(), query, 'coverage');
 		assert.equal(explicit.rankingMode, DEFAULT_RANKING_MODE);
 		assert.equal(explicit.match, unflagged.match, `match must not move for "${query}"`);
 		assert.equal(explicit.fallbackUsed, unflagged.fallbackUsed);
@@ -275,18 +277,34 @@ test('current mode is the default, and naming it explicitly changes nothing', ()
 		// Identical result set AND ordering, down to every attribution field — JSON.stringify
 		// so an added/reordered key fails here rather than surviving a deepEqual.
 		assert.equal(JSON.stringify(explicit.results), JSON.stringify(unflagged.results));
-		// No coverage leg ran, so its two attribution keys must be absent entirely (the
-		// `scoreVector` "omitted, not 0" rule), leaving the payload exactly what it has been.
-		for (const row of unflagged.results) {
-			assert.deepEqual(Object.keys(row.attribution), ['base', 'textRank', 'titleRank', 'titleBoost', 'vectorRank', 'rrf', 'pooledChunks']);
-			assert.equal(row.scoreVector, undefined);
-		}
 	}
-	// And the bug itself, pinned: under `current` the target is unreachable because no single
-	// chunk satisfies the AND, while the decoy coincidentally does — so the rescue never fires.
+	// The regression the flip fixes, re-asserted on the winner: the split-terms target is now
+	// reachable by DEFAULT — no flag, no client change, exactly what an unmodified plugin sends.
 	const outcome = search(makeSplitTermsDb(), SPLIT_TERMS_QUERY);
+	assert.equal(outcome.coverageUsed, true);
+	const paths = outcome.results.map(row => row.path);
+	assert.ok(paths.includes('Target.md'), 'the split-terms target must be reachable by default');
+	assert.ok(paths.includes('Decoy.md'), 'the strict-AND decoy must still rank by default');
+	// The one-term note stays out by default too — the coverage floor holds at the flip.
+	assert.equal(paths.includes('Common.md'), false);
+});
+
+test("'current' still pins the pre-flip behavior, now only when asked for", () => {
+	// The old default is not deleted, it is demoted: the bake-off baseline must stay
+	// reproducible per request, and its known failure shape stays pinned here so a future
+	// "simplify the modes" pass cannot silently redefine what 'current' meant.
+	const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'current');
+	assert.equal(outcome.rankingMode, 'current');
+	assert.equal(outcome.coverageUsed, false);
+	// The bug itself: under 'current' the target is unreachable because no single chunk
+	// satisfies the AND, while the decoy coincidentally does — so the rescue never fires.
 	assert.equal(outcome.fallbackUsed, false);
 	assert.deepEqual(outcome.results.map(row => row.path), ['Decoy.md']);
+	// And 'current' rows carry no coverage attribution at all (the "omitted, not 0" rule).
+	for (const row of outcome.results) {
+		assert.deepEqual(Object.keys(row.attribution), ['base', 'textRank', 'titleRank', 'titleBoost', 'vectorRank', 'rrf', 'pooledChunks']);
+		assert.equal(row.scoreVector, undefined);
+	}
 });
 
 test('blend mode unions the loose-OR pool in, and the strict-AND rows keep the head of the text leg', () => {
@@ -380,11 +398,12 @@ test('the coverage leg is inert below two terms and reports nothing when it does
 	assert.equal(JSON.stringify(single.results), JSON.stringify(searchMode(db, 'skills', 'current').results));
 });
 
-test('rankingMode parsing: absent means current, unknown is a 400, not a silent degrade', () => {
+test('rankingMode parsing: absent means the default (coverage), unknown is a 400, not a silent degrade', () => {
 	assert.deepEqual([...RANKING_MODES], ['current', 'blend', 'coverage', 'blend+coverage']);
-	assert.equal(parseRankingMode(undefined), 'current');
-	assert.equal(parseRankingMode(null), 'current');
-	assert.equal(parseRankingMode(''), 'current');
+	// Absent/empty is every existing client — they get the measured winner, not the baseline.
+	assert.equal(parseRankingMode(undefined), 'coverage');
+	assert.equal(parseRankingMode(null), 'coverage');
+	assert.equal(parseRankingMode(''), 'coverage');
 	assert.equal(parseRankingMode('BLEND'), 'blend');
 	assert.equal(parseRankingMode(' blend+coverage '), 'blend+coverage');
 	// A typo in a bake-off harness must fail loudly: silently measuring the default four times
@@ -428,17 +447,28 @@ test('POST /v1/search carries rankingMode through, and a 200 default response ke
 
 		const unflagged = await post(base);
 		assert.equal(unflagged.status, 200);
-		assert.deepEqual(unflagged.json.results.map(row => row.path), ['Decoy.md']);
-		// The default response gains no keys: `rankingMode`, `coverageUsed` and `matchFallback`
-		// exist only for a caller who opted out of the default.
+		// The winner, live at the HTTP surface: an unmodified client reaches the split-terms
+		// target with no flag at all.
+		assert.ok(unflagged.json.results.map(row => row.path).includes('Target.md'), 'the default must reach the target over HTTP');
+		// The default response still gains no keys: `rankingMode`, `coverageUsed` and
+		// `matchFallback` exist only for a caller who opted out of the default — the key set is
+		// pinned to the pre-rankingMode payload even though the default ranking moved.
 		assert.deepEqual(Object.keys(unflagged.json), ['mode', 'semanticAvailable', 'schemaVersion', 'match', 'fallbackUsed', 'total', 'hasMore', 'results']);
 
-		const explicit = await post({ ...base, rankingMode: 'current' });
+		const explicit = await post({ ...base, rankingMode: 'coverage' });
 		assert.equal(explicit.status, 200);
 		assert.equal(explicit.json.rankingMode, undefined, 'naming the default must not change the payload either');
 		assert.equal(JSON.stringify(explicit.json), JSON.stringify(unflagged.json));
 
-		for (const mode of ['blend', 'coverage', 'blend+coverage']) {
+		// The demoted baseline is the non-default now: it grows the opt-out keys and reproduces
+		// the pre-flip ranking (the decoy alone — the split-terms target unreachable).
+		const baseline = await post({ ...base, rankingMode: 'current' });
+		assert.equal(baseline.status, 200);
+		assert.equal(baseline.json.rankingMode, 'current');
+		assert.equal(baseline.json.coverageUsed, false);
+		assert.deepEqual(baseline.json.results.map(row => row.path), ['Decoy.md']);
+
+		for (const mode of ['blend', 'blend+coverage']) {
 			const outcome = await post({ ...base, rankingMode: mode });
 			assert.equal(outcome.status, 200);
 			assert.equal(outcome.json.rankingMode, mode);

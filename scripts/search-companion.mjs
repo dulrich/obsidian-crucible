@@ -899,11 +899,10 @@ export function buildFtsQuery(query) {
 }
 
 // Ranking modes (`rankingMode` on POST /v1/search). Two candidate directions from the WP-4
-// diagnosis, selectable per request so a bake-off can measure them against each other before
-// either becomes the default. `'current'` is exactly today's behavior and stays the default:
-// this whole surface is inert unless a caller asks for it.
+// diagnosis, selectable per request so a bake-off could measure them against each other before
+// either became the default.
 //
-//   current         the shipped ranking: strict AND primary, loose-OR only as a zero-hit rescue
+//   current         the pre-bake-off ranking: strict AND primary, loose-OR only as a zero-hit rescue
 //   blend           always run the loose-OR fallback too and union its pooled rows in
 //   coverage        add a document-level term-coverage leg as a fourth RRF rank
 //   blend+coverage  both
@@ -911,13 +910,23 @@ export function buildFtsQuery(query) {
 // The two are orthogonal on purpose — blend widens the *bm25 candidate pool*, coverage adds a
 // *separate retrieval leg* (structurally the vector leg's twin) without touching the FTS
 // clause at all — so the four modes form a clean 2x2 for the bake-off.
+//
+// **The default is `'coverage'`, by measurement, not inspection** (eval-harness
+// `measurements/fsq-bakeoff-2026-07-26/run.md`; 46 graded queries against a copy of the live
+// index): the only mode that improved every headline metric with zero rank-1 losses — MRR +15%,
+// R@25 +26%, 8 targets rescued / 0 lost, sign test p = 0.00052, +3–14ms p50 on realistic 1–4
+// term queries. The entire win is the split-terms family (terms present in a note but never
+// co-occurring in one chunk — the per-chunk implicit AND root cause). `blend` measured
+// net-negative on its own (MRR −13%, every severe rank-1 displacement in the sweep, 5.4x
+// latency at 5–8 terms) — do not promote it to default; it remains a per-request option.
+// `'current'` remains selectable per request as the pre-flip baseline.
 export const RANKING_MODES = Object.freeze(['current', 'blend', 'coverage', 'blend+coverage']);
-export const DEFAULT_RANKING_MODE = 'current';
+export const DEFAULT_RANKING_MODE = 'coverage';
 
-// An unrecognized mode is a 400, not a silent degrade to `'current'`. A typo in a bake-off
+// An unrecognized mode is a 400, not a silent degrade to the default. A typo in a bake-off
 // harness that quietly measured the default four times would be indistinguishable from a real
 // null result, which is the one failure this flag exists to avoid. Absent/empty is not a typo —
-// that is every existing client, and it means `'current'`.
+// that is every existing client, and it means the default.
 export function parseRankingMode(value) {
 	if (value === undefined || value === null || value === '') return DEFAULT_RANKING_MODE;
 	const mode = String(value).trim().toLowerCase();
