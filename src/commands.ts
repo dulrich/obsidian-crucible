@@ -381,6 +381,30 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => runServiceOutageRequeueFlow(plugin),
 	});
 
+	// Fan-out, not immediate: this enqueues the image_describe_backfill job, which itself
+	// enqueues ~48 image_describe_batch jobs (~100 images each) rather than running inline —
+	// see the file-queue-hygiene invariant in orchestration/AGENTS.md. Confirm first and name
+	// the scale, same pattern as search-rebuild-index: a multi-hour vision-model run started by
+	// accident is expensive to notice and expensive to undo.
+	plugin.registerCrucibleCommand({
+		id: 'search-describe-vault-images',
+		name: 'Search: describe vault images',
+		group: 'Orchestrations',
+		mutating: false,
+		run: async () => {
+			const confirmed = await new ConfirmModal(plugin.app, {
+				title: 'Describe every image referenced in the vault?',
+				message: 'This queues a vision-model description pass (a narrative pass and a structured-extraction pass) over '
+					+ 'every uniquely-referenced localized image not already described — roughly 4,700 images at this vault\'s '
+					+ 'current size, around 12.6 hours of local model time. It runs in the background in ~100-image batches and '
+					+ 'is safely interruptible and resumable: already-described images are skipped on any re-run.',
+				confirmText: 'Queue backfill',
+			}).openAndAwait();
+			if (!confirmed) return;
+			await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
+		},
+	});
+
 	plugin.registerCrucibleCommand({
 		id: 'search-vault',
 		name: 'Search: vault',
