@@ -126,7 +126,13 @@ export class JobStore {
 			const lane = laneRank(a.job.lane) - laneRank(b.job.lane);
 			if (lane !== 0) return lane;
 			const priority = PRIORITY_RANK[a.job.priority] - PRIORITY_RANK[b.job.priority];
-			return priority !== 0 ? priority : a.job.id.localeCompare(b.job.id);
+			if (priority !== 0) return priority;
+			// `created` is millisecond ISO for file jobs, so this tie-break makes same-lane
+			// same-priority jobs claim in chronological (mint) order. Only same-millisecond
+			// mints (or legacy rows with equal/missing created) fall through to the id compare,
+			// which is itself now millisecond+monotonic (see newJobId in utils/dates.ts).
+			const created = a.job.created.localeCompare(b.job.created);
+			return created !== 0 ? created : a.job.id.localeCompare(b.job.id);
 		});
 		return out;
 	}
