@@ -282,7 +282,9 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			videoId: e.videoId,
 			targetPath: e.targetPath,
 			title: e.title || e.videoId,
-			created: e.addedAt ? formatDateTime(e.addedAt) : '',
+			// Raw ISO like file rows (`created` above) — the sort key must compare one
+			// format across both sources; humans get the formatted string at render time.
+			created: e.addedAt ? new Date(e.addedAt).toISOString() : '',
 			error: e.error,
 		}));
 
@@ -358,8 +360,10 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			key: 'created',
 			label: 'Created',
 			sortable: true,
+			// `r.created` is raw ISO for both sources (see the row-mapping comments above);
+			// format for humans here, at render time, so the sort itself compares one format.
 			sortKey: r => r.created,
-			render: (r, td) => td.setText(r.created),
+			render: (r, td) => td.setText(r.created ? formatDateTime(Date.parse(r.created)) : ''),
 		},
 		{
 			key: 'error',
