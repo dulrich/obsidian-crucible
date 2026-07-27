@@ -27,6 +27,17 @@ export function modelHasCapability(model: ProviderModel, capability: ProviderMod
 	return model.capabilities.includes(capability);
 }
 
+/**
+ * idh-WP-2: whether a provider has at least one chat-capable model, per `modelHasCapability`
+ * (never a raw `capabilities?.includes('chat')` — see that function's own doc comment for why an
+ * unconfigured model's `capabilities === undefined` must still count as chat). Drives the Agents
+ * tab's pinned-provider and constrained-allowlist dropdowns (`sections/ai.ts`), which only make
+ * sense pointed at something that can chat.
+ */
+export function providerHasChatCapableModel(provider: Provider): boolean {
+	return (provider.models ?? []).some(model => modelHasCapability(model, 'chat'));
+}
+
 export function setModelCapability(model: ProviderModel, capability: ProviderModelCapability, enabled: boolean): void {
 	// Seed from the legacy default only when nothing was ever configured — never when the array
 	// is present and empty, which is an explicit "no capabilities", not an absence.
