@@ -61,6 +61,9 @@ const obsidianStub = {
 			contents: `
 				export class App {}
 				export class FileSystemAdapter {}
+				export class TFile {}
+				export class TFolder {}
+				export const Platform = { isDesktopApp: true, isMobile: false };
 				export class Notice { constructor() {} }
 				export function normalizePath(path) { return path; }
 				export async function requestUrl(options) {

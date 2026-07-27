@@ -35,6 +35,37 @@ const MAX_ENTITY_TEXT_CHARS = 200;
  */
 const DEFAULT_SEARCH_EXTENSIONS = ['md', 'qmd', 'txt'];
 
+/**
+ * The heading prefix every image-description chunk carries, and the *entire* contract between
+ * the chunker and the results UI's figure indicator (`SearchModal.renderResults`). Deliberately
+ * a heading convention rather than a new `SearchChunk` field or a companion column: the chunk
+ * shape, the FTS schema and the ranking are all untouched by this facet, so a description chunk
+ * is an ordinary chunk that happens to be named after the figure it describes.
+ */
+export const IMAGE_CHUNK_HEADING_PREFIX = 'Image: ';
+
+/** True for a heading minted by `buildSearchChunks`'s image pass — see the prefix doc. */
+export function isImageChunkHeading(heading: string | undefined | null): boolean {
+	return typeof heading === 'string' && heading.startsWith(IMAGE_CHUNK_HEADING_PREFIX);
+}
+
+/**
+ * One described image reaching the chunker. Plain data on purpose — resolving a note's embeds to
+ * `_MD5` attachments and those to store records is `SearchManager`'s job (`prepareFile`), because
+ * it needs `metadataCache` and plugin state and this module must stay importable standalone.
+ *
+ * `narrative` and `extraction` are independently optional in practice: an SVG-derived record
+ * carries its text in `extraction` with an empty `narrative`, so a one-chunk image is normal.
+ */
+export interface ImageDescriptionChunkInput {
+	/** Display name of the image — the attachment's basename, not a path. */
+	filename: string;
+	/** One dense paragraph: what the image is and the point it makes. May be empty. */
+	narrative: string;
+	/** Structured transcription: titles, axis labels, values, table content. May be empty. */
+	extraction: string;
+}
+
 export interface BuildChunksInput {
 	vaultId: string;
 	path: string;
@@ -45,6 +76,20 @@ export interface BuildChunksInput {
 	contentHash?: string;
 	maxChars: number;
 	overlapChars: number;
+	/**
+	 * Described images embedded by this note, already resolved and ordered by the caller. Each
+	 * entry appends up to two chunks after the prose sections, through the same monotonic
+	 * ordinal counter — see `buildSearchChunks`.
+	 */
+	imageDescriptions?: ImageDescriptionChunkInput[];
+	/**
+	 * Extra facets for the `contentHash` fallback recompute below. Threaded rather than derived
+	 * so the fallback cannot drift from `SearchManager.prepareFile`'s compute: both must fold the
+	 * same facets or the stored hash never equals the compared hash and every file re-indexes on
+	 * every sweep, forever. Real callers pass `contentHash` too and never reach the fallback;
+	 * this exists so the one that doesn't still agrees.
+	 */
+	extraHashFacets?: string[];
 }
 
 /**
@@ -69,7 +114,7 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 	const maxChars = Math.max(400, input.maxChars || 1800);
 	const overlapChars = Math.max(0, Math.min(input.overlapChars || 0, Math.floor(maxChars / 3)));
 	const { body, metadata } = parseSearchDocument(input.content, input.basename);
-	const contentHash = input.contentHash ?? hashSearchContent(input.content);
+	const contentHash = input.contentHash ?? hashSearchContent(input.content, input.extraHashFacets);
 	const sections = splitSections(body);
 	const chunks: SearchChunk[] = [];
 	// Computed once per note and shared by reference across its chunks: the extraction reads the
@@ -98,6 +143,51 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 				...(entities.length > 0 ? { entities } : {}),
 			});
 			ordinal++;
+		}
+	}
+
+	// Image descriptions come *after* every prose section and share the same monotonic `ordinal`,
+	// which is what keeps `stableChunkId` deterministic: the companion's per-path upsert is a full
+	// replace, so a re-chunk of unchanged input must regenerate exactly the ids it deletes.
+	// Appending here (rather than interleaving at the embed's position in the body) means adding a
+	// description never renumbers a prose chunk.
+	//
+	// The chunks carry the *note's* path and title like every other chunk — a hit is the note that
+	// embeds the figure, never the image file. That is the whole point of describing images into
+	// the note's index identity rather than indexing sidecars as documents of their own.
+	for (const image of input.imageDescriptions ?? []) {
+		const filename = typeof image?.filename === 'string' ? image.filename.trim() : '';
+		if (!filename) continue;
+		const parts: { heading: string; text: unknown }[] = [
+			{ heading: `${IMAGE_CHUNK_HEADING_PREFIX}${filename}`, text: image.narrative },
+			{ heading: `${IMAGE_CHUNK_HEADING_PREFIX}${filename} (text)`, text: image.extraction },
+		];
+		for (const part of parts) {
+			const source = typeof part.text === 'string' ? part.text.trim() : '';
+			// Emitted only when non-empty: an SVG-derived record has no narrative, and an empty
+			// chunk would cost an index row and a vector for nothing.
+			if (!source) continue;
+			// The same packing prose sections get — an 875-token extracted table must not become
+			// one oversized chunk. Multiple slices share the heading and differ by ordinal, which
+			// `stableChunkId` folds, so their ids stay distinct.
+			for (const text of chunkText(source, maxChars, overlapChars)) {
+				const trimmed = text.trim();
+				if (!trimmed) continue;
+				chunks.push({
+					id: stableChunkId(input.vaultId, input.path, ordinal, part.heading),
+					vaultId: input.vaultId,
+					path: input.path,
+					contentHash,
+					title: metadata.title,
+					heading: part.heading,
+					text: trimmed,
+					mtime: input.mtime,
+					ordinal,
+					metadata,
+					...(entities.length > 0 ? { entities } : {}),
+				});
+				ordinal++;
+			}
 		}
 	}
 
@@ -192,14 +282,32 @@ function normalizeEntityText(value: unknown): string {
  * effect to be minimized — it is the mechanism that populates the new `entities` column for
  * notes that already exist. (With semantic search on, that sweep re-embeds too; the alternative
  * is a facet that stays empty until each note is next touched.)
+ *
+ * **`extraFacets` generalizes that argument to facets this module cannot see.** Image
+ * descriptions live in a store outside the vault (`imageDescriptionStore.ts`), so a description
+ * arriving for an already-indexed note changes what the note contributes to the index while its
+ * bytes on disk are untouched — the coverage-aware skip would leave it permanently un-described
+ * without this. The caller passes `['image-desc:<combinedDescriptionHash>']`.
+ *
+ * **An absent or empty `extraFacets` must hash exactly as this function did before the parameter
+ * existed**, or landing the image facet would re-index every note in every vault that has no
+ * described images at all — the entity fold's one-time vault-wide re-upsert was the population
+ * mechanism for a facet every note could carry; this one is not. Hence the `facets.length > 0`
+ * guard rather than an unconditional `\nfacets:` suffix. Facets are deduplicated and sorted so
+ * the value is a property of the *set*, not of the caller's argument order.
  */
-export function hashSearchContent(content: string): string {
+export function hashSearchContent(content: string, extraFacets?: string[]): string {
 	const frontmatterText = content.match(FRONTMATTER_RE)?.[1] ?? '';
 	// Only the frontmatter block is parsed here, not the whole document: this runs once per file
 	// per indexing sweep (`SearchManager.prepareFile`) and the body scan `parseSearchDocument`
 	// does for its title fallback would be pure waste on that path.
 	const entities = extractFrontmatterEntities(parseSimpleFrontmatter(frontmatterText));
-	return hashString(`${content}\nentities:${entityIndexText(entities)}`);
+	const base = `${content}\nentities:${entityIndexText(entities)}`;
+	const facets = [...new Set((extraFacets ?? [])
+		.map(facet => (typeof facet === 'string' ? facet.trim() : ''))
+		.filter(Boolean))].sort();
+	if (facets.length === 0) return hashString(base);
+	return hashString(`${base}\nfacets:${facets.join('\n')}`);
 }
 
 export function parseSearchDocument(content: string, fallbackTitle: string): { body: string; metadata: SearchDocumentMetadata } {

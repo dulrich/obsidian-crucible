@@ -1,5 +1,6 @@
 import { App, Modal, Notice, TFile, debounce, setIcon } from 'obsidian';
 import type CruciblePlugin from '../main';
+import { isImageChunkHeading } from './chunker';
 import { SEARCH_TYPEAHEAD_DEBOUNCE_MS, SEARCH_TYPEAHEAD_MIN_QUERY_LENGTH, shouldAutoSearch } from './debounce';
 import type { SearchRerankOutcome } from './SearchManager';
 import { SearchResult, SearchScoreAttribution } from './types';
@@ -195,6 +196,17 @@ export class VaultSearchModal extends Modal {
 
 			const meta = row.createDiv({ cls: 'crucible-search-result-meta' });
 			meta.setText([result.path, result.heading].filter(Boolean).join(' · '));
+			// The `Image: ` heading prefix minted by the chunker's image pass is the entire
+			// contract — no schema field, no companion change, no score change. Neutral pill, not a
+			// status hue: "this hit came from a figure's description rather than the note's prose"
+			// is a non-semantic fact about where the match landed, and spending an ok/warn/error
+			// colour on it would spend the reader's alarm budget on nothing.
+			if (isImageChunkHeading(result.heading)) {
+				meta.createSpan({
+					cls: 'crucible-pill is-muted crucible-search-result-figure',
+					text: 'matched a figure',
+				});
+			}
 			row.createDiv({ cls: 'crucible-search-result-snippet', text: result.snippet });
 			// The explain line is deliberately verbose (see formatScore) and so gets its own
 			// full-width wrapping row; as a nowrap column beside the title it dictated the
