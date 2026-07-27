@@ -12,6 +12,12 @@ import type { JobType } from "../../orchestration/types";
 import { TEXT_EXTRACTABLE_CATEGORIES, deriveFileTypeGroups } from "../../fileTypes";
 import { renderExtensionCheckboxGroups } from "./commands";
 import { resolveProviderModelRef } from "../../search/SearchManager";
+import {
+	SEARCH_QUERY_LOG_DEFAULT_MAX_ENTRIES,
+	SEARCH_QUERY_LOG_MAX_MAX_ENTRIES,
+	SEARCH_QUERY_LOG_MIN_MAX_ENTRIES,
+	normalizeMaxEntries,
+} from "../../search/queryLog";
 
 interface WorkflowMeta {
 	id: string;
@@ -495,6 +501,33 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 		get: () => String(s.searchRerankTopN),
 		set: (v) => { const n = Number(v.trim()); s.searchRerankTopN = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30; },
 		min: 1,
+	}, save);
+
+	// Query logging. The copy below is deliberately blunt about what is recorded and where it
+	// goes: this feature writes down what the user searches for, so a vague description of it
+	// would itself be the problem. Nothing leaves the machine, and "Search: clear query log"
+	// deletes the file outright.
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(searchGroup, {
+		name: 'Log searches and which result you open',
+		desc: 'Records each vault search — the words you typed, the note paths it returned and in what order, '
+			+ 'and which result you opened — to a local file in this plugin\'s folder. Note contents and snippets '
+			+ 'are never recorded, nothing is sent anywhere, and the log is capped below. A search where you open '
+			+ 'nothing is recorded as exactly that, not as a failure. Used to check that search ranking changes '
+			+ 'actually help on real searches; "Search: export query log" turns it into a measurable query set.',
+		get: () => s.searchQueryLogEnabled,
+		set: (v) => { s.searchQueryLogEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Query log size',
+		desc: 'How many searches to keep. Once full, the oldest is dropped for each new one. Clamped to 10–5000.',
+		placeholder: String(SEARCH_QUERY_LOG_DEFAULT_MAX_ENTRIES),
+		get: () => String(s.searchQueryLogMaxEntries),
+		set: (v) => { s.searchQueryLogMaxEntries = normalizeMaxEntries(v.trim()); },
+		min: SEARCH_QUERY_LOG_MIN_MAX_ENTRIES,
+		max: SEARCH_QUERY_LOG_MAX_MAX_ENTRIES,
 	}, save);
 
 	// --- Workflows list ---
