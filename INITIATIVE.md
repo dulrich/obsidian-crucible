@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[image-describe-hardening-ux]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 ---
