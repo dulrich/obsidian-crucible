@@ -93,6 +93,33 @@ export interface SearchDocumentMetadata {
 	frontmatter: Record<string, unknown>;
 }
 
+/**
+ * One named thing this chunk is *about* — the unit of the entity facet.
+ *
+ * **The shape is the forward-compatibility contract, and it is the reason this is an object
+ * rather than a bare string.** There are two sources of entities by design and only one of them
+ * exists today: `'frontmatter'` (this sprint — the note's `author` field, extracted by
+ * `extractFrontmatterEntities` in `chunker.ts`) and `'model'` (later — GLiNER2 span extraction
+ * over the body text, which cannot run under crucible-inference and arrives as its own CPU
+ * sidecar container). The locked decision behind that: the entity facet is ONE mechanism with
+ * two sources, so the model-sourced half must be able to append into this same array, land in
+ * the same FTS column, and be scored at the same bm25 weight *without a second schema bump*.
+ *
+ * `type` and `source` therefore ride on the wire from day one even though the companion flattens
+ * every entity to its `text` for indexing (see `normalizeChunkEntities` in
+ * `scripts/search-companion.mjs`). They cost nothing to carry, and carrying them is what makes
+ * "add GLiNER2" a producer change rather than a protocol change. The companion deliberately
+ * accepts a bare string too, so a future producer that only has text is not blocked on this type.
+ *
+ * `type` is an open string (`'person'` for an author) rather than a union: GLiNER2's label set is
+ * configured per deployment, so pinning a union here would make every new label a plugin release.
+ */
+export interface SearchEntity {
+	text: string;
+	type: string;
+	source: 'frontmatter' | 'model';
+}
+
 export interface SearchChunk {
 	id: string;
 	vaultId: string;
@@ -104,6 +131,23 @@ export interface SearchChunk {
 	mtime: number;
 	ordinal: number;
 	metadata: SearchDocumentMetadata;
+	/**
+	 * The entity facet for this chunk — see `SearchEntity`. Omitted entirely (not `[]`) when the
+	 * note names none, so a vault with no `author:` frontmatter sends byte-for-byte the payload it
+	 * sent before this facet existed.
+	 *
+	 * Every chunk of a note carries the note's full entity list, not just chunk 0. That is a
+	 * ranking decision, not a convenience: FTS5's implicit AND is per *chunk*, so an entity
+	 * present only on chunk 0 could never co-occur with a body term found in chunk 4 — the exact
+	 * split-terms failure the WP-4 quality diagnosis identified as the root cause of misses. The
+	 * per-path pooling (`MIN(score_text)` in the companion's `SEARCH_SQL`) then collapses the
+	 * duplication back to one row per path, so the repetition costs index bytes and nothing else.
+	 *
+	 * The emitted text is folded into `contentHash` (see `hashSearchContent`), so editing an
+	 * author — or changing the extraction rule — re-indexes the note instead of being stranded by
+	 * the coverage-aware skip.
+	 */
+	entities?: SearchEntity[];
 	embedding?: number[];
 	// The id of the model that produced `embedding`, recorded per chunk so a later model switch
 	// is detectable. Set only alongside `embedding`; the companion stores it in
@@ -179,7 +223,12 @@ export function embeddingSpaceId(modelId: string, precision?: string): string {
 // to it would have no rowid contract to rely on even though nothing in the wire protocol
 // itself changed — the mismatch is entirely server-internal, but the pairing rule still
 // applies uniformly rather than special-casing "this bump changed no client-visible field."
-export const SEARCH_REQUIRED_SCHEMA_VERSION = 6;
+// Bumped to 7 for the entity facet: `chunks.entities` plus a dedicated indexed `entities` column
+// on `chunks_fts` (see `SearchEntity`). An older companion binary has neither, so it would accept
+// every `chunk.entities` this client sends and silently drop it — the note would index, report a
+// current `contentHash`, and never match its own author. That is a silent permanent gap of
+// exactly the kind the pairing rule exists to turn into a loud "rebuild required".
+export const SEARCH_REQUIRED_SCHEMA_VERSION = 7;
 
 export interface SearchHealth {
 	ok: boolean;

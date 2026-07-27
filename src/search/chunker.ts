@@ -1,7 +1,31 @@
-import { SearchChunk, SearchDocumentMetadata } from './types';
+import { SearchChunk, SearchDocumentMetadata, SearchEntity } from './types';
 
 const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/;
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+
+/**
+ * Frontmatter fields that name an entity, and the entity type each one produces.
+ *
+ * `author` is the whole list this sprint, and adding a second row is the *only* change a second
+ * frontmatter-sourced facet needs — no schema bump, no companion change, because everything
+ * downstream (the chunk field, the `entities` FTS column, the bm25 weight, the `contentHash`
+ * fold) is already type-agnostic. The model-sourced half (GLiNER2 over body text) appends to the
+ * same `SearchEntity[]` from a different producer and is likewise not a schema event.
+ *
+ * Deliberately NOT scanned from the note body: the same rule the derived-ID lint keys follow —
+ * these are metadata about what the note *is*, not about URLs or names that happen to appear
+ * inside it. Body-text extraction is the model source's job, where it is a deliberate, labelled
+ * span rather than an incidental substring.
+ */
+const FRONTMATTER_ENTITY_FIELDS: readonly { key: string; type: string }[] = [
+	{ key: 'author', type: 'person' },
+];
+
+// Junk tolerance, not tuning. Frontmatter is user-authored text that a web clipper may have
+// written, so a pathological `author:` list must cost a bounded number of bytes in every chunk
+// of the note rather than an unbounded one. Neither bound is reachable by a real author field.
+const MAX_ENTITIES_PER_CHUNK = 32;
+const MAX_ENTITY_TEXT_CHARS = 200;
 
 /**
  * Default indexable extensions — exactly the pre-WP-4 hardcoded set, kept as the default
@@ -48,6 +72,10 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 	const contentHash = input.contentHash ?? hashSearchContent(input.content);
 	const sections = splitSections(body);
 	const chunks: SearchChunk[] = [];
+	// Computed once per note and shared by reference across its chunks: the extraction reads the
+	// note's frontmatter, which is a property of the note and not of any one chunk. See the
+	// `SearchChunk.entities` doc for why every chunk carries it rather than only chunk 0.
+	const entities = extractFrontmatterEntities(metadata.frontmatter);
 	let ordinal = 0;
 
 	for (const section of sections) {
@@ -65,6 +93,9 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 				mtime: input.mtime,
 				ordinal,
 				metadata,
+				// Omitted, not `[]`, when the note names no entity — a vault with no `author:`
+				// frontmatter therefore sends exactly the payload it sent before this facet.
+				...(entities.length > 0 ? { entities } : {}),
 			});
 			ordinal++;
 		}
@@ -73,8 +104,102 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 	return chunks;
 }
 
+/**
+ * The note's entity facet, from frontmatter. Tolerant by construction — frontmatter is
+ * user-authored and clipper-authored text, so every non-string, blank, over-long or duplicate
+ * value is dropped rather than allowed to become a junk index term.
+ *
+ * Accepts both YAML forms `parseSimpleFrontmatter` can produce for one key: a scalar
+ * (`author: Matt Pocock`) and a list (`author:` + `- Matt Pocock` items, or the inline
+ * `[a, b]` form). Duplicates are collapsed case-insensitively while the first-seen casing is
+ * kept, because the stored text is what a debug view shows a human.
+ */
+export function extractFrontmatterEntities(frontmatter: Record<string, unknown> | undefined): SearchEntity[] {
+	const entities: SearchEntity[] = [];
+	const seen = new Set<string>();
+	if (!frontmatter || typeof frontmatter !== 'object') return entities;
+	for (const field of FRONTMATTER_ENTITY_FIELDS) {
+		const raw = frontmatter[field.key];
+		const values = Array.isArray(raw) ? raw : [raw];
+		for (const value of values) {
+			const text = normalizeEntityText(value);
+			if (!text) continue;
+			// Keyed by type *and* text: the same name legitimately appears under two facets (an
+			// author who is also the subject) and those are two entities, not one.
+			const key = `${field.type}\n${text.toLowerCase()}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			entities.push({ text, type: field.type, source: 'frontmatter' });
+			if (entities.length >= MAX_ENTITIES_PER_CHUNK) return entities;
+		}
+	}
+	return entities;
+}
+
+/**
+ * The flat text the entity facet contributes to the index, and the only part of an entity that
+ * reaches FTS this sprint.
+ *
+ * Deduplicated by text alone — not by `(type, text)` like `extractFrontmatterEntities` — because
+ * the index column is untyped: indexing one name twice would double its term frequency and
+ * over-rank the note for no reason. The companion's `normalizeChunkEntities` reproduces exactly
+ * this rule on the server side, which is what lets the hash computed here and the text stored
+ * there stay in agreement (there is no shared module across that boundary: the companion is
+ * dependency-free `.mjs`).
+ *
+ * The `\n` separator matches this file's existing separator convention (`stableChunkId`), and is
+ * deliberately not a control byte — see the NUL quirk in the root `AGENTS.md`.
+ */
+export function entityIndexText(entities: SearchEntity[]): string {
+	const texts: string[] = [];
+	const seen = new Set<string>();
+	for (const entity of entities) {
+		const text = normalizeEntityText(entity?.text);
+		if (!text) continue;
+		const key = text.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		texts.push(text);
+		if (texts.length >= MAX_ENTITIES_PER_CHUNK) break;
+	}
+	return texts.join('\n');
+}
+
+function normalizeEntityText(value: unknown): string {
+	if (typeof value !== 'string' && typeof value !== 'number') return '';
+	// Whitespace runs collapse so a multi-line YAML scalar cannot smuggle the `\n` separator
+	// `entityIndexText` joins on into a single entity's text.
+	return String(value).replace(/\s+/g, ' ').trim().slice(0, MAX_ENTITY_TEXT_CHARS);
+}
+
+/**
+ * The note's index identity: change it and the note re-indexes, leave it and the coverage-aware
+ * skip in `SearchManager.indexFiles` leaves the note exactly as the companion already holds it.
+ *
+ * **The entity text is folded in on purpose, and it is not redundant with hashing the content.**
+ * Hashing the raw content happens to cover an `author:` edit today only because frontmatter is
+ * part of `content`; that is an accident of where the hash is taken, not a guarantee, and any
+ * future narrowing of the hash to the note *body* would silently strand every author-only edit.
+ * Folding the emitted text states the invariant directly: the hash covers everything that gets
+ * indexed. It also covers what content alone cannot — a change to the *extraction rule*
+ * (a new field in `FRONTMATTER_ENTITY_FIELDS`, a normalization fix, a model source producing
+ * different spans) produces different entity text from byte-identical content, and must
+ * re-index. Without the fold that change would be invisible to every already-indexed note and
+ * the new facet would only ever populate for notes the user happened to edit afterwards.
+ *
+ * Consequence to expect, once, at landing: this changes the hash of every note in the vault, so
+ * the first indexing sweep after the upgrade re-upserts the whole vault. That is not a side
+ * effect to be minimized — it is the mechanism that populates the new `entities` column for
+ * notes that already exist. (With semantic search on, that sweep re-embeds too; the alternative
+ * is a facet that stays empty until each note is next touched.)
+ */
 export function hashSearchContent(content: string): string {
-	return hashString(content);
+	const frontmatterText = content.match(FRONTMATTER_RE)?.[1] ?? '';
+	// Only the frontmatter block is parsed here, not the whole document: this runs once per file
+	// per indexing sweep (`SearchManager.prepareFile`) and the body scan `parseSearchDocument`
+	// does for its title fallback would be pure waste on that path.
+	const entities = extractFrontmatterEntities(parseSimpleFrontmatter(frontmatterText));
+	return hashString(`${content}\nentities:${entityIndexText(entities)}`);
 }
 
 export function parseSearchDocument(content: string, fallbackTitle: string): { body: string; metadata: SearchDocumentMetadata } {
