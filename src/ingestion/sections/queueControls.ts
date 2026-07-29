@@ -1,4 +1,5 @@
 import { renderQueueTypeControls } from '../render/queueTypeControls';
+import { refreshWithScrollPreserved } from '../render/refresh';
 import type { DashboardHost, SectionContext } from '../render/types';
 
 // The Queue Configuration section: the per-type auto-run (drain/execution) and rate
@@ -27,7 +28,9 @@ export function buildQueueControlsSection(host: DashboardHost): void {
 		countEl,
 		metaEl,
 		sort: null,
-		refresh: () => renderQueueControls(host, body),
+		// See render/refresh.ts / AGENTS.md #5: SectionContext.refresh is itself the
+		// scroll-preserving wrapped function so every call site is covered for free.
+		refresh: () => refreshWithScrollPreserved(body, () => renderQueueControls(host, body)),
 	};
 	host.registerSection(ctx);
 	renderQueueControls(host, body);

@@ -38,6 +38,12 @@ const SCAN_DEBOUNCE_MS = 1000;
 // the 250ms coalesce — both stay as the event-arrival cadence; this only throttles
 // how often the resulting full rebuild is allowed to run.
 const QUEUE_MONITOR_MIN_INTERVAL_MS = 1000;
+// Own gate for the "captures without metadata" scan (a full-vault scan) — see
+// registerListeners' use of minIntervalGate. Kept as a distinct gate instance from
+// QUEUE_MONITOR_MIN_INTERVAL_MS (same magnitude, independent timing state) rather
+// than folding it into the queue-monitor gate, so the two scans' cadences don't
+// couple to each other's call pattern.
+const YOUTUBE_NO_METADATA_MIN_INTERVAL_MS = 1000;
 
 // Lifecycle/registry controller for the Ingestion dashboard: owns mounting,
 // listener wiring, and the section registry (header chrome, count/meta slots,
@@ -164,16 +170,26 @@ export class IngestionDashboardUI {
 		const debouncedIgnoredPosts = debounce(() => void this.refresh('ignoredPosts'), DEBOUNCE_MS, true);
 		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
 		const debouncedBlogControl = debounce(() => void this.refresh('blogControl'), SCAN_DEBOUNCE_MS, true);
-		const debouncedYoutubeNoMetadata = debounce(() => void this.refresh('youtubeWithoutMetadata'), SCAN_DEBOUNCE_MS, true);
-		// The queue monitor's own render is cadence-gated on top of the DEBOUNCE_MS
-		// trigger below — see QUEUE_MONITOR_MIN_INTERVAL_MS above. The intake button
-		// refreshes are cheap (no full teardown) and stay on the plain 150ms debounce.
-		const gatedQueueMonitorRefresh = minIntervalGate(() => this.refresh('queueMonitor'), QUEUE_MONITOR_MIN_INTERVAL_MS);
-		const debouncedQueueMonitor = debounce(() => {
-			gatedQueueMonitorRefresh();
+		// Own cadence gate, distinct from the queue monitor's below: this is a
+		// full-vault scan (computeYoutubeNoMetadataRows), and the outer
+		// SCAN_DEBOUNCE_MS Obsidian debounce below (resetTimer=true) only fires
+		// after a full quiet period — during a sustained queue drain that never
+		// quiets for a full second, it would never fire at all. minIntervalGate's
+		// leading-immediate + bounded-trailing semantics guarantee at most one scan
+		// per interval regardless of how continuous the event stream is.
+		const gatedYoutubeNoMetadataRefresh = minIntervalGate(() => this.refresh('youtubeWithoutMetadata'), YOUTUBE_NO_METADATA_MIN_INTERVAL_MS);
+		const debouncedYoutubeNoMetadata = debounce(() => gatedYoutubeNoMetadataRefresh(), SCAN_DEBOUNCE_MS, true);
+		// The queue monitor's own render — and the two intake-button folder scans,
+		// which used to run ungated on every DEBOUNCE_MS (150ms) firing regardless
+		// of the queue-monitor gate — are cadence-gated together on top of the
+		// DEBOUNCE_MS trigger below, so a queue-event burst costs at most one
+		// folder-scan set per QUEUE_MONITOR_MIN_INTERVAL_MS, not one per debounce tick.
+		const gatedQueueMonitorRefresh = minIntervalGate(() => {
+			void this.refresh('queueMonitor');
 			void this.intake.refreshIntakeButton('blog');
 			void this.intake.refreshIntakeButton('youtube');
-		}, DEBOUNCE_MS, true);
+		}, QUEUE_MONITOR_MIN_INTERVAL_MS);
+		const debouncedQueueMonitor = debounce(() => gatedQueueMonitorRefresh(), DEBOUNCE_MS, true);
 		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), SCAN_DEBOUNCE_MS, true);
 
 		// reason 'structural' = vault create/delete/rename (can change everything);
@@ -330,9 +346,13 @@ export class IngestionDashboardUI {
 			countEl,
 			metaEl,
 			sort: null,
-			refresh: async () => {
-				await this.renderSection(id, body, ctx);
-			},
+			// SectionContext.refresh is itself the scroll-preserving wrapped function
+			// (render/refresh.ts) so every call site — the header Refresh button,
+			// sort-header clicks, Ignore/Un-ignore, per-row action buttons, and this
+			// class's own refresh(id) dispatch below — gets scroll preservation for
+			// free, and participates in the shared dashboard-level scroll coordinator
+			// alongside every other section's refresh.
+			refresh: () => refreshWithScrollPreserved(body, () => this.renderSection(id, body, ctx)),
 		};
 		this.sections.set(id, ctx);
 		refreshBtn.addEventListener('click', () => void ctx.refresh());
@@ -372,11 +392,10 @@ export class IngestionDashboardUI {
 	private async refresh(id: SectionId): Promise<void> {
 		const ctx = this.sections.get(id);
 		if (!ctx) return;
-		// Every section refresh does a full teardown/rebuild of `ctx.body` (renderSortableTable's
-		// `parent.empty()`, renderQueueMonitor's `body.empty()`, ...). Wrapping the dispatch here —
-		// rather than each section's own render function — is the single wiring point that covers
-		// every section, present and future, without touching their render logic.
-		await refreshWithScrollPreserved(ctx.body, () => ctx.refresh());
+		// Plain dispatch: ctx.refresh is itself the scroll-preserving wrapped
+		// function (see each section builder), so this no longer wraps anything
+		// itself — it just routes to the section's own refresh. See render/refresh.ts.
+		await ctx.refresh();
 	}
 
 	private async renderSection(id: SectionId, body: HTMLElement, ctx: SectionContext): Promise<void> {
