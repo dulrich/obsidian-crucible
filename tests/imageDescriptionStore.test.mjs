@@ -25,7 +25,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { ImageDescriptionStore, IMAGE_DESCRIPTION_SCHEMA_VERSION } = await import(pathToFileURL(outfile).href);
+const { ImageDescriptionStore, IMAGE_DESCRIPTION_SCHEMA_VERSION, classifyFailure } = await import(pathToFileURL(outfile).href);
 
 // Minimal in-memory ImageDescriptionStorage. `list` is non-recursive on purpose (matches the
 // contract of a real vault-adapter wrapper): only direct children of `dir` are returned.
@@ -275,4 +275,191 @@ test('pruneDegenerate: an empty store prunes nothing', async () => {
 	const storage = createFakeStorage();
 	const store = new ImageDescriptionStore(storage, BASE_DIR);
 	assert.deepEqual(await store.pruneDegenerate(20_000), []);
+});
+
+// ── idh-WP-2: classifyFailure ────────────────────────────────────────────────
+
+test('classifyFailure: a withTimeout label -> transient', () => {
+	assert.equal(classifyFailure('image description (narrative pass) timed out after 120000ms'), 'transient');
+	assert.equal(classifyFailure('image description (extraction pass) timed out after 120000ms'), 'transient');
+	assert.equal(classifyFailure('image transcode timed out after 30000ms'), 'transient');
+});
+
+test('classifyFailure: a net::ERR_* message -> transient, including variants beyond the breaker\'s specific trio', () => {
+	assert.equal(classifyFailure('net::ERR_CONNECTION_REFUSED'), 'transient');
+	assert.equal(classifyFailure('net::ERR_CONNECTION_RESET'), 'transient');
+	assert.equal(classifyFailure('net::ERR_NETWORK_CHANGED'), 'transient');
+	// A legacy record could carry a net::ERR_* variant the infra breaker doesn't specifically
+	// abort on (it only aborts on the observed trio) — still transient by this broader match.
+	assert.equal(classifyFailure('net::ERR_NAME_NOT_RESOLVED'), 'transient');
+});
+
+test('classifyFailure: everything else -> permanent, including undefined/empty', () => {
+	assert.equal(classifyFailure('LM Studio image description API returned no choices'), 'permanent');
+	assert.equal(classifyFailure('HTTP 500: internal server error'), 'permanent');
+	assert.equal(classifyFailure(''), 'permanent');
+	assert.equal(classifyFailure(undefined), 'permanent');
+});
+
+// ── idh-WP-2: failureClass field ──────────────────────────────────────────────
+
+test('put/get round-trip for kind:\'failed\' carries failureClass, and omitting it round-trips undefined', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	const transientMd5 = 'c'.repeat(32);
+	const legacyMd5 = 'd'.repeat(32);
+	await store.put({ md5: transientMd5, narrative: '', extraction: '', kind: 'failed', failure: 'timed out after 120000ms', failureClass: 'transient' });
+	await store.put({ md5: legacyMd5, narrative: '', extraction: '', kind: 'failed', failure: 'provider threw' }); // no failureClass — legacy shape
+
+	const transientRecord = await store.get(transientMd5);
+	assert.equal(transientRecord.failureClass, 'transient');
+
+	const legacyRecord = await store.get(legacyMd5);
+	assert.equal(legacyRecord.failureClass, undefined);
+});
+
+test('a stored record with an invalid failureClass value is rejected as structurally malformed', async () => {
+	const storage = createFakeStorage();
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, JSON.stringify({
+		md5: MD5_A, narrative: '', extraction: '', kind: 'failed',
+		describedAt: 'now', schemaVersion: IMAGE_DESCRIPTION_SCHEMA_VERSION, descriptionHash: 'h',
+		failureClass: 'sometimes', // must be 'transient' | 'permanent'
+	}));
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	await store.ensureLoaded();
+	assert.equal(store.has(MD5_A), false);
+	assert.equal(await store.get(MD5_A), null);
+});
+
+// ── idh-WP-2: pruneFailed ─────────────────────────────────────────────────────
+
+test('pruneFailed(\'transient\'): removes only failed records classifying transient (explicit failureClass), leaves permanent-failed and non-failed records untouched', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	const transientMd5 = 'c'.repeat(32);
+	const permanentMd5 = 'd'.repeat(32);
+	const visionMd5 = 'e'.repeat(32);
+	await store.put({ md5: transientMd5, narrative: '', extraction: '', kind: 'failed', failure: 'timed out after 120000ms', failureClass: 'transient' });
+	await store.put({ md5: permanentMd5, narrative: '', extraction: '', kind: 'failed', failure: 'provider returned no choices', failureClass: 'permanent' });
+	await store.put({ md5: visionMd5, narrative: 'n', extraction: 'e', kind: 'vision' });
+
+	const pruned = await store.pruneFailed('transient');
+
+	assert.deepEqual(pruned, [transientMd5]);
+	assert.equal(store.has(transientMd5), false, 'transient-failed falls out of has() and re-enters pending');
+	assert.equal(store.has(permanentMd5), true, 'permanent-failed is left alone — skip-forever stays correct');
+	assert.equal(store.has(visionMd5), true, 'a real description is never touched by a failed-record prune');
+});
+
+test('pruneFailed(\'transient\'): a legacy failed record with no failureClass is classified lazily via classifyFailure', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	const legacyTimeoutMd5 = 'c'.repeat(32);
+	const legacyNetMd5 = 'd'.repeat(32);
+	const legacyPermanentMd5 = 'e'.repeat(32);
+	// Simulate records written before idh-WP-2 (no failureClass at all).
+	await store.put({ md5: legacyTimeoutMd5, narrative: '', extraction: '', kind: 'failed', failure: 'timed out after 120000ms' });
+	await store.put({ md5: legacyNetMd5, narrative: '', extraction: '', kind: 'failed', failure: 'net::ERR_CONNECTION_REFUSED' });
+	await store.put({ md5: legacyPermanentMd5, narrative: '', extraction: '', kind: 'failed', failure: 'provider returned no choices' });
+
+	const pruned = await store.pruneFailed('transient');
+
+	assert.deepEqual(pruned.sort(), [legacyNetMd5, legacyTimeoutMd5].sort());
+	assert.equal(store.has(legacyPermanentMd5), true);
+});
+
+test('pruneFailed(\'all\'): removes every failed record regardless of classification, still leaves non-failed records untouched', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	const transientMd5 = 'c'.repeat(32);
+	const permanentMd5 = 'd'.repeat(32);
+	const visionMd5 = 'e'.repeat(32);
+	await store.put({ md5: transientMd5, narrative: '', extraction: '', kind: 'failed', failure: 'timed out after 120000ms', failureClass: 'transient' });
+	await store.put({ md5: permanentMd5, narrative: '', extraction: '', kind: 'failed', failure: 'provider returned no choices', failureClass: 'permanent' });
+	await store.put({ md5: visionMd5, narrative: 'n', extraction: 'e', kind: 'vision' });
+
+	const pruned = await store.pruneFailed('all');
+
+	assert.deepEqual(pruned.sort(), [permanentMd5, transientMd5].sort());
+	assert.equal(store.has(visionMd5), true);
+});
+
+test('pruneFailed: an empty store prunes nothing', async () => {
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+	assert.deepEqual(await store.pruneFailed('transient'), []);
+	assert.deepEqual(await store.pruneFailed('all'), []);
+});
+
+// ── idh-WP-2: store load tolerates + deletes corrupt (zero-byte/unparseable) files ────────────
+
+test('ensureLoaded: a zero-byte record file is skipped, and the corrupt file is deleted from storage', async () => {
+	const storage = createFakeStorage();
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, ''); // zero-byte — JSON.parse('') throws
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	await store.ensureLoaded();
+
+	assert.equal(store.has(MD5_A), false);
+	assert.equal(storage.files.has(`${BASE_DIR}/${MD5_A}.json`), false, 'the corrupt file is deleted, not left to warn forever on every future load');
+});
+
+test('ensureLoaded: an unparseable record file is skipped, and the corrupt file is deleted from storage', async () => {
+	const storage = createFakeStorage();
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, 'not json{{{');
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	await store.ensureLoaded();
+
+	assert.equal(store.has(MD5_A), false);
+	assert.equal(storage.files.has(`${BASE_DIR}/${MD5_A}.json`), false);
+});
+
+test('ensureLoaded: a structurally malformed (valid-JSON) record file is skipped, and the corrupt file is deleted from storage', async () => {
+	const storage = createFakeStorage();
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, JSON.stringify({ md5: MD5_A, narrative: 'n' })); // missing required fields
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+
+	await store.ensureLoaded();
+
+	assert.equal(store.has(MD5_A), false);
+	assert.equal(storage.files.has(`${BASE_DIR}/${MD5_A}.json`), false);
+});
+
+test('ensureLoaded: corrupt-file deletion does not disturb a healthy record loaded in the same sweep', async () => {
+	const storage = createFakeStorage();
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, ''); // corrupt
+	const store1 = new ImageDescriptionStore(storage, BASE_DIR);
+	await store1.put({ md5: MD5_B, narrative: 'n', extraction: 'e', kind: 'vision' }); // healthy, same storage
+
+	const store2 = new ImageDescriptionStore(storage, BASE_DIR);
+	await store2.ensureLoaded();
+
+	assert.equal(store2.has(MD5_A), false);
+	assert.equal(store2.has(MD5_B), true);
+	assert.equal(storage.files.has(`${BASE_DIR}/${MD5_A}.json`), false);
+	assert.equal(storage.files.has(`${BASE_DIR}/${MD5_B}.json`), true);
+});
+
+test('a corrupt record is NOT deleted by a per-md5 get() (deletion is scoped to the load() sweep)', async () => {
+	// get() only reaches readRecord for an md5 already in the index (has() true), so a corrupt
+	// file that was never indexed (e.g. written directly, bypassing put()) simply returns null —
+	// there is no code path where get() deletes a file. This documents that scoping explicitly.
+	const storage = createFakeStorage();
+	const store = new ImageDescriptionStore(storage, BASE_DIR);
+	await store.put({ md5: MD5_A, narrative: 'n', extraction: 'e', kind: 'vision' });
+	// Corrupt the file on disk after put() succeeded but without going through the store again.
+	storage.files.set(`${BASE_DIR}/${MD5_A}.json`, 'not json{{{');
+
+	const fetched = await store.get(MD5_A);
+
+	assert.equal(fetched, null);
+	// The index still (stale-)believes it's present; the point of this test is only that get()
+	// itself does not reach into storage.remove.
+	assert.equal(storage.files.has(`${BASE_DIR}/${MD5_A}.json`), true);
 });
