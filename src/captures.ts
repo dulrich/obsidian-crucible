@@ -80,6 +80,16 @@ export class CaptureManager {
 			// or if we are inserting into a section (where FM is invalid anyway).
 			const content = contentRaw.replace(FRONTMATTER_REGEX, '').trim();
 
+			// A capture whose resolved content is YAML-only (e.g. a template that only sets
+			// frontmatter properties) passes the guard above — contentRaw is non-empty — but
+			// strips to an empty body here. For writeMode 'replace' that would otherwise
+			// blank the note/section body: the whole-note branch below would write just the
+			// retained frontmatter, and insertIntoSection's 'replace' mode splices an empty
+			// payload into the section. Treat that as a no-op success, the same shape as the
+			// guard above. Other write modes (prepend/append) keep existing behavior — they
+			// can't destroy content that's already there.
+			if (!content && capture.writeMode === 'replace') return true;
+
 			const existingContent = await this.app.vault.read(file);
 			const writeMode = capture.writeMode;
 			const targetSection = resolveTargetSection(capture, existingContent, context);

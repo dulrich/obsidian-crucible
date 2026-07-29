@@ -6,12 +6,20 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import esbuild from 'esbuild';
 
-// Covers idh-WP-3 scope 3: Linter.lintFile only fires
-// `dataview:dataview-rebuild-current-view` when the pass actually changed the file, derived
-// by comparing raw content before/after the locked write section (see the comment above
-// `let modified = false;` in src/lint.ts). This drives the REAL Linter.lintFile /
-// updateFrontmatter wiring (not a mirror) against a minimal hand-rolled Obsidian stub, so a
-// regression that breaks the actual gating (not just an isolated helper) would be caught.
+// Covers idh-WP-3 scope (b): Linter.lintFile's dataview refresh fire. It used to gate on
+// `modified` and call `dataview:dataview-rebuild-current-view` — which resolves to
+// `activeView.leaf.rebuildView()` in Dataview v0.5.68 (a full leaf teardown that races
+// `ChainManager.reconcileOpenEditor`'s setViewData and can blank the note). The new
+// semantics: fire the non-destructive `refreshDataviewViews` primitive (revision-bump touch,
+// falling back to `dataview:dataview-force-refresh-views` when the index handle isn't
+// reachable — the case this hand-rolled stub exercises, since it has no
+// `app.plugins.plugins.dataview.index`) UNCONDITIONALLY whenever the linted note contains a
+// dataview/dataviewjs fence, regardless of whether the pass actually wrote anything — and
+// never otherwise. `modified` itself is still computed (this file's other tests, and the
+// final "return value" test below, pin that its own contract is unchanged) but no longer
+// gates the fire. This drives the REAL Linter.lintFile / updateFrontmatter wiring (not a
+// mirror) against a minimal hand-rolled Obsidian stub, so a regression that breaks the
+// actual gating (not just an isolated helper) would be caught.
 // `noteLocks` is left undefined — withOptionalNoteLock then just runs the action inline
 // (src/orchestration/NoteLockManager.ts's own `withOptionalNoteLock` short-circuits on
 // undefined), so this doesn't need to stand up a NoteLockManager.
@@ -65,7 +73,7 @@ const { Linter, calculateWordCount } = await import(pathToFileURL(outfile).href)
 // production regex is the single source of truth; this is only used to derive a
 // metadataCache stand-in that reports "fresh" for whatever content the fixture starts
 // with, so updateFrontmatter's stale-cache barrier never engages and the test stays
-// about the modified-signal, not the barrier).
+// about the dataview-fire signal, not the barrier).
 const FRONTMATTER_REGEX = new RegExp('^[\\uFEFF]?---\\s*[^\\S\\r\\n]*[\\r\\n]+([\\s\\S]*?)[\\r\\n]+---[^\\S\\r\\n]*([\\r\\n]*)');
 
 function deriveFreshCache(content) {
@@ -119,7 +127,9 @@ function stringifyFlatYaml(fm) {
 // fileManager.processFrontMatter is a real (if flat-only) parse/update/reserialize round
 // trip against that same content, and metadataCache always reports the cache matching
 // whatever the content currently is (see deriveFreshCache) — updateFrontmatter's barrier
-// is not what this test is about.
+// is not what this test is about. `plugins.plugins` (the instance map refreshDataviewViews
+// prefers) is deliberately absent, so every "fires" assertion below exercises the
+// `dataview-force-refresh-views` command fallback — that's the branch this stub can reach.
 function makeApp({ content }) {
 	const state = { content, executedCommands: [] };
 	const file = { path: 'note.md', extension: 'md', basename: 'note', stat: { ctime: 0 } };
@@ -160,26 +170,16 @@ function baseSettings(overrides = {}) {
 }
 
 const BODY = 'Some body text here.';
-const WORD_COUNT = calculateWordCount(BODY);
+const DATAVIEW_BLOCK = '\n\n```dataview\nTABLE file.name\n```';
+// stripNonProseContent removes fenced code before segmenting, so the dataview fence
+// contributes no prose words — this word count is valid for bodies with or without it.
+const WORD_COUNT = calculateWordCount(BODY + DATAVIEW_BLOCK);
 
-test('a lint pass that changes nothing does not fire the dataview rebuild', async () => {
+test('a dataview note fires the refresh even when the lint pass changes nothing', async () => {
 	// title/created already present (non-empty) so the *IfEmpty upserts are no-ops, and
 	// word-count already matches what this pass will compute — nothing for processFrontMatter
-	// to actually change, so the reserialized content should be byte-identical.
-	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: ${WORD_COUNT}\n---\n\n${BODY}`;
-	const { app, state, file } = makeApp({ content });
-	const linter = new Linter(app, baseSettings(), () => {}, undefined);
-
-	const ok = await linter.lintFile(file, false);
-
-	assert.equal(ok, true);
-	assert.deepEqual(state.executedCommands, [], 'no dataview rebuild fired when the pass wrote nothing new');
-});
-
-test('a lint pass that actually writes fires the dataview rebuild', async () => {
-	// word-count is wrong going in, so upsertFrontmatterProperty(fm, 'word-count', wordCount)
-	// changes it — a genuine write.
-	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}`;
+	// to actually change, so the reserialized content should be byte-identical (unmodified).
+	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: ${WORD_COUNT}\n---\n\n${BODY}${DATAVIEW_BLOCK}`;
 	const { app, state, file } = makeApp({ content });
 	const linter = new Linter(app, baseSettings(), () => {}, undefined);
 
@@ -188,25 +188,56 @@ test('a lint pass that actually writes fires the dataview rebuild', async () => 
 	assert.equal(ok, true);
 	assert.deepEqual(
 		state.executedCommands,
-		['dataview:dataview-rebuild-current-view'],
-		'the dataview rebuild fires exactly once when the pass changed the file',
+		['dataview:dataview-force-refresh-views'],
+		'the refresh fires on a dataview note even though the pass wrote nothing new',
+	);
+});
+
+test('a dataview note fires the refresh when the lint pass also writes', async () => {
+	// word-count is wrong going in, so upsertFrontmatterProperty(fm, 'word-count', wordCount)
+	// changes it — a genuine write, in addition to the fence being present.
+	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}${DATAVIEW_BLOCK}`;
+	const { app, state, file } = makeApp({ content });
+	const linter = new Linter(app, baseSettings(), () => {}, undefined);
+
+	const ok = await linter.lintFile(file, false);
+
+	assert.equal(ok, true);
+	assert.deepEqual(
+		state.executedCommands,
+		['dataview:dataview-force-refresh-views'],
+		'the refresh fires exactly once on a dataview note that also changed',
 	);
 	assert.match(state.content, new RegExp(`word-count: ${WORD_COUNT}`), 'the write actually landed');
 });
 
-test('a silent lint pass never fires the dataview rebuild, whether or not it wrote', async () => {
-	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}`;
+test('a note without a dataview fence never fires the refresh, whether or not it wrote', async () => {
+	const unwritten = `---\ntitle: note\ncreated: 2026-01-01\nword-count: ${calculateWordCount(BODY)}\n---\n\n${BODY}`;
+	const { app: appA, state: stateA, file: fileA } = makeApp({ content: unwritten });
+	const linterA = new Linter(appA, baseSettings(), () => {}, undefined);
+	await linterA.lintFile(fileA, false);
+	assert.deepEqual(stateA.executedCommands, [], 'no dataview fence, no write — no refresh');
+
+	const written = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}`;
+	const { app: appB, state: stateB, file: fileB } = makeApp({ content: written });
+	const linterB = new Linter(appB, baseSettings(), () => {}, undefined);
+	await linterB.lintFile(fileB, false);
+	assert.deepEqual(stateB.executedCommands, [], 'no dataview fence, real write — still no refresh');
+});
+
+test('a silent lint pass never fires the refresh, dataview fence or not', async () => {
+	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}${DATAVIEW_BLOCK}`;
 	const { app, state, file } = makeApp({ content });
 	const linter = new Linter(app, baseSettings(), () => {}, undefined);
 
 	const ok = await linter.lintFile(file, true);
 
 	assert.equal(ok, true);
-	assert.deepEqual(state.executedCommands, [], 'silent passes (lintFolder/lintVault) never touch dataview, regardless of modified');
+	assert.deepEqual(state.executedCommands, [], 'silent passes (lintFolder/lintVault) never touch dataview');
 });
 
-test('the dataview rebuild does not fire when the dataview plugin is not enabled, even on a real write', async () => {
-	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}`;
+test('the refresh does not fire when the dataview plugin is not enabled, even on a dataview note that writes', async () => {
+	const content = `---\ntitle: note\ncreated: 2026-01-01\nword-count: 1\n---\n\n${BODY}${DATAVIEW_BLOCK}`;
 	const { app, state, file } = makeApp({ content });
 	app.plugins.enabledPlugins = new Set(); // dataview not installed/enabled
 	const linter = new Linter(app, baseSettings(), () => {}, undefined);
@@ -216,8 +247,8 @@ test('the dataview rebuild does not fire when the dataview plugin is not enabled
 	assert.deepEqual(state.executedCommands, []);
 });
 
-test('Note linted notice-worthy return value stays true regardless of modified (lintFile\'s success contract is unchanged)', async () => {
-	const unchanged = `---\ntitle: note\ncreated: 2026-01-01\nword-count: ${WORD_COUNT}\n---\n\n${BODY}`;
+test('Note linted notice-worthy return value stays true regardless of modified or dataview presence', async () => {
+	const unchanged = `---\ntitle: note\ncreated: 2026-01-01\nword-count: ${WORD_COUNT}\n---\n\n${BODY}${DATAVIEW_BLOCK}`;
 	const { app: appA, file: fileA } = makeApp({ content: unchanged });
 	const linterA = new Linter(appA, baseSettings(), () => {}, undefined);
 	assert.equal(await linterA.lintFile(fileA, false), true);

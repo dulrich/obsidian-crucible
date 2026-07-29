@@ -135,6 +135,35 @@ export function calculateWordCount(content: string): number {
 	}
 }
 
+// Matches a fenced ```dataview / ```dataviewjs block opener (up to 3 leading spaces of
+// indentation, per CommonMark). Used to decide whether a linted note is worth a Dataview
+// refresh at all — checked against the content this pass already read, no extra vault read.
+const DATAVIEW_FENCE_RE = /^ {0,3}```\s*dataview(js)?\b/m;
+
+// Non-destructive Dataview refresh primitive, shared with the `dataview-refresh` internal
+// command (src/internalCommands.ts). `dataview:dataview-rebuild-current-view` (the command
+// this file and user chains used to fire) resolves to `activeView.leaf.rebuildView()` in
+// Dataview v0.5.68 — a full leaf teardown + async reconstruction that races
+// `ChainManager.reconcileOpenEditor`'s `setViewData` and can leave the note visibly blank.
+// The safe primitive is the revision bump Dataview's own renderers gate on
+// (`this.lastReload != this.index.revision`): prefer calling `index.touch()` directly
+// (typed via the guarded-augmentation precedent in src/types.ts:65-95 — every property
+// beyond `plugins` itself is presence-checked), falling back to the
+// `dataview-force-refresh-views` command (which does the same touch +
+// `workspace.trigger('dataview:refresh-views')` internally) when the index handle isn't
+// reachable. A bare `workspace.trigger('dataview:refresh-views')` alone is a no-op without
+// the revision bump — never call that directly. Absent/disabled dataview is a silent no-op.
+export function refreshDataviewViews(app: App): void {
+	const plugins = app.plugins;
+	if (!plugins?.enabledPlugins.has('dataview')) return;
+	const index = plugins.plugins?.['dataview']?.index;
+	if (typeof index?.touch === 'function') {
+		index.touch();
+		return;
+	}
+	app.commands?.executeCommandById('dataview:dataview-force-refresh-views');
+}
+
 export class Linter {
 	app: App;
 	settings: CrucibleSettings;
@@ -227,6 +256,10 @@ export class Linter {
 		// updateFrontmatter's contract, which is a cross-cutting chokepoint owned outside this
 		// change — so the signal is derived locally, from the bytes, instead.
 		let modified = false;
+		// Populated inside the locked section below; read out here (rather than only
+		// used for the `modified` compare) so the post-lock dataview-fence check can
+		// reuse it instead of taking another vault.read().
+		let finalContent = '';
 		try {
 			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
 				const content = await this.app.vault.read(file);
@@ -273,7 +306,7 @@ export class Linter {
 					});
 				}
 
-				const finalContent = await this.app.vault.read(file);
+				finalContent = await this.app.vault.read(file);
 				modified = finalContent !== content;
 			}));
 		} catch (e) {
@@ -282,16 +315,19 @@ export class Linter {
 			return false;
 		}
 
+		logWarn('lint', 'lint pass', modified ? 'modified' : 'did not modify', file.path);
+
 		if (!silent) {
-			const plugins = this.app.plugins;
-			// Only yank the current dataview view when this pass actually wrote something —
-			// firing it unconditionally re-rendered dataview on every manual/chain lint even
-			// when nothing changed.
-			if (modified && plugins && plugins.enabledPlugins.has('dataview')) {
-				const commands = this.app.commands;
-				if (commands) {
-					commands.executeCommandById('dataview:dataview-rebuild-current-view');
-				}
+			// Fire unconditionally (not gated on `modified`) whenever the note contains a
+			// dataview/dataviewjs fence — checked against the content this pass already
+			// read for the `modified` compare above, no extra vault.read(). The refresh
+			// primitive is non-destructive (a revision bump, not a leaf rebuild — see
+			// refreshDataviewViews), so the flicker motivation for the old `modified` gate
+			// no longer applies, and this restores the "run Lint: all to refresh tables"
+			// pathway that gate had broken (lint's writes are idempotent, so re-linting an
+			// already-clean note used to never refresh).
+			if (this.app.plugins?.enabledPlugins.has('dataview') && DATAVIEW_FENCE_RE.test(finalContent)) {
+				refreshDataviewViews(this.app);
 			}
 			new Notice('Note linted');
 		}
