@@ -14,11 +14,15 @@
  * Wraps a render callback that tears down and rebuilds `region`'s contents so the
  * rebuild doesn't visibly jump:
  *  - the scroll position of `region`'s nearest actually-scrolling ancestor is
- *    captured before the render and restored on the next animation frame after it
- *    (rAF, same as the settings idiom, because the rebuilt content needs to have
- *    laid out before a scrollTop assignment sticks);
+ *    captured and restored via the shared coordinator below, because all 13
+ *    ingestion-dashboard sections share ONE scroller (the workspace leaf's
+ *    `.view-content`) — see the coordinator's own comment for why a per-call
+ *    capture/restore is wrong under concurrency;
  *  - if focus currently sits inside `region`, a best-effort equivalent element is
- *    re-focused after the rebuild.
+ *    re-focused after the rebuild. This stays per-region and per-call (not
+ *    coordinated) — unlike scroll position, focus is a property of `region`
+ *    itself, not of the shared scroller, so there is nothing to merge across
+ *    concurrent calls.
  *
  * `render` is expected to be the section's existing full-rebuild render function —
  * this does not diff or avoid the rebuild, only hide its visual side effects.
@@ -28,14 +32,89 @@ export async function refreshWithScrollPreserved(
 	render: () => void | Promise<void>,
 ): Promise<void> {
 	const scrollEl = findScrollAncestor(region);
-	const scrollTop = scrollEl?.scrollTop ?? 0;
+	const coordinator = scrollEl ? acquireScrollCoordinator(scrollEl) : null;
+	if (coordinator && scrollEl) {
+		// 0 -> 1: the first concurrent refresh in this burst captures, before ANY
+		// of the concurrent renders has started tearing anything down.
+		if (coordinator.count === 0) coordinator.scrollTop = scrollEl.scrollTop;
+		coordinator.count++;
+	}
 	const focusToken = captureFocus(region);
 
-	await render();
+	try {
+		await render();
+	} finally {
+		if (coordinator && scrollEl) {
+			coordinator.count--;
+			// Guard against underflow rather than assume every acquire is perfectly
+			// paired with a release (a render() that throws still reaches here via
+			// `finally`, but a defensive floor costs nothing and prevents a stuck
+			// negative count from silently disabling restore for the rest of the
+			// session).
+			if (coordinator.count <= 0) {
+				coordinator.count = 0;
+				restoreScrollTop(scrollEl, coordinator.scrollTop);
+			}
+		}
+	}
 
 	requestAnimationFrame(() => {
-		if (scrollEl) scrollEl.scrollTop = scrollTop;
 		restoreFocus(region, focusToken);
+	});
+}
+
+// --- Dashboard-level scroll coordinator ---
+//
+// All 13 ingestion-dashboard sections render into the same scrolling ancestor
+// (`.crucible-ingestion-dashboard` sits directly in the view's `.view-content`;
+// neither the section nor its body element establishes its own overflow — see
+// AGENTS.md). A per-call capture/restore (the original shape of this function) is
+// wrong once more than one section refreshes concurrently, which is the normal
+// case during a queue drain: section A's teardown can transiently shrink the
+// shared scroller's content while section B's capture reads `scrollTop`, so B
+// captures an already-clamped value (the capture-time clamp); and if A's rebuild
+// hasn't finished growing the content back by the time B's render() resolves and
+// assigns `scrollTop`, the shared scroller clamps the assignment right back down
+// (the restore-time clamp) even though B captured the correct value. Keying a
+// shared counter + captured value on the scroll element itself — rather than one
+// per `refreshWithScrollPreserved` call — fixes both: capture only happens on the
+// transition from 0 in-flight refreshes to 1 (before any of the concurrent
+// renders has started), and restore only happens on the transition back to 0
+// (after every concurrent render has settled).
+interface ScrollCoordinatorState {
+	count: number;
+	scrollTop: number;
+}
+
+const scrollCoordinators = new WeakMap<HTMLElement, ScrollCoordinatorState>();
+
+function acquireScrollCoordinator(scrollEl: HTMLElement): ScrollCoordinatorState {
+	let state = scrollCoordinators.get(scrollEl);
+	if (!state) {
+		state = { count: 0, scrollTop: 0 };
+		scrollCoordinators.set(scrollEl, state);
+	}
+	return state;
+}
+
+// Restores `scrollEl.scrollTop` after a DOUBLE rAF — the rebuilt content needs a
+// full layout pass before an assignment sticks (same reasoning as the original
+// single-rAF restore), and the second frame gives a sibling section's own
+// still-in-flight rebuild one more frame to finish growing the scroller back to
+// its full height before the assignment lands. After that, it reads back once: if
+// a still-settling sibling clamped the assignment anyway, one more rAF re-asserts
+// it. This is a single extra attempt, not a retry loop — a value still wrong after
+// a third frame reflects a real content change (the prior scroll position no
+// longer exists), not a transient clamp, and re-asserting forever would fight the
+// user's own subsequent scrolling.
+function restoreScrollTop(scrollEl: HTMLElement, target: number): void {
+	requestAnimationFrame(() => {
+		requestAnimationFrame(() => {
+			scrollEl.scrollTop = target;
+			requestAnimationFrame(() => {
+				if (scrollEl.scrollTop !== target) scrollEl.scrollTop = target;
+			});
+		});
 	});
 }
 

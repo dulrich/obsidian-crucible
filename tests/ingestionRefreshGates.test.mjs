@@ -107,11 +107,26 @@ class FakeElement {
 		this.textContent = text;
 		this.children = [];
 		this.parentElement = null;
-		this.scrollTop = 0;
+		this._scrollTop = 0;
 		this.scrollHeight = 0;
 		this.clientHeight = 0;
 		this.style = { overflowY: 'visible' };
 		this.ownerDocument = null;
+	}
+	// Mirrors real DOM behavior: a scroller can't scroll past its own content, so
+	// an out-of-range assignment silently clamps to [0, scrollHeight - clientHeight].
+	// This is exactly the mechanism the WP-4 scroll coordinator exists to work
+	// around — a sibling section transiently shrinking scrollHeight mid-rebuild
+	// clamps both a capture (reads an already-clamped value) and a restore (the
+	// assignment itself gets clamped back down) — so without this getter/setter
+	// the clamp bug class is untestable: a plain assignable field lets a test
+	// "restore" a scrollTop the real DOM would have refused.
+	get scrollTop() {
+		return this._scrollTop;
+	}
+	set scrollTop(value) {
+		const max = Math.max(0, this.scrollHeight - this.clientHeight);
+		this._scrollTop = Math.max(0, Math.min(value, max));
 	}
 	append(child) {
 		child.parentElement = this;
@@ -155,7 +170,12 @@ function withRaf(fn) {
 	const queue = [];
 	globalThis.requestAnimationFrame = (cb) => queue.push(cb);
 	const flush = () => { while (queue.length) queue.shift()(); };
-	return fn(flush).finally(() => { globalThis.requestAnimationFrame = prev; });
+	// Pops and runs exactly one queued callback (rather than draining
+	// everything), so a test can inject a mutation between two animation
+	// frames — needed below to exercise the double-rAF restore's readback
+	// re-assert, which only does anything if the world changes between frames.
+	const step = () => { if (queue.length) queue.shift()(); };
+	return fn(flush, step).finally(() => { globalThis.requestAnimationFrame = prev; });
 }
 
 test('refreshWithScrollPreserved restores the scrolling ancestor scrollTop a full teardown/rebuild reset', async () => {
@@ -243,5 +263,156 @@ test('refreshWithScrollPreserved is a harmless no-op when focus was outside the 
 
 		assert.equal(ran, true);
 		assert.equal(doc.activeElement, outsideButton, 'focus outside the rebuilt region is left untouched');
+	});
+});
+
+// --- Dashboard-level scroll coordinator (WP-4 #3) ---
+//
+// All 13 ingestion-dashboard sections share ONE scroller. A per-call capture/
+// restore (the pre-WP-4 shape) is wrong once more than one section refreshes
+// concurrently: a sibling's teardown can transiently collapse the shared
+// scroller, clamping BOTH a concurrent capture (reads the already-clamped value)
+// and a concurrent restore (the assignment itself gets clamped back down). These
+// tests drive two overlapping `refreshWithScrollPreserved` calls against regions
+// that share one scroller and assert the coordinator captures once (before
+// either render starts tearing down) and restores once (after both have
+// settled), to the pre-burst value — not the collapsed intermediate one.
+
+test('the scroll coordinator does not re-capture while a sibling refresh is still in flight', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+		scroller.scrollTop = 340; // where the user had scrolled to, before either refresh starts
+
+		const regionA = scroller.append(new FakeElement('div'));
+		const regionB = scroller.append(new FakeElement('div'));
+
+		let releaseA;
+		const aGate = new Promise(res => { releaseA = res; });
+
+		// A starts first and, like a real teardown/rebuild, collapses the shared
+		// scroller's content mid-flight before growing it back. A per-call capture
+		// reading `scrollTop` during this window would see 0, not 340.
+		const pA = refreshWithScrollPreserved(regionA, async () => {
+			scroller.scrollHeight = 50; // collapsed: max scrollTop is now 0
+			scroller.scrollTop = 999; // any assignment during this window clamps to 0
+			await aGate; // hold the collapse open until B has started and captured
+			scroller.scrollHeight = 2000; // rebuild finishes, back to full size
+		});
+
+		// B starts while A is still mid-collapse (count is already 1, so the
+		// coordinator must NOT re-capture — a re-capture here would record 0).
+		let bSawCollapsed = false;
+		const pB = refreshWithScrollPreserved(regionB, () => {
+			bSawCollapsed = scroller.scrollTop === 0;
+		});
+
+		assert.equal(bSawCollapsed, true, 'sanity: the scroller really is collapsed while B renders');
+
+		releaseA();
+		await Promise.all([pA, pB]);
+		flush();
+
+		assert.equal(
+			scroller.scrollTop,
+			340,
+			'restored to the value captured before EITHER render began, not the collapsed intermediate value B observed',
+		);
+	});
+});
+
+test('the scroll coordinator restores exactly once after all concurrent refreshes settle, not once per call', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+		scroller.scrollTop = 200;
+
+		const regionA = scroller.append(new FakeElement('div'));
+		const regionB = scroller.append(new FakeElement('div'));
+
+		const restores = [];
+		const originalDescriptor = Object.getOwnPropertyDescriptor(FakeElement.prototype, 'scrollTop');
+		Object.defineProperty(scroller, 'scrollTop', {
+			configurable: true,
+			get() { return originalDescriptor.get.call(this); },
+			set(v) { restores.push(v); originalDescriptor.set.call(this, v); },
+		});
+
+		await Promise.all([
+			refreshWithScrollPreserved(regionA, () => { regionA.children.length = 0; }),
+			refreshWithScrollPreserved(regionB, () => { regionB.children.length = 0; }),
+		]);
+		flush();
+
+		// The two renders' own churn does not itself assign scrollTop here (unlike
+		// the other tests), so every recorded assignment after the initial capture
+		// came from the restore path. Coordinated restore-once means exactly one
+		// assignment reaches the target value, not one per participating call.
+		const restoresToTarget = restores.filter(v => v === 200);
+		assert.equal(restoresToTarget.length, 1, 'scrollTop is assigned back to the captured value exactly once, not per concurrent call');
+	});
+});
+
+test('a single refresh through the coordinator behaves exactly as the original per-call capture/restore', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+		scroller.scrollTop = 450;
+
+		const region = scroller.append(new FakeElement('div'));
+
+		await refreshWithScrollPreserved(region, () => {
+			region.children.length = 0;
+			scroller.scrollTop = 0;
+		});
+		assert.equal(scroller.scrollTop, 0, 'not restored yet — still behind the rAF chain');
+		flush();
+		assert.equal(scroller.scrollTop, 450, 'a lone refresh still restores to its captured value');
+	});
+});
+
+test('the double-rAF restore re-asserts once if a still-settling sibling clamps the first attempt', async () => {
+	await withRaf(async (flush, step) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+		scroller.scrollTop = 340;
+
+		const region = scroller.append(new FakeElement('div'));
+
+		await refreshWithScrollPreserved(region, () => {
+			region.children.length = 0;
+			scroller.scrollTop = 0;
+		});
+
+		// Scheduling order after the awaited call above: [scroll-restore outer
+		// frame, focus-restore frame] (refreshWithScrollPreserved queues the
+		// scroll chain in its `finally`, then the focus rAF right after).
+		step(); // outer scroll frame: schedules the inner (actual-assignment) frame
+		// A sibling section is still mid-rebuild when the assignment frame runs.
+		scroller.scrollHeight = 50;
+		step(); // focus-restore frame (no-op: nothing was focused)
+		step(); // inner frame: assigns scrollTop = 340, clamped to 0 by the collapse
+		assert.equal(scroller.scrollTop, 0, 'the still-settling sibling clamped the first restore attempt');
+
+		// The sibling finishes growing the scroller back before the readback frame.
+		scroller.scrollHeight = 2000;
+		step(); // readback frame: sees the mismatch and re-asserts
+		assert.equal(scroller.scrollTop, 340, 'the readback re-assert recovers once the scroller is back to full size');
 	});
 });
