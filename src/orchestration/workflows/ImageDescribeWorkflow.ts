@@ -4,6 +4,7 @@ import { OrchestrationJob, WorkflowResult } from '../types';
 import { SearchServiceUnavailableError } from '../../search/types';
 import { logWarn } from '../../log';
 import { localizedImageInfo, type LocalizedImageInfo } from '../utils/imageMetadata';
+import { SERVICE_IMAGE_DESCRIPTION_PROVIDER } from '../serviceHealth';
 import {
 	IMAGE_DESCRIBE_BATCH_IMAGES,
 	IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS,
@@ -15,7 +16,38 @@ import {
 	referencingNotePaths,
 	resolveImageDescribeModel,
 	resolveNoteImages,
+	type DescribeMd5ImagesResult,
 } from '../utils/imageDescribe';
+
+/** idh-WP-2: base backoff for the image-description provider breaker (`serviceUnhealthy` below)
+ * — same order of magnitude as `SearchIndexWorkflow`'s `SEARCH_RETRY_AFTER_MS`, kept as its own
+ * constant rather than a shared import since the two dependencies (search companion vs. the
+ * vision model's inference endpoint) recover independently. */
+const IMAGE_DESCRIBE_RETRY_AFTER_MS = 30_000;
+
+/**
+ * idh-WP-2 infra breaker: `describeMd5Images` sets `abortReason`/`abortKind` when a
+ * connection-class error or `IMAGE_DESCRIBE_CONSECUTIVE_TIMEOUT_LIMIT` consecutive timeouts
+ * stopped the loop early. Reported as `status: 'deferred'` + `serviceUnhealthy`, not a plain
+ * `'failed'` — a provider outage is a dependency-level problem, and `serviceHealth.ts`'s own
+ * module comment documents the prior incident this exact mis-classification caused elsewhere
+ * (one search-companion outage → 2,022 independent failure files, because nothing above the job
+ * level knew the outage existed). Routing through the registry stops the drain from claiming
+ * further `image_describe_note`/`image_describe_batch` jobs while it's open, and re-queues THIS
+ * job with its original params — already-described/failed images are skipped via `has()` on
+ * retry, so resuming naturally only attempts the images that were never reached.
+ */
+function breakerDeferredResult(result: DescribeMd5ImagesResult, notes: string, outputPaths?: string[]): WorkflowResult {
+	const reason = result.abortReason ?? 'image description provider unhealthy';
+	return {
+		status: 'deferred',
+		...(outputPaths && outputPaths.length > 0 ? { outputPaths } : {}),
+		error: reason,
+		notes,
+		retryAfterMs: IMAGE_DESCRIBE_RETRY_AFTER_MS,
+		serviceUnhealthy: { service: SERVICE_IMAGE_DESCRIPTION_PROVIDER, kind: result.abortKind ?? 'server-error', reason },
+	};
+}
 
 /**
  * Replaces `ImageMetadataExtractWorkflow` (`docs/multimodal-image-search.md` Decision 3): one
@@ -51,13 +83,19 @@ export class ImageDescribeNoteWorkflow implements Workflow {
 		const reindexNote = await reindexNotes(plugin, [file]);
 		plugin.ingestionEvents?.emit('image-described', { md5Count: result.describedCount, notePaths: reindexNote.indexed });
 
+		const baseNotes = `Described ${result.describedCount} image(s) for ${targetPath} `
+			+ `(${result.skippedCount} already described, ${result.missingCount} missing files, `
+			+ `${result.failedCount} failed).`
+			+ (reindexNote.note ? ` ${reindexNote.note}` : '');
+
+		if (result.abortReason) {
+			return breakerDeferredResult(result, `${baseNotes} ${result.abortReason}`, [file.path]);
+		}
+
 		return {
 			status: 'done',
 			outputPaths: [file.path],
-			notes: `Described ${result.describedCount} image(s) for ${targetPath} `
-				+ `(${result.skippedCount} already described, ${result.missingCount} missing files, `
-				+ `${result.failedCount} failed).`
-				+ (reindexNote.note ? ` ${reindexNote.note}` : ''),
+			notes: baseNotes,
 		};
 	}
 }
@@ -95,6 +133,13 @@ export class ImageDescribeBackfillWorkflow implements Workflow {
 		const prunedMd5s = await plugin.imageDescriptions.pruneDegenerate(IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS);
 		ctx.throwIfAborted();
 
+		// idh-WP-2 self-heal: transient-class failed records (infra casualties — timeouts, connection
+		// errors) are cleared on every backfill start so they re-enter pending, the same shape as
+		// `pruneDegenerate` above applied to a different bug class. Permanent-class failed records
+		// (genuinely poison images) are left alone — skip-forever stays correct for those.
+		const prunedTransientMd5s = await plugin.imageDescriptions.pruneFailed('transient');
+		ctx.throwIfAborted();
+
 		const referenced = computeReferencedImagePaths(plugin);
 		const pending = referenced.filter(image => !plugin.imageDescriptions.has(image.md5));
 		const batches = chunk(pending.map(image => image.path), IMAGE_DESCRIBE_BATCH_IMAGES);
@@ -115,6 +160,7 @@ export class ImageDescribeBackfillWorkflow implements Workflow {
 			status: 'done',
 			notes: `Legacy sidecars imported: ${importResult.imported}. `
 				+ `Pruned ${prunedMd5s.length} degenerate description(s) for re-describe. `
+				+ `Pruned ${prunedTransientMd5s.length} transient-failed description(s) for re-describe. `
 				+ `Queued image description backfill: ${pending.length} referenced image(s) `
 				+ `(${referenced.length - pending.length} already described) in ${batches.length} batch(es).`,
 		};
@@ -158,12 +204,18 @@ export class ImageDescribeBatchWorkflow implements Workflow {
 		const batchIndex = numberParam(job, 'batchIndex');
 		const batchCount = numberParam(job, 'batchCount');
 		const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
+		const baseNotes = `Described ${label}: ${result.describedCount} new, ${result.skippedCount} already described, `
+			+ `${result.missingCount} missing, ${result.failedCount} failed; reindexed ${reindexed.indexed.length} note(s).`
+			+ (reindexed.note ? ` ${reindexed.note}` : '');
+
+		if (result.abortReason) {
+			return breakerDeferredResult(result, `${baseNotes} ${result.abortReason}`, paths);
+		}
+
 		return {
 			status: 'done',
 			outputPaths: paths,
-			notes: `Described ${label}: ${result.describedCount} new, ${result.skippedCount} already described, `
-				+ `${result.missingCount} missing, ${result.failedCount} failed; reindexed ${reindexed.indexed.length} note(s).`
-				+ (reindexed.note ? ` ${reindexed.note}` : ''),
+			notes: baseNotes,
 		};
 	}
 }

@@ -16,8 +16,9 @@ import { TFile } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { providerModality, type CrucibleSettings, type Provider } from '../../types';
 import { needsVisionTranscode, transcodeToPng, extractSvgText } from '../../search/imageTranscode';
-import type { ImageDescriptionStore } from '../../search/imageDescriptionStore';
+import { classifyFailure, type ImageDescriptionStore } from '../../search/imageDescriptionStore';
 import { logWarn } from '../../log';
+import type { ServiceFailureKind } from '../serviceHealth';
 import { imageMimeType, localizedImageInfo, extractMetadataSections, type LocalizedImageInfo } from './imageMetadata';
 
 /** Files per `image_describe_batch` job — the `SEARCH_REBUILD_BATCH_FILES` precedent applied to
@@ -40,6 +41,55 @@ export const IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS = 20_000;
 /** Truncation length for a stored `failure` message — enough to diagnose, not enough for a
  * pathological error (e.g. one embedding a chunk of the runaway output itself) to bloat the store. */
 const FAILURE_MESSAGE_MAX_CHARS = 500;
+
+// idh-WP-2 hardening (`plans/queue-image-dataview-dashboard-fixes.md` WP-2): the live incident
+// this section fixes — a dead local inference router failed every remaining image in a batch
+// (dozens per second), each earning a durable `kind: 'failed'` skip-forever record, and 954 more
+// were `withTimeout` timeouts cascading from one abandoned generation that kept the server busy
+// (requestUrl cannot cancel it — see `withTimeout`'s doc). 1030 of 1039 failed records were infra
+// casualties, not poison images. `IMAGE_DESCRIBE_BATCH_IMAGES` (up to 100) makes this expensive:
+// left unchecked, one outage writes up to 100 bogus skip-forever records per batch, ~48 times over
+// a full backfill.
+/** Electron `requestUrl` error text for a dead/unreachable local inference router — "nothing is
+ * listening", the one connection-class shape observed live (`ERR_CONNECTION_REFUSED`/`_RESET`,
+ * `ERR_NETWORK_CHANGED`). On a match, `describeOneImage` writes **no record at all** (unlike a
+ * timeout, a connection refusal carries zero information about *this* image) and the whole batch
+ * aborts via `ImageDescribeInfraAbort` — the router being down says nothing about the untried
+ * images, and hammering it once per remaining image only wastes wall-clock before the same abort. */
+const CONNECTION_CLASS_ERROR_RE = /net::ERR_(?:CONNECTION_REFUSED|CONNECTION_RESET|NETWORK_CHANGED)/;
+
+function isConnectionClassError(message: string): boolean {
+	return CONNECTION_CLASS_ERROR_RE.test(message);
+}
+
+/** Matches any `withTimeout` failure label (`... timed out after <n>ms`) — narrative pass,
+ * extraction pass, or transcode. Used only for the consecutive-timeout breaker below;
+ * `classifyFailure` (broader — also matches `net::ERR_*`) is the transient/permanent taxonomy. */
+const TIMEOUT_FAILURE_RE = /timed out after \d+ms/;
+
+function isTimeoutFailureMessage(message: string): boolean {
+	return TIMEOUT_FAILURE_RE.test(message);
+}
+
+/** 3 consecutive provider-call timeouts abort the batch: a `withTimeout` timeout means the
+ * request was abandoned, not cancelled (`requestUrl` takes no signal), so an abandoned generation
+ * keeps the server busy and every subsequent request queues into its own timeout — three in a row
+ * is "the server is wedged," not "three unlucky images." A success (or a non-timeout failure —
+ * either proves the server answered) resets the counter; see `describeMd5Images`. */
+export const IMAGE_DESCRIBE_CONSECUTIVE_TIMEOUT_LIMIT = 3;
+
+/**
+ * Thrown by `describeOneImage` on a connection-class error to unwind `describeMd5Images`'s loop
+ * without writing a failed record for the image that triggered it (or attempting any of the
+ * images after it). Not a normal `ImageOutcome` — the whole point is that this image's outcome is
+ * unknown, not `'failed'`.
+ */
+export class ImageDescribeInfraAbort extends Error {
+	constructor(message: string, public readonly kind: ServiceFailureKind) {
+		super(message);
+		this.name = 'ImageDescribeInfraAbort';
+	}
+}
 
 export class ImageDescribeConfigError extends Error {}
 
@@ -127,6 +177,17 @@ export interface DescribeMd5ImagesResult {
 	/** A durable `kind: 'failed'` record was written this run (provider throw, timeout, or
 	 * transcode failure) — the loop continued to the next image rather than aborting the batch. */
 	failedCount: number;
+	/**
+	 * idh-WP-2 infra breaker: set when the loop stopped early — a connection-class error (no
+	 * record written for the triggering image) or `IMAGE_DESCRIBE_CONSECUTIVE_TIMEOUT_LIMIT`
+	 * consecutive timeouts (records for those ARE written; they're transient-class and will
+	 * re-describe). Every image after the abort point in `images` was never attempted and stays
+	 * pending for a later run. Callers should surface this as a deferred/unhealthy job outcome,
+	 * not a plain failure — see `ImageDescribeNoteWorkflow`/`ImageDescribeBatchWorkflow`.
+	 */
+	abortReason?: string;
+	/** Only set alongside `abortReason` — feeds a workflow's `serviceUnhealthy.kind`. */
+	abortKind?: ServiceFailureKind;
 }
 
 /**
@@ -150,26 +211,72 @@ export async function describeMd5Images(
 	let skippedCount = 0;
 	let missingCount = 0;
 	let failedCount = 0;
+	// idh-WP-2 infra breaker: consecutive `withTimeout` timeouts. Only a timeout increments it (a
+	// permanent failure, a skip, or a missing file proves nothing about server health either way,
+	// so they leave it untouched); a described image resets it to 0 (proof the server answered).
+	let consecutiveTimeouts = 0;
+	let abortReason: string | undefined;
+	let abortKind: ServiceFailureKind | undefined;
 
 	for (const image of images) {
 		opts.signal?.throwIfAborted();
-		// Sequential by design: one queue worker runs this loop, one model call in flight at a time.
-		const outcome = await plugin.noteLocks.withResourceLock(
-			'image',
-			image.md5,
-			'image-describe',
-			() => describeOneImage(plugin, provider, modelId, image, opts),
-		);
-		if (outcome === 'described') describedCount++;
-		else if (outcome === 'skipped') skippedCount++;
-		else if (outcome === 'failed') failedCount++;
-		else missingCount++;
+		let outcome: ImageOutcome;
+		try {
+			// Sequential by design: one queue worker runs this loop, one model call in flight at a time.
+			outcome = await plugin.noteLocks.withResourceLock(
+				'image',
+				image.md5,
+				'image-describe',
+				() => describeOneImage(plugin, provider, modelId, image, opts),
+			);
+		} catch (e) {
+			if (e instanceof ImageDescribeInfraAbort) {
+				logWarn('image describe: infra breaker aborted batch (connection-class error)', image.path, e.message);
+				abortReason = e.message;
+				abortKind = e.kind;
+				break;
+			}
+			throw e;
+		}
+		if (outcome.outcome === 'described') {
+			describedCount++;
+			consecutiveTimeouts = 0;
+		} else if (outcome.outcome === 'skipped') {
+			skippedCount++;
+		} else if (outcome.outcome === 'missing') {
+			missingCount++;
+		} else {
+			failedCount++;
+			if (outcome.isTimeout) {
+				consecutiveTimeouts++;
+				if (consecutiveTimeouts >= IMAGE_DESCRIBE_CONSECUTIVE_TIMEOUT_LIMIT) {
+					abortReason = `${consecutiveTimeouts} consecutive image description timeouts — the inference server is likely `
+						+ 'wedged behind an abandoned generation. Aborting the remaining images in this batch; they stay pending '
+						+ 'for a later run.';
+					abortKind = 'timeout';
+					logWarn('image describe: infra breaker aborted batch (consecutive timeouts)', consecutiveTimeouts);
+					break;
+				}
+			} else {
+				consecutiveTimeouts = 0;
+			}
+		}
 	}
 
-	return { describedCount, skippedCount, missingCount, failedCount };
+	return {
+		describedCount, skippedCount, missingCount, failedCount,
+		...(abortReason !== undefined ? { abortReason } : {}),
+		...(abortKind !== undefined ? { abortKind } : {}),
+	};
 }
 
-type ImageOutcome = 'described' | 'skipped' | 'missing' | 'failed';
+type ImageOutcomeKind = 'described' | 'skipped' | 'missing' | 'failed';
+interface ImageOutcome {
+	outcome: ImageOutcomeKind;
+	/** `outcome: 'failed'` only — whether the failure was a `withTimeout` timeout, for the
+	 * consecutive-timeout breaker above. */
+	isTimeout?: boolean;
+}
 
 async function describeOneImage(
 	plugin: CruciblePlugin,
@@ -180,12 +287,12 @@ async function describeOneImage(
 ): Promise<ImageOutcome> {
 	if (plugin.imageDescriptions.has(image.md5)) {
 		opts.onTiming?.({ md5: image.md5, path: image.path, skipped: true, totalMs: 0 });
-		return 'skipped';
+		return { outcome: 'skipped' };
 	}
 	const file = plugin.app.vault.getAbstractFileByPath(image.path);
 	if (!(file instanceof TFile)) {
 		logWarn('image describe: referenced file is missing, skipping', image.path);
-		return 'missing';
+		return { outcome: 'missing' };
 	}
 
 	const started = Date.now();
@@ -209,7 +316,7 @@ async function describeOneImage(
 			const totalMs = Date.now() - started;
 			logWarn('image describe: svg text extracted', image.path, `${totalMs}ms`);
 			opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, totalMs });
-			return 'described';
+			return { outcome: 'described' };
 		}
 
 		const bytes = await plugin.app.vault.readBinary(file);
@@ -255,14 +362,26 @@ async function describeOneImage(
 			`transcode=${transcodeMs ?? 0}ms narrative=${narrativeMs}ms extraction=${extractionMs}ms total=${totalMs}ms`,
 		);
 		opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, transcodeMs, narrativeMs, extractionMs, totalMs });
-		return 'described';
+		return { outcome: 'described' };
 	} catch (e) {
 		const failure = truncateFailureMessage(e);
-		logWarn('image describe: failed, recording durable failure and continuing', image.path, failure);
-		await plugin.imageDescriptions.put({ md5: image.md5, narrative: '', extraction: '', kind: 'failed', failure });
+		// idh-WP-2 infra breaker: a connection-class error means nothing is listening — it carries
+		// zero information about THIS image, so (unlike every other failure) it does not earn a
+		// skip-forever record. Rethrow to unwind describeMd5Images's loop without writing anything
+		// or attempting the remaining images (the router being down won't clear between them).
+		if (isConnectionClassError(failure)) {
+			logWarn('image describe: connection-class failure, aborting batch without recording a failure', image.path, failure);
+			throw new ImageDescribeInfraAbort(
+				`Image description aborted: ${failure}. Remaining images in this batch were not attempted and stay pending.`,
+				'refused',
+			);
+		}
+		const failureClass = classifyFailure(failure);
+		logWarn('image describe: failed, recording durable failure and continuing', image.path, failure, failureClass);
+		await plugin.imageDescriptions.put({ md5: image.md5, narrative: '', extraction: '', kind: 'failed', failure, failureClass });
 		const totalMs = Date.now() - started;
 		opts.onTiming?.({ md5: image.md5, path: image.path, skipped: false, totalMs });
-		return 'failed';
+		return { outcome: 'failed', isTimeout: isTimeoutFailureMessage(failure) };
 	}
 }
 

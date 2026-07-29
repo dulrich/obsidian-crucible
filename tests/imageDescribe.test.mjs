@@ -362,6 +362,127 @@ test('describeMd5Images: a long failure message is truncated in the stored recor
 	assert.ok(record.failure.length <= 501, 'truncated to ~500 chars plus an ellipsis marker');
 });
 
+// ── idh-WP-2: failureClass at write time ────────────────────────────────────
+
+test('describeMd5Images: a permanent (non-timeout, non-connection) provider failure is recorded with failureClass \'permanent\'', async () => {
+	const bytes = new Uint8Array([7]).buffer;
+	const files = new Map([['a/badresp_MD5.png', { bytes }]]);
+	const providerManager = createFailingProviderManager(() => true, 'LM Studio image description API returned no choices');
+	const plugin = createFakePlugin({ files, providerManager });
+	const image = { path: 'a/badresp_MD5.png', md5: 'badresp', ext: 'png' };
+
+	await describeMd5Images(plugin, provider, 'model-1', [image]);
+
+	const record = plugin.imageDescriptions.map.get('badresp');
+	assert.equal(record.kind, 'failed');
+	assert.equal(record.failureClass, 'permanent');
+});
+
+test('describeMd5Images: a withTimeout-labeled provider failure is recorded with failureClass \'transient\'', async () => {
+	const bytes = new Uint8Array([8]).buffer;
+	const files = new Map([['a/slow_MD5.png', { bytes }]]);
+	const providerManager = createFailingProviderManager(() => true, 'image description (extraction pass) timed out after 120000ms');
+	const plugin = createFakePlugin({ files, providerManager });
+	const image = { path: 'a/slow_MD5.png', md5: 'slow', ext: 'png' };
+
+	await describeMd5Images(plugin, provider, 'model-1', [image]);
+
+	const record = plugin.imageDescriptions.map.get('slow');
+	assert.equal(record.kind, 'failed');
+	assert.equal(record.failureClass, 'transient');
+});
+
+// ── idh-WP-2: infra breaker ──────────────────────────────────────────────────
+
+test('describeMd5Images: a connection-class provider failure aborts the batch, writes NO record for the triggering image, and never attempts the remaining images', async () => {
+	const refusedBytes = new Uint8Array([9, 9]).buffer;
+	const neverBytes = new Uint8Array([1, 2, 3]).buffer;
+	const files = new Map([
+		['a/refused_MD5.png', { bytes: refusedBytes }],
+		['a/never_MD5.png', { bytes: neverBytes }],
+	]);
+	const providerManager = createFailingProviderManager((pass, bytes) => bytes.byteLength === 2, 'net::ERR_CONNECTION_REFUSED');
+	const plugin = createFakePlugin({ files, providerManager });
+	const images = [
+		{ path: 'a/refused_MD5.png', md5: 'refused', ext: 'png' },
+		{ path: 'a/never_MD5.png', md5: 'never', ext: 'png' },
+	];
+
+	const result = await describeMd5Images(plugin, provider, 'model-1', images);
+
+	assert.equal(result.describedCount, 0);
+	assert.equal(result.skippedCount, 0);
+	assert.equal(result.missingCount, 0);
+	assert.equal(result.failedCount, 0, 'the triggering image is NOT counted as failed — it never earns a skip-forever record');
+	assert.equal(result.abortKind, 'refused');
+	assert.match(result.abortReason, /net::ERR_CONNECTION_REFUSED/);
+	assert.equal(plugin.imageDescriptions.has('refused'), false, 'a connection refusal carries zero information about THIS image');
+	assert.equal(plugin.imageDescriptions.has('never'), false, 'the second image was never attempted once the batch aborted');
+	assert.equal(providerManager.calls.length, 1, 'only the narrative pass of the first image reached the provider before the abort');
+});
+
+test('describeMd5Images: 3 consecutive provider timeouts abort the batch — their failed records ARE written, remaining images stay unattempted', async () => {
+	const files = new Map([
+		['a/t1_MD5.png', { bytes: new Uint8Array([1]).buffer }],
+		['a/t2_MD5.png', { bytes: new Uint8Array([1, 1]).buffer }],
+		['a/t3_MD5.png', { bytes: new Uint8Array([1, 1, 1]).buffer }],
+		['a/never_MD5.png', { bytes: new Uint8Array([1, 1, 1, 1]).buffer }],
+	]);
+	const providerManager = createFailingProviderManager(() => true, 'image description (narrative pass) timed out after 120000ms');
+	const plugin = createFakePlugin({ files, providerManager });
+	const images = [
+		{ path: 'a/t1_MD5.png', md5: 't1', ext: 'png' },
+		{ path: 'a/t2_MD5.png', md5: 't2', ext: 'png' },
+		{ path: 'a/t3_MD5.png', md5: 't3', ext: 'png' },
+		{ path: 'a/never_MD5.png', md5: 'never', ext: 'png' },
+	];
+
+	const result = await describeMd5Images(plugin, provider, 'model-1', images);
+
+	assert.equal(result.failedCount, 3);
+	assert.equal(result.abortKind, 'timeout');
+	assert.match(result.abortReason, /3 consecutive image description timeouts/);
+	for (const md5 of ['t1', 't2', 't3']) {
+		assert.equal(plugin.imageDescriptions.has(md5), true, 'timeout failures ARE recorded — they are transient-class and will re-describe');
+		const record = plugin.imageDescriptions.map.get(md5);
+		assert.equal(record.kind, 'failed');
+		assert.equal(record.failureClass, 'transient');
+	}
+	assert.equal(plugin.imageDescriptions.has('never'), false, 'the 4th image was never attempted once the breaker tripped');
+});
+
+test('describeMd5Images: a success between timeouts resets the consecutive-timeout counter — no abort even with 4 timeouts total in the batch', async () => {
+	// t1, t2 timeout; ok succeeds (resets the counter); t3, t4 timeout again — never 3 IN A ROW.
+	const files = new Map([
+		['a/t1_MD5.png', { bytes: new Uint8Array([1]).buffer }],
+		['a/t2_MD5.png', { bytes: new Uint8Array([1, 1]).buffer }],
+		['a/ok_MD5.png', { bytes: new Uint8Array([1, 1, 1]).buffer }],
+		['a/t3_MD5.png', { bytes: new Uint8Array([1, 1, 1, 1]).buffer }],
+		['a/t4_MD5.png', { bytes: new Uint8Array([1, 1, 1, 1, 1]).buffer }],
+	]);
+	const timeoutByteLengths = new Set([1, 2, 4, 5]);
+	const providerManager = createFailingProviderManager(
+		(pass, bytes) => timeoutByteLengths.has(bytes.byteLength),
+		'image description (narrative pass) timed out after 120000ms',
+	);
+	const plugin = createFakePlugin({ files, providerManager });
+	const images = [
+		{ path: 'a/t1_MD5.png', md5: 't1', ext: 'png' },
+		{ path: 'a/t2_MD5.png', md5: 't2', ext: 'png' },
+		{ path: 'a/ok_MD5.png', md5: 'ok', ext: 'png' },
+		{ path: 'a/t3_MD5.png', md5: 't3', ext: 'png' },
+		{ path: 'a/t4_MD5.png', md5: 't4', ext: 'png' },
+	];
+
+	const result = await describeMd5Images(plugin, provider, 'model-1', images);
+
+	assert.equal(result.abortReason, undefined, 'never 3 consecutive — the "ok" success in the middle reset the counter');
+	assert.equal(result.abortKind, undefined);
+	assert.equal(result.failedCount, 4);
+	assert.equal(result.describedCount, 1);
+	assert.equal(plugin.imageDescriptions.has('t4'), true, 'the batch ran to completion — every image was attempted');
+});
+
 // ── shouldEnqueueImageDescribe ───────────────────────────────────────────────
 
 function baseSettings(overrides = {}) {

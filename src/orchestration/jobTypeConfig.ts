@@ -1,6 +1,7 @@
 import type CruciblePlugin from '../main';
 import type { MemoryJobSeed } from './MemoryJobQueue';
 import {
+	SERVICE_IMAGE_DESCRIPTION_PROVIDER,
 	SERVICE_SEARCH_COMPANION,
 	SERVICE_SEARCH_EMBEDDER,
 	SERVICE_YOUTUBE_API,
@@ -150,8 +151,14 @@ export function imageDescribeNoteDedupeKey(p: Record<string, unknown>): string {
 	return targetPath ? `note:${targetPath}` : '';
 }
 
+// idh-WP-2: `services` lets the drain's `servicesHealthyFor` gate stop claiming further
+// image_describe_note/image_describe_batch jobs while the infra breaker in `imageDescribe.ts`
+// has reported the provider unhealthy (`ImageDescribeNoteWorkflow`/`ImageDescribeBatchWorkflow`
+// return `status: 'deferred'` + `serviceUnhealthy` on a connection-class error or 3 consecutive
+// timeouts). `imageDescribeBackfillJobConfig` deliberately does NOT declare it — the backfill job
+// only enqueues batches and prunes the store; it never calls the provider itself.
 export function imageDescribeNoteJobConfig(): JobTypeConfig {
-	return fileJobConfig(imageDescribeNoteDedupeKey);
+	return { ...fileJobConfig(imageDescribeNoteDedupeKey), services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER] };
 }
 
 // One backfill fan-out at a time — see searchEmbedMissingJobConfig's identical reasoning: this
@@ -173,7 +180,7 @@ export function imageDescribeBatchDedupeKey(p: Record<string, unknown>): string 
 }
 
 export function imageDescribeBatchJobConfig(): JobTypeConfig {
-	return fileJobConfig(imageDescribeBatchDedupeKey);
+	return { ...fileJobConfig(imageDescribeBatchDedupeKey), services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER] };
 }
 
 export function searchFileJobConfig(): JobTypeConfig {

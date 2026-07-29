@@ -12,6 +12,7 @@ import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
 import { ConfirmModal } from './confirmModal';
+import { RetryFailedImageDescriptionsModal } from './retryImageDescriptionsModal';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -397,11 +398,33 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 				message: 'This queues a vision-model description pass (a narrative pass and a structured-extraction pass) over '
 					+ 'every uniquely-referenced localized image not already described — roughly 4,700 images at this vault\'s '
 					+ 'current size, around 12.6 hours of local model time. It runs in the background in ~100-image batches and '
-					+ 'is safely interruptible and resumable: already-described images are skipped on any re-run, and images '
-					+ 'that previously failed (timed out or errored) are skipped too, not retried automatically.',
+					+ 'is safely interruptible and resumable: already-described images are skipped on any re-run. Images that '
+					+ 'previously failed with a genuine (permanent) error are skipped too, not retried automatically — infra '
+					+ 'casualties (timeouts, connection errors) are pruned and re-attempted automatically at the start of every '
+					+ 'backfill run, or on demand via "Search: retry failed image descriptions".',
 				confirmText: 'Queue backfill',
 			}).openAndAwait();
 			if (!confirmed) return;
+			await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
+		},
+	});
+
+	// idh-WP-2: clears the chosen failed image-description records from the store (transient-only
+	// or all, per the modal choice) and re-queues the backfill so they re-enter pending and
+	// re-describe. Manual complement to the automatic transient-failed prune at the start of every
+	// backfill run (`ImageDescribeBackfillWorkflow`) — this command exists for "all" (permanent
+	// failures included) and for forcing a retry sooner than the next backfill.
+	plugin.registerCrucibleCommand({
+		id: 'search-retry-failed-image-descriptions',
+		name: 'Search: retry failed image descriptions',
+		group: 'Orchestrations',
+		mutating: false,
+		run: async () => {
+			const choice = await new RetryFailedImageDescriptionsModal(plugin.app).openAndAwait();
+			if (!choice) return;
+			const clearedMd5s = await plugin.imageDescriptions.pruneFailed(choice);
+			new Notice(`Cleared ${clearedMd5s.length} failed image description${clearedMd5s.length === 1 ? '' : 's'} `
+				+ `(${choice}); queuing re-describe backfill.`);
 			await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
 		},
 	});
