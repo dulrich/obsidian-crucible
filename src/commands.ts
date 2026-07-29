@@ -159,6 +159,14 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 	});
 
 	plugin.registerCrucibleCommand({
+		id: 'dataview-refresh',
+		name: 'Lint: refresh dataview views',
+		group: 'Lint',
+		mutating: false,
+		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:dataview-refresh`, {}),
+	});
+
+	plugin.registerCrucibleCommand({
 		id: 'mark-as-forwarded',
 		name: 'Mark as forwarded',
 		group: 'Other',
