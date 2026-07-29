@@ -99,6 +99,7 @@ function makeStore(initial = {}) {
 		errors,
 		ensureFolders: async () => {},
 		listFolder: async (status) => folders[status] ?? [],
+		countFolder: (status) => (folders[status] ?? []).length,
 		appendNotes: async (file, lines) => { notes.push({ file, lines }); },
 		setError: async (file, message) => { errors.push({ file, message }); },
 		setOutputPaths: async () => {},

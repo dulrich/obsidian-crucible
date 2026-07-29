@@ -5,6 +5,7 @@ import type { CancelJobOutcome, StopJobOutcome } from './cancellation';
 import type { RunOutcome } from './JobBackend';
 import { Semaphore } from './utils/semaphore';
 import { computeShouldDrain, readTypeAutorun, readTypeMinIntervalOverride, resolveMaxParallel } from './autorunGate';
+import { logError } from '../log';
 
 const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
 
@@ -279,6 +280,17 @@ export class OrchestrationAutoRunner {
 			let outcome: RunOutcome;
 			try {
 				outcome = await this.orchestrator.runNextOfType(type);
+			} catch (err) {
+				// A claim throw used to propagate straight out of typeWorker, rejecting
+				// drainType's Promise.all — which skips the finally block's redrain replay
+				// (a kick that landed mid-drain would then be stranded until the next event)
+				// and escapes `void this.drainType(...)` at the call site as an unhandled
+				// rejection. Treat it like 'empty': no verdict reached the registry for this
+				// claim, so this worker's iteration ends here rather than looping on a
+				// possibly-persistent fault, but the drain itself (and its finally-block
+				// redrain replay) completes normally.
+				logError(`OrchestrationAutoRunner.typeWorker: runNextOfType threw for type ${type}`, err);
+				outcome = 'empty';
 			} finally {
 				this.globalSem.release();
 			}
