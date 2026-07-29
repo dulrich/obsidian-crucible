@@ -42,6 +42,15 @@ export const SERVICE_SEARCH_COMPANION = 'search-companion';
 export const SERVICE_SEARCH_EMBEDDER = 'search-embedder';
 export const SERVICE_YOUTUBE_API = 'youtube-api';
 export const SERVICE_YOUTUBE_RSS = 'youtube-rss';
+/**
+ * idh-WP-2: the configured image-description vision model's inference endpoint (local router
+ * or remote openai-compatible provider). Reported unhealthy by the image-describe infra breaker
+ * (`orchestration/utils/imageDescribe.ts`) on a connection-class error or 3 consecutive
+ * provider-call timeouts — the same "one dependency outage, many independent job failures" shape
+ * this registry exists for (see the module comment's 2,022-failure-file precedent), applied to a
+ * second dependency.
+ */
+export const SERVICE_IMAGE_DESCRIPTION_PROVIDER = 'image-description-provider';
 
 /**
  * `closed` = healthy, claim freely. `open` = do not claim. `half-open` = the open

@@ -71,6 +71,14 @@ test('imageDescribeNoteJobConfig: file-backed, single worker, dedupeKey matches 
 	assert.equal(config.dedupeKey({ targetPath: 'a/b.md' }), 'note:a/b.md');
 });
 
+// idh-WP-2: `services` lets the drain stop claiming further image_describe_note jobs once the
+// infra breaker reports the image-description provider unhealthy (a connection-class error or 3
+// consecutive timeouts in `describeMd5Images`).
+test('imageDescribeNoteJobConfig: declares the image-description-provider service dependency', () => {
+	const config = imageDescribeNoteJobConfig();
+	assert.deepEqual(config.services, ['image-description-provider']);
+});
+
 // ── image_describe_backfill ──────────────────────────────────────────────────
 
 test('imageDescribeBackfillJobConfig: fixed single key so repeat enqueues collapse onto one active fan-out', () => {
@@ -103,4 +111,14 @@ test('imageDescribeBatchJobConfig: two different batches of the same backfill pr
 	const key0 = config.dedupeKey({ backfillId: 'run-1', batchIndex: 0 });
 	const key1 = config.dedupeKey({ backfillId: 'run-1', batchIndex: 1 });
 	assert.notEqual(key0, key1);
+});
+
+test('imageDescribeBatchJobConfig: declares the image-description-provider service dependency', () => {
+	const config = imageDescribeBatchJobConfig();
+	assert.deepEqual(config.services, ['image-description-provider']);
+});
+
+test('imageDescribeBackfillJobConfig: does NOT declare the image-description-provider service — it only enqueues batches and prunes the store, never calls the provider itself', () => {
+	const config = imageDescribeBackfillJobConfig();
+	assert.equal(config.services, undefined);
 });

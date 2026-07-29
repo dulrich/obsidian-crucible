@@ -47,6 +47,15 @@ export interface ImageDescriptionRecord {
 	descriptionHash: string;
 	/** `kind: 'failed'` only — the thrown error's message, truncated (see `FAILURE_MESSAGE_MAX_CHARS`). */
 	failure?: string;
+	/**
+	 * idh-WP-2: `kind: 'failed'` only. `'transient'` = an infra casualty (a `withTimeout` timeout,
+	 * or a connection-class `net::ERR_*`) expected to succeed on a later attempt — `pruneFailed`
+	 * clears these so they re-enter pending. `'permanent'` = everything else (a genuinely poison
+	 * image, a malformed response, …) — skip-forever stays the right call. Written at describe
+	 * time via `classifyFailure` (the single source of truth, also used to classify legacy
+	 * records that predate this field — see `pruneFailed`).
+	 */
+	failureClass?: 'transient' | 'permanent';
 }
 
 /**
@@ -73,6 +82,27 @@ export interface PutImageDescriptionInput {
 	modelId?: string;
 	/** `kind: 'failed'` only. See `ImageDescriptionRecord.failure`. */
 	failure?: string;
+	/** `kind: 'failed'` only. See `ImageDescriptionRecord.failureClass`. */
+	failureClass?: 'transient' | 'permanent';
+}
+
+/**
+ * idh-WP-2 single source of truth for "is this failure message an infra casualty or a genuine
+ * per-image failure": a `withTimeout` timeout (`... timed out after <n>ms`, any pass/transcode
+ * label) or a `net::ERR_*` (Electron `requestUrl` connection-class error text, broader than the
+ * specific `CONNECTION_REFUSED`/`CONNECTION_RESET`/`NETWORK_CHANGED` trio the infra breaker in
+ * `orchestration/utils/imageDescribe.ts` aborts a batch on — legacy failed records recorded
+ * before the breaker existed may carry other `net::ERR_*` variants, and those are transient too)
+ * classify `'transient'`; everything else classifies `'permanent'`. Written at describe time
+ * (`imageDescribe.ts`'s `describeOneImage`) so new failures carry an explicit `failureClass`, and
+ * reused here as the lazy fallback for legacy records that predate the field (`pruneFailed`) —
+ * one function, so the two call sites can never drift on what counts as transient.
+ */
+const TRANSIENT_FAILURE_RE = /timed out after \d+ms|net::ERR_/;
+
+export function classifyFailure(message: string | undefined): 'transient' | 'permanent' {
+	if (!message) return 'permanent';
+	return TRANSIENT_FAILURE_RE.test(message) ? 'transient' : 'permanent';
 }
 
 /**
@@ -106,6 +136,7 @@ function isValidRecord(value: unknown): value is ImageDescriptionRecord {
 	if (typeof record.schemaVersion !== 'number') return false;
 	if (typeof record.descriptionHash !== 'string') return false;
 	if (record.failure !== undefined && typeof record.failure !== 'string') return false;
+	if (record.failureClass !== undefined && record.failureClass !== 'transient' && record.failureClass !== 'permanent') return false;
 	return true;
 }
 
@@ -151,8 +182,8 @@ export class ImageDescriptionStore {
 		// unconditionally — `JSON.stringify` drops an `undefined`-valued key on write, so an
 		// unconditional assignment here would make the record `put()` returns (in-memory) diverge
 		// from what a later `get()` returns (round-tripped through storage) whenever the caller
-		// omits one of these. `failure` (idh-WP-1) inherits the same treatment as the pre-existing
-		// `providerId`/`modelId` fields for the same reason.
+		// omits one of these. `failure` (idh-WP-1) and `failureClass` (idh-WP-2) inherit the same
+		// treatment as the pre-existing `providerId`/`modelId` fields for the same reason.
 		const record: ImageDescriptionRecord = {
 			md5: input.md5,
 			narrative: input.narrative,
@@ -164,6 +195,7 @@ export class ImageDescriptionStore {
 			...(input.providerId !== undefined ? { providerId: input.providerId } : {}),
 			...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
 			...(input.failure !== undefined ? { failure: input.failure } : {}),
+			...(input.failureClass !== undefined ? { failureClass: input.failureClass } : {}),
 		};
 		await this.storage.write(this.pathFor(input.md5), `${JSON.stringify(record)}\n`);
 		this.index.set(input.md5, descriptionHash);
@@ -218,10 +250,44 @@ export class ImageDescriptionStore {
 		return pruned;
 	}
 
+	/**
+	 * idh-WP-2 store hygiene: deletes `kind: 'failed'` records whose failure classifies
+	 * `'transient'` (7 zero-byte/corrupt store files and ~1030 timeout/connection-error failures
+	 * were the live incident this exists for). `scope: 'transient'` is the backfill-start prune
+	 * (`pruneDegenerate`'s shape, applied to a different bug class); `scope: 'all'` also clears
+	 * genuinely-permanent failures — the "retry failed image descriptions" command's "all" choice,
+	 * for a user who wants to force a re-attempt regardless of classification. Deleting drops the
+	 * md5 out of the index so a subsequent backfill enumeration treats it as pending again and
+	 * re-describes it — same contract as `pruneDegenerate`. Records missing an explicit
+	 * `failureClass` (written before idh-WP-2) classify lazily via `classifyFailure` on the stored
+	 * `failure` message, so legacy failures are covered without a migration pass.
+	 */
+	async pruneFailed(scope: 'transient' | 'all'): Promise<string[]> {
+		await this.ensureLoaded();
+		const pruned: string[] = [];
+		for (const md5 of [...this.index.keys()]) {
+			const record = await this.readRecord(this.pathFor(md5));
+			if (!record || record.kind !== 'failed') continue;
+			if (scope === 'transient' && (record.failureClass ?? classifyFailure(record.failure)) !== 'transient') continue;
+			await this.storage.remove(this.pathFor(md5));
+			this.index.delete(md5);
+			pruned.push(md5);
+		}
+		return pruned;
+	}
+
 	private pathFor(md5: string): string {
 		return `${this.baseDir}/${md5}.json`;
 	}
 
+	/**
+	 * idh-WP-2: a corrupt (zero-byte or unparseable) record left behind by an interrupted write
+	 * must not be tolerated forever — every future `load()` would log the same warning and skip
+	 * the same dead file, and the md5 would never re-enter `has()`-pending. Deletion is scoped to
+	 * the load-time sweep on purpose: `get()`/`pruneDegenerate()`/`pruneFailed()` reuse the plain
+	 * `readRecord` (no delete) because they are per-md5 lookups mid-operation, not the cleanup
+	 * sweep whose job this is.
+	 */
 	private async load(): Promise<void> {
 		let entries: string[] = [];
 		try {
@@ -237,7 +303,7 @@ export class ImageDescriptionStore {
 			// returns full paths already, and reconstructing from `baseDir` would only diverge if
 			// the two disagreed, which would itself be a bug worth surfacing via a missed index entry
 			// rather than papering over with two different path-building rules.
-			const record = await this.readRecord(entry);
+			const record = await this.readRecordOrPurge(entry);
 			if (!record) continue;
 			this.index.set(md5, record.descriptionHash);
 		}
@@ -266,5 +332,43 @@ export class ImageDescriptionStore {
 			return null;
 		}
 		return parsed;
+	}
+
+	/** `readRecord`, plus deletes the file on disk when it exists but is corrupt (zero-byte,
+	 * unparseable, or fails `isValidRecord`) — see the module-hygiene doc above `load()`. A
+	 * genuinely missing file (`storage.read` returns `null`) is left alone; there is nothing to
+	 * delete. */
+	private async readRecordOrPurge(path: string): Promise<ImageDescriptionRecord | null> {
+		let raw: string | null;
+		try {
+			raw = await this.storage.read(path);
+		} catch (e) {
+			logWarn('image description store: failed to read record', path, e);
+			return null;
+		}
+		if (raw === null) return null;
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw);
+		} catch (e) {
+			logWarn('image description store: corrupt (unparseable) record, deleting', path, e);
+			await this.removeCorrupt(path);
+			return null;
+		}
+		if (!isValidRecord(parsed)) {
+			logWarn('image description store: corrupt (malformed) record, deleting', path);
+			await this.removeCorrupt(path);
+			return null;
+		}
+		return parsed;
+	}
+
+	private async removeCorrupt(path: string): Promise<void> {
+		try {
+			await this.storage.remove(path);
+		} catch (e) {
+			logWarn('image description store: failed to delete corrupt record', path, e);
+		}
 	}
 }
