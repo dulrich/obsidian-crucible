@@ -15,6 +15,7 @@ tags: ""
 	- [ ] test new image batch (first let agent check)
 - [ ] blink/rerender fix has stopped a pathway I used to use to refresh dataview tables -> add to chain or is there a watcher/timer approach?
 	- [ ] the chain is sometimes blanking the note, maybe wrong dataview command
+- [ ] Ingestion Dashboard still has blink/rerender pause, and scroll position is broken when long table views are involved
 
 ---
 
