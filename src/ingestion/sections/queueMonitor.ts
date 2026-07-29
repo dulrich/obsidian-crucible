@@ -7,6 +7,7 @@ import { ConfirmModal } from '../../confirmModal';
 import { renderSortableTable } from '../render/sortableTable';
 import { renderFileLink } from '../render/cells';
 import { formatDateTime } from '../render/format';
+import { refreshWithScrollPreserved } from '../render/refresh';
 import type { DashboardHost, SectionContext } from '../render/types';
 
 const QUEUE_MONITOR_RENDER_LIMIT = 100;
@@ -227,14 +228,22 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 		countEl,
 		metaEl,
 		sort: null,
-		refresh: () => renderQueueMonitor(host, body, ctx),
+		// SectionContext.refresh is itself the scroll-preserving wrapped function
+		// (see AGENTS.md #5 / render/refresh.ts) so every call site — the header
+		// Refresh button, sort-header clicks, and this section's own Cancel/Run/
+		// Clear/panic-toggle handlers below — gets scroll preservation for free.
+		refresh: () => refreshWithScrollPreserved(body, () => renderQueueMonitor(host, body, ctx)),
 	};
 	host.registerSection(ctx);
 }
 
 export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
-	body.empty();
-
+	// Body is intentionally NOT emptied here: `store.listFolder` below awaits two
+	// full folder scans, and clearing the body first left it visibly blank for
+	// that whole window on every queue event. Every branch below empties body
+	// itself, immediately before it writes — the error message, the empty state,
+	// and (via renderSortableTable's own `parent.empty()`) the table.
+	//
 	// --- File-backed jobs (orchestrator job store) ---
 	type QueueRow = {
 		// 'file' rows come from jobStore; 'memory' rows come from enrichmentQueue
@@ -264,6 +273,7 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 				...queued.map(e => ({ source: 'file' as const, status: 'queued' as const, type: e.job.type, key: e.job.id, targetPath: fileJobTargetPath(e.job), title: fileJobTitle(e.job), created: e.job.created ?? '', error: e.job.error, progress: e.job.progress })),
 			];
 		} catch (e) {
+			body.empty();
 			body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read file queue: ${e instanceof Error ? e.message : String(e)}` });
 			host.setSectionCount('queueMonitor', 0);
 			return;
@@ -300,6 +310,7 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 	host.setSectionCount('queueMonitor', rows.length);
 
 	if (rows.length === 0) {
+		body.empty();
 		body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 		return;
 	}

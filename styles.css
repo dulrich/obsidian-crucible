@@ -618,6 +618,12 @@ If your plugin does not need CSS, delete this file.
   font-size: 0.85em;
 }
 
+.crucible-ingestion-table-caption {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  padding-top: 0.35rem;
+}
+
 .crucible-ingestion-section-desc {
   color: var(--text-muted);
   font-size: 0.85em;
