@@ -137,6 +137,25 @@ export class JobStore {
 		return out;
 	}
 
+	/**
+	 * Count of `.md` job files directly in a status folder, without reading each one's
+	 * frontmatter. `listFolder` calls `readJob` per entry (a `metadataCache.getFileCache`
+	 * hit, or a raw-disk parse on a miss) purely to build sortable `OrchestrationJob`
+	 * rows — overkill when the only thing a caller wants is "how many". `scan()`'s
+	 * done/failed/cancelled counts are exactly that case: those buckets can run into the
+	 * tens of thousands, and reading every one of them on every scan is ~21k needless
+	 * reads for a number nothing else uses. Use this wherever only the count matters.
+	 */
+	countFolder(status: JobStatus): number {
+		const folder = this.app.vault.getAbstractFileByPath(this.folderForStatus(status));
+		if (!(folder instanceof TFolder)) return 0;
+		let count = 0;
+		for (const child of folder.children) {
+			if (child instanceof TFile && child.extension === 'md') count++;
+		}
+		return count;
+	}
+
 	async readJob(file: TFile): Promise<OrchestrationJob | null> {
 		const cached = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
 		const fm = cached ?? (await this.parseFrontmatterFromDisk(file));
@@ -170,9 +189,28 @@ export class JobStore {
 		const targetPath = `${targetFolder}/${file.name}`;
 		await this.app.fileManager.renameFile(file, targetPath);
 
-		const moved = this.app.vault.getAbstractFileByPath(targetPath);
-		if (!(moved instanceof TFile)) {
-			throw new Error(`JobStore.move: file disappeared after rename: ${targetPath}`);
+		// `file` is a live TFile — `renameFile` mutates its `.path` in place, so `file`
+		// IS the moved file (same liveness fact already documented and depended on at
+		// FileJobBackend.ts:173-189). This used to re-derive the moved file via a fresh
+		// `getAbstractFileByPath(targetPath)` lookup unconditionally and throw on a miss —
+		// *after* the rename but *before* the frontmatter write's rollback `try` began, so
+		// a transient/lagging lookup left the file physically moved with stale frontmatter
+		// (the "stranded in running/ with status: queued" incident). The lookup now only
+		// runs as a fallback when the cheap identity check fails, and any failure from
+		// there rolls the rename back rather than leaving the file moved-but-unresolved.
+		let moved: TFile = file;
+		if (moved.path !== targetPath) {
+			const lookedUp = this.app.vault.getAbstractFileByPath(targetPath);
+			if (lookedUp instanceof TFile) {
+				moved = lookedUp;
+			} else {
+				try {
+					await this.app.fileManager.renameFile(file, fromPath);
+				} catch (rollbackErr) {
+					logError(`JobStore.move: rollback to ${fromPath} failed after post-rename lookup miss`, rollbackErr);
+				}
+				throw new Error(`JobStore.move: file disappeared after rename: ${targetPath}`);
+			}
 		}
 
 		const updated = nowIso();

@@ -10,6 +10,7 @@ import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
+import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
 // Backstop for jobs that slipped the per-job timeout entirely — e.g. a plugin
@@ -23,6 +24,12 @@ export type { RunOutcome };
 
 export function staleRunningMsForTimeout(timeoutMs: number): number {
 	return timeoutMs > 0 ? timeoutMs + STALE_RUNNING_TIMEOUT_BUFFER_MS : STALE_RUNNING_MS;
+}
+
+// Mirrors failedJobRepair.ts's yieldToEventLoop: lets a long recovery sweep interleave
+// with the rest of the event loop rather than blocking it start-to-finish.
+function yieldToEventLoop(): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, 0));
 }
 
 export class Orchestrator {
@@ -249,11 +256,13 @@ export class Orchestrator {
 	async scan(options: { notify?: boolean } = {}): Promise<ScanReport> {
 		await this.store.ensureFolders();
 
+		// Only queued/running need their job data read — the repair loops below act on
+		// them. done/failed/cancelled are needed only as counts for the report, so their
+		// reads are deferred past the repair loops and taken via countFolder (see below):
+		// those buckets can run into the tens of thousands, and listFolder's per-entry
+		// readJob would otherwise cost ~21k needless frontmatter reads on every scan.
 		const queued = await this.store.listFolder('queued');
 		const running = await this.store.listFolder('running');
-		const done = await this.store.listFolder('done');
-		const failed = await this.store.listFolder('failed');
-		const cancelled = await this.store.listFolder('cancelled');
 
 		// Re-home file-backed jobs whose type has since become memory-persistence
 		// (e.g. youtube_metadata_fetch after it folded into the unified in-memory
@@ -276,10 +285,39 @@ export class Orchestrator {
 			migrated++;
 		}
 
+		// State-gated recovery, ahead of the time-based sweep below: a running/ entry
+		// whose frontmatter still says `status: 'queued'` never had its claim-time
+		// frontmatter write land (the JobStore.move claim-path fault — see JobStore.ts)
+		// or otherwise aborted mid-claim. The folder says "claimed"; the status says
+		// "never claimed" — that disagreement is itself proof the claim aborted, so this
+		// bounces the job back to queued/ with no age check at all (unlike the time-based
+		// sweep, an un-updated status can't be "still genuinely running").
 		let recovered = 0;
+		const stateRecoveredPaths = new Set<string>();
+		let processed = 0;
+		for (const entry of running) {
+			if (migratedPaths.has(entry.file.path)) continue;
+			if (entry.job.status !== 'queued') continue;
+			if (this.isRunning(entry.job.type, entry.job.id)) continue;
+			try {
+				await this.store.setError(entry.file, 'Recovered: aborted claim');
+				await this.store.move(entry.file, entry.job, 'queued');
+				stateRecoveredPaths.add(entry.file.path);
+				recovered++;
+			} catch (err) {
+				// One job the store refused to move must not abort the sweep for the rest —
+				// leave it in running/ (JobStore.move rolls its own rename back on failure)
+				// and let the next scan retry it.
+				logError(`Orchestrator.scan: could not recover aborted-claim job ${entry.job.id}`, err);
+			}
+			processed++;
+			if (processed % 20 === 0) await yieldToEventLoop();
+		}
+
 		const now = Date.now();
 		for (const entry of running) {
 			if (migratedPaths.has(entry.file.path)) continue;
+			if (stateRecoveredPaths.has(entry.file.path)) continue;
 			// The sweep's whole premise is "no live timer owns this job". A run registered
 			// in this process is the counter-example, so it wins over recovery — whether it
 			// is winding down from a cancel (still in running/ until execute() moves it) or
@@ -298,14 +336,20 @@ export class Orchestrator {
 			}
 		}
 
+		// Deferred until after the repair loops above (see the comment at the top of this
+		// method): a plain folder-children count, no per-file frontmatter reads.
+		const done = this.store.countFolder('done');
+		const failed = this.store.countFolder('failed');
+		const cancelled = this.store.countFolder('cancelled');
+
 		const queuedMigrated = queued.filter(e => migratedPaths.has(e.file.path)).length;
 		const runningMigrated = running.filter(e => migratedPaths.has(e.file.path)).length;
 		const report: ScanReport = {
 			inbox: queued.length - queuedMigrated,
 			running: running.length - recovered - runningMigrated,
-			done: done.length + migrated,
-			failed: failed.length,
-			cancelled: cancelled.length,
+			done: done + migrated,
+			failed,
+			cancelled,
 			recovered,
 		};
 

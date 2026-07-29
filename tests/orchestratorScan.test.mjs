@@ -155,8 +155,109 @@ function makeStore(folders) {
 	return {
 		ensureFolders: async () => {},
 		listFolder: async (name) => folders[name] ?? [],
+		countFolder: () => 0,
 		appendNotes: async () => {},
 		move: async (file, job, status) => ({ file, job: { ...job, status } }),
 		setError: async () => {},
 	};
 }
+
+// Fix B: a running/ entry whose frontmatter status never advanced past 'queued' is the
+// exact signature JobStore.move's claim-path fault left behind (the file physically
+// moved into running/, but the frontmatter write that would have set status: 'running'
+// never landed). The folder says "claimed", the status says "never claimed" — that
+// disagreement alone is proof enough to bounce it back to queued/, with no age check:
+// unlike the time-based sweep above, a fresh `updated` stamp on an un-advanced status is
+// not evidence of a live run, because a live run always advances the status on claim.
+test('scan requeues a running/ entry whose status is still queued, regardless of age', async () => {
+	globalThis.__orchestratorScanNotices = [];
+	const fresh = new Date().toISOString();
+	const moved = [];
+	const errors = [];
+	const store = makeStore({
+		running: [{
+			file: { path: 'queue/running/aborted.md' },
+			job: { id: 'job-aborted', type: 'search_upsert_file', status: 'queued', created: fresh, updated: fresh, params: { path: 'note.md' } },
+		}],
+	});
+	store.move = async (file, job, status) => {
+		moved.push({ file, job, status });
+		return { file, job: { ...job, status } };
+	};
+	store.setError = async (file, error) => {
+		errors.push({ file, error });
+	};
+	const plugin = { settings: { orchestrationAutorunTimeoutSeconds: 600 } };
+	const orchestrator = new Orchestrator(plugin, store);
+
+	const report = await orchestrator.scan({ notify: false });
+
+	assert.equal(report.recovered, 1);
+	assert.equal(report.running, 0);
+	assert.deepEqual(moved.map(item => item.status), ['queued']);
+	assert.match(errors[0].error, /Recovered: aborted claim/);
+});
+
+test('scan does not requeue a running/ entry with status queued that this process is actively executing', async () => {
+	const fresh = new Date().toISOString();
+	const file = { path: 'queue/running/live-aborted.md' };
+	const job = { id: 'job-live-aborted', type: 'command_run', status: 'queued', created: fresh, updated: fresh, params: {} };
+	const moves = [];
+	const store = makeStore({ running: [{ file, job }] });
+	store.move = async (f, j, status) => {
+		moves.push(status);
+		return { file: f, job: { ...j, status } };
+	};
+
+	const plugin = {
+		settings: {
+			orchestrationEnabled: true,
+			orchestrationAutorunTimeoutSeconds: 600,
+			orchestrationRoutineNoticesEnabled: {},
+		},
+	};
+	const orchestrator = new Orchestrator(plugin, store);
+	let release = () => {};
+	const gate = new Promise(resolve => { release = resolve; });
+	orchestrator.register('command_run', { async run() { await gate; return { status: 'done' }; } },
+		{ persistence: 'file', maxParallel: 1, minIntervalMs: 0 });
+
+	const execution = orchestrator.backends.get('command_run').execute({ file, job });
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	const report = await orchestrator.scan({ notify: false });
+
+	assert.equal(report.recovered, 0, 'a live run is not an aborted claim, however its recorded status reads');
+	assert.equal(report.running, 1);
+	assert.deepEqual(moves, [], 'nothing was moved out from under the live run');
+
+	release();
+	await execution;
+	assert.deepEqual(moves, ['done'], 'it settled itself, exactly once');
+});
+
+test('scan takes done/failed/cancelled counts from countFolder, not listFolder', async () => {
+	globalThis.__orchestratorScanNotices = [];
+	const store = makeStore({});
+	let countFolderCalls = 0;
+	let listFolderCalls = 0;
+	const origListFolder = store.listFolder;
+	store.countFolder = (status) => {
+		countFolderCalls++;
+		return { done: 7, failed: 3, cancelled: 1 }[status] ?? 0;
+	};
+	store.listFolder = async (name) => {
+		if (name === 'done' || name === 'failed' || name === 'cancelled') listFolderCalls++;
+		return origListFolder(name);
+	};
+	const plugin = { settings: { orchestrationAutorunTimeoutSeconds: 600 } };
+	const orchestrator = new Orchestrator(plugin, store);
+
+	const report = await orchestrator.scan({ notify: false });
+
+	assert.equal(report.done, 7);
+	assert.equal(report.failed, 3);
+	assert.equal(report.cancelled, 1);
+	assert.equal(listFolderCalls, 0, 'done/failed/cancelled must not go through listFolder');
+	assert.ok(countFolderCalls >= 3, 'done/failed/cancelled must each be read via countFolder');
+});
