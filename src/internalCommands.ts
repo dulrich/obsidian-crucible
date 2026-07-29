@@ -11,6 +11,7 @@ import {
 	upsertFrontmatterTags,
 	withMaterializing,
 } from './frontmatter';
+import { refreshDataviewViews } from './lint';
 import { coerceVideoId, ingestYoutubeVideoMetadata } from './orchestration/utils/youtubeApi';
 import { addIgnoredVideoId } from './orchestration/utils/ignoredIds';
 import { youtubeVideoIdFromArgsOrFrontmatter, youtubeWatchUrlFromArgsOrFrontmatter } from './orchestration/utils/youtubeActions';
@@ -65,6 +66,10 @@ export function registerInternalCommands(plugin: CruciblePlugin): void {
 	register('lint-remove-property', async (args) => await plugin.linter.removePropertyFromVault(
 		typeof args['key'] === 'string' ? args['key'] : '',
 	), { lockTarget: 'none' });
+	register('dataview-refresh', async () => {
+		refreshDataviewViews(plugin.app);
+		return true;
+	}, { mutating: false, lockTarget: 'none' });
 	register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await fetchYoutubeMetadataForActiveNote(plugin, tf));
 	register('youtube-ignore-video', async (args, _p, _e, tf) => await ignoreYoutubeVideoCommand(plugin, args, tf), {
 		lockTarget: 'none',

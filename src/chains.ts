@@ -221,7 +221,18 @@ export class ChainManager {
 		if (views.length === 0) return;
 		const disk = await this.app.vault.read(file);
 		for (const view of views) {
-			if (view.getViewData() === disk) continue;
+			const current = view.getViewData();
+			if (current === disk) continue;
+			// A view mid-load reports '' from getViewData() before its own onLoadFile has
+			// populated it. Writing disk content into it here races that load — whichever
+			// finishes last wins, and if this write loses, the view silently reverts to
+			// (or worse, straddles) a stale buffer. Since disk is non-empty and the view
+			// claims to be empty, treat it as still loading and skip; the view's own load
+			// will pick up the current disk content once it finishes.
+			if (current === '' && disk !== '') {
+				logWarn('chain', 'skipping editor reconcile — view reports empty content (mid-load)', file.path);
+				continue;
+			}
 			logWarn('chain', 'reconciling open editor buffer to disk', file.path);
 			view.setViewData(disk, false);
 		}

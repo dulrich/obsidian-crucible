@@ -76,6 +76,12 @@ declare module 'obsidian' {
 			enabledPlugins: Set<string>;
 			disablePlugin(id: string): Promise<void>;
 			enablePlugin(id: string): Promise<void>;
+			// Undocumented instance map keyed by plugin id, absent from obsidian.d.ts.
+			// Used only to reach the Dataview plugin's index for a non-destructive
+			// revision-bump refresh (see refreshDataviewViews in lint.ts) —
+			// every property below `plugins` itself is optional and guarded at the call
+			// site, the same way secretStorage is guarded above.
+			plugins?: Record<string, { index?: { touch?: () => void } } | undefined>;
 		};
 		setting: {
 			open(): void;
