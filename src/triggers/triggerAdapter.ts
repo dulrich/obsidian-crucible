@@ -3,6 +3,7 @@ import type CruciblePlugin from '../main';
 import type { TriggerDef, TriggerScope } from '../types';
 import type { OrchestrationTrigger, TriggerJobSeed } from '../orchestration/TriggerRegistry';
 import { evaluateSyncGuards, guardContext } from './guardEval';
+import { pathInScope } from './scopeMatch';
 import { logWarn } from '../log';
 
 // User-trigger ids are namespaced so they never collide with code-defined founding
@@ -13,13 +14,12 @@ export function userTriggerId(defId: string): string {
 	return `user:${defId}`;
 }
 
+// Thin wrapper over the pure path-based `pathInScope` (see scopeMatch.ts) — kept as a
+// named function here (rather than inlining the import at every call site) so the
+// settings-UI match-volume estimator can reuse the exact same prefix semantics without
+// depending on a live TFile.
 function inScope(file: TFile, scope?: TriggerScope): boolean {
-	const folder = scope?.folder?.trim().replace(/\/$/, '');
-	if (!folder) return true;
-	if (scope?.includeSubfolders === false) {
-		return (file.parent?.path ?? '') === folder;
-	}
-	return file.path === folder || file.path.startsWith(`${folder}/`);
+	return pathInScope(file.path, scope);
 }
 
 function seedsFor(def: TriggerDef, file?: TFile): TriggerJobSeed[] {
