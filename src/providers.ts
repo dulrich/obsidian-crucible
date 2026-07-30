@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
-import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS, IMAGE_DESCRIPTION_EXTRACTION_PROMPT, IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS, IMAGE_DESCRIPTION_NARRATIVE_PROMPT, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
+import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS, IMAGE_DESCRIPTION_EXTRACTION_PROMPT, IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS, IMAGE_DESCRIPTION_NARRATIVE_PROMPT, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT, withTimeout } from './providers/shared';
 import { isLocal as isLocalProvider, openAICompatibleClient } from './providers/openaiCompatible';
 import { anthropicClient } from './providers/anthropic';
 import { googleClient } from './providers/google';
@@ -305,18 +305,41 @@ export class ProviderManager {
 	// ProviderModelCapability check — capability *presence* is an HTTP-client concern, capability
 	// *selection* (which model the user picked for this) is the settings UI's job, same division
 	// extractImageMetadata already draws.
-	async describeImage(provider: Provider, modelId: string, imageBytes: ArrayBuffer, mimeType: string, pass: 'narrative' | 'extraction'): Promise<string> {
+	//
+	// thq WP-4 (B-1): `timeoutMs` is optional and, when set, races only `client.describeImagePass`
+	// — armed AFTER the concurrency slot is acquired, not at call time. The old shape (an outer
+	// `withTimeout` at the `imageDescribe.ts` call site, wrapping this whole method) started its
+	// clock before `concurrency.run` even began queuing, so time spent waiting behind another
+	// in-flight call on a limit-1 local provider silently ate into the per-pass budget. `signalAcquired`
+	// resolves as the very first statement inside `concurrency.run`'s fn — i.e. exactly when the
+	// slot is granted (immediately, for an unlimited provider) — so awaiting it before constructing
+	// the race defers the timer's start past acquisition. `workPromise` (`concurrency.run`'s own
+	// return value, which is what its internal try/finally awaits to decide when to `release()`) is
+	// never itself wrapped in the race: `Promise.race` only changes what THIS caller sees when the
+	// timeout branch wins, it does not touch `workPromise`'s own resolution, so the slot still
+	// releases only when `client.describeImagePass` itself actually settles — the release-on-settle
+	// contract on `ProviderConcurrencyLimiter.run` above is completely unaffected by this.
+	async describeImage(provider: Provider, modelId: string, imageBytes: ArrayBuffer, mimeType: string, pass: 'narrative' | 'extraction', timeoutMs?: number): Promise<string> {
 		if (!modelId) {
 			throw new Error(`No image description model selected for provider "${provider.name || provider.id}"`);
 		}
 		const client = this.requireCapability(provider, 'describeImagePass', 'image description');
 		const prompt = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_PROMPT : IMAGE_DESCRIPTION_EXTRACTION_PROMPT;
 		const maxTokens = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS : IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS;
+		const passLabel = pass === 'narrative' ? 'image description (narrative pass)' : 'image description (extraction pass)';
+
+		let signalAcquired: () => void = () => {};
+		const acquired = new Promise<void>((resolve) => { signalAcquired = resolve; });
 		// rsp-wp1: the measured pile-up path (image_describe_batch/note against a single-GPU local
 		// server) — gated by the same completion-class limiter as complete().
-		return await this.concurrency.run(provider.id, resolveProviderConcurrencyLimit(provider), async () => {
+		const workPromise = this.concurrency.run(provider.id, resolveProviderConcurrencyLimit(provider), async () => {
+			signalAcquired();
 			return await client.describeImagePass(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType, prompt, maxTokens);
 		});
+
+		if (typeof timeoutMs !== 'number' || timeoutMs <= 0) return await workPromise;
+		await acquired;
+		return await withTimeout(workPromise, timeoutMs, passLabel);
 	}
 
 	// WP-5: rerank has two backends. Primary is the provider's native rerank() (currently only
