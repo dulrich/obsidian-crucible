@@ -285,6 +285,64 @@ test('SearchServiceClient throws SearchServiceUnavailableError with kind "refuse
 	globalThis.__searchClientThrow = undefined;
 });
 
+// WP-5: SearchServiceClient.search() now accepts a caller-supplied timeout (SearchManager
+// threads the configurable `searchQueryTimeoutMs` setting through it) and derives the
+// companion's own cooperative `budgetMs` from whatever timeout is actually in effect — so the
+// two constants documented in client.ts (SEARCH_QUERY_BUDGET_FRACTION, 0.8) stay in the
+// documented relationship (companion budget strictly below the client timeout) automatically.
+test('SearchServiceClient.search() sends budgetMs derived from the timeout actually passed in', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await client.search({ query: 'x', limit: 1 });
+	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).budgetMs, 4000, 'default timeout (5000) * 0.8');
+
+	globalThis.__searchClientRequests = [];
+	await client.search({ query: 'x', limit: 1 }, 10_000);
+	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).budgetMs, 8000, 'a caller-supplied timeout (10000) * 0.8');
+});
+
+// Settings threading (WP-5): SearchManager passes a configured `searchQueryTimeoutMs` as the
+// second argument to `search()`, which must actually change how long the client is willing to
+// wait — not just what it tells the companion.
+test('SearchServiceClient.search() respects a caller-supplied timeout, not just the 5s default', async (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = new Promise(() => {});
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+	const search = client.search({ query: 'x', limit: 1 }, 9000);
+	let settled = false;
+	search.then(() => { settled = true; }, () => { settled = true; });
+
+	t.mock.timers.tick(5_001);
+	await flush();
+	assert.equal(settled, false, 'the 5s default must not fire when a longer timeout was explicitly passed');
+
+	t.mock.timers.tick(4_000);
+	await assert.rejects(search, SearchServiceUnavailableError);
+	globalThis.__searchClientResponse = undefined;
+});
+
+// Additive-only, degraded-response tolerance (WP-5): a companion that hit its own cooperative
+// deadline carries `degraded: true`; the client must surface it, and its absence — every
+// existing/older companion response — must normalize to undefined, never a coerced false.
+test('SearchServiceClient.search() surfaces a companion degraded flag, and tolerates its absence', async () => {
+	globalThis.__searchClientThrow = undefined;
+
+	globalThis.__searchClientResponse = { status: 200, json: { results: [], degraded: true } };
+	const degraded = await new SearchServiceClient('http://search.local', 'vault').search({ query: 'x', limit: 1 });
+	assert.equal(degraded.degraded, true);
+
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const notDegraded = await new SearchServiceClient('http://search.local', 'vault').search({ query: 'x', limit: 1 });
+	assert.equal(notDegraded.degraded, undefined, 'an older companion that never sends the field must normalize to undefined, not false');
+});
+
 test('SearchServiceClient throws SearchServiceUnavailableError with kind "timeout" when the request times out', async (t) => {
 	t.mock.timers.enable({ apis: ['setTimeout'] });
 	globalThis.__searchClientThrow = undefined;
