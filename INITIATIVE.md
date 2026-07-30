@@ -7,7 +7,8 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans: []
+pending-plans:
+  - "[[render-search-provider-remediation]]"
 initiative-status: active
 initiative-cadence: as-needed
 ---
