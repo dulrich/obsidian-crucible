@@ -674,6 +674,16 @@ export interface CrucibleSettings {
 	searchIndexBatchSize: number;
 	searchIndexDebounceMs: number;
 	searchResultLimit: number;
+	/**
+	 * WP-5: milliseconds an interactive search waits before giving up. Health probes keep the
+	 * client's own hardcoded 5s default. Separate from `SEARCH_SERVICE_INDEX_TIMEOUT_MS` (60s,
+	 * hardcoded — reset/upsert/delete/fileStates) per the two-timeout law in
+	 * `src/search/AGENTS.md`: this setting only ever threads into the interactive budget, never
+	 * the indexing one. `SearchServiceClient.search()` also derives the companion's own
+	 * cooperative per-request deadline from this value (~80% of it), so raising or lowering it
+	 * moves both budgets together in the documented relationship.
+	 */
+	searchQueryTimeoutMs: number;
 	// Which file types the search indexer ingests. Independent of
 	// crucibleFileOpenPaletteExtensions (the palette's "what can I open" set) — this is
 	// "what can FTS5 chunk", restricted in the UI to text-extractable categories.
@@ -858,6 +868,10 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	searchIndexBatchSize: 24,
 	searchIndexDebounceMs: 5000,
 	searchResultLimit: 12,
+	// WP-2 measured ground truth (clsl-wp2-search-latency-2026-07-29): server-side work is
+	// <=1.4s worst case even on a pathological 15-term query, so this budget mostly absorbs
+	// queuing behind the companion's own indexing work, not search cost itself.
+	searchQueryTimeoutMs: 4000,
 	searchIndexExtensions: ['md', 'qmd', 'txt'],
 	searchLinkBoostEnabled: true,
 	// weight / (LINK_BOOST_RRF_K + linkRank): at rank 1 that's ~0.00082, which against the

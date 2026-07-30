@@ -405,6 +405,16 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	}, save);
 
 	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Query timeout',
+		desc: 'Milliseconds an interactive search waits before giving up. The companion also gets ~80% of this as its own cooperative deadline, so a pathological or queued-up query degrades gracefully (partial results) instead of blocking the single-threaded companion until this fires. Floored at 3000 — search/health-probe budgets, never the 60s indexing one.',
+		placeholder: '4000',
+		get: () => String(s.searchQueryTimeoutMs),
+		set: (v) => { const n = Number(v.trim()); s.searchQueryTimeoutMs = Number.isFinite(n) && n >= 3000 ? Math.floor(n) : 4000; },
+		min: 3000,
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindToggle(searchGroup, {
 		name: 'Link-adjacency boost',
 		desc: 'Boost results adjacent to two or more of the top-ranked results, using Obsidian\'s own link graph (resolved + frontmatter-property links). Client-side, applied after the companion returns — no re-index needed.',

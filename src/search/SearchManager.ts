@@ -5,7 +5,7 @@ import { normalizePrecision } from '../providers/shared';
 import { buildSearchChunks, hashSearchContent, ImageDescriptionChunkInput, isSearchIndexablePath } from './chunker';
 import type { ImageDescriptionStore } from './imageDescriptionStore';
 import { localizedImageInfo } from '../orchestration/utils/imageMetadata';
-import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient } from './client';
+import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient, SearchServiceUnavailableError } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
 import {
@@ -680,12 +680,36 @@ export class SearchManager {
 		// Only when there is a vector to place — a keyword-only search has no space, and asking
 		// for one would probe the runtime on a path that has already decided not to embed.
 		const embeddingSpace = queryEmbedding ? (await this.activeEmbeddingSpaceId()) ?? undefined : undefined;
-		const response = await this.client().search({
-			query,
-			limit: limit ?? this.settings.searchResultLimit,
-			queryEmbedding,
-			embeddingSpace,
-		});
+		const startedAt = Date.now();
+		let response: SearchResponse;
+		try {
+			// WP-5: the user-configurable interactive timeout, not the client's hardcoded
+			// default — SearchServiceClient derives the companion's own cooperative `budgetMs`
+			// from whichever timeout is passed here, so this one setting drives both halves.
+			response = await this.client().search({
+				query,
+				limit: limit ?? this.settings.searchResultLimit,
+				queryEmbedding,
+				embeddingSpace,
+			}, this.settings.searchQueryTimeoutMs);
+		} catch (e) {
+			// WP-5 breadcrumb: a timed-out interactive search is otherwise invisible — the modal
+			// just shows "Search failed" and the companion-side cause (queued behind its own
+			// upsert flush, or a genuinely pathological query) is lost. Term count is a cheap
+			// client-side proxy for the companion's own term parsing (buildFtsQuery), not an
+			// exact echo of it — good enough for a debug breadcrumb, not a ranking input.
+			if (e instanceof SearchServiceUnavailableError && e.kind === 'timeout') {
+				const elapsedMs = Date.now() - startedAt;
+				const termCount = query.trim().split(/\s+/).filter(Boolean).length;
+				logWarn('search', `interactive search timed out after ${elapsedMs}ms (${termCount} terms)`);
+			}
+			throw e;
+		}
+		// WP-5 escalation guard: a response actually arrived (success or a `degraded: true`
+		// partial), which is direct proof the companion is up right now — see
+		// CompanionAvailabilityGate.noteInteractiveSearchResponse for why this cannot mask a
+		// genuinely dead companion.
+		this.availability.noteInteractiveSearchResponse();
 		return this.boostSearchResponse(response);
 	}
 
