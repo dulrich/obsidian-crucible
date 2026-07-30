@@ -4,6 +4,28 @@ import type { CrucibleSettingTab } from "../../settings";
 import { FolderSuggest } from "../../suggesters";
 import { bindToggle, bindText, bindTextArea, bindSearch } from "../bind";
 import { renderLocalizeAttachmentsSettings } from "./localize";
+import { LINT_STEPS } from "../../lint";
+
+// Prose shown for each LINT_STEPS entry in the "Lint: all pipeline" panel below. Kept
+// separate from the registry itself (src/lint.ts) since the registry is also bundled into
+// the node:test suite via esbuild against a minimal Obsidian stub — settings-panel copy has
+// no reason to travel with it.
+const LINT_STEP_DESCRIPTIONS: Record<string, string> = {
+	'excluded-folder-guard': 'Skips this pipeline entirely for notes under an excluded folder (Excluded folders, below).',
+	'read-and-word-count': "Reads the note and calculates its prose word count.",
+	'parse-frontmatter-insert': 'Parses the Frontmatter insert template (below) into key/value pairs to insert.',
+	'insert-keys': 'Inserts the parsed Frontmatter insert keys where blank. Configured by Frontmatter insert, below.',
+	'created-date': 'Stamps the created date once, if blank. Configured by Created date key, below — leave that key blank to disable this step.',
+	'title-stamp': 'Stamps the note title once, if blank.',
+	'modified-date': "Stamps today's date on every pass. Configured by Modified date key, below — leave that key blank to disable this step.",
+	'word-count': 'Writes the calculated word count to frontmatter.',
+	'derive-source-ids': 'Derives yt-video-id / post-id from the source property.',
+	'sort-yaml': 'Reorders frontmatter keys per Yaml key priority, below.',
+	'blank-line-after-yaml': 'Ensures a blank line follows the frontmatter block. Configured by Blank line after yaml, below.',
+	're-read-diff': 'Re-reads the note to determine whether this pass changed anything.',
+	'dataview-refresh': 'Refreshes Dataview views when the note contains a dataview/dataviewjs fence.',
+	'notice': "Shows the 'Note linted' notice (suppressed during Lint vault / Lint folder passes).",
+};
 
 export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	const s = tab.plugin.settings;
@@ -25,6 +47,24 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 				await tab.plugin.linter.lintVault();
 			})
 		);
+
+	new Setting(containerEl).setName('Lint: all pipeline').setHeading();
+	containerEl.createEl('p', { text: 'Every "Lint: all" pass (Lint note, Lint vault, and the Lint on save trigger above) runs these steps in this order. The four with a toggle can be turned off individually; the rest are pipeline mechanics or already governed by an existing setting, named below. Lint: localize attachments is a separate command and deliberately not part of this pipeline — it touches binary files and, for remote URLs, the network.' });
+	const pipelineGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	LINT_STEPS.forEach((step, index) => {
+		if (index > 0) pipelineGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		const desc = LINT_STEP_DESCRIPTIONS[step.id] ?? '';
+		if (step.toggleable) {
+			bindToggle(pipelineGroup, {
+				name: step.label,
+				desc,
+				get: () => s.lintStepEnabled[step.id] !== false,
+				set: (v) => { s.lintStepEnabled = { ...s.lintStepEnabled, [step.id]: v }; },
+			}, save);
+		} else {
+			new Setting(pipelineGroup).setName(step.label).setDesc(desc);
+		}
+	});
 
 	new Setting(containerEl).setName('Date keys').setHeading();
 	const dateGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });

@@ -164,6 +164,229 @@ export function refreshDataviewViews(app: App): void {
 	app.commands?.executeCommandById('dataview:dataview-force-refresh-views');
 }
 
+// The four sub-steps gated by `settings.lintStepEnabled` — the settings-UI-visible on/off
+// switches. Every other step either always runs (structural) or is already gated by an
+// existing setting (created/modified date keys, blank-line-after-yaml, frontmatter insert).
+export const LINT_STEP_TOGGLE_IDS = ['title-stamp', 'word-count', 'derive-source-ids', 'sort-yaml'] as const;
+export type LintStepToggleId = typeof LINT_STEP_TOGGLE_IDS[number];
+
+function lintStepEnabledGate(id: LintStepToggleId): (settings: CrucibleSettings) => boolean {
+	// Optional-chained: `lintStepEnabled` is a new field, and hand-built settings fixtures
+	// (e.g. tests/lintModifiedSignal.test.mjs's baseSettings()) predate it — absent record or
+	// absent key must both mean "enabled" (defaults preserve current behavior exactly).
+	return (settings) => settings.lintStepEnabled?.[id] !== false;
+}
+
+// Mutable pass-state threaded through every LINT_STEPS run() — one instance per lintFile()
+// call. `fm` is only populated while inside the single updateFrontmatter callback (see
+// lintFile below); frontmatter-kind steps are the only ones that read it.
+export interface LintStepContext {
+	app: App;
+	file: TFile;
+	settings: CrucibleSettings;
+	silent: boolean;
+	content: string;
+	wordCount: number;
+	insertYaml: Record<string, string>;
+	todayStr: string;
+	createdStr: string;
+	fm?: Record<string, unknown>;
+	finalContent: string;
+	modified: boolean;
+	aborted: boolean;
+}
+
+export interface LintStep {
+	id: string;
+	label: string;
+	/** `frontmatter` steps run inside the single updateFrontmatter callback; `content` steps
+	 *  mutate the note body directly; `structural` steps are non-mutating pipeline mechanics
+	 *  (guard/read/diff/dataview-refresh/notice) and are never settings-gated. */
+	kind: 'frontmatter' | 'content' | 'structural';
+	/** Returns whether this step should execute this pass. Absent = always runs. */
+	settingsGate?: (settings: CrucibleSettings) => boolean;
+	/** True for the four steps whose settingsGate reads `settings.lintStepEnabled` — the Lint
+	 *  tab panel renders a toggle for these and a static row (naming `configuredBySetting`,
+	 *  when present) for everything else. */
+	toggleable?: boolean;
+	/** UI-only: for non-toggleable gated steps, the existing setting that already governs
+	 *  them, surfaced as prose in the Lint tab panel (e.g. modified-date -> lintModifiedKey). */
+	configuredBySetting?: string;
+	run: (ctx: LintStepContext) => void | Promise<void>;
+}
+
+// The enumerable `Lint: all` pipeline, in fire order — refactored out of the previously
+// opaque body of lintFile() so a settings panel (and tests) can enumerate, gate, and assert
+// on individual steps. The frontmatter-kind steps still run inside ONE updateFrontmatter
+// call (lintFile threads them through a single callback, in this array's order) — the
+// write-consistency barrier in src/frontmatter.ts is a chokepoint quirk; splitting the write
+// into several calls would defeat it. See the lint step registry quirk in AGENTS.md.
+export const LINT_STEPS: LintStep[] = [
+	{
+		id: 'excluded-folder-guard',
+		label: 'Excluded-folder guard',
+		kind: 'structural',
+		run: (ctx) => {
+			if (isPathExcluded(ctx.settings, ctx.file.path, 'lint')) {
+				logWarn('lint', 'skipped — path is lint-excluded:', ctx.file.path);
+				ctx.aborted = true;
+			}
+		},
+	},
+	{
+		id: 'read-and-word-count',
+		label: 'Read note + calculate word count',
+		kind: 'structural',
+		run: async (ctx) => {
+			ctx.content = await ctx.app.vault.read(ctx.file);
+			ctx.wordCount = calculateWordCount(ctx.content);
+		},
+	},
+	{
+		id: 'parse-frontmatter-insert',
+		label: 'Parse frontmatter insert template',
+		kind: 'structural',
+		configuredBySetting: 'lintFrontmatterInsert',
+		run: async (ctx) => {
+			if (!ctx.settings.lintFrontmatterInsert) return;
+			const processedInsert = await applyTemplateString(ctx.settings.lintFrontmatterInsert, moment(), ctx.file.basename);
+			const lines = processedInsert.split('\n');
+			for (const line of lines) {
+				const parts = line.split(':');
+				if (parts.length >= 2) {
+					const key = parts[0]?.trim();
+					const value = parts.slice(1).join(':').trim();
+					if (key) ctx.insertYaml[key] = value;
+				}
+			}
+		},
+	},
+	{
+		id: 'insert-keys',
+		label: 'Insert configured frontmatter keys',
+		kind: 'frontmatter',
+		configuredBySetting: 'lintFrontmatterInsert',
+		run: (ctx) => {
+			const fm = ctx.fm as Record<string, unknown>;
+			for (const [key, value] of Object.entries(ctx.insertYaml)) {
+				upsertFrontmatterPropertyIfEmpty(fm, key, value);
+			}
+		},
+	},
+	{
+		id: 'created-date',
+		label: 'Stamp created date',
+		kind: 'frontmatter',
+		// Fix for the created/modified asymmetry: a blank lintCreatedKey now disables this
+		// step, matching the existing lintModifiedKey guard below.
+		settingsGate: (settings) => !!settings.lintCreatedKey,
+		configuredBySetting: 'lintCreatedKey',
+		run: (ctx) => {
+			upsertFrontmatterPropertyIfEmpty(ctx.fm as Record<string, unknown>, ctx.settings.lintCreatedKey, ctx.createdStr);
+		},
+	},
+	{
+		id: 'title-stamp',
+		label: 'Stamp title',
+		kind: 'frontmatter',
+		settingsGate: lintStepEnabledGate('title-stamp'),
+		toggleable: true,
+		run: (ctx) => {
+			upsertFrontmatterPropertyIfEmpty(ctx.fm as Record<string, unknown>, 'title', ctx.file.basename);
+		},
+	},
+	{
+		id: 'modified-date',
+		label: 'Stamp modified date',
+		kind: 'frontmatter',
+		settingsGate: (settings) => !!settings.lintModifiedKey,
+		configuredBySetting: 'lintModifiedKey',
+		run: (ctx) => {
+			upsertFrontmatterProperty(ctx.fm as Record<string, unknown>, ctx.settings.lintModifiedKey, ctx.todayStr);
+		},
+	},
+	{
+		id: 'word-count',
+		label: 'Write word count',
+		kind: 'frontmatter',
+		settingsGate: lintStepEnabledGate('word-count'),
+		toggleable: true,
+		run: (ctx) => {
+			upsertFrontmatterProperty(ctx.fm as Record<string, unknown>, 'word-count', ctx.wordCount);
+		},
+	},
+	{
+		id: 'derive-source-ids',
+		label: 'Derive source ID properties',
+		kind: 'frontmatter',
+		settingsGate: lintStepEnabledGate('derive-source-ids'),
+		toggleable: true,
+		run: (ctx) => {
+			deriveSourceIdProperties(ctx.fm as Record<string, unknown>);
+		},
+	},
+	{
+		id: 'sort-yaml',
+		label: 'Sort frontmatter keys',
+		kind: 'frontmatter',
+		settingsGate: lintStepEnabledGate('sort-yaml'),
+		toggleable: true,
+		run: (ctx) => {
+			sortFrontmatterProperties(ctx.fm as Record<string, unknown>, ctx.settings.lintYamlKeyPriority);
+		},
+	},
+	{
+		id: 'blank-line-after-yaml',
+		label: 'Ensure blank line after frontmatter',
+		kind: 'content',
+		settingsGate: (settings) => !!settings.lintBlankLineAfterYaml,
+		configuredBySetting: 'lintBlankLineAfterYaml',
+		run: async (ctx) => {
+			await ctx.app.vault.process(ctx.file, (contentAfterFM) => {
+				const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
+				if (!yamlMatch) return contentAfterFM;
+				const yamlBlockWithNewlines = yamlMatch[0];
+				const currentNewlines = yamlMatch[2] || "";
+				if (currentNewlines === "\n\n") return contentAfterFM;
+				const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
+				const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
+				return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
+			});
+		},
+	},
+	{
+		id: 're-read-diff',
+		label: 'Re-read + diff against original',
+		kind: 'structural',
+		run: async (ctx) => {
+			ctx.finalContent = await ctx.app.vault.read(ctx.file);
+			ctx.modified = ctx.finalContent !== ctx.content;
+		},
+	},
+	{
+		id: 'dataview-refresh',
+		label: 'Dataview refresh (fence-gated)',
+		kind: 'structural',
+		run: (ctx) => {
+			// Fire unconditionally (not gated on `modified`) whenever the note contains a
+			// dataview/dataviewjs fence — see refreshDataviewViews above for why.
+			if (ctx.silent) return;
+			if (ctx.app.plugins?.enabledPlugins.has('dataview') && DATAVIEW_FENCE_RE.test(ctx.finalContent)) {
+				refreshDataviewViews(ctx.app);
+			}
+		},
+	},
+	{
+		id: 'notice',
+		label: 'Completion notice',
+		kind: 'structural',
+		run: (ctx) => {
+			if (ctx.silent) return;
+			new Notice('Note linted');
+		},
+	},
+];
+
 export class Linter {
 	app: App;
 	settings: CrucibleSettings;
@@ -240,74 +463,70 @@ export class Linter {
 	}
 
 	async lintFile(file: TFile, silent: boolean = false): Promise<boolean> {
-		if (this.isPathIgnored(file.path)) {
-			logWarn('lint', 'skipped — path is lint-excluded:', file.path);
-			return true;
-		}
+		// Whether this pass actually changed the file on disk — derived by the re-read-diff
+		// step, inside the locked section, by re-reading after every write and comparing
+		// against the content this pass started from. This is the cheapest honest check
+		// available here: the read-and-word-count step already reads the file once, so one
+		// extra vault.read() after the writes costs little, and a raw content comparison
+		// can't be fooled the way an mtime comparison could — Obsidian's mtime
+		// granularity/update timing isn't guaranteed fine enough to distinguish two lint
+		// passes seconds apart. Threading a "did we write" boolean back out of
+		// updateFrontmatter/vault.process instead would mean changing updateFrontmatter's
+		// contract, which is a cross-cutting chokepoint owned outside this change — so the
+		// signal is derived locally, from the bytes, instead.
+		const ctx: LintStepContext = {
+			app: this.app,
+			file,
+			settings: this.settings,
+			silent,
+			content: '',
+			wordCount: 0,
+			insertYaml: {},
+			todayStr: moment().format('YYYY-MM-DD'),
+			createdStr: moment(file.stat.ctime).format('YYYY-MM-DD'),
+			finalContent: '',
+			modified: false,
+			aborted: false,
+		};
 
-		// Whether this pass actually changed the file on disk — derived below, inside the
-		// locked section, by re-reading after every write and comparing against the content
-		// this pass started from. This is the cheapest honest check available here: lintFile
-		// already reads the file once for calculateWordCount, so one extra vault.read() after
-		// the writes costs little, and a raw content comparison can't be fooled the way an
-		// mtime comparison could — Obsidian's mtime granularity/update timing isn't guaranteed
-		// fine enough to distinguish two lint passes seconds apart. Threading a "did we write"
-		// boolean back out of updateFrontmatter/vault.process instead would mean changing
-		// updateFrontmatter's contract, which is a cross-cutting chokepoint owned outside this
-		// change — so the signal is derived locally, from the bytes, instead.
-		let modified = false;
-		// Populated inside the locked section below; read out here (rather than only
-		// used for the `modified` compare) so the post-lock dataview-fence check can
-		// reuse it instead of taking another vault.read().
-		let finalContent = '';
+		const getStep = (id: string): LintStep => {
+			const step = LINT_STEPS.find(s => s.id === id);
+			if (!step) throw new Error(`lint step not registered: ${id}`);
+			return step;
+		};
+		const runStep = async (id: string) => {
+			const step = getStep(id);
+			if (step.settingsGate && !step.settingsGate(this.settings)) return;
+			await step.run(ctx);
+		};
+
+		await runStep('excluded-folder-guard');
+		if (ctx.aborted) return true;
+
 		try {
 			await withOptionalNoteLock(this.noteLocks, file.path, 'lint', () => withMaterializing(this.setMaterializing, async () => {
-				const content = await this.app.vault.read(file);
-				const wordCount = this.calculateWordCount(content);
-				const insertYaml: Record<string, string> = {};
-				
-				if (this.settings.lintFrontmatterInsert) {
-					const processedInsert = await applyTemplateString(this.settings.lintFrontmatterInsert, moment(), file.basename);
-					const lines = processedInsert.split('\n');
-					for (const line of lines) {
-						const parts = line.split(':');
-						if (parts.length >= 2) {
-							const key = parts[0]?.trim();
-							const value = parts.slice(1).join(':').trim();
-							if (key) insertYaml[key] = value;
-						}
-					}
-				}
+				await runStep('read-and-word-count');
+				await runStep('parse-frontmatter-insert');
 
-				const todayStr = moment().format('YYYY-MM-DD');
-				const createdStr = moment(file.stat.ctime).format('YYYY-MM-DD');
+				// The frontmatter mutator steps stay inside this ONE updateFrontmatter call —
+				// the registry enumerates them for display/gating, but the write-consistency
+				// barrier in src/frontmatter.ts is a chokepoint quirk that a split into
+				// several calls would defeat.
 				await updateFrontmatter(this.app, file, (fm) => {
-					for (const [key, value] of Object.entries(insertYaml)) {
-						upsertFrontmatterPropertyIfEmpty(fm, key, value);
+					ctx.fm = fm;
+					for (const step of LINT_STEPS) {
+						if (step.kind !== 'frontmatter') continue;
+						if (step.settingsGate && !step.settingsGate(this.settings)) continue;
+						// updateFrontmatter's callback is synchronous (processFrontMatter's
+						// contract) — every frontmatter-kind step's run() is written
+						// synchronously to match, so there is nothing to await here.
+						void step.run(ctx);
 					}
-					upsertFrontmatterPropertyIfEmpty(fm, this.settings.lintCreatedKey, createdStr);
-					upsertFrontmatterPropertyIfEmpty(fm, 'title', file.basename);
-					if (this.settings.lintModifiedKey) upsertFrontmatterProperty(fm, this.settings.lintModifiedKey, todayStr);
-					upsertFrontmatterProperty(fm, 'word-count', wordCount);
-					deriveSourceIdProperties(fm);
-					sortFrontmatterProperties(fm, this.settings.lintYamlKeyPriority);
+					ctx.fm = undefined;
 				});
 
-				if (this.settings.lintBlankLineAfterYaml) {
-					await this.app.vault.process(file, (contentAfterFM) => {
-						const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
-						if (!yamlMatch) return contentAfterFM;
-						const yamlBlockWithNewlines = yamlMatch[0];
-						const currentNewlines = yamlMatch[2] || "";
-						if (currentNewlines === "\n\n") return contentAfterFM;
-						const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
-						const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
-						return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
-					});
-				}
-
-				finalContent = await this.app.vault.read(file);
-				modified = finalContent !== content;
+				await runStep('blank-line-after-yaml');
+				await runStep('re-read-diff');
 			}));
 		} catch (e) {
 			if (!silent) new Notice(`Error during lint (${file.path}): ${(e as Error).message}`);
@@ -315,22 +534,11 @@ export class Linter {
 			return false;
 		}
 
-		logWarn('lint', 'lint pass', modified ? 'modified' : 'did not modify', file.path);
+		logWarn('lint', 'lint pass', ctx.modified ? 'modified' : 'did not modify', file.path);
 
-		if (!silent) {
-			// Fire unconditionally (not gated on `modified`) whenever the note contains a
-			// dataview/dataviewjs fence — checked against the content this pass already
-			// read for the `modified` compare above, no extra vault.read(). The refresh
-			// primitive is non-destructive (a revision bump, not a leaf rebuild — see
-			// refreshDataviewViews), so the flicker motivation for the old `modified` gate
-			// no longer applies, and this restores the "run Lint: all to refresh tables"
-			// pathway that gate had broken (lint's writes are idempotent, so re-linting an
-			// already-clean note used to never refresh).
-			if (this.app.plugins?.enabledPlugins.has('dataview') && DATAVIEW_FENCE_RE.test(finalContent)) {
-				refreshDataviewViews(this.app);
-			}
-			new Notice('Note linted');
-		}
+		await runStep('dataview-refresh');
+		await runStep('notice');
+
 		return true;
 	}
 

@@ -512,6 +512,10 @@ export interface CrucibleSettings {
 	lintModifiedKey: string;
 	lintBlankLineAfterYaml: boolean;
 	lintOnSave: boolean;
+	// Per-step on/off switches for the `Lint: all` pipeline (src/lint.ts LINT_STEPS).
+	// Absent key = enabled — keeps a vault that never opens the Lint pipeline panel linting
+	// byte-identically to before this setting existed.
+	lintStepEnabled: Record<string, boolean>;
 	// Lint: Localize Attachments
 	localizeAttachmentsTriggerOnCreate: boolean;
 	localizeAttachmentsTriggerOnEdit: boolean;
@@ -726,6 +730,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	lintModifiedKey: 'updated',
 	lintBlankLineAfterYaml: true,
 	lintOnSave: false,
+	lintStepEnabled: {},
 	localizeAttachmentsTriggerOnCreate: false,
 	localizeAttachmentsTriggerOnEdit: false,
 	localizeAttachmentsTriggerOnPaste: false,
