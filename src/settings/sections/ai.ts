@@ -5,7 +5,7 @@ import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provide
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
 import { FileSuggest, FolderSuggest, ProviderModelSuggest } from "../../suggesters";
-import { ConfirmModal } from "../../confirmModal";
+import { confirmDestructive } from "../destructiveActions";
 import {
 	PROVIDER_KIND_LABELS,
 	SearchWithContainer,
@@ -119,15 +119,14 @@ async function deleteProvider(tab: CrucibleSettingTab, index: number) {
 	const providerLabel = provider.name || '(unnamed)';
 	const refs = providerRefsPointingAt(tab.plugin.settings, provider);
 	const message = refs.length > 0
-		? `Used by: ${refs.join(', ')}. Its stored API key is deleted with it. This cannot be undone.`
+		? `Its stored API key is deleted with it. This cannot be undone.`
 		: `This provider is not currently used by search, agents, or chain steps. Its stored API key is deleted with it. This cannot be undone.`;
-	const confirmed = await new ConfirmModal(tab.app, {
+	const impact = refs.length > 0 ? [`Used by: ${refs.join(', ')}.`] : undefined;
+	if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'provider-delete', {
 		title: `Delete provider "${providerLabel}"?`,
 		message,
-		confirmText: 'Delete provider',
-		destructive: true,
-	}).openAndAwait();
-	if (!confirmed) return;
+		impact,
+	}))) return;
 
 	tab.plugin.settings.providers.splice(index, 1);
 	tab.editingProviderIndex = -1;
@@ -298,6 +297,11 @@ function mountProviderApiKeyControl(tab: CrucibleSettingTab, containerEl: HTMLEl
 		store: (v) => tab.plugin.providerManager.storeApiKey(provider.id, v),
 		clear: () => tab.plugin.providerManager.deleteApiKey(provider.id),
 		expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(providerSecretKey(provider.id)),
+		confirm: {
+			app: tab.app,
+			settings: tab.plugin.settings,
+			message: `Clear the stored API key for provider "${provider.name || '(unnamed)'}"? Anything using this provider will fail until a new key is set.`,
+		},
 	});
 }
 
@@ -537,6 +541,9 @@ function renderProviderModelsList(tab: CrucibleSettingTab, containerEl: HTMLElem
 					.onChange(async (v) => { model.label = v; await tab.plugin.saveSettings(); })
 					.inputEl.addClass('pi-width-normal'))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove model').onClick(async () => {
+					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'provider-model-delete', {
+						message: `Delete model "${model.label || model.id || '(unnamed)'}" from provider "${provider.name || '(unnamed)'}"?`,
+					}))) return;
 					models.splice(modelIndex, 1);
 					await tab.plugin.saveSettings();
 					tab.display();
@@ -902,7 +909,12 @@ function describeAgent(tab: CrucibleSettingTab, agent: Agent): string {
 }
 
 async function deleteAgent(tab: CrucibleSettingTab, index: number) {
-	if (!tab.plugin.settings.agents[index]) return;
+	const agent = tab.plugin.settings.agents[index];
+	if (!agent) return;
+
+	if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'agent-delete', {
+		message: `Delete agent "${agent.name || '(unnamed)'}"? This cannot be undone.`,
+	}))) return;
 
 	tab.plugin.settings.agents.splice(index, 1);
 	tab.editingAgentIndex = -1;
@@ -1185,6 +1197,9 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 				new Setting(list)
 					.setName(label)
 					.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove').onClick(async () => {
+						if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'constrained-binding-model-delete', {
+							message: `Remove "${label}" from the allowed models list?`,
+						}))) return;
 						allow.splice(allowIndex, 1);
 						await tab.plugin.saveSettings();
 						tab.display();

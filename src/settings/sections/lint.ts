@@ -5,6 +5,7 @@ import { FolderSuggest } from "../../suggesters";
 import { bindToggle, bindText, bindTextArea, bindSearch } from "../bind";
 import { renderLocalizeAttachmentsSettings } from "./localize";
 import { LINT_STEPS } from "../../lint";
+import { confirmDestructive } from "../destructiveActions";
 
 // Prose shown for each LINT_STEPS entry in the "Lint: all pipeline" panel below. Kept
 // separate from the registry itself (src/lint.ts) since the registry is also bundled into
@@ -44,6 +45,10 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 			.setButtonText('Lint Vault')
 			.setWarning()
 			.onClick(async () => {
+				const noteCount = tab.app.vault.getMarkdownFiles().length;
+				if (!(await confirmDestructive(tab.app, s, 'lint-vault-run', {
+					message: `Run "Lint: all" on all ${noteCount} Markdown note${noteCount === 1 ? '' : 's'} in the vault? This rewrites frontmatter across the vault.`,
+				}))) return;
 				await tab.plugin.linter.lintVault();
 			})
 		);
@@ -104,7 +109,12 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 			set: (v) => { entry.folder = v; },
 			suggest: (el) => { el.classList.add('crucible-full-width-search'); new FolderSuggest(tab.app, el); },
 		}, save);
-		setting.addExtraButton(cb => { cb.setIcon('trash').setTooltip('Remove').onClick(async () => { s.excludedFolders.splice(index, 1); await save(); tab.display(); }); });
+		setting.addExtraButton(cb => { cb.setIcon('trash').setTooltip('Remove').onClick(async () => {
+			if (!(await confirmDestructive(tab.app, s, 'lint-excluded-folder-delete', {
+				message: `Delete excluded folder "${entry.folder || '(unnamed)'}"?`,
+			}))) return;
+			s.excludedFolders.splice(index, 1); await save(); tab.display();
+		}); });
 		setting.infoEl.remove();
 
 		const scopes = row.createDiv({ cls: 'crucible-exclusion-scopes' });

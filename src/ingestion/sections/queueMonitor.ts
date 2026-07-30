@@ -4,6 +4,7 @@ import type { StopJobOutcome } from '../../orchestration/cancellation';
 import type { ServiceHealthSnapshot } from '../../orchestration/serviceHealth';
 import { runServiceOutageRequeueFlow } from '../../orchestration/failedJobRepair';
 import { ConfirmModal } from '../../confirmModal';
+import { confirmDestructive } from '../../settings/destructiveActions';
 import { renderSortableTable } from '../render/sortableTable';
 import { renderFileLink } from '../render/cells';
 import { formatDateTime } from '../render/format';
@@ -453,6 +454,14 @@ function renderCancelAction(
 		: 'Drop this job from the queue before it runs.';
 	cancel.addEventListener('click', () => {
 		void (async () => {
+			// clsl-WP-4: job-cancel is registered default-suppressed (preserves the documented
+			// single-row-cancel policy above) — with default settings this resolves true without
+			// showing a modal, and only prompts once a user has explicitly turned it on.
+			if (!(await confirmDestructive(host.app, host.plugin.settings, 'job-cancel', {
+				message: status === 'running'
+					? 'Stop this running job? It stops at its next checkpoint.'
+					: 'Remove this job from the queue before it runs?',
+			}))) return;
 			cancel.disabled = true;
 			cancel.setText(status === 'running' ? 'Stopping…' : 'Cancelling…');
 			const outcome = (await host.plugin.orchestrationAutoRunner?.stopJob(type, key)) ?? 'not-found';

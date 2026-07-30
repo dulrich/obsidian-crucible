@@ -7,6 +7,7 @@ import { FileSuggest, FolderSuggest } from "../../suggesters";
 import { SearchWithContainer, sortByNameWithEmptyLast, addWarningIcon } from "../shared";
 import { bindText, bindToggle, bindSearch, bindNumber } from "../bind";
 import { GUARD_TYPE_LABELS, normalizeGuardConditionForType, renderGuardConditionFields } from "./guardConditionFields";
+import { confirmDestructive } from "../destructiveActions";
 
 // Job types sensible to enqueue directly from a trigger. chain_run/command_run are
 // omitted: the "chain" action uses chain_run, and command_run needs a command id.
@@ -112,6 +113,22 @@ function queueableTriggerCommands(tab: CrucibleSettingTab): Command[] {
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// clsl-WP-4: shared by both trigger-delete entry points (list row + edit-form button) so
+// they confirm through the same registry id and behave identically.
+async function deleteTrigger(tab: CrucibleSettingTab, index: number) {
+	const trigger = tab.plugin.settings.triggers[index];
+	if (!trigger) return;
+	const label = trigger.name || '(unnamed)';
+	if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'trigger-delete', {
+		message: `Delete trigger "${label}"? This cannot be undone.`,
+	}))) return;
+	tab.plugin.settings.triggers.splice(index, 1);
+	tab.editingTriggerIndex = -1;
+	await tab.plugin.saveSettings();
+	tab.plugin.registerTriggers();
+	tab.display();
+}
+
 export function renderTriggerListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	new Setting(containerEl).setName('Triggers').setHeading();
 	containerEl.createEl('p', { text: 'Run a chain, queueable command, or workflow automatically when an event or schedule fires. Triggered work runs through the queue (dedupe, pacing, timeouts, note locks).' });
@@ -143,10 +160,7 @@ export function renderTriggerListSection(tab: CrucibleSettingTab, containerEl: H
 					tab.display();
 				}))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete trigger').onClick(async () => {
-					tab.plugin.settings.triggers.splice(index, 1);
-					await tab.plugin.saveSettings();
-					tab.plugin.registerTriggers();
-					tab.display();
+					await deleteTrigger(tab, index);
 				}));
 			const warning = getTriggerWarning(tab, trigger);
 			if (warning) addWarningIcon(setting.nameEl, warning);
@@ -199,6 +213,9 @@ function renderTriggerConditions(tab: CrucibleSettingTab, containerEl: HTMLEleme
 				});
 			})
 			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove condition').onClick(async () => {
+				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'trigger-guard-condition-delete', {
+					message: `Delete condition ${i + 1} of trigger "${trigger.name || '(unnamed)'}"?`,
+				}))) return;
 				trigger.conditions.splice(i, 1);
 				await save();
 				reregister();
@@ -463,10 +480,6 @@ export function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElem
 			tab.display();
 		}))
 		.addButton(bt => bt.setButtonText('Delete trigger').setWarning().onClick(async () => {
-			tab.plugin.settings.triggers.splice(tab.editingTriggerIndex, 1);
-			tab.editingTriggerIndex = -1;
-			await save();
-			reregister();
-			tab.display();
+			await deleteTrigger(tab, tab.editingTriggerIndex);
 		}));
 }
