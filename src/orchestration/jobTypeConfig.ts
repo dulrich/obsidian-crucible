@@ -16,11 +16,19 @@ import {
 } from './utils/imageDescribe';
 
 // Per-type behavior for the unified queue. File types are backed by the markdown
-// JobStore (inbox/running/done/failed); memory types run in-memory under the same
-// runner/gate (the folded enrichment queue). `maxParallel`/`minIntervalMs` may be
-// implemented as getters so they track live settings.
+// JobStore (inbox/running/done/failed); `db` types are backed by the SQLite
+// `SqliteJobStore`/`DbJobBackend` (durable, no vault files); memory types run
+// in-memory under the same runner/gate (the folded enrichment queue).
+// `maxParallel`/`minIntervalMs` may be implemented as getters so they track live
+// settings.
 export interface JobTypeConfig {
-	persistence: 'file' | 'memory';
+	/**
+	 * Which `JobBackend` `Orchestrator.register` builds for this type. `'db'` is the
+	 * destination for every durable type (thq WP-8 flips them and deletes the other
+	 * two); no type declares it yet, so the DB path is dormant in production and
+	 * exercised only by tests until then.
+	 */
+	persistence: 'file' | 'memory' | 'db';
 	/** Per-type worker count for the drain (default 1). A per-type user override wins unless `maxParallelFixed` is set. */
 	maxParallel: number;
 	/**

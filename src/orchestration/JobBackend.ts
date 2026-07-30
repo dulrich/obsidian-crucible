@@ -99,19 +99,73 @@ export interface JobBackend {
 	refill(): void;
 }
 
-// The single "the file queue changed" emit, with the current bucket counts.
+/**
+ * Where the `orchestration-queue-updated` payload comes from.
+ *
+ * The emit used to derive its counts from `JobStore.listFolder('queued'|'running')`
+ * directly, which hard-wired the *file* queue into the event bus: a DB-backed backend
+ * has no folders to list, and its counts are a `COUNT(*)`. This one-method abstraction
+ * is the seam — anything that can answer "how many queued / how many running" can drive
+ * the event, and the wire payload it produces is unchanged
+ * (`{ queued: number, running: number }`).
+ *
+ * Async on purpose: the file implementation is two awaited `listFolder` passes, and
+ * flattening it to a sync shape would mean changing what the file path counts (its
+ * cheap sync alternative, `countFolder`, counts folder *children* rather than parsed
+ * job files).
+ */
+export interface QueueCountsSource {
+	queueCounts(): Promise<{ queued: number; running: number }>;
+}
+
+/**
+ * What the emit helpers accept. The `JobStore` arm is a transitional convenience so
+ * every existing call site that already holds the file store (`FileJobBackend`,
+ * `Orchestrator`, `failedJobRepair`, `SearchIndexWorkflow`) keeps compiling and
+ * behaving identically — it is adapted to a `QueueCountsSource` on the way in. When the
+ * file backend is deleted (WP-8) this union collapses to `QueueCountsSource`.
+ */
+export type QueueCountsProvider = QueueCountsSource | JobStore;
+
+// Memoized per JobStore so the adapter's *identity* is stable: the coalescer below is
+// keyed on the resolved source, and a fresh adapter object per call would give every
+// emit its own window (i.e. no coalescing at all).
+const fileCountsSources = new WeakMap<object, QueueCountsSource>();
+
+/** The file queue's counts, exactly as `emitQueueChanged` derived them before the
+ * seam existed: one `listFolder` pass per active bucket, in parallel. */
+export function fileQueueCountsSource(store: JobStore): QueueCountsSource {
+	const existing = fileCountsSources.get(store);
+	if (existing) return existing;
+	const source: QueueCountsSource = {
+		async queueCounts() {
+			const [queued, running] = await Promise.all([
+				store.listFolder('queued'),
+				store.listFolder('running'),
+			]);
+			return { queued: queued.length, running: running.length };
+		},
+	};
+	fileCountsSources.set(store, source);
+	return source;
+}
+
+function resolveCountsSource(provider: QueueCountsProvider): QueueCountsSource {
+	const candidate = provider as QueueCountsSource;
+	if (typeof candidate.queueCounts === 'function') return candidate;
+	return fileQueueCountsSource(provider as JobStore);
+}
+
+// The single "the queue changed" emit, with the current bucket counts.
 // Exported (rather than staying private to FileJobBackend) because bulk operations
 // have to emit exactly once for the whole batch: every listener answers this event
-// with a full listFolder re-read, and the autorunner answers it with kickAll().
-export async function emitQueueChanged(plugin: CruciblePlugin, store: JobStore): Promise<void> {
+// with a full re-read of the queue, and the autorunner answers it with kickAll().
+export async function emitQueueChanged(plugin: CruciblePlugin, source: QueueCountsProvider): Promise<void> {
 	const bus = plugin.ingestionEvents;
 	if (!bus) return;
 	try {
-		const [queued, running] = await Promise.all([
-			store.listFolder('queued'),
-			store.listFolder('running'),
-		]);
-		bus.emit('orchestration-queue-updated', { queued: queued.length, running: running.length });
+		const counts = await resolveCountsSource(source).queueCounts();
+		bus.emit('orchestration-queue-updated', { queued: counts.queued, running: counts.running });
 	} catch (err) {
 		logError('failed to emit orchestration-queue-updated', err);
 	}
@@ -133,9 +187,12 @@ interface QueueChangeCoalescer {
 	timer: ReturnType<typeof setTimeout> | null;
 }
 
-// Per JobStore (i.e. per vault queue), so two backends draining different types share
-// one window rather than each getting its own.
-const queueChangeCoalescers = new WeakMap<JobStore, QueueChangeCoalescer>();
+// Per counts source (i.e. per queue), so two backends draining different types out of
+// the same queue share one window rather than each getting its own. `fileQueueCountsSource`
+// memoizes its adapter per JobStore and `DbJobBackend` memoizes its own per SqliteJobStore,
+// so "same queue" still resolves to one key exactly as it did when this was keyed on the
+// JobStore itself.
+const queueChangeCoalescers = new WeakMap<QueueCountsSource, QueueChangeCoalescer>();
 
 /**
  * Leading-plus-trailing-edge coalesced `emitQueueChanged`, for the high-frequency
@@ -150,11 +207,12 @@ const queueChangeCoalescers = new WeakMap<JobStore, QueueChangeCoalescer>();
  * `removeQueuedJob` emit exactly once for the whole operation, which is a stronger
  * guarantee than coalescing and is asserted by tests.
  */
-export function scheduleQueueChanged(plugin: CruciblePlugin, store: JobStore): void {
-	let state = queueChangeCoalescers.get(store);
+export function scheduleQueueChanged(plugin: CruciblePlugin, provider: QueueCountsProvider): void {
+	const source = resolveCountsSource(provider);
+	let state = queueChangeCoalescers.get(source);
 	if (!state) {
 		state = { lastEmitAt: 0, timer: null };
-		queueChangeCoalescers.set(store, state);
+		queueChangeCoalescers.set(source, state);
 	}
 	// A trailing emit is already booked; it will carry whatever this change did.
 	if (state.timer) return;
@@ -162,14 +220,14 @@ export function scheduleQueueChanged(plugin: CruciblePlugin, store: JobStore): v
 	const since = now - state.lastEmitAt;
 	if (since >= QUEUE_CHANGE_COALESCE_MS) {
 		state.lastEmitAt = now;
-		void emitQueueChanged(plugin, store);
+		void emitQueueChanged(plugin, source);
 		return;
 	}
 	const pending = state;
 	pending.timer = setTimeout(() => {
 		pending.timer = null;
 		pending.lastEmitAt = Date.now();
-		void emitQueueChanged(plugin, store);
+		void emitQueueChanged(plugin, source);
 	}, QUEUE_CHANGE_COALESCE_MS - since);
 }
 

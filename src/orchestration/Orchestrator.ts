@@ -5,11 +5,14 @@ import { Workflow } from './workflows/Workflow';
 import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
-import { JobBackend, RunOutcome, emitQueueChanged, resolveTimeoutMs } from './JobBackend';
+import { JobBackend, QueueCountsProvider, QueueCountsSource, RunOutcome, emitQueueChanged, fileQueueCountsSource, resolveTimeoutMs } from './JobBackend';
 import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
+import { DbJobBackend, dbQueueCountsSource } from './DbJobBackend';
+import { SqliteJobStore } from './db/SqliteJobStore';
+import { SqliteUnavailableError, openJobsDb, resolveJobsDbPath } from './db/sqlite';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
@@ -32,20 +35,116 @@ function yieldToEventLoop(): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+/** How the Orchestrator obtains its shared `SqliteJobStore`. Injectable so tests can
+ * hand over a `:memory:`-backed store (or one that throws) without touching the
+ * vault-path resolution. */
+export interface OrchestratorOptions {
+	openDbStore?: () => SqliteJobStore;
+}
+
 export class Orchestrator {
 	private configs: Map<JobType, JobTypeConfig> = new Map();
 	private gates: Map<JobType, MinIntervalGate> = new Map();
 	private backends: Map<JobType, JobBackend> = new Map();
+	/** One store for every `db` type, opened lazily on the first such registration —
+	 * see `dbStoreOrThrow`. Null until then (and forever, while no type is `'db'`). */
+	private dbStore: SqliteJobStore | null = null;
+	/** Memoized composite counts source; rebuilt once, when the DB store appears. */
+	private combinedCounts: QueueCountsSource | null = null;
+	private readonly openDbStore: () => SqliteJobStore;
 
-	constructor(private plugin: CruciblePlugin, private store: JobStore) {}
+	constructor(private plugin: CruciblePlugin, private store: JobStore, options: OrchestratorOptions = {}) {
+		this.openDbStore = options.openDbStore
+			?? (() => new SqliteJobStore(openJobsDb(resolveJobsDbPath(this.plugin.app, this.plugin.pluginDataPath('jobs.sqlite')))));
+	}
 
 	register(type: JobType, workflow: Workflow, config: JobTypeConfig = DEFAULT_JOB_TYPE_CONFIG): void {
+		// Built BEFORE the config/gate maps are written: a `db` registration whose store
+		// cannot be opened throws, and a half-registered type (config present, no
+		// backend) would report itself in `getConfig` while `jobTypes()` never lists it.
+		const backend = this.createBackend(type, workflow, config);
 		this.configs.set(type, config);
 		this.gates.set(type, new MinIntervalGate(config.minIntervalMs));
-		const backend: JobBackend = config.persistence === 'memory'
-			? new MemoryJobBackend(this.plugin, type, config, workflow)
-			: new FileJobBackend(this.plugin, this.store, type, config, workflow);
 		this.backends.set(type, backend);
+	}
+
+	private createBackend(type: JobType, workflow: Workflow, config: JobTypeConfig): JobBackend {
+		switch (config.persistence) {
+			case 'memory':
+				return new MemoryJobBackend(this.plugin, type, config, workflow);
+			case 'db':
+				return new DbJobBackend(this.plugin, this.dbStoreOrThrow(), type, config, workflow);
+			default:
+				return new FileJobBackend(this.plugin, this.store, type, config, workflow);
+		}
+	}
+
+	/**
+	 * Opens the shared jobs DB on first use.
+	 *
+	 * `SqliteUnavailableError` is surfaced as a visible `Notice` + `logError` and then
+	 * **rethrown**: there is no fallback storage for the queue (queue-db investigation,
+	 * §Storage decision), and a `db` type that silently registered against nothing
+	 * would accept enqueues and drop them. Failing the registration is the honest
+	 * outcome — the alternative is a queue that looks alive and loses work.
+	 */
+	private dbStoreOrThrow(): SqliteJobStore {
+		if (this.dbStore) return this.dbStore;
+		try {
+			this.dbStore = this.openDbStore();
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			new Notice(`Orchestrate: the job queue database is unavailable — ${detail}`);
+			logError('failed to open the orchestration jobs database', err);
+			throw err instanceof SqliteUnavailableError
+				? err
+				: new SqliteUnavailableError(`Could not open the orchestration jobs database: ${detail}`, err);
+		}
+		// The queue-changed payload has to describe the WHOLE queue, so once a DB store
+		// exists the bulk emits sum both halves. With no DB store this stays null and the
+		// file store drives the emit exactly as before.
+		const fileSource = fileQueueCountsSource(this.store);
+		const dbSource = dbQueueCountsSource(this.dbStore);
+		this.combinedCounts = {
+			async queueCounts() {
+				const [file, db] = await Promise.all([fileSource.queueCounts(), dbSource.queueCounts()]);
+				return { queued: file.queued + db.queued, running: file.running + db.running };
+			},
+		};
+		return this.dbStore;
+	}
+
+	/** The counts behind the bulk `orchestration-queue-updated` emits. */
+	private queueCountsProvider(): QueueCountsProvider {
+		return this.combinedCounts ?? this.store;
+	}
+
+	/**
+	 * Crash-lease + hang sweep over the DB queue, the `db` half of what
+	 * `scan()`'s stale-running loop does for file jobs. Per-type stale window is the
+	 * type's effective timeout + a 30s buffer (`staleRunningMsForTimeout`), and a job
+	 * this process is still executing is never swept. No-op with no `db` type
+	 * registered. WP-7 calls this from `scan()`.
+	 */
+	recoverStaleDbJobs(): number {
+		if (!this.dbStore) return 0;
+		return this.dbStore.recoverStale(
+			Date.now(),
+			type => staleRunningMsForTimeout(resolveTimeoutMs(this.plugin, this.getConfig(type))),
+			(id, type) => this.isRunning(type, id),
+		);
+	}
+
+	/**
+	 * Age-based terminal retention over the DB queue: deletes done/failed/cancelled
+	 * rows settled more than `orchestrationJobRetentionDays` ago (0/blank = keep
+	 * forever). This is the pruning the file queue never had — the reason 37,081 job
+	 * files accumulated. No-op with no `db` type registered. WP-7 calls this from
+	 * `scan()`.
+	 */
+	pruneTerminalDbJobs(): number {
+		if (!this.dbStore) return 0;
+		return this.dbStore.pruneTerminal(Date.now(), this.plugin.settings.orchestrationJobRetentionDays);
 	}
 
 	getConfig(type: JobType): JobTypeConfig {
@@ -225,7 +324,7 @@ export class Orchestrator {
 		const backend = this.backends.get(type);
 		if (!backend) return 'not-queued';
 		const outcome = await backend.removeQueued(key);
-		if (outcome === 'removed') await emitQueueChanged(this.plugin, this.store);
+		if (outcome === 'removed') await emitQueueChanged(this.plugin, this.queueCountsProvider());
 		return outcome;
 	}
 
@@ -241,7 +340,7 @@ export class Orchestrator {
 			: Array.from(this.backends.values());
 		let cleared = 0;
 		for (const backend of backends) cleared += await backend.clearQueued();
-		if (cleared > 0) await emitQueueChanged(this.plugin, this.store);
+		if (cleared > 0) await emitQueueChanged(this.plugin, this.queueCountsProvider());
 		return cleared;
 	}
 

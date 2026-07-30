@@ -4,7 +4,7 @@ import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
-import { JobBackend, RunOutcome, resolveTimeoutMs, runWorkflowWithTimeout, scheduleQueueChanged } from './JobBackend';
+import { JobBackend, RunOutcome, fileQueueCountsSource, resolveTimeoutMs, runWorkflowWithTimeout, scheduleQueueChanged } from './JobBackend';
 import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
@@ -490,7 +490,11 @@ export class FileJobBackend implements JobBackend {
 	// emit costs two listFolder passes here plus one per listener plus a kickAll. See
 	// scheduleQueueChanged. Bulk operations still emit exactly once, from the Orchestrator.
 	private emitQueueUpdate(): void {
-		scheduleQueueChanged(this.plugin, this.store);
+		// The counts come through the `QueueCountsSource` seam (memoized per JobStore, so
+		// the 250ms coalescing window is still shared per queue) rather than the emit
+		// reaching into `listFolder` itself — that hard-wiring is what a DB-backed queue
+		// could not satisfy.
+		scheduleQueueChanged(this.plugin, fileQueueCountsSource(this.store));
 	}
 
 	private emitTrackerEvent(result: WorkflowResult, status: 'done' | 'failed'): void {
