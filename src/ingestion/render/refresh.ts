@@ -36,7 +36,18 @@ export async function refreshWithScrollPreserved(
 	if (coordinator && scrollEl) {
 		// 0 -> 1: the first concurrent refresh in this burst captures, before ANY
 		// of the concurrent renders has started tearing anything down.
-		if (coordinator.count === 0) coordinator.scrollTop = scrollEl.scrollTop;
+		if (coordinator.count === 0) {
+			coordinator.scrollTop = scrollEl.scrollTop;
+			coordinator.anchor = captureAnchor(scrollEl);
+			coordinator.cancelled = false;
+			// Busy for the whole render window: teardown/rebuild code (this call's
+			// own `render()`, and any sibling's, per the shared-scroller reasoning
+			// above) routinely assigns/clamps scrollTop as a side effect, and that
+			// churn is not a user scroll — suppress the cancel listener until every
+			// concurrent render has settled (count back to 0, below).
+			coordinator.suppressScrollEvents = true;
+			armUserScrollCancel(scrollEl, coordinator);
+		}
 		coordinator.count++;
 	}
 	const focusToken = captureFocus(region);
@@ -53,7 +64,10 @@ export async function refreshWithScrollPreserved(
 			// session).
 			if (coordinator.count <= 0) {
 				coordinator.count = 0;
-				restoreScrollTop(scrollEl, coordinator.scrollTop);
+				// Renders have settled — from here until the double-rAF restore
+				// actually writes, a 'scroll' event is presumed user-caused (A-3).
+				coordinator.suppressScrollEvents = false;
+				restoreScroll(scrollEl, coordinator);
 			}
 		}
 	}
@@ -81,9 +95,35 @@ export async function refreshWithScrollPreserved(
 // transition from 0 in-flight refreshes to 1 (before any of the concurrent
 // renders has started), and restore only happens on the transition back to 0
 // (after every concurrent render has settled).
+// A-1: the anchor captured at acquire time — a live reference to the first
+// element (in document order under the scroller) whose top edge sat at/below
+// the viewport top, plus its distance below that top. Re-deriving
+// `el.offsetTop - offset` at restore time follows the anchor to wherever it
+// ends up, which is what makes an above-section height change a no-op for the
+// reader instead of a jump: keyed `<tr>`s and the once-created section cards
+// survive a reconciled rebuild by identity, so the same element, read again,
+// reports its new (correct) position. `offsetTop`, not
+// `getBoundingClientRect()`, per the brief — it's measurable in the FakeElement
+// test harness and untouched by any transform/zoom, neither of which this
+// dashboard uses anyway.
+interface ScrollAnchor {
+	el: HTMLElement;
+	offset: number;
+}
+
 interface ScrollCoordinatorState {
 	count: number;
 	scrollTop: number;
+	anchor: ScrollAnchor | null;
+	// A-3: true once the pending restore has been cancelled by a user scroll
+	// during the settled-but-not-yet-restored window; both the anchor and the
+	// absolute-fallback restore are skipped for the rest of this acquire cycle.
+	cancelled: boolean;
+	// True while scrollTop churn is expected/self-caused (renders in flight, or
+	// the coordinator's own restore writes) and the cancel listener should
+	// ignore the resulting 'scroll' event rather than treat it as the user.
+	suppressScrollEvents: boolean;
+	scrollListener: (() => void) | null;
 }
 
 const scrollCoordinators = new WeakMap<HTMLElement, ScrollCoordinatorState>();
@@ -91,10 +131,94 @@ const scrollCoordinators = new WeakMap<HTMLElement, ScrollCoordinatorState>();
 function acquireScrollCoordinator(scrollEl: HTMLElement): ScrollCoordinatorState {
 	let state = scrollCoordinators.get(scrollEl);
 	if (!state) {
-		state = { count: 0, scrollTop: 0 };
+		state = {
+			count: 0,
+			scrollTop: 0,
+			anchor: null,
+			cancelled: false,
+			suppressScrollEvents: false,
+			scrollListener: null,
+		};
 		scrollCoordinators.set(scrollEl, state);
 	}
 	return state;
+}
+
+// Walks `root`'s element descendants via `.children` (not `querySelectorAll`,
+// which the FakeElement test harness only supports tag-filtered) in document
+// order — the same order a reader encounters them top-to-bottom for ordinary
+// block flow, which is what "first element at/below the viewport top" needs.
+function collectElementDescendants(root: HTMLElement): HTMLElement[] {
+	const out: HTMLElement[] = [];
+	const walk = (node: HTMLElement) => {
+		const children = node.children as unknown as ArrayLike<HTMLElement>;
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i];
+			if (!child) continue;
+			out.push(child);
+			walk(child);
+		}
+	};
+	walk(root);
+	return out;
+}
+
+// A-1 capture: the first element (in document order) whose top edge is at/below
+// the scroller's current viewport top. `null` when nothing qualifies (e.g. the
+// scroller is scrolled to 0, or its only content so far is above the viewport
+// top) — the restore path falls back to the absolute `scrollTop` capture in
+// that case, same as it always did.
+function captureAnchor(scrollEl: HTMLElement): ScrollAnchor | null {
+	const viewportTop = scrollEl.scrollTop;
+	for (const el of collectElementDescendants(scrollEl)) {
+		if (el.offsetTop >= viewportTop) {
+			return { el, offset: el.offsetTop - viewportTop };
+		}
+	}
+	return null;
+}
+
+// A-1 restore target: the anchor if it's still attached under the scroller
+// (survives an in-place reconciled rebuild), else the plain captured
+// `scrollTop` — this is what covers the unkeyed blogControl/channelControl
+// container rebuilds and queueMonitor's `body.empty()` branches, whose old
+// elements are gone entirely rather than reused.
+function computeRestoreTarget(scrollEl: HTMLElement, coordinator: ScrollCoordinatorState): number {
+	const anchor = coordinator.anchor;
+	if (anchor && anchor.el.isConnected && scrollEl.contains(anchor.el)) {
+		return anchor.el.offsetTop - anchor.offset;
+	}
+	return coordinator.scrollTop;
+}
+
+// A-3: arms a listener that treats any 'scroll' event NOT caused by the
+// coordinator itself (guarded via `suppressScrollEvents`) as the user actively
+// repositioning the view, and cancels the pending restore rather than fight it.
+// One-shot: disarmed either when it fires, or when the restore it was guarding
+// completes/cancels.
+function armUserScrollCancel(scrollEl: HTMLElement, coordinator: ScrollCoordinatorState): void {
+	if (coordinator.scrollListener) return;
+	const listener = () => {
+		if (coordinator.suppressScrollEvents) return;
+		coordinator.cancelled = true;
+		disarmUserScrollCancel(scrollEl, coordinator);
+	};
+	coordinator.scrollListener = listener;
+	scrollEl.addEventListener('scroll', listener);
+}
+
+function disarmUserScrollCancel(scrollEl: HTMLElement, coordinator: ScrollCoordinatorState): void {
+	if (!coordinator.scrollListener) return;
+	scrollEl.removeEventListener('scroll', coordinator.scrollListener);
+	coordinator.scrollListener = null;
+}
+
+// Assigns `scrollEl.scrollTop`, guarding the write so the A-3 cancel listener
+// doesn't mistake the coordinator's own restore for a user scroll.
+function writeScrollTop(scrollEl: HTMLElement, coordinator: ScrollCoordinatorState, value: number): void {
+	coordinator.suppressScrollEvents = true;
+	scrollEl.scrollTop = value;
+	coordinator.suppressScrollEvents = false;
 }
 
 // Restores `scrollEl.scrollTop` after a DOUBLE rAF — the rebuilt content needs a
@@ -106,13 +230,27 @@ function acquireScrollCoordinator(scrollEl: HTMLElement): ScrollCoordinatorState
 // it. This is a single extra attempt, not a retry loop — a value still wrong after
 // a third frame reflects a real content change (the prior scroll position no
 // longer exists), not a transient clamp, and re-asserting forever would fight the
-// user's own subsequent scrolling.
-function restoreScrollTop(scrollEl: HTMLElement, target: number): void {
+// user's own subsequent scrolling. The restore target is recomputed at each
+// write (`computeRestoreTarget`), not the single value captured at acquire time,
+// so an anchor that has moved between capture and now (content above it grew or
+// shrank) is followed rather than pinned to a stale offset.
+function restoreScroll(scrollEl: HTMLElement, coordinator: ScrollCoordinatorState): void {
 	requestAnimationFrame(() => {
 		requestAnimationFrame(() => {
-			scrollEl.scrollTop = target;
+			if (coordinator.cancelled) {
+				disarmUserScrollCancel(scrollEl, coordinator);
+				return;
+			}
+			const target = computeRestoreTarget(scrollEl, coordinator);
+			writeScrollTop(scrollEl, coordinator, target);
 			requestAnimationFrame(() => {
-				if (scrollEl.scrollTop !== target) scrollEl.scrollTop = target;
+				if (coordinator.cancelled) {
+					disarmUserScrollCancel(scrollEl, coordinator);
+					return;
+				}
+				const reassertTarget = computeRestoreTarget(scrollEl, coordinator);
+				if (scrollEl.scrollTop !== reassertTarget) writeScrollTop(scrollEl, coordinator, reassertTarget);
+				disarmUserScrollCancel(scrollEl, coordinator);
 			});
 		});
 	});
