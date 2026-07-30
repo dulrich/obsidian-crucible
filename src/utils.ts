@@ -27,6 +27,11 @@ export function getCommandHotkeyLabel(app: App, fullCommandId: string): string |
 
 export const FRONTMATTER_REGEX = new RegExp('^[\\uFEFF]?---\\s*[^\\S\\r\\n]*[\\r\\n]+([\\s\\S]*?)[\\r\\n]+---[^\\S\\r\\n]*([\\r\\n]*)');
 
+// In-flight folder creations, shared per path so N concurrent ensureFolder callers
+// collapse onto one createFolder instead of racing check-then-create. The map is
+// cleaned in a finally, so a completed (or failed) create never pins a stale promise.
+const inFlightFolderCreates = new Map<string, Promise<void>>();
+
 export async function ensureFolder(app: App, path: string): Promise<void> {
 	const normalizedPath = path.replace(/\\/g, '/').replace(/\/+$/, '');
 	const parts = normalizedPath.split('/');
@@ -35,9 +40,27 @@ export async function ensureFolder(app: App, path: string): Promise<void> {
 	for (const part of parts) {
 		currentPath = currentPath ? `${currentPath}/${part}` : part;
 		const folder = app.vault.getAbstractFileByPath(currentPath);
-		if (!(folder instanceof TFolder)) {
-			await app.vault.createFolder(currentPath);
+		if (folder instanceof TFolder) continue;
+		// The pre-check above and the create below are not atomic: at first startup
+		// after the queue tree was deleted on disk, every void'ed startup chain
+		// (orchestrator scan, trigger enqueues, auto-localize) saw `null` here at
+		// once, and all but the winner rejected with core's "Folder already exists."
+		// as an uncaught promise rejection. Two layers make the create idempotent:
+		// share one in-flight create per path, and treat a rejection as success iff
+		// the post-condition holds (the folder exists) — rethrow otherwise.
+		let pending = inFlightFolderCreates.get(currentPath);
+		if (!pending) {
+			const target = currentPath;
+			pending = (async () => {
+				try {
+					await app.vault.createFolder(target);
+				} catch (err) {
+					if (!(app.vault.getAbstractFileByPath(target) instanceof TFolder)) throw err;
+				}
+			})().finally(() => { inFlightFolderCreates.delete(target); });
+			inFlightFolderCreates.set(target, pending);
 		}
+		await pending;
 	}
 }
 

@@ -1,4 +1,5 @@
 import { TFile } from 'obsidian';
+import { logWarn } from './log';
 
 export type AutoLocalizeSource = 'create' | 'edit';
 
@@ -98,7 +99,7 @@ export class AutoLocalizeScheduler {
 		this.timers.set(state.path, state);
 		state.timer = setTimeout(() => {
 			state.timer = null;
-			void this.run(state);
+			this.run(state).catch((e) => logWarn('auto-localize run failed', state.path, e));
 		}, delayMs);
 	}
 
