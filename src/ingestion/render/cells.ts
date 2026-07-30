@@ -7,6 +7,7 @@ import {
 	removeIgnoredBlogId,
 	removeIgnoredVideoId,
 } from '../../orchestration/utils/ignoredIds';
+import { ENRICHMENT_JOB_TYPE } from '../../orchestration/jobTypeConfig';
 import { markSelfRefreshedForEcho } from './echoSuppress';
 import { parseMarkdownLink } from './format';
 import type { DashboardHost, IntakeKind, SectionId, TableStateContext, UncapturedVideoRow } from './types';
@@ -68,29 +69,50 @@ export function renderOpenButton(app: App, td: HTMLElement, file: TFile): void {
 	});
 }
 
-export function renderEnrichedCell(td: HTMLElement, plugin: CruciblePlugin, row: UncapturedVideoRow): void {
+/**
+ * The Uncaptured Videos "Enriched?" cell.
+ *
+ * `inFlight` is passed in rather than looked up here (thq WP-8): the queue is durable
+ * now, so a per-row status lookup would be a per-row query on a table that already
+ * computed the whole map once for its repaint signature. Passing it also keeps this
+ * function synchronous, which the column renderer requires.
+ *
+ * The Enrich click goes through `enqueueAndRun` — the same path the "captures without
+ * metadata" section uses — so a manual click drains immediately regardless of the
+ * auto-run gate, and a duplicate collapses onto the existing job (the backend's dedupe)
+ * instead of being rejected outright as the memory queue's `enqueue` did.
+ */
+export function renderEnrichedCell(
+	td: HTMLElement,
+	plugin: CruciblePlugin,
+	row: UncapturedVideoRow,
+	inFlight: 'queued' | 'running' | null,
+): void {
 	if (row.enrichmentFile) {
 		renderFileLink(plugin.app, td, row.enrichmentFile, 'metadata');
 		return;
 	}
-	const queue = plugin.enrichmentQueue;
-	const entry = queue?.getEntry(row.videoId) ?? null;
-	if (entry && (entry.status === 'pending' || entry.status === 'running')) {
-		td.setText(entry.status === 'running' ? 'enriching…' : 'queued');
+	if (inFlight) {
+		td.setText(inFlight === 'running' ? 'enriching…' : 'queued');
 		return;
 	}
 	const btn = td.createEl('button', { text: 'Enrich' });
 	btn.addEventListener('click', () => {
-		if (!queue) {
-			new Notice('Enrichment service not available.');
-			return;
-		}
-		const ok = queue.enqueue({
-			videoId: row.videoId,
-			title: row.title,
-			channelName: row.channelName,
-		});
-		if (!ok) new Notice('Already queued or in progress.');
+		void (async () => {
+			const runner = plugin.orchestrationAutoRunner;
+			if (!runner) {
+				new Notice('Enrichment service not available.');
+				return;
+			}
+			btn.disabled = true;
+			const job = await runner.enqueueAndRun(ENRICHMENT_JOB_TYPE, {
+				videoId: row.videoId,
+				title: row.title,
+				channelName: row.channelName,
+			}, { priority: 'high', lane: 'user' });
+			if (job) btn.setText('Queued');
+			else btn.disabled = false;
+		})();
 	});
 }
 

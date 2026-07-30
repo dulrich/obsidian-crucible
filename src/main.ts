@@ -11,8 +11,8 @@ import { SecretRegistry, describeSecretKey } from "./secretRegistry";
 import { AgentManager, agentCommandId } from "./agents";
 import { TableOfContentsUI } from "./toc";
 import { applyTemplateString } from './utils';
-import { JobStore } from './orchestration/JobStore';
 import { Orchestrator } from './orchestration/Orchestrator';
+import type { AutoSourceFn } from './orchestration/Orchestrator';
 import type { JobType } from './orchestration/types';
 import { DailyBriefLiteWorkflow } from './orchestration/workflows/DailyBriefLiteWorkflow';
 import { TranscriptRefinerWorkflow } from './orchestration/workflows/TranscriptRefinerWorkflow';
@@ -33,10 +33,9 @@ import { SourceEvalDashboardView, SOURCE_EVAL_DASHBOARD_VIEW_TYPE } from './sour
 import { IngestionEventBus } from './orchestration/events';
 import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
-import { EnrichmentQueueAdapter } from './orchestration/EnrichmentQueueAdapter';
-import type { AutoSourceFn } from './orchestration/EnrichmentQueueAdapter';
 import { migrateJobTypeControls, readTypeAutorun, setTypeControl } from './orchestration/autorunGate';
-import { chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
+import { maybeShowArchiveNotice } from './orchestration/archiveNotice';
+import { ENRICHMENT_JOB_TYPE, chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
 import { ServiceHealthRegistry } from './orchestration/serviceHealth';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
@@ -114,7 +113,6 @@ export default class CruciblePlugin extends Plugin {
 	providerManager: ProviderManager;
 	secretRegistry: SecretRegistry;
 	agentManager: AgentManager;
-	jobStore: JobStore;
 	orchestrator: Orchestrator;
 	/**
 	 * Per-dependency circuit breaker for the queue. Deliberately in-memory and NEVER
@@ -126,7 +124,6 @@ export default class CruciblePlugin extends Plugin {
 	ingestionEvents: IngestionEventBus;
 	noteLocks: NoteLockManager;
 	private noteLockOverlay: NoteLockOverlay;
-	enrichmentQueue: EnrichmentQueueAdapter;
 	searchManager: SearchManager;
 	// Passive, bounded, local record of executed vault searches and which result was opened
 	// (src/search/queryLog.ts). Lives in the plugin's data dir, never in the vault's note tree.
@@ -212,35 +209,23 @@ export default class CruciblePlugin extends Plugin {
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
-		this.jobStore = new JobStore(this);
 		// Before the orchestrator and the autorunner: both read it, and the autorunner
 		// subscribes to its transitions in its own constructor.
 		this.serviceHealth = new ServiceHealthRegistry();
-		this.orchestrator = new Orchestrator(this, this.jobStore);
-		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
-		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow(), transcriptRefineJobConfig());
-		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow(), youtubeTrackerJobConfig());
-		this.orchestrator.register('youtube_tracker_consolidate', new YoutubeTrackerConsolidateWorkflow());
-		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
-		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
-		this.orchestrator.register('link_scan', new LinkScanWorkflow());
-		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
-		this.orchestrator.register('youtube_channel_enrich', new YoutubeChannelEnrichWorkflow(), youtubeChannelEnrichJobConfig(this));
-		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow(), youtubeChannelEnrichSweepJobConfig());
-		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
-		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
-		this.orchestrator.register('image_describe_note', new ImageDescribeNoteWorkflow(), imageDescribeNoteJobConfig());
-		this.orchestrator.register('image_describe_backfill', new ImageDescribeBackfillWorkflow(), imageDescribeBackfillJobConfig());
-		this.orchestrator.register('image_describe_batch', new ImageDescribeBatchWorkflow(), imageDescribeBatchJobConfig());
-		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
-		this.orchestrator.register('search_embed_missing', new SearchEmbedMissingWorkflow(), searchEmbedMissingJobConfig());
-		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
-		this.orchestrator.register('search_upsert_batch', new SearchUpsertBatchWorkflow(), searchBatchJobConfig());
-		this.orchestrator.register('search_delete_path', new SearchDeletePathWorkflow(), searchFileJobConfig());
-		this.orchestrator.register('search_sweep', new SearchSweepWorkflow(), searchSweepJobConfig());
+		this.orchestrator = new Orchestrator(this);
+		// thq WP-8: the first `register` opens the jobs DB, and a DB that cannot be
+		// opened fails the registration hard (SqliteUnavailableError, already surfaced as
+		// a Notice + logError inside the Orchestrator). Catching here is what keeps that
+		// honest failure *scoped*: orchestration is dead — no types registered, so every
+		// enqueue answers null and no drain runs — while lint, localize, chains, captures
+		// and search all still load. Letting it escape `onload` would take the whole
+		// plugin down over a queue that is, by design, disposable.
+		try {
+			this.registerJobTypes();
+		} catch (e) {
+			logError('orchestration is unavailable: the jobs database could not be opened', e);
+		}
 		void this.migrateGlobalAutorun();
-		this.enrichmentQueue = new EnrichmentQueueAdapter(this);
-		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 		this.triggers = new TriggerRegistry(this, () => this.isMaterializing);
 		this.registerFoundingTriggers();
 		// Migrate a held note-lock when its note is moved/renamed mid-operation, so
@@ -269,6 +254,10 @@ export default class CruciblePlugin extends Plugin {
 			this.searchIndexCoordinator.markLayoutReady();
 			this.fileOpenIndex.markLayoutReady();
 			this.orchestrator.scan({ notify: false }).catch((e) => logError('startup orchestrator scan failed', e));
+			// thq WP-8: tell the user, once, that the old markdown queue folder is now a
+			// frozen archive they may delete. See archiveNotice.ts for why it is a Notice,
+			// why the folder is never auto-deleted, and why the flag is persisted.
+			void maybeShowArchiveNotice(this.app, this.settings, () => this.saveSettings());
 			void this.warnOnMissingSecrets();
 			// Obsidian replays vault.on('create') for every pre-existing file during
 			// vault indexing at startup — with a populated orchestration queue that's
@@ -388,7 +377,6 @@ export default class CruciblePlugin extends Plugin {
 		this.triggers?.dispose();
 		this.orchestrationAutoRunner?.dispose();
 		this.serviceHealth?.dispose();
-		this.enrichmentQueue?.dispose();
 		this.ingestionEvents?.dispose();
 	}
 
@@ -719,15 +707,46 @@ export default class CruciblePlugin extends Plugin {
 	async setEnrichmentAutoEnqueue(enabled: boolean, autoSource?: AutoSourceFn): Promise<void> {
 		this.settings.ingestionYoutubeAutoEnqueueEnabled = enabled;
 		await this.saveSettings();
-		this.enrichmentQueue?.setAutoSourceEnabled(enabled);
-		if (enabled && autoSource) this.enrichmentQueue?.setAutoSource(autoSource);
+		this.orchestrator?.setAutoSourceEnabled(ENRICHMENT_JOB_TYPE, enabled);
+		if (enabled && autoSource) this.orchestrator?.setAutoSource(ENRICHMENT_JOB_TYPE, autoSource);
+	}
+
+	/**
+	 * Every job type the queue knows about, in one place.
+	 *
+	 * Extracted from `onload` (thq WP-8) so the whole block can sit inside one
+	 * try/catch: the first `register` call is what opens the jobs database, and an
+	 * unopenable database throws out of it. See the call site for why that failure is
+	 * caught and scoped rather than allowed to abort plugin load.
+	 */
+	private registerJobTypes(): void {
+		this.orchestrator.register('daily_brief_lite', new DailyBriefLiteWorkflow());
+		this.orchestrator.register('transcript_refine', new TranscriptRefinerWorkflow(), transcriptRefineJobConfig());
+		this.orchestrator.register('youtube_tracker', new YoutubeTrackerWorkflow(), youtubeTrackerJobConfig());
+		this.orchestrator.register('youtube_tracker_consolidate', new YoutubeTrackerConsolidateWorkflow());
+		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
+		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
+		this.orchestrator.register('link_scan', new LinkScanWorkflow());
+		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
+		this.orchestrator.register('youtube_channel_enrich', new YoutubeChannelEnrichWorkflow(), youtubeChannelEnrichJobConfig(this));
+		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow(), youtubeChannelEnrichSweepJobConfig());
+		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
+		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
+		this.orchestrator.register('image_describe_note', new ImageDescribeNoteWorkflow(), imageDescribeNoteJobConfig());
+		this.orchestrator.register('image_describe_backfill', new ImageDescribeBackfillWorkflow(), imageDescribeBackfillJobConfig());
+		this.orchestrator.register('image_describe_batch', new ImageDescribeBatchWorkflow(), imageDescribeBatchJobConfig());
+		this.orchestrator.register('search_rebuild', new SearchRebuildWorkflow(), searchRebuildJobConfig());
+		this.orchestrator.register('search_embed_missing', new SearchEmbedMissingWorkflow(), searchEmbedMissingJobConfig());
+		this.orchestrator.register('search_upsert_file', new SearchUpsertFileWorkflow(), searchFileJobConfig());
+		this.orchestrator.register('search_upsert_batch', new SearchUpsertBatchWorkflow(), searchBatchJobConfig());
+		this.orchestrator.register('search_delete_path', new SearchDeletePathWorkflow(), searchFileJobConfig());
+		this.orchestrator.register('search_sweep', new SearchSweepWorkflow(), searchSweepJobConfig());
 	}
 
 	// One-shot migration for the removed global Autorun master: if it was on, its
-	// file-type effect folds into the per-type auto-run flags — seed autoRun:true for
-	// every file-backed type without an explicit flag so previously-draining file
-	// types keep draining. Memory types were never governed by it. Runs after the
-	// backends register (needs the type list); persists only if something changed.
+	// effect folds into the per-type auto-run flags — seed autoRun:true for every type
+	// without an explicit flag so previously-draining types keep draining. Runs after
+	// the backends register (needs the type list); persists only if something changed.
 	private async migrateGlobalAutorun(): Promise<void> {
 		const legacy = this.settings as CrucibleSettings & { orchestrationQueueAutorunEnabled?: unknown };
 		if (!('orchestrationQueueAutorunEnabled' in legacy)) return;

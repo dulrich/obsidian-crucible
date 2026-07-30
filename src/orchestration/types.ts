@@ -121,11 +121,20 @@ export interface ScanReport {
 	done: number;
 	failed: number;
 	cancelled: number;
+	/**
+	 * How many jobs the crash-lease + hang sweep bounced `running → queued`
+	 * (`Orchestrator.recoverStaleDbJobs()`).
+	 *
+	 * thq WP-8: this used to count the file queue's own stale-running sweep, and the db
+	 * sweep reported separately as `dbRecovered` while both queues coexisted. With the
+	 * file queue gone there is exactly one recovery number, so it keeps the original
+	 * name rather than the transitional one — two names for one count is the confusion,
+	 * not the clarity.
+	 */
 	recovered: number;
-	/** `Orchestrator.recoverStaleDbJobs()`'s count, folded in here so the scan notice
-	 * can mention it once a `db` type exists — WP-6 landed the hook, WP-7 wires it into
-	 * `scan()`. Always 0 with no `db` type registered. */
-	dbRecovered: number;
-	/** `Orchestrator.pruneTerminalDbJobs()`'s count — same shape as `dbRecovered`. */
-	dbPruned: number;
+	/** `Orchestrator.pruneTerminalDbJobs()`'s count: terminal rows deleted by the
+	 * `orchestrationJobRetentionDays` retention policy. Genuinely distinct from
+	 * `recovered` (and never had a file-side counterpart — the file queue had no
+	 * pruning at all, which is why 37,081 job files accumulated). */
+	pruned: number;
 }

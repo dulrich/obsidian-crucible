@@ -1,4 +1,6 @@
-import type { EnrichmentQueueItem } from '../../orchestration/EnrichmentQueueAdapter';
+import type { JobSeed } from '../../orchestration/Orchestrator';
+import { ENRICHMENT_JOB_TYPE } from '../../orchestration/jobTypeConfig';
+import { computeMetadataFetchStatus } from '../data/metadataFetchStatus';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderEnrichedCell, renderFileLink, renderIgnoreButton, renderChannelLink, renderExternalLink } from '../render/cells';
 import { displayLabel, formatDuration } from '../render/format';
@@ -10,7 +12,7 @@ export interface UncapturedVideosSection {
 	// The enrichment auto-source: uncaptured videos without an enrichment file
 	// yet, in the section's current sort order. The cache lives here but stays
 	// reachable from the host (DashboardHost#uncapturedQueueItems).
-	uncapturedQueueItems(): EnrichmentQueueItem[];
+	uncapturedQueueItems(): JobSeed[];
 	// Renders the Auto-enqueue (source) toggle into the section header — the control
 	// that governs whether uncaptured videos are automatically enqueued for metadata
 	// enrichment. Draining those jobs is a separate control (Queue Configuration).
@@ -40,13 +42,14 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		const rows = await computeUncapturedVideoRows(host.app, host.plugin);
 		uncapturedVideosCache = rows;
 
-		// P5: the 'enriched' column (renderEnrichedCell) reads the enrichment
-		// queue's LIVE per-video status (pending/running/absent) — state that
-		// does not live on UncapturedVideoRow itself, so two passes with
-		// byte-identical `rows` could still need to repaint. Fold each row's
-		// current status into the signature (not the whole queue map, which
-		// would also react to unrelated videos not in this list).
-		const enrichedExtra = rows.map(r => host.plugin.enrichmentQueue?.getEntry(r.videoId)?.status ?? null);
+		// P5: the 'enriched' column (renderEnrichedCell) reads the LIVE per-video
+		// metadata-fetch status (queued/running/absent) — state that does not live
+		// on UncapturedVideoRow itself, so two passes with byte-identical `rows`
+		// could still need to repaint. Fold each row's current status into the
+		// signature (not the whole map, which would also react to unrelated videos
+		// not in this list).
+		const inFlight = await computeMetadataFetchStatus(host.plugin);
+		const enrichedExtra = rows.map(r => inFlight.byStandaloneVideoId.get(r.videoId) ?? null);
 		if (shouldRepaint(ctx, computeRowSignature(rows, enrichedExtra))) {
 			renderTableSection<UncapturedVideoRow>({
 				body, ctx, rows,
@@ -62,7 +65,7 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 					{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
 					{ key: 'watch', label: '', render: (r, td) => renderExternalLink(td, r.url, 'watch') },
 					{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'youtube', r.videoId, 'uncapturedVideos', 'ignoredVideos', ctx) },
-					{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r) },
+					{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r, inFlight.byStandaloneVideoId.get(r.videoId) ?? null) },
 				],
 			});
 		}
@@ -70,18 +73,24 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		// Refresh the queue's auto-source so it stays aligned with current sort.
 		// Not gated on the paint skip above — this is queue bookkeeping, not DOM
 		// work, and must stay live even on a pass that skipped repainting.
-		if (host.plugin.enrichmentQueue?.isAutoSourceEnabled()) {
-			host.plugin.enrichmentQueue.setAutoSource(() => uncapturedQueueItems());
+		if (host.plugin.orchestrator?.isAutoSourceEnabled(ENRICHMENT_JOB_TYPE)) {
+			host.plugin.orchestrator.setAutoSource(ENRICHMENT_JOB_TYPE, () => uncapturedQueueItems());
 		}
 	}
 
-	function uncapturedQueueItems(): EnrichmentQueueItem[] {
+	// Params only: the queue derives the dedupe key from them via the type's own
+	// `youtubeMetadataDedupeKey`, so this can't mint a key the backend would dedupe
+	// differently. No `targetPath` — these videos have no vault note yet, which is
+	// exactly what makes them standalone enrichments.
+	function uncapturedQueueItems(): JobSeed[] {
 		return uncapturedVideosCache
 			.filter(r => !r.enrichmentFile)
 			.map(r => ({
-				videoId: r.videoId,
-				title: r.title,
-				channelName: r.channelName,
+				params: {
+					videoId: r.videoId,
+					title: r.title,
+					channelName: r.channelName,
+				},
 			}));
 	}
 

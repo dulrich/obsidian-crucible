@@ -128,6 +128,32 @@ export class SqliteJobStore {
 		return row ? mapRow(row) : null;
 	}
 
+	/**
+	 * Dedupe keys of jobs that reached a terminal state at or after `sinceMs` — the
+	 * auto-source re-seed suppression set (`Orchestrator.refill`).
+	 *
+	 * `findActive` deliberately spans `queued`+`running` only, which is right for
+	 * dedupe: a settled job must not block a genuine new request. But an auto-source is
+	 * not a request — it re-offers the same candidate set on every refill, so without a
+	 * settled-recently check a cancelled item comes straight back and the user's Cancel
+	 * reads as ignored. This is the durable form of the window `MemoryJobQueue` got from
+	 * "refill skips any tracked key" + `sweepTerminal(retentionMs)`; it expires on its
+	 * own, so the source may legitimately offer the item again later.
+	 */
+	settledDedupeKeysSince(sinceMs: number): Set<string> {
+		const rows = this.db.prepare(`
+			SELECT DISTINCT dedupe_key FROM jobs
+			WHERE dedupe_key IS NOT NULL
+				AND status IN ('done', 'failed', 'cancelled')
+				AND settled_at IS NOT NULL AND settled_at >= ?
+		`).all(sinceMs);
+		const keys = new Set<string>();
+		for (const row of rows) {
+			if (typeof row.dedupe_key === 'string' && row.dedupe_key) keys.add(row.dedupe_key);
+		}
+		return keys;
+	}
+
 	/** Soonest future `defer_until` among still-`queued` rows, or null if none are
 	 * deferred — lets a backend schedule a wake timer instead of polling. */
 	nextDeferredWakeMs(): number | null {

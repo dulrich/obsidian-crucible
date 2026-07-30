@@ -9,7 +9,8 @@ import {
 	youtubeApiDeferredResult,
 } from '../utils/youtubeApi';
 
-// One job per note. With params.targetPath it links the video's metadata note onto
+// One job per note (durable since thq WP-8 — this was the last `memory` type). With
+// params.targetPath it links the video's metadata note onto
 // that note — fetching via the Data API only when the metadata note doesn't exist
 // yet (link-first; see ingestYoutubeVideoMetadata for the lock choreography).
 // Without a targetPath it runs standalone (the enrichment path for videos not yet
@@ -28,7 +29,7 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 					return { status: 'failed', error: 'Missing params.videoId' };
 				}
 				const result = await enrichYoutubeMetadataStandalone(plugin, paramVideoId);
-				return this.toResult(result, paramVideoId);
+				return this.emitEnriched(plugin, this.toResult(result, paramVideoId), paramVideoId, '');
 			}
 
 			const file = plugin.app.vault.getAbstractFileByPath(targetPath);
@@ -43,13 +44,52 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 			}
 
 			const result = await ingestYoutubeVideoMetadata(plugin, file, videoId);
-			return this.toResult(result, targetPath);
+			return this.emitEnriched(plugin, this.toResult(result, targetPath), videoId, targetPath);
 		} catch (e) {
 			// The Data API itself is down/throttled — a service-level deferral, not a
 			// per-job failure. See the class doc on YoutubeApiUnavailableError.
 			if (e instanceof YoutubeApiUnavailableError) return youtubeApiDeferredResult(e);
 			throw e;
 		}
+	}
+
+	/**
+	 * Emits `metadata-enriched` for a successful run, and hands the result straight
+	 * back so the call sites above stay one-liners.
+	 *
+	 * This emit used to live in `MemoryJobBackend.runEntry`'s done branch — the one
+	 * place in the queue that knew this specific job type by name (`if (this.type !==
+	 * 'youtube_metadata_fetch') return`). thq WP-8 deleted that backend, and re-homing
+	 * the emit here rather than into `DbJobBackend` is the point: a generic backend
+	 * should not carry a per-type event, and the workflow already holds everything the
+	 * payload needs. It matches how the standalone command path has always done it
+	 * (`internalCommands.ts` emits the same event after its own write).
+	 *
+	 * Fires only for `done` with a metadata path that resolves to a real `TFile`,
+	 * exactly as the backend's version did — the dashboard's `uncapturedVideos` refresh
+	 * and the `youtube-metadata-enriched` trigger both hang off it, and neither should
+	 * fire for a failure.
+	 */
+	private emitEnriched(
+		plugin: WorkflowContext['plugin'],
+		result: WorkflowResult,
+		videoId: string,
+		targetPath: string,
+	): WorkflowResult {
+		if (result.status !== 'done') return result;
+		const bus = plugin.ingestionEvents;
+		if (!bus) return result;
+		const metadataPath = result.outputPaths?.[0];
+		if (!metadataPath) return result;
+		const metadataFile = plugin.app.vault.getAbstractFileByPath(metadataPath);
+		if (!(metadataFile instanceof TFile)) return result;
+		const sourceFile = targetPath ? plugin.app.vault.getAbstractFileByPath(targetPath) : null;
+		bus.emit('metadata-enriched', {
+			videoId,
+			metadataFile,
+			sourceFile: sourceFile instanceof TFile ? sourceFile : undefined,
+		});
+		return result;
 	}
 
 	private toResult(

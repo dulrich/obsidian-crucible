@@ -1,37 +1,34 @@
 import { Notice } from 'obsidian';
-import { JobStore } from './JobStore';
-import { JobPriority, JobStatus, JobType, OrchestrationEnqueueOptions, OrchestrationJob, ScanReport } from './types';
+import { JobStatus, JobType, OrchestrationEnqueueOptions, OrchestrationJob, ScanReport } from './types';
 import { Workflow } from './workflows/Workflow';
 import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
-import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
 import {
 	JobBackend,
-	QueueCountsProvider,
 	QueueCountsSource,
 	RunOutcome,
 	emitQueueChanged,
-	fileQueueCountsSource,
 	hasJobQuerySeam,
 	resolveTimeoutMs,
 } from './JobBackend';
 import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
-import { FileJobBackend } from './FileJobBackend';
-import { MemoryJobBackend } from './MemoryJobBackend';
 import { DbJobBackend, dbQueueCountsSource, dbRowToOrchestrationJob } from './DbJobBackend';
 import { SqliteJobStore } from './db/SqliteJobStore';
 import { SqliteUnavailableError, openJobsDb, resolveJobsDbPath } from './db/sqlite';
-import { laneRank } from './lanes';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
 // Backstop for jobs that slipped the per-job timeout entirely — e.g. a plugin
-// reload mid-run leaves a job stranded in the running folder. `scan()` re-queues
+// reload mid-run leaves a job stranded in the running bucket. `scan()` re-queues
 // these. The autorun timeout (orchestrationAutorunTimeoutSeconds) is the primary
 // mechanism; this only catches what no live timer could.
 const STALE_RUNNING_MS = 60 * 60 * 1000;
 const STALE_RUNNING_TIMEOUT_BUFFER_MS = 30_000;
+
+/** Default window a settled job suppresses its own auto-source re-seed for, when the
+ * type declares no `terminalRetentionMs` — the same 60s `MemoryJobQueue` used. */
+const DEFAULT_AUTO_SOURCE_SUPPRESSION_MS = 60_000;
 
 export type { RunOutcome };
 
@@ -39,55 +36,20 @@ export function staleRunningMsForTimeout(timeoutMs: number): number {
 	return timeoutMs > 0 ? timeoutMs + STALE_RUNNING_TIMEOUT_BUFFER_MS : STALE_RUNNING_MS;
 }
 
-// Mirrors failedJobRepair.ts's yieldToEventLoop: lets a long recovery sweep interleave
-// with the rest of the event loop rather than blocking it start-to-finish.
-function yieldToEventLoop(): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, 0));
+/**
+ * One candidate an auto-source offers the queue. Params only — the *key* is derived by
+ * the type's own `dedupeKey`, so an auto-source physically cannot mint a key the
+ * backend would dedupe differently (the drift `EnrichmentQueueAdapter.itemToSeed` had
+ * to be careful about by hand).
+ */
+export interface JobSeed {
+	params: Record<string, unknown>;
+	lane?: OrchestrationJob['lane'];
 }
 
-// Same rank table `FileJobBackend`/`DbJobBackend` each keep their own copy of
-// (source citation: `JobStore.ts:18-22`) — duplicated here rather than exported from
-// either backend, matching the existing per-file pattern rather than inventing a new
-// shared module for one three-line switch.
-function priorityRank(priority: JobPriority): number {
-	switch (priority) {
-		case 'high': return 0;
-		case 'normal': return 1;
-		case 'low': return 2;
-	}
-}
-
-// The claim-order comparator `JobStore.listFolder` and `SqliteJobStore`'s
-// `ORDER BY lane_rank, priority_rank, created, id` both already apply on their own
-// side — this is what lets `listJobs` below merge two already-sorted lists (file +
-// db) into one globally-ordered list without re-deriving either store's own sort.
-function compareJobClaimOrder(a: OrchestrationJob, b: OrchestrationJob): number {
-	const lane = laneRank(a.lane) - laneRank(b.lane);
-	if (lane !== 0) return lane;
-	const priority = priorityRank(a.priority) - priorityRank(b.priority);
-	if (priority !== 0) return priority;
-	const created = a.created.localeCompare(b.created);
-	return created !== 0 ? created : a.id.localeCompare(b.id);
-}
-
-// Two-pointer merge of two already-sorted (claim-order) lists — the k-way-merge
-// building block `listJobs` uses to combine the file store's jobs (all types, one
-// shared folder) with the db store's jobs (all `db` types, one shared table) into a
-// single globally-ordered list, cheaply: each source stays a single query/read, no
-// matter how many job types share it.
-function mergeJobsInClaimOrder(a: OrchestrationJob[], b: OrchestrationJob[]): OrchestrationJob[] {
-	if (b.length === 0) return a;
-	if (a.length === 0) return b;
-	const out: OrchestrationJob[] = [];
-	let i = 0;
-	let j = 0;
-	while (i < a.length && j < b.length) {
-		out.push(compareJobClaimOrder(a[i]!, b[j]!) <= 0 ? a[i++]! : b[j++]!);
-	}
-	while (i < a.length) out.push(a[i++]!);
-	while (j < b.length) out.push(b[j++]!);
-	return out;
-}
+/** A function that offers the current candidate set for a type. Called on every
+ * refill, so it reads whatever the dashboard is showing right now. */
+export type AutoSourceFn = () => JobSeed[];
 
 /** How the Orchestrator obtains its shared `SqliteJobStore`. Injectable so tests can
  * hand over a `:memory:`-backed store (or one that throws) without touching the
@@ -100,20 +62,24 @@ export class Orchestrator {
 	private configs: Map<JobType, JobTypeConfig> = new Map();
 	private gates: Map<JobType, MinIntervalGate> = new Map();
 	private backends: Map<JobType, JobBackend> = new Map();
-	/** One store for every `db` type, opened lazily on the first such registration —
-	 * see `dbStoreOrThrow`. Null until then (and forever, while no type is `'db'`). */
+	/** The one store every registered type shares, opened lazily on the first
+	 * registration — see `dbStoreOrThrow`. Null only before any type registers. */
 	private dbStore: SqliteJobStore | null = null;
-	/** Memoized composite counts source; rebuilt once, when the DB store appears. */
-	private combinedCounts: QueueCountsSource | null = null;
 	private readonly openDbStore: () => SqliteJobStore;
+	/** Per-type auto-ENQUEUE sources: the candidate set a type pulls in when its queue
+	 * drains empty. Registered at runtime (the enrichment source is dashboard-owned,
+	 * because its items follow the dashboard's sort order) rather than declared in
+	 * `JobTypeConfig`. See `refill`. */
+	private readonly autoSources = new Map<JobType, AutoSourceFn>();
+	private readonly autoSourceEnabled = new Set<JobType>();
 
-	constructor(private plugin: CruciblePlugin, private store: JobStore, options: OrchestratorOptions = {}) {
+	constructor(private plugin: CruciblePlugin, options: OrchestratorOptions = {}) {
 		this.openDbStore = options.openDbStore
 			?? (() => new SqliteJobStore(openJobsDb(resolveJobsDbPath(this.plugin.app, this.plugin.pluginDataPath('jobs.sqlite')))));
 	}
 
 	register(type: JobType, workflow: Workflow, config: JobTypeConfig = DEFAULT_JOB_TYPE_CONFIG): void {
-		// Built BEFORE the config/gate maps are written: a `db` registration whose store
+		// Built BEFORE the config/gate maps are written: a registration whose store
 		// cannot be opened throws, and a half-registered type (config present, no
 		// backend) would report itself in `getConfig` while `jobTypes()` never lists it.
 		const backend = this.createBackend(type, workflow, config);
@@ -122,14 +88,14 @@ export class Orchestrator {
 		this.backends.set(type, backend);
 	}
 
+	// One arm today (`persistence` has one legal value). Kept as a dispatch rather than
+	// inlined into `register` so a second backend is a `case`, not a re-derivation of
+	// where the choice is made.
 	private createBackend(type: JobType, workflow: Workflow, config: JobTypeConfig): JobBackend {
 		switch (config.persistence) {
-			case 'memory':
-				return new MemoryJobBackend(this.plugin, type, config, workflow);
 			case 'db':
-				return new DbJobBackend(this.plugin, this.dbStoreOrThrow(), type, config, workflow);
 			default:
-				return new FileJobBackend(this.plugin, this.store, type, config, workflow);
+				return new DbJobBackend(this.plugin, this.dbStoreOrThrow(), type, config, workflow);
 		}
 	}
 
@@ -138,9 +104,11 @@ export class Orchestrator {
 	 *
 	 * `SqliteUnavailableError` is surfaced as a visible `Notice` + `logError` and then
 	 * **rethrown**: there is no fallback storage for the queue (queue-db investigation,
-	 * §Storage decision), and a `db` type that silently registered against nothing
-	 * would accept enqueues and drop them. Failing the registration is the honest
-	 * outcome — the alternative is a queue that looks alive and loses work.
+	 * §Storage decision), and a type that silently registered against nothing would
+	 * accept enqueues and drop them. Failing the registration is the honest outcome —
+	 * the alternative is a queue that looks alive and loses work. `main.ts` catches the
+	 * throw around the whole registration block, so orchestration dies and the rest of
+	 * the plugin still loads.
 	 */
 	private dbStoreOrThrow(): SqliteJobStore {
 		if (this.dbStore) return this.dbStore;
@@ -154,23 +122,16 @@ export class Orchestrator {
 				? err
 				: new SqliteUnavailableError(`Could not open the orchestration jobs database: ${detail}`, err);
 		}
-		// The queue-changed payload has to describe the WHOLE queue, so once a DB store
-		// exists the bulk emits sum both halves. With no DB store this stays null and the
-		// file store drives the emit exactly as before.
-		const fileSource = fileQueueCountsSource(this.store);
-		const dbSource = dbQueueCountsSource(this.dbStore);
-		this.combinedCounts = {
-			async queueCounts() {
-				const [file, db] = await Promise.all([fileSource.queueCounts(), dbSource.queueCounts()]);
-				return { queued: file.queued + db.queued, running: file.running + db.running };
-			},
-		};
 		return this.dbStore;
 	}
 
-	/** The counts behind the bulk `orchestration-queue-updated` emits. */
-	private queueCountsProvider(): QueueCountsProvider {
-		return this.combinedCounts ?? this.store;
+	/** The counts behind the bulk `orchestration-queue-updated` emits. Answers zeros
+	 * before any type has registered (i.e. before a store exists) rather than throwing:
+	 * an emit is a notification, and there is provably nothing to count. */
+	private queueCountsProvider(): QueueCountsSource {
+		const store = this.dbStore;
+		if (!store) return { queueCounts: () => Promise.resolve({ queued: 0, running: 0 }) };
+		return dbQueueCountsSource(store);
 	}
 
 	/**
@@ -186,11 +147,10 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Crash-lease + hang sweep over the DB queue, the `db` half of what
-	 * `scan()`'s stale-running loop does for file jobs. Per-type stale window is the
-	 * type's effective timeout + a 30s buffer (`staleRunningMsForTimeout`), and a job
-	 * this process is still executing is never swept. No-op with no `db` type
-	 * registered. WP-7 calls this from `scan()`.
+	 * Crash-lease + hang sweep over the queue: bounces `running → queued` any job whose
+	 * claim token belongs to a previous plugin load, or whose claim has aged past the
+	 * type's effective timeout + a 30s buffer (`staleRunningMsForTimeout`). A job this
+	 * process is still executing is never swept. Called from `scan()`.
 	 */
 	recoverStaleDbJobs(): number {
 		if (!this.dbStore) return 0;
@@ -202,10 +162,9 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Age-based terminal retention over the DB queue: deletes done/failed/cancelled
-	 * rows settled more than `orchestrationJobRetentionDays` ago (0/blank = keep
-	 * forever). This is the pruning the file queue never had — the reason 37,081 job
-	 * files accumulated. No-op with no `db` type registered. WP-7 calls this from
+	 * Age-based terminal retention: deletes done/failed/cancelled rows settled more than
+	 * `orchestrationJobRetentionDays` ago (0/blank = keep forever). This is the pruning
+	 * the file queue never had — the reason 37,081 job files accumulated. Called from
 	 * `scan()`.
 	 */
 	pruneTerminalDbJobs(): number {
@@ -217,29 +176,30 @@ export class Orchestrator {
 
 	/**
 	 * Jobs of ANY registered type in `status`, in claim order — what the queue monitor
-	 * table renders. Backend-agnostic on purpose: rather than asking each of the ~20
-	 * per-type backends for its own slice (which would cost the file store one full
-	 * `listFolder` scan PER TYPE for what used to be a single scan), this reads each
-	 * *underlying store* once — `this.store.listFolder(status)` already spans every
-	 * file-persisted type in one folder, and `this.dbStore.list(status, {})` (no type
-	 * filter) spans every db-persisted type in one table — and merges the two
-	 * already-sorted lists. Memory types are excluded: the queue monitor renders them
-	 * through its own `enrichmentQueue` adapter, untouched by this seam.
+	 * table renders. One query for the whole queue, not one per registered type: every
+	 * type shares one table, so `list(status, {})` (no type filter) already spans them
+	 * all, ordered by the same `lane_rank, priority_rank, created, id` the claim uses.
 	 *
-	 * `limit`/`offset` apply to the merged, globally-ordered result. The db half is
-	 * asked for a real SQL `LIMIT` sized to cover the requested window (`offset +
-	 * limit`) — the file half still reads its whole folder (file types die in WP-8) —
-	 * so a caller gets the "db LIMIT, file list-then-slice" split the brief describes
-	 * without the merge itself ever seeing more rows than it needs to.
+	 * `limit`/`offset` are a real SQL `LIMIT`/`OFFSET`, so a queue thousands deep costs
+	 * the monitor one bounded page rather than a full read followed by a JS-side cap.
 	 */
 	async listJobs(status: JobStatus, options: { limit?: number; offset?: number } = {}): Promise<OrchestrationJob[]> {
-		const fileEntries = await this.store.listFolder(status);
-		const fileJobs = fileEntries.map(e => e.job);
-		const dbWindow = options.limit !== undefined ? (options.offset ?? 0) + options.limit : undefined;
-		const dbJobs = this.dbStore ? this.dbStore.list(status, { limit: dbWindow }).map(dbRowToOrchestrationJob) : [];
-		const merged = mergeJobsInClaimOrder(fileJobs, dbJobs);
-		const offset = options.offset ?? 0;
-		return options.limit !== undefined ? merged.slice(offset, offset + options.limit) : merged.slice(offset);
+		if (!this.dbStore) return [];
+		return this.dbStore.list(status, options).map(dbRowToOrchestrationJob);
+	}
+
+	/**
+	 * Jobs of ONE type in any of `statuses`, in claim order — what the dashboard's
+	 * per-type badges read (the enrichment "queued / enriching…" cells, which used to
+	 * read `MemoryJobQueue.snapshot()` through `EnrichmentQueueAdapter`). Dispatches to
+	 * that type's own backend seam, which scopes the query in SQL rather than filtering
+	 * an all-types page in JS.
+	 */
+	async listTypeJobs(type: JobType, statuses: JobStatus[]): Promise<OrchestrationJob[]> {
+		const backend = this.backends.get(type);
+		if (!backend || !hasJobQuerySeam(backend)) return [];
+		const pages = await Promise.all(statuses.map(status => backend.list(status)));
+		return pages.flat();
 	}
 
 	/**
@@ -247,8 +207,7 @@ export class Orchestrator {
 	 * check (`intake.ts`'s "is a blogs_tracker/youtube_tracker job already active").
 	 * Unlike `listJobs`, this is naturally per-type (a backend already scopes itself to
 	 * one type), so it just dispatches to that type's own `JobQuerySeam.count`. A type
-	 * with no backend, or a memory-persisted one (no seam), answers 0 — intake.ts only
-	 * ever asks about file-persisted tracker types today, so this path is dormant.
+	 * with no backend answers 0.
 	 */
 	async countJobs(type: JobType, statuses: JobStatus[]): Promise<number> {
 		const backend = this.backends.get(type);
@@ -259,9 +218,8 @@ export class Orchestrator {
 	/**
 	 * Progress line for one running job — replaces `SearchJobProgress`'s own scan of
 	 * `running/` for its TFile (`SearchIndexWorkflow.ts`). Dispatches to the job's own
-	 * type's backend, which knows how to resolve/write its own row (a memoized folder
-	 * lookup for file types, a direct indexed UPDATE for db types) and emits its own
-	 * coalesced `orchestration-queue-updated`. A type with no seam (memory) is a no-op.
+	 * type's backend, which writes its own row (one indexed UPDATE) and emits its own
+	 * coalesced `orchestration-queue-updated`. A type with no seam is a no-op.
 	 */
 	async setJobProgress(type: JobType, id: string, message: string): Promise<void> {
 		const backend = this.backends.get(type);
@@ -269,18 +227,17 @@ export class Orchestrator {
 	}
 
 	/**
-	 * The db arm of `failedJobRepair`'s bulk service-outage requeue — the file arm's
-	 * per-file loop stays in `failedJobRepair.ts` itself (deleted in WP-8, not this
-	 * WP). Lives here rather than on `DbJobBackend` because the requeue is queue-wide
-	 * (every `db` type shares one table), the same reason `clearQueued`/`scan()`'s db
-	 * hooks are Orchestrator-level rather than per-backend.
+	 * `failedJobRepair`'s bulk service-outage requeue. Lives here rather than on
+	 * `DbJobBackend` because the requeue is queue-wide (every type shares one table),
+	 * the same reason `clearQueued`/`scan()`'s sweeps are Orchestrator-level rather than
+	 * per-backend.
 	 *
 	 * `dryRun` computes the type breakdown without writing (the preview a `ConfirmModal`
 	 * shows); the live run skips that extra query — nothing downstream reads `byType`
 	 * after execution, only `requeued`/`skipped` totals — and reports the actual
 	 * `UPDATE`'s row count as `requeued`.
 	 */
-	requeueServiceOutageDbFailures(dryRun: boolean): { total: number; byType: Record<string, number>; requeued: number } {
+	requeueServiceOutageFailures(dryRun: boolean): { total: number; byType: Record<string, number>; requeued: number } {
 		if (!this.dbStore) return { total: 0, byType: {}, requeued: 0 };
 		const total = this.dbStore.count('failed');
 		if (dryRun) {
@@ -304,18 +261,82 @@ export class Orchestrator {
 		return gate;
 	}
 
-	getMemoryQueue(type: JobType): MemoryJobQueue | null {
-		const backend = this.backends.get(type);
-		return backend instanceof MemoryJobBackend ? backend.getQueue() : null;
-	}
-
 	jobTypes(): JobType[] {
 		return Array.from(this.backends.keys());
 	}
 
-	// True when the type drains even with the autorun toggle off (memory types).
+	// True when the type drains even with its per-type auto-run toggle off — read from
+	// the backend (which reads it from `JobTypeConfig.drainsWithoutAutorun`) rather than
+	// from the config map, so the autorunner asks exactly what the drain honors.
 	drainsWithoutAutorun(type: JobType): boolean {
 		return this.backends.get(type)?.drainsWithoutAutorun ?? false;
+	}
+
+	// ---- Auto-ENQUEUE sources -------------------------------------------------------
+
+	/**
+	 * Registers (or clears, with `null`) the candidate source for a type.
+	 *
+	 * Auto-ENQUEUE, never auto-run: whether the source may create jobs is this flag,
+	 * whether those jobs then execute is the type's own auto-run gate. Keeping the two
+	 * separate is a standing rule for any queued job type, and it is what makes
+	 * "auto-enqueue on, auto-run off" a coherent (and used) configuration.
+	 */
+	setAutoSource(type: JobType, fn: AutoSourceFn | null): void {
+		if (fn) this.autoSources.set(type, fn);
+		else this.autoSources.delete(type);
+	}
+
+	setAutoSourceEnabled(type: JobType, enabled: boolean): void {
+		if (enabled) this.autoSourceEnabled.add(type);
+		else this.autoSourceEnabled.delete(type);
+	}
+
+	isAutoSourceEnabled(type: JobType): boolean {
+		return this.autoSourceEnabled.has(type);
+	}
+
+	/**
+	 * Pulls this type's auto-source candidates into the queue. The drain calls it when
+	 * a type reports empty, which is exactly where `MemoryJobQueue.refill` used to sit.
+	 *
+	 * Two skips, both load-bearing:
+	 *
+	 *  * **Already active.** Handled for free by the backend's own dedupe — a seed whose
+	 *    key matches a queued/running job collapses onto it rather than inserting.
+	 *  * **Recently settled.** A job that just finished (or was *cancelled*) must not be
+	 *    re-offered immediately, or an enabled source re-adds the item on the very next
+	 *    refill and the user's Cancel looks ignored. `MemoryJobQueue` got this from
+	 *    "refill skips any key tracked in any state" plus a retention sweep; the durable
+	 *    equivalent is one indexed query for the keys settled inside the type's
+	 *    `terminalRetentionMs` window. It expires by itself, exactly as before.
+	 */
+	async refill(type: JobType): Promise<void> {
+		if (!this.autoSourceEnabled.has(type)) return;
+		const source = this.autoSources.get(type);
+		const store = this.dbStore;
+		if (!source || !store) return;
+		const config = this.getConfig(type);
+		const windowMs = config.terminalRetentionMs ?? DEFAULT_AUTO_SOURCE_SUPPRESSION_MS;
+		const suppressed = store.settledDedupeKeysSince(Date.now() - windowMs);
+		for (const seed of source()) {
+			const key = config.dedupeKey ? config.dedupeKey(seed.params) : '';
+			if (!key) continue;
+			// The stored form is type-namespaced — see `DbJobBackend.dedupeKeyFor`.
+			if (suppressed.has(`${type}::${key}`)) continue;
+			await this.enqueue(type, seed.params, { lane: seed.lane ?? 'background' });
+		}
+	}
+
+	/**
+	 * Turns the auto-source off for a type because a job failed for a reason that makes
+	 * every other candidate hopeless too (today: a missing API credential). Called from
+	 * the settle path rather than inferred from error text — `MemoryJobBackend` gated on
+	 * the typed `failureReason` for exactly this reason, so a transient 403 whose
+	 * message happens to mention "API key" can never latch the source off.
+	 */
+	disableAutoSource(type: JobType): void {
+		this.autoSourceEnabled.delete(type);
 	}
 
 	// True while THIS process is executing a run for `key` of `type`.
@@ -416,15 +437,18 @@ export class Orchestrator {
 		return backend ? backend.enqueue(params ?? {}, options) : Promise.resolve(null);
 	}
 
-	// Manual "Run next": execute a single file-backed job of whichever type has one
-	// queued, regardless of which type it belongs to.
+	// Manual "Run next": execute a single job of whichever type has one queued,
+	// regardless of which type it belongs to. Types that drain without the autorun gate
+	// (enrichment) are skipped: they are already draining on their own, so spending the
+	// user's one explicit "Run next" on one of them would answer a different question
+	// than the one asked.
 	async runNext(): Promise<void> {
 		if (!this.plugin.settings.orchestrationEnabled) {
 			new Notice('Orchestrate: disabled in settings.');
 			return;
 		}
 		for (const backend of this.backends.values()) {
-			if (backend.drainsWithoutAutorun) continue; // skip memory types here
+			if (backend.drainsWithoutAutorun) continue;
 			// 'blocked' means a job WAS claimed and came back service-deferred, so this
 			// manual run is answered — reporting "nothing to run" would be a lie about a
 			// job the user can still see in the queue.
@@ -462,7 +486,7 @@ export class Orchestrator {
 	}
 
 	// Removes one queued (not running) job, mirroring runJob's dispatch. `'failed'`
-	// means the job is still queued (JobStore.move rolled back), so no caller may
+	// means the store refused the write and the job is still queued, so no caller may
 	// report it cancelled — or report it missing.
 	async removeQueuedJob(type: JobType, key: string): Promise<RemoveQueuedOutcome> {
 		const backend = this.backends.get(type);
@@ -492,127 +516,41 @@ export class Orchestrator {
 		return this.backends.get(type)?.hasPending() ?? false;
 	}
 
-	refillMemory(type: JobType): void {
-		this.backends.get(type)?.refill();
-	}
-
+	/**
+	 * The maintenance pass: recover, prune, report.
+	 *
+	 * Post-cutover this is three indexed statements and five `COUNT(*)`s, where the
+	 * file-queue version listed two folders' worth of markdown, re-homed jobs whose type
+	 * had changed persistence, and ran two repair loops with an event-loop yield every
+	 * 20 entries. Two of those are gone because they are *unrepresentable*, not because
+	 * they were dropped: re-homing existed to rescue jobs stranded by a file→memory type
+	 * flip (there is one persistence kind now), and the aborted-claim recovery existed
+	 * because `JobStore.move` could rename a file and then fail to write its status (a
+	 * claim is one guarded UPDATE now — it applies or it doesn't).
+	 *
+	 * The counts keep their `ScanReport` field names and now report bucket counts from
+	 * the DB; `inbox` is the queued bucket, which is what it always meant.
+	 */
 	async scan(options: { notify?: boolean } = {}): Promise<ScanReport> {
-		await this.store.ensureFolders();
+		const recovered = this.recoverStaleDbJobs();
+		const pruned = this.pruneTerminalDbJobs();
+		const store = this.dbStore;
 
-		// Only queued/running need their job data read — the repair loops below act on
-		// them. done/failed/cancelled are needed only as counts for the report, so their
-		// reads are deferred past the repair loops and taken via countFolder (see below):
-		// those buckets can run into the tens of thousands, and listFolder's per-entry
-		// readJob would otherwise cost ~21k needless frontmatter reads on every scan.
-		const queued = await this.store.listFolder('queued');
-		const running = await this.store.listFolder('running');
-
-		// Re-home file-backed jobs whose type has since become memory-persistence
-		// (e.g. youtube_metadata_fetch after it folded into the unified in-memory
-		// queue). The file path can never drain them — the memory backend never
-		// claims their folders, and stale recovery only bounces running→queued, so
-		// such a job would sit forever. Push its params into the memory queue (which
-		// drains immediately) and archive the markdown file under done/.
-		const migratedPaths = new Set<string>();
-		let migrated = 0;
-		for (const entry of [...queued, ...running]) {
-			if (this.getConfig(entry.job.type).persistence !== 'memory') continue;
-			// Never re-home a job this process is executing — its own execute() is about
-			// to move the file, and racing that would both lose the settle and leave a
-			// duplicate of the job in the memory queue.
-			if (this.isRunning(entry.job.type, entry.job.id)) continue;
-			await this.backends.get(entry.job.type)?.enqueue(entry.job.params ?? {});
-			await this.store.appendNotes(entry.file, 'Re-homed to the in-memory queue (type is now memory-persistence).');
-			await this.store.move(entry.file, entry.job, 'done');
-			migratedPaths.add(entry.file.path);
-			migrated++;
-		}
-
-		// State-gated recovery, ahead of the time-based sweep below: a running/ entry
-		// whose frontmatter still says `status: 'queued'` never had its claim-time
-		// frontmatter write land (the JobStore.move claim-path fault — see JobStore.ts)
-		// or otherwise aborted mid-claim. The folder says "claimed"; the status says
-		// "never claimed" — that disagreement is itself proof the claim aborted, so this
-		// bounces the job back to queued/ with no age check at all (unlike the time-based
-		// sweep, an un-updated status can't be "still genuinely running").
-		let recovered = 0;
-		const stateRecoveredPaths = new Set<string>();
-		let processed = 0;
-		for (const entry of running) {
-			if (migratedPaths.has(entry.file.path)) continue;
-			if (entry.job.status !== 'queued') continue;
-			if (this.isRunning(entry.job.type, entry.job.id)) continue;
-			try {
-				await this.store.setError(entry.file, 'Recovered: aborted claim');
-				await this.store.move(entry.file, entry.job, 'queued');
-				stateRecoveredPaths.add(entry.file.path);
-				recovered++;
-			} catch (err) {
-				// One job the store refused to move must not abort the sweep for the rest —
-				// leave it in running/ (JobStore.move rolls its own rename back on failure)
-				// and let the next scan retry it.
-				logError(`Orchestrator.scan: could not recover aborted-claim job ${entry.job.id}`, err);
-			}
-			processed++;
-			if (processed % 20 === 0) await yieldToEventLoop();
-		}
-
-		const now = Date.now();
-		for (const entry of running) {
-			if (migratedPaths.has(entry.file.path)) continue;
-			if (stateRecoveredPaths.has(entry.file.path)) continue;
-			// The sweep's whole premise is "no live timer owns this job". A run registered
-			// in this process is the counter-example, so it wins over recovery — whether it
-			// is winding down from a cancel (still in running/ until execute() moves it) or
-			// simply taking longer than the stale cutoff, which a long search batch or a
-			// slow LLM step genuinely can. Bouncing either running → queued duplicates the
-			// job: the original keeps executing while a worker claims and runs the copy.
-			// `isRunning` subsumes the older `isCancelling` check.
-			if (this.isRunning(entry.job.type, entry.job.id)) continue;
-			const updatedRaw = entry.job.updated ?? entry.job.created;
-			const updatedAt = Date.parse(updatedRaw);
-			const cutoff = now - staleRunningMsForTimeout(resolveTimeoutMs(this.plugin, this.getConfig(entry.job.type)));
-			if (Number.isFinite(updatedAt) && updatedAt < cutoff) {
-				await this.store.setError(entry.file, `Recovered: stale running job (last updated ${updatedRaw})`);
-				await this.store.move(entry.file, entry.job, 'queued');
-				recovered++;
-			}
-		}
-
-		// Deferred until after the repair loops above (see the comment at the top of this
-		// method): a plain folder-children count, no per-file frontmatter reads.
-		const done = this.store.countFolder('done');
-		const failed = this.store.countFolder('failed');
-		const cancelled = this.store.countFolder('cancelled');
-
-		// The db half of the sweep (WP-6 landed the hooks as no-ops with no `db` type
-		// registered; WP-7 wires them into the pass every scan already runs — including
-		// the silent auto-scan `main.ts`'s onLayoutReady fires via
-		// `orchestrator.scan({ notify: false })`, so retention doesn't wait for a manual
-		// Scan). Both are 0 today; the summary line below only mentions them once real.
-		const dbRecovered = this.recoverStaleDbJobs();
-		const dbPruned = this.pruneTerminalDbJobs();
-
-		const queuedMigrated = queued.filter(e => migratedPaths.has(e.file.path)).length;
-		const runningMigrated = running.filter(e => migratedPaths.has(e.file.path)).length;
 		const report: ScanReport = {
-			inbox: queued.length - queuedMigrated,
-			running: running.length - recovered - runningMigrated,
-			done: done + migrated,
-			failed,
-			cancelled,
+			inbox: store?.count('queued') ?? 0,
+			running: store?.count('running') ?? 0,
+			done: store?.count('done') ?? 0,
+			failed: store?.count('failed') ?? 0,
+			cancelled: store?.count('cancelled') ?? 0,
 			recovered,
-			dbRecovered,
-			dbPruned,
+			pruned,
 		};
 
 		const summary =
 			`Orchestrate: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
 			(report.cancelled > 0 ? `, cancelled ${report.cancelled}` : '') +
 			(recovered > 0 ? `, recovered ${recovered}` : '') +
-			(migrated > 0 ? `, re-homed ${migrated}` : '') +
-			(dbRecovered > 0 ? `, db recovered ${dbRecovered}` : '') +
-			(dbPruned > 0 ? `, db pruned ${dbPruned}` : '');
+			(pruned > 0 ? `, pruned ${pruned}` : '');
 		if (options.notify ?? true) new Notice(summary);
 		return report;
 	}

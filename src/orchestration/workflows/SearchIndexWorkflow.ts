@@ -14,9 +14,10 @@ import {
 const SEARCH_RETRY_AFTER_MS = 30_000;
 
 /**
- * Files per `search_upsert_batch` job. Each batch is one durable markdown job file under the
- * queue root, claimed and moved through JobStore — so the batch size sets how many vault
- * writes a full rebuild costs before a single file is indexed.
+ * Files per `search_upsert_batch` job. Each batch is one durable job row, so the batch size
+ * sets how much of a full rebuild is retried when a single batch fails. (Until thq WP-8 each
+ * batch was also a markdown file under the queue root, which made the same number govern how
+ * many vault WRITES a rebuild cost before a single file was indexed — that cost is gone.)
  *
  * At the original 25 this was far too small, but the 250 that replaced it was sized against
  * a vault file count that turned out to be inflated ~7.7x: the "~42,000 markdown files"
@@ -329,13 +330,10 @@ class SearchJobProgress {
 	) {}
 
 	/**
-	 * WP-7: retired the scan-`running/`-for-my-own-TFile dance (and the JobStore-shaped
+	 * WP-7: retired the scan-`running/`-for-my-own-TFile dance (and the store-shaped
 	 * `scheduleQueueChanged` call it required) in favor of the backend-agnostic seam.
 	 * `Orchestrator.setJobProgress` dispatches to this job's own type's backend, which
-	 * resolves/writes its own row (a memoized folder lookup for file types — see
-	 * `FileJobBackend.progressFileCache`, which preserves the "was `queued 0, running
-	 * 0` fabricated payload every 10 files" fix below by construction — or a direct
-	 * indexed UPDATE for db types) and emits its own coalesced
+	 * writes its own row (one indexed UPDATE) and emits its own coalesced
 	 * `orchestration-queue-updated`, so a long batch still can't out-emit the 250ms
 	 * window.
 	 */

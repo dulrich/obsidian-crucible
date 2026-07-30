@@ -6,7 +6,6 @@ export type IngestionEventName =
 	| 'transcript-refined'
 	| 'tracker-run'
 	| 'metadata-enriched'
-	| 'enrichment-queue-updated'
 	| 'orchestration-queue-updated'
 	| 'note-lock-changed'
 	| 'image-described';
@@ -16,7 +15,6 @@ export interface IngestionEventPayloads {
 	'transcript-refined': { file: TFile; model?: string };
 	'tracker-run': { kind: 'blog' | 'youtube'; runFile: TFile | null; status: 'done' | 'failed' };
 	'metadata-enriched': { videoId: string; metadataFile: TFile; sourceFile?: TFile };
-	'enrichment-queue-updated': { size: number };
 	'orchestration-queue-updated': { queued: number; running: number };
 	'note-lock-changed': { path: string; locked: boolean; label: string };
 	/** Fired once per image_describe_note/batch run (after the describe pass, whether or not

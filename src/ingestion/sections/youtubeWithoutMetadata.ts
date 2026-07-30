@@ -3,19 +3,13 @@ import { computeRowSignature, renderTableSection, shouldRepaint } from '../rende
 import { renderFileLink, renderIgnoreButton } from '../render/cells';
 import { formatDate } from '../render/format';
 import { computeYoutubeNoMetadataRows } from '../data/uncaptured';
+import { computeMetadataFetchStatus } from '../data/metadataFetchStatus';
 import type { DashboardHost, SectionContext, YoutubeNoMetadataRow } from '../render/types';
-
-// youtube_metadata_fetch now runs in the unified queue's in-memory path, so
-// in-flight state comes from the enrichment adapter (target note path → status)
-// rather than scanning the file-backed job folders.
-function youtubeMetadataInFlight(host: DashboardHost): Map<string, 'queued' | 'running'> {
-	return host.plugin.enrichmentQueue?.metadataInFlightByPath() ?? new Map();
-}
 
 // --- Section: YouTube captures without metadata ---
 export async function renderYoutubeNoMetadata(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
 	const rows = await computeYoutubeNoMetadataRows(host.app);
-	const inFlight = youtubeMetadataInFlight(host);
+	const inFlight = (await computeMetadataFetchStatus(host.plugin)).byPath;
 
 	// P5: the enqueue-metadata cell reads inFlight's LIVE per-path status,
 	// which doesn't live on YoutubeNoMetadataRow — fold each row's current
@@ -77,7 +71,7 @@ export function renderEnqueueAllMetadataButton(host: DashboardHost, heading: HTM
 					new Notice('No captures awaiting metadata.');
 					return;
 				}
-				const inFlight = youtubeMetadataInFlight(host);
+				const inFlight = (await computeMetadataFetchStatus(host.plugin)).byPath;
 				let enqueued = 0;
 				// enqueueAndRun kicks the type's drain, so manual enqueues run
 				// regardless of the Auto-enrich gate (repeat kicks no-op while the

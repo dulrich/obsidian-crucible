@@ -27,7 +27,7 @@ const STOP_OUTCOME_NOTICE: Record<StopJobOutcome, string> = {
 	cancelled: 'Stopped.',
 	completed: 'Finished before it could be stopped.',
 	removed: 'Removed from the queue before it ran.',
-	// The store rolled the move back, so the job is still queued — saying "no longer
+	// The store refused the write, so the job is still queued — saying "no longer
 	// queued" here would be the same lie in a different costume.
 	failed: 'Could not cancel that job; it is still queued.',
 	'not-found': 'That job is no longer queued or running.',
@@ -36,15 +36,14 @@ const STOP_OUTCOME_NOTICE: Record<StopJobOutcome, string> = {
 // One paragraph, deliberately: ConfirmModal renders its message as a single <p>, so a
 // blank line here would collapse to a space rather than split it.
 //
-// The auto-refill sentence is not padding. Clearing an in-memory entry stops it from
-// suppressing its own auto-source seed once the cancelled entry is forgotten, so with
-// auto-enqueue on the item genuinely comes back — and a user who was not told that
-// reads it as the clear having been ignored.
+// The auto-refill sentence is not padding. A cancelled job suppresses its own
+// auto-source re-seed only for the type's retention window, so with auto-enqueue on the
+// item genuinely comes back — and a user who was not told that reads it as the clear
+// having been ignored.
 const CLEAR_QUEUED_CONFIRM =
-	'Every queued job is removed: file-backed jobs move to the queue\'s cancelled folder, in-memory entries are '
-	+ 'marked cancelled. Jobs already running are not affected — stop those with Cancel on their row. '
-	+ 'One caveat: while auto-enqueue is on, cleared in-memory entries can be re-added by their source about a '
-	+ 'minute later, so turn the source off as well if you want them to stay gone.';
+	'Every queued job is marked cancelled. Jobs already running are not affected — stop those with Cancel on '
+	+ 'their row. One caveat: while auto-enqueue is on, cleared enrichment jobs can be re-added by their source '
+	+ 'about a minute later, so turn the source off as well if you want them to stay gone.';
 
 // Service-health pills: the fleet taxonomy split by breaker state. `open` and
 // `half-open` are genuine status (something is or might be wrong), so they use the
@@ -88,13 +87,17 @@ function renderServiceHealthPills(host: DashboardHost, container: HTMLElement): 
 	}
 }
 
-function fileJobTargetPath(job: OrchestrationJob): string | undefined {
+function jobTargetPath(job: OrchestrationJob): string | undefined {
 	const path = job.params?.targetPath ?? job.params?.path;
 	return typeof path === 'string' ? path : undefined;
 }
 
-function fileJobTitle(job: OrchestrationJob): string {
+function jobTitle(job: OrchestrationJob): string {
 	switch (job.type) {
+		// The enrichment types name themselves by their subject rather than by their id —
+		// the memory queue used to carry `display` fields for exactly this, and the row
+		// would otherwise read as a bare job id where it used to read as a video title.
+		case 'youtube_metadata_fetch': return youtubeMetadataTitle(job);
 		case 'image_describe_note': return typeof job.params?.targetPath === 'string' ? `Image descriptions: ${job.params.targetPath.split('/').pop()}` : 'Image descriptions';
 		case 'image_describe_backfill': return 'Image description backfill';
 		case 'image_describe_batch': return imageDescribeBatchTitle(job);
@@ -104,6 +107,13 @@ function fileJobTitle(job: OrchestrationJob): string {
 		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';
 		default: return job.id;
 	}
+}
+
+function youtubeMetadataTitle(job: OrchestrationJob): string {
+	const title = typeof job.params?.title === 'string' ? job.params.title : '';
+	if (title) return title;
+	const videoId = typeof job.params?.videoId === 'string' ? job.params.videoId : '';
+	return videoId || job.id;
 }
 
 function imageDescribeBatchTitle(job: OrchestrationJob): string {
@@ -123,29 +133,25 @@ function searchBatchTitle(job: OrchestrationJob): string {
 	return kind;
 }
 
-// 'file' rows come from `Orchestrator.listJobs` (WP-7 seam — file- and, once WP-8
-// flips a type, db-backed jobs are indistinguishable here); 'memory' rows come from
-// enrichmentQueue. Hoisted to module scope so `toQueueRow` below can build one without
-// duplicating the shape twice inside `renderQueueMonitor`.
+// One row shape for one queue. thq WP-8 removed the `source: 'file' | 'memory'`
+// discriminant along with the in-memory queue that needed it: every row now comes from
+// `Orchestrator.listJobs`, so `key` is always a job id, `title` is always derived from
+// params, and the Details modal (which used to be hidden for memory rows because they
+// carried no params/notes/failureKind) applies to every row.
 type QueueRow = {
-	source: 'file' | 'memory';
 	status: 'queued' | 'running';
 	type: string;
-	// file rows: job id; memory rows: key used for Cancel
+	/** Job id — what Run/Cancel/Details address. */
 	key: string;
-	// memory rows: videoId for dequeue calls
-	videoId?: string;
-	// memory rows/file rows: targetPath note link when available
+	/** Target note link when the job names one. */
 	targetPath?: string;
-	// memory rows: display title / channel fallback
+	/** Human-readable subject; falls back to the id. */
 	title?: string;
 	created: string;
 	error?: string;
 	progress?: string;
-	// file rows only (WP-7 job-detail affordance) — no dedicated column, shown in the
-	// per-row Details modal instead: how `error` was classified, the free-text run
-	// narration (db rows only — see OrchestrationJob.notes' doc comment), and the raw
-	// params payload.
+	// No dedicated column — shown in the per-row Details modal instead: how `error` was
+	// classified, the free-text run narration, and the raw params payload.
 	failureKind?: 'service' | 'job';
 	notes?: string;
 	params?: Record<string, unknown>;
@@ -153,12 +159,11 @@ type QueueRow = {
 
 function toQueueRow(job: OrchestrationJob, status: 'queued' | 'running'): QueueRow {
 	return {
-		source: 'file',
 		status,
 		type: job.type,
 		key: job.id,
-		targetPath: fileJobTargetPath(job),
-		title: fileJobTitle(job),
+		targetPath: jobTargetPath(job),
+		title: jobTitle(job),
 		created: job.created ?? '',
 		error: job.error,
 		progress: job.progress,
@@ -229,7 +234,7 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	const { countEl, metaEl } = host.createSectionHeader(
 		card,
 		'Queue monitor',
-		'All queued and running jobs across the file-backed and in-memory queues.',
+		'All queued and running jobs, across every job type.',
 		false,
 	);
 
@@ -252,7 +257,7 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	panicToggle.checked = host.plugin.settings.orchestrationQueueEnabled !== false;
 	panicLabel.appendText(' Queue enabled');
 
-	// Manual "Run next": runs one queued file-backed job regardless of the gate.
+	// Manual "Run next": runs one queued job regardless of the gate.
 	const runNextBtn = controls.createEl('button', { text: 'Run next', cls: 'crucible-ingestion-run-next' });
 	runNextBtn.addEventListener('click', () => {
 		void host.plugin.orchestrationAutoRunner?.runOnce();
@@ -345,45 +350,22 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 	// window on every queue event. Every branch below empties body itself, immediately
 	// before it writes — the error message, the empty state, and (via
 	// renderSortableTable's own `parent.empty()`) the table.
-	//
-	// --- Backend-agnostic jobs (Orchestrator.listJobs — file today, file+db once
-	// WP-8 flips a type; the queue monitor doesn't know or care which) ---
 	const orchestrator = host.plugin.orchestrator;
-	let fileRows: QueueRow[] = [];
+	let rows: QueueRow[] = [];
 	if (orchestrator) {
 		try {
 			const [running, queued] = await Promise.all([orchestrator.listJobs('running', { limit: QUEUE_MONITOR_RENDER_LIMIT }), orchestrator.listJobs('queued', { limit: QUEUE_MONITOR_RENDER_LIMIT })]);
-			fileRows = [
+			rows = [
 				...running.map(job => toQueueRow(job, 'running')),
 				...queued.map(job => toQueueRow(job, 'queued')),
 			];
 		} catch (e) {
 			body.empty();
-			body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read file queue: ${e instanceof Error ? e.message : String(e)}` });
+			body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read the job queue: ${e instanceof Error ? e.message : String(e)}` });
 			host.setSectionCount('queueMonitor', 0);
 			return;
 		}
 	}
-
-	// --- In-memory jobs (enrichment queue snapshot) ---
-	const memoryRows: QueueRow[] = (host.plugin.enrichmentQueue?.getSnapshot() ?? [])
-		.filter(e => e.status === 'pending' || e.status === 'running')
-		.map(e => ({
-			source: 'memory' as const,
-			// Map enrichment queue status to display status: pending → queued
-			status: e.status === 'pending' ? ('queued' as const) : ('running' as const),
-			type: 'youtube_metadata_fetch',
-			key: e.key,
-			videoId: e.videoId,
-			targetPath: e.targetPath,
-			title: e.title || e.videoId,
-			// Raw ISO like file rows (`created` above) — the sort key must compare one
-			// format across both sources; humans get the formatted string at render time.
-			created: e.addedAt ? new Date(e.addedAt).toISOString() : '',
-			error: e.error,
-		}));
-
-	const rows: QueueRow[] = [...fileRows, ...memoryRows];
 
 	// Per-type pending counts for section meta line
 	const typeCounts = new Map<string, number>();
@@ -424,27 +406,15 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			sortable: true,
 			sortKey: r => r.targetPath ?? r.title ?? r.key,
 			render: (r, td) => {
-				if (r.source === 'memory') {
-					if (r.targetPath) {
-						// Resolve note TFile and render a clickable vault link
-						const file = host.app.vault.getAbstractFileByPath(r.targetPath);
-						if (file instanceof TFile) {
-							renderFileLink(host.app, td, file);
-							return;
-						}
+				if (r.targetPath) {
+					// Resolve the note TFile and render a clickable vault link.
+					const file = host.app.vault.getAbstractFileByPath(r.targetPath);
+					if (file instanceof TFile) {
+						renderFileLink(host.app, td, file);
+						return;
 					}
-					// Fallback: title or videoId
-					td.setText(r.title ?? r.videoId ?? r.key);
-				} else {
-					if (r.targetPath) {
-						const file = host.app.vault.getAbstractFileByPath(r.targetPath);
-						if (file instanceof TFile) {
-							renderFileLink(host.app, td, file);
-							return;
-						}
-					}
-					td.setText(r.title ?? r.key);
 				}
+				td.setText(r.title ?? r.key);
 			},
 		},
 		{
@@ -493,25 +463,21 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 						})();
 					});
 				}
-				// File/db rows only: memory rows already show their identifying fields
-				// (title/videoId/targetPath) directly in the table, and carry no params/
-				// notes/failureKind worth a modal.
-				if (r.source === 'file') {
-					const details = td.createEl('button', { text: 'Details' });
-					details.title = 'Show this job\'s params, error, progress and notes.';
-					details.addEventListener('click', () => new JobDetailModal(host.app, r).open());
-				}
+				// Unconditional since thq WP-8: the one row source that used to be excluded
+				// (in-memory enrichment entries, which carried no params/notes/failureKind)
+				// is now an ordinary job with all three.
+				const details = td.createEl('button', { text: 'Details' });
+				details.title = 'Show this job\'s params, error, progress and notes.';
+				details.addEventListener('click', () => new JobDetailModal(host.app, r).open());
 				renderCancelAction(host, td, r.type as JobType, r.key, r.status);
 			},
 		},
 	], rows, ctx, {
 		limit: QUEUE_MONITOR_RENDER_LIMIT,
-		// rsp-wp6: file-backed rows key on the job id (unique per job); memory
-		// rows key on the enrichment queue's own dedupe key (unique per queue
-		// entry — see youtubeMetadataDedupeKey). The two id spaces are never
-		// compared to each other, but the source prefix keeps them visually
-		// distinct in a log and costs nothing.
-		rowKey: r => `${r.source}:${r.key}`,
+		// rsp-wp6: the job id is the natural stable key — one row per job. (It used to
+		// be prefixed with the row's source to keep the file-queue and memory-queue id
+		// spaces visually distinct; there is one id space now.)
+		rowKey: r => r.key,
 	});
 }
 
