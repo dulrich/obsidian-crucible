@@ -1,5 +1,5 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { Setting, Command } from "obsidian";
+import { Setting, Command, Notice, TFolder, debounce } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { CommandArgSchema, GuardCondition, GuardConditionType, SYNC_GUARD_CONDITION_TYPES, TriggerAction, TriggerDef, TriggerEvent } from "../../types";
 import type { JobType } from "../../orchestration/types";
@@ -8,6 +8,8 @@ import { SearchWithContainer, sortByNameWithEmptyLast, addWarningIcon } from "..
 import { bindText, bindToggle, bindSearch, bindNumber } from "../bind";
 import { GUARD_TYPE_LABELS, normalizeGuardConditionForType, renderGuardConditionFields } from "./guardConditionFields";
 import { confirmDestructive } from "../destructiveActions";
+import { BROAD_MATCH_WARNING, TriggerValidationCtx, estimateScopeMatches, validateTrigger } from "../../triggers/triggerValidation";
+import { INTERNAL_PLUGIN_FOLDER } from "../../exclusions";
 
 // Job types sensible to enqueue directly from a trigger. chain_run/command_run are
 // omitted: the "chain" action uses chain_run, and command_run needs a command id.
@@ -46,7 +48,11 @@ function newTrigger(): TriggerDef {
 	return {
 		id: newTriggerId(),
 		name: '',
-		enabled: true,
+		// Minted disabled: an empty chainName/blank scope is exactly the incident
+		// trigger's shape, and it fails validateTrigger's chain-selected rule anyway —
+		// the Enable toggle would immediately veto a same-tick enable. See the
+		// trigger-storm investigation.
+		enabled: false,
 		on: { events: ['create'] },
 		scope: { folder: '', includeSubfolders: true },
 		conditions: [],
@@ -76,25 +82,28 @@ function describeTrigger(trigger: TriggerDef): string {
 	return `${when}${scope}${conds} → ${action}`;
 }
 
+// Vault-derived facts `validateTrigger` needs, built fresh per call so they always
+// reflect live settings/registry state (chains and commands can change while the
+// Triggers tab is open — e.g. after editing a chain in the Automate tab).
+function triggerValidationCtx(tab: CrucibleSettingTab): TriggerValidationCtx {
+	return {
+		chainNames: tab.plugin.settings.chains.map(c => c.name),
+		hasInternalCommand: (id) => tab.plugin.chainManager.hasInternalCommand(id),
+		knownJobTypes: tab.plugin.orchestrator.jobTypes(),
+		folderExists: (folder) => tab.app.vault.getAbstractFileByPath(folder) instanceof TFolder,
+	};
+}
+
+// Thin wrapper over `validateTrigger`: joins errors + warnings into the single string
+// the warning-icon tooltip expects. Errors are included here too (not just warnings) —
+// this function is display-only and pre-dates the enable gate, so a trigger that is
+// currently enabled-but-invalid (e.g. its chain was deleted after the trigger was
+// created) still needs to show a warning icon even though it can no longer be
+// (re-)enabled from scratch.
 function getTriggerWarning(tab: CrucibleSettingTab, trigger: TriggerDef): string | null {
-	if (trigger.action.kind === 'chain') {
-		const chainName = trigger.action.chainName;
-		if (!chainName) return 'No chain selected; this trigger will not run.';
-		if (!tab.plugin.settings.chains.some(c => c.name === chainName)) {
-			return `Chain "${chainName}" does not exist.`;
-		}
-	}
-	if (trigger.action.kind === 'command') {
-		const commandId = trigger.action.commandId;
-		if (!commandId) return 'No command selected; this trigger will not run.';
-		if (!tab.plugin.chainManager.hasInternalCommand(commandId)) {
-			return `Command "${commandId}" is not queueable.`;
-		}
-	}
-	if ('everyMinutes' in trigger.on && (trigger.scope?.folder || trigger.conditions.length)) {
-		return 'Schedule triggers have no note context; scope and conditions are ignored.';
-	}
-	return null;
+	const { errors, warnings } = validateTrigger(trigger, triggerValidationCtx(tab));
+	const combined = [...errors, ...warnings];
+	return combined.length > 0 ? combined.join(' ') : null;
 }
 
 function describeTriggerAction(action: TriggerAction): string {
@@ -145,7 +154,19 @@ export function renderTriggerListSection(tab: CrucibleSettingTab, containerEl: H
 				.addToggle(t => t
 					.setTooltip('Enabled')
 					.setValue(trigger.enabled)
-					.onChange(async (v) => { trigger.enabled = v; await tab.plugin.saveSettings(); tab.plugin.registerTriggers(); }))
+					.onChange(async (v) => {
+						if (v) {
+							const { errors } = validateTrigger(trigger, triggerValidationCtx(tab));
+							if (errors.length > 0) {
+								t.setValue(false);
+								new Notice(errors[0] ?? 'This trigger is not valid.');
+								return;
+							}
+						}
+						trigger.enabled = v;
+						await tab.plugin.saveSettings();
+						tab.plugin.registerTriggers();
+					}))
 				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate trigger').onClick(async () => {
 					const copy = JSON.parse(JSON.stringify(trigger)) as TriggerDef;
 					copy.id = newTriggerId();
@@ -335,7 +356,19 @@ export function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElem
 		get: () => trigger.enabled,
 		set: (v) => { trigger.enabled = v; },
 		after: reregister,
+		// Enabling is gated on validity (disabling is never gated — see bindToggle's
+		// guard semantics in src/settings/bind.ts). Re-render on veto so the toggle's
+		// visual state and the error block below both reflect the still-false value.
+		guard: () => {
+			const { errors } = validateTrigger(trigger, triggerValidationCtx(tab));
+			return errors.length > 0 ? (errors[0] ?? 'This trigger is not valid.') : null;
+		},
+		onGuardRejected: () => tab.refreshDisplay(),
 	}, save);
+	const editFormErrors = validateTrigger(trigger, triggerValidationCtx(tab)).errors;
+	if (editFormErrors.length > 0) {
+		group.createDiv({ cls: 'crucible-setting-warning', text: editFormErrors[0] });
+	}
 
 	// --- When ---
 	new Setting(containerEl).setName('When').setHeading();
@@ -400,15 +433,41 @@ export function renderEditTrigger(tab: CrucibleSettingTab, containerEl: HTMLElem
 			get: () => scope.folder ?? '',
 			set: (v) => { scope.folder = v; },
 			suggest: (el) => { new FolderSuggest(tab.app, el); },
-			after: reregister,
+			after: () => { reregister(); debouncedUpdateScopeEstimate(); },
 		}, save);
 		scopeGroup.createEl('hr', { cls: 'crucible-row-divider' });
 		bindToggle(scopeGroup, {
 			name: 'Include subfolders',
 			get: () => scope.includeSubfolders !== false,
 			set: (v) => { scope.includeSubfolders = v; },
-			after: reregister,
+			after: () => { reregister(); debouncedUpdateScopeEstimate(); },
 		}, save);
+		scopeGroup.createEl('hr', { cls: 'crucible-row-divider' });
+
+		// Match-volume estimate: same exclusion predicate the registry applies
+		// (isPluginManagedPath over [orchestrationQueueRoot, INTERNAL_PLUGIN_FOLDER])
+		// and the same scope-prefix semantics `triggerAdapter.inScope` applies at fire
+		// time (via the shared pathInScope) — see triggerValidation.ts. Upper bound:
+		// conditions aren't evaluated here. Recomputed on a 300ms debounce so typing in
+		// the folder field doesn't walk the vault's markdown files on every keystroke.
+		const estimateEl = scopeGroup.createDiv({ cls: 'crucible-inline-warning is-info' });
+		const broadMatchEl = scopeGroup.createDiv({ cls: 'crucible-inline-warning is-hidden' });
+		const updateScopeEstimate = () => {
+			const excludedRoots = [tab.plugin.settings.orchestrationQueueRoot, INTERNAL_PLUGIN_FOLDER];
+			const paths = tab.app.vault.getMarkdownFiles().map(f => f.path);
+			const count = estimateScopeMatches(paths, trigger.scope, excludedRoots);
+			estimateEl.setText(`~${count} note${count === 1 ? '' : 's'} currently in scope.`);
+			const { warnings } = validateTrigger(trigger, triggerValidationCtx(tab));
+			if (warnings.includes(BROAD_MATCH_WARNING)) {
+				broadMatchEl.setText(BROAD_MATCH_WARNING);
+				broadMatchEl.removeClass('is-hidden');
+			} else {
+				broadMatchEl.setText('');
+				broadMatchEl.addClass('is-hidden');
+			}
+		};
+		updateScopeEstimate();
+		const debouncedUpdateScopeEstimate = debounce(updateScopeEstimate, 300);
 
 		renderTriggerConditions(tab, containerEl, trigger, save, reregister);
 	}
