@@ -45,7 +45,7 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 				{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
 				{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
 				{ key: 'watch', label: '', render: (r, td) => renderExternalLink(td, r.url, 'watch') },
-				{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host.app, 'youtube', r.videoId, ctx, () => void host.refresh('ignoredVideos')) },
+				{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'youtube', r.videoId, 'uncapturedVideos', 'ignoredVideos', ctx) },
 				{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r) },
 			],
 		});

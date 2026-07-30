@@ -34,7 +34,7 @@ export async function renderUncapturedPosts(host: DashboardHost, body: HTMLEleme
 			{ key: 'wordCount', label: 'Words', sortable: true, sortKey: r => r.wordCount ?? -1, render: (r, td) => td.setText(r.wordCount == null ? '—' : String(r.wordCount)) },
 			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
 			{ key: 'action', label: '', render: (r, td) => renderPostActionCell(host, td, r, ctx) },
-			{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host.app, 'blog', r.postId, ctx, () => void host.refresh('ignoredPosts')) },
+			{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'blog', r.postId, 'uncapturedPosts', 'ignoredPosts', ctx) },
 		],
 	});
 }

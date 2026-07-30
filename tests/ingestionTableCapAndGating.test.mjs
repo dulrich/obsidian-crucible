@@ -270,3 +270,71 @@ test('STRUCTURAL: renderQueueMonitor no longer empties the body before the listF
 	const beforeAwait = queueMonitorSrc.slice(fnStart, awaitIdx);
 	assert.ok(!beforeAwait.includes('body.empty()'), 'body must not be emptied before the folder-scan awaits — that is the blank-window bug');
 });
+
+/* -------------------------------------------- (WP-6) STRUCTURAL: Ignore double-render */
+//
+// The behavioral contract of the echo-suppression primitive itself (one mark = one
+// suppressed echo, unrelated ids/expired markers are not swallowed) is covered against
+// the real compiled module in ingestionRefreshGates.test.mjs. What's left to prove here
+// is that the two real call sites — ingestionDashboard.ts's route() and render/cells.ts's
+// Ignore/Unignore handlers — actually invoke it, at the ids that make one click coalesce
+// to one render. ingestionDashboard.ts still pulls the full 'obsidian' App/TFile surface
+// (see the block comment above), so this stays structural, same as (#2/#5) above;
+// cells.ts only imports the 'obsidian' Notice class, so it's cheap enough to bundle with
+// the small stub below and drive an actual DOM click through the real compiled handler.
+
+test('STRUCTURAL: route() consumes the self-refresh echo marker for every id it would otherwise redundantly re-render on an IGNORED_IDS_NOTE write', () => {
+	const blockStart = dashboardSrc.indexOf('if (path === IGNORED_IDS_NOTE) {');
+	assert.ok(blockStart >= 0, 'the IGNORED_IDS_NOTE route() block not found');
+	const blockEnd = dashboardSrc.indexOf('\n\t\t\t}', blockStart);
+	const block = dashboardSrc.slice(blockStart, blockEnd);
+	for (const id of ['ignoredPosts', 'ignoredVideos', 'uncapturedPosts', 'uncapturedVideos', 'blogControl']) {
+		assert.match(
+			block,
+			new RegExp(`if \\(!consumeSelfRefreshedEcho\\('${id}'\\)\\) debounced${id[0].toUpperCase()}${id.slice(1)}\\(\\);`),
+			`the ${id} debounced refresh must be gated on consumeSelfRefreshedEcho('${id}'), not called unconditionally`,
+		);
+	}
+	assert.match(dashboardSrc, /import \{ consumeSelfRefreshedEcho \} from '\.\/ingestion\/render\/echoSuppress';/, 'consumeSelfRefreshedEcho must be imported from the real echoSuppress module, not reimplemented');
+});
+
+test('STRUCTURAL: cells.ts and its four call sites mark both the owning and companion section before dispatching either refresh', () => {
+	const cellsSrc = readFileSync('src/ingestion/render/cells.ts', 'utf8');
+	assert.match(cellsSrc, /import \{ markSelfRefreshedForEcho \} from '\.\/echoSuppress';/, 'cells.ts must import the real primitive, not reimplement it');
+
+	for (const fnName of ['renderIgnoreButton', 'renderUnignoreButton']) {
+		const fnStart = cellsSrc.indexOf(`export function ${fnName}(`);
+		assert.ok(fnStart >= 0, `${fnName} not found`);
+		const fnEnd = cellsSrc.indexOf('\n}', fnStart);
+		const fnBody = cellsSrc.slice(fnStart, fnEnd);
+		const markOwn = fnBody.indexOf('markSelfRefreshedForEcho(ownSectionId);');
+		const markCompanion = fnBody.indexOf('markSelfRefreshedForEcho(companionSectionId);');
+		const ctxRefresh = fnBody.indexOf('ctx.refresh();');
+		const hostRefresh = fnBody.indexOf('host.refresh(companionSectionId);');
+		assert.ok(markOwn >= 0 && markCompanion >= 0, `${fnName} must mark both ids for echo suppression`);
+		assert.ok(
+			markOwn < ctxRefresh && markCompanion < hostRefresh,
+			`${fnName} must mark each id BEFORE dispatching its refresh, so the marker is armed before the vault event can arrive`,
+		);
+	}
+
+	// The four section call sites: own id, companion id — matching the ids route()
+	// actually schedules a debounced refresh for on an IGNORED_IDS_NOTE write.
+	const sites = [
+		{ file: 'src/ingestion/sections/uncapturedVideos.ts', fn: 'renderIgnoreButton', own: 'uncapturedVideos', companion: 'ignoredVideos' },
+		{ file: 'src/ingestion/sections/youtubeWithoutMetadata.ts', fn: 'renderIgnoreButton', own: 'youtubeWithoutMetadata', companion: 'ignoredVideos' },
+		{ file: 'src/ingestion/sections/uncapturedPosts.ts', fn: 'renderIgnoreButton', own: 'uncapturedPosts', companion: 'ignoredPosts' },
+		{ file: 'src/ingestion/sections/ignored.ts', fn: 'renderUnignoreButton', own: 'ignoredPosts', companion: 'uncapturedPosts' },
+		{ file: 'src/ingestion/sections/ignored.ts', fn: 'renderUnignoreButton', own: 'ignoredVideos', companion: 'uncapturedVideos' },
+	];
+	for (const { file, fn, own, companion } of sites) {
+		const src = readFileSync(file, 'utf8');
+		const needle = `${fn}(td, host, `;
+		assert.ok(src.includes(needle), `${file} must call ${fn} with (td, host, ...) — a DashboardHost, not a bare App`);
+		assert.match(
+			src,
+			new RegExp(`${fn}\\(td, host, '(?:youtube|blog)', [^,]+, '${own}', '${companion}', ctx\\)`),
+			`${file} must pass own id '${own}' and companion id '${companion}' to ${fn}`,
+		);
+	}
+});
