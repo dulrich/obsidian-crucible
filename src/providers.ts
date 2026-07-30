@@ -1,7 +1,7 @@
 import { App } from 'obsidian';
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderImageExtractionResult, ProviderKind, ProviderModelDescription, ProviderRerankResult, providerModality } from './types';
 import { HttpListCallContext, HttpProviderClient, arrayBufferToBase64, buildRerankFallbackUserPrompt, IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS, IMAGE_DESCRIPTION_EXTRACTION_PROMPT, IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS, IMAGE_DESCRIPTION_NARRATIVE_PROMPT, parseRerankCompletionText, RERANK_FALLBACK_SYSTEM_PROMPT } from './providers/shared';
-import { openAICompatibleClient } from './providers/openaiCompatible';
+import { isLocal as isLocalProvider, openAICompatibleClient } from './providers/openaiCompatible';
 import { anthropicClient } from './providers/anthropic';
 import { googleClient } from './providers/google';
 import { ollamaClient } from './providers/ollama';
@@ -13,6 +13,94 @@ export { CLI_DEFAULT_TIMEOUT_SECONDS } from './providers/cli';
 export type { ProviderCompletionOptions } from './providers/cli';
 
 export const providerSecretKey = (id: string) => `crucible-provider-${id}-key`;
+
+// rsp-wp1: default resolution for Provider.maxConcurrentRequests. An explicit positive value
+// always wins; otherwise local providers — reusing `isLocal` from providers/openaiCompatible.ts,
+// the exact detection that already gates `reasoning_effort` there, rather than a second "is
+// local" heuristic — default to 1 (measured: a single-GPU local inference-engine gains no
+// throughput from concurrency, and pile-up pushed the tail across the 120s timeout; see
+// `runs/dispatch/feedback-image-timeout-investigation.md`). Everything else (cloud HTTP kinds and
+// CLI kinds, which run their own local subprocess rather than sharing a GPU-bound HTTP server)
+// defaults to unlimited (`Infinity`) — a CLI provider that does share a constrained local
+// resource can still be capped by setting the field explicitly.
+export function resolveProviderConcurrencyLimit(provider: Provider): number {
+	const configured = provider.maxConcurrentRequests;
+	if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+		return configured;
+	}
+	return isLocalProvider(provider) ? 1 : Infinity;
+}
+
+interface ConcurrencyState {
+	active: number;
+	waiters: Array<() => void>;
+}
+
+// Per-provider-id completion-class concurrency limiter (rsp-wp1). Only the three ProviderManager
+// methods that shape a chat/completions-style request (complete, describeImage,
+// extractImageMetadata) route through this — embed() and the native rerank() path never do, by
+// design (a different model/latency class; serializing a search embed behind a 2-minute vision
+// call would be a regression). Keyed by provider id, not object identity, so in-flight requests
+// still share a queue with ones issued after the provider's settings are edited.
+class ProviderConcurrencyLimiter {
+	private readonly states = new Map<string, ConcurrencyState>();
+
+	// Runs fn() so that at most `limit` calls for the same providerId are in flight at once; extra
+	// callers queue FIFO (a released slot hands off directly to the oldest waiter). `limit` <= 0 or
+	// non-finite means unlimited — fn() runs immediately with no queue bookkeeping, so the common
+	// case (cloud providers) pays zero overhead.
+	//
+	// LOAD-BEARING: the slot is held for the lifetime of the fn() promise, not for however long a
+	// caller waits on the result of run(). A caller racing this against its own timeout
+	// (`withTimeout` in orchestration/utils/imageDescribe.ts) and giving up early does NOT release
+	// the slot early — fn() (which wraps the actual `requestUrl` call, not anything above it) keeps
+	// running to completion and only then triggers `finally`. `requestUrl` has no abort signal, so
+	// the HTTP request — and the GPU slot it holds server-side — is still in flight regardless of
+	// whether anything is still awaiting it; releasing on abandon instead of on settle would free a
+	// plugin-side slot the server is still busy on, letting the next request pile onto it and
+	// reproducing the exact amplifier the investigation measured (7/7 "transient" timeouts were
+	// requests that had actually completed 2-16s after the plugin gave up).
+	async run<T>(providerId: string, limit: number, fn: () => Promise<T>): Promise<T> {
+		if (!Number.isFinite(limit) || limit <= 0) return fn();
+		await this.acquire(providerId, limit);
+		try {
+			return await fn();
+		} finally {
+			this.release(providerId);
+		}
+	}
+
+	private acquire(providerId: string, limit: number): Promise<void> {
+		const state = this.stateFor(providerId);
+		if (state.active < limit) {
+			state.active++;
+			return Promise.resolve();
+		}
+		return new Promise<void>((resolve) => { state.waiters.push(resolve); });
+	}
+
+	private release(providerId: string): void {
+		const state = this.states.get(providerId);
+		if (!state) return;
+		const next = state.waiters.shift();
+		if (next) {
+			// Hand the slot straight to the oldest waiter — `active` is unchanged, so the count
+			// stays correct without a decrement/re-increment race.
+			next();
+			return;
+		}
+		state.active = Math.max(0, state.active - 1);
+	}
+
+	private stateFor(providerId: string): ConcurrencyState {
+		let state = this.states.get(providerId);
+		if (!state) {
+			state = { active: 0, waiters: [] };
+			this.states.set(providerId, state);
+		}
+		return state;
+	}
+}
 
 // Registry of HTTP-backed provider clients. A client only declares the capabilities it supports
 // (embed/extractImage are optional), so ProviderManager dispatches by looking up the client and
@@ -59,6 +147,8 @@ export class ProviderManager {
 	// cache" button should call alongside removing Provider.modelCatalog from settings — without
 	// it, a session-cached *successful* stale list would outlive an explicit user clear.
 	private readonly listModelsCache = new Map<string, Promise<ProviderCatalogModel[]>>();
+	// rsp-wp1: gates completion-class calls only — see ProviderConcurrencyLimiter's doc comment.
+	private readonly concurrency = new ProviderConcurrencyLimiter();
 
 	constructor(app: App, private readonly secrets: SecretRegistry) {
 		this.app = app;
@@ -80,13 +170,17 @@ export class ProviderManager {
 		if (!modelId) {
 			throw new Error(`No model selected for provider "${provider.name || provider.id}"`);
 		}
-		if (providerModality(provider.kind) === 'cli') {
-			const text = await runCliCompletion(this.app, provider, modelId, system, user, options);
-			return { text, finishReason: 'stop' };
-		}
-		const client = HTTP_PROVIDER_CLIENTS[provider.kind];
-		if (!client) throw new Error("Unsupported provider kind: " + (provider.kind as string));
-		return await client.complete(await this.httpContext(provider, modelId), system, user);
+		// rsp-wp1: the limiter wraps the actual call (CLI process or HTTP client), not this method —
+		// see ProviderConcurrencyLimiter's release-on-settle comment for why that boundary matters.
+		return await this.concurrency.run(provider.id, resolveProviderConcurrencyLimit(provider), async () => {
+			if (providerModality(provider.kind) === 'cli') {
+				const text = await runCliCompletion(this.app, provider, modelId, system, user, options);
+				return { text, finishReason: 'stop' };
+			}
+			const client = HTTP_PROVIDER_CLIENTS[provider.kind];
+			if (!client) throw new Error("Unsupported provider kind: " + (provider.kind as string));
+			return await client.complete(await this.httpContext(provider, modelId), system, user);
+		});
 	}
 
 	async embed(provider: Provider, modelId: string, inputs: string[]): Promise<ProviderEmbeddingResult> {
@@ -197,7 +291,11 @@ export class ProviderManager {
 			throw new Error(`No image extraction model selected for provider "${provider.name || provider.id}"`);
 		}
 		const client = this.requireCapability(provider, 'extractImage', 'image extraction');
-		return await client.extractImage(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType);
+		// rsp-wp1: same completion-class limiter as complete()/describeImage() — this is a
+		// chat/completions-shaped vision call, not embed/rerank.
+		return await this.concurrency.run(provider.id, resolveProviderConcurrencyLimit(provider), async () => {
+			return await client.extractImage(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType);
+		});
 	}
 
 	// WP-1's two-pass description call (`docs/multimodal-image-search.md`, Decision 2): one call
@@ -214,7 +312,11 @@ export class ProviderManager {
 		const client = this.requireCapability(provider, 'describeImagePass', 'image description');
 		const prompt = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_PROMPT : IMAGE_DESCRIPTION_EXTRACTION_PROMPT;
 		const maxTokens = pass === 'narrative' ? IMAGE_DESCRIPTION_NARRATIVE_MAX_TOKENS : IMAGE_DESCRIPTION_EXTRACTION_MAX_TOKENS;
-		return await client.describeImagePass(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType, prompt, maxTokens);
+		// rsp-wp1: the measured pile-up path (image_describe_batch/note against a single-GPU local
+		// server) — gated by the same completion-class limiter as complete().
+		return await this.concurrency.run(provider.id, resolveProviderConcurrencyLimit(provider), async () => {
+			return await client.describeImagePass(await this.httpContext(provider, modelId), arrayBufferToBase64(imageBytes), mimeType, prompt, maxTokens);
+		});
 	}
 
 	// WP-5: rerank has two backends. Primary is the provider's native rerank() (currently only

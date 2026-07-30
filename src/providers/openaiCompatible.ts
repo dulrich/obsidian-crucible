@@ -28,7 +28,11 @@ function isOpenRouter(provider: Provider): boolean {
 
 // A user-configured local server (LM Studio, llama.cpp, vLLM, LocalAI, …) speaking the
 // OpenAI wire format. It honours provider.baseUrl and treats the API key as optional.
-function isLocal(provider: Provider): boolean {
+//
+// Exported (rsp-wp1) so ProviderManager's per-provider concurrency limiter (src/providers.ts,
+// resolveProviderConcurrencyLimit) can reuse this exact detection for its "local defaults to 1"
+// resolution, rather than inventing a second is-local heuristic that could drift from this one.
+export function isLocal(provider: Provider): boolean {
 	return provider.kind === 'openai-compatible';
 }
 
