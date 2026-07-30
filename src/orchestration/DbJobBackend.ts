@@ -7,6 +7,7 @@ import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJo
 import type { Workflow } from './workflows/Workflow';
 import {
 	JobBackend,
+	JobQuerySeam,
 	QueueCountsSource,
 	RunOutcome,
 	resolveTimeoutMs,
@@ -46,7 +47,7 @@ import { newJobId, nowIso } from './utils/dates';
  * backends), and the fact that `clearQueued` emits nothing — the Orchestrator emits
  * once for the whole bulk operation.
  */
-export class DbJobBackend implements JobBackend {
+export class DbJobBackend implements JobBackend, JobQuerySeam {
 	// File-like semantics: the autorunner drains this type, and the autorun toggle
 	// gates it. Only memory types drain regardless of the toggle.
 	readonly drainsWithoutAutorun = false;
@@ -97,10 +98,10 @@ export class DbJobBackend implements JobBackend {
 					this.store.promote(existing.id, promotesLane ? lane : undefined, priority);
 					this.emitQueueUpdate();
 					routineJobNotice(this.plugin, this.type, `Orchestrate: promoted ${this.type} (${existing.id})`);
-					return { ...toOrchestrationJob(existing), lane, priority };
+					return { ...dbRowToOrchestrationJob(existing), lane, priority };
 				}
 				routineJobNotice(this.plugin, this.type, `Orchestrate: ${this.type} already queued for this target (${existing.id}).`);
-				return toOrchestrationJob(existing);
+				return dbRowToOrchestrationJob(existing);
 			}
 		}
 		const row = this.store.insert({
@@ -114,7 +115,7 @@ export class DbJobBackend implements JobBackend {
 		});
 		routineJobNotice(this.plugin, this.type, `Orchestrate: queued ${this.type} (${row.id})`);
 		this.emitQueueUpdate();
-		return toOrchestrationJob(row);
+		return dbRowToOrchestrationJob(row);
 	}
 
 	async runNext(): Promise<RunOutcome> {
@@ -195,7 +196,7 @@ export class DbJobBackend implements JobBackend {
 	/** Queue rows of this type in claim order (queue monitor; `limit` maps to LIMIT,
 	 * which is what retires the monitor's 100-row JS-side cap). */
 	list(status: OrchestrationJob['status'], options: { limit?: number; offset?: number } = {}): OrchestrationJob[] {
-		return this.store.list(status, { ...options, type: this.type }).map(toOrchestrationJob);
+		return this.store.list(status, { ...options, type: this.type }).map(dbRowToOrchestrationJob);
 	}
 
 	/** How many jobs of this type sit in any of `statuses` (intake button state). */
@@ -264,7 +265,7 @@ export class DbJobBackend implements JobBackend {
 	// 'blocked' when the job came back deferred because a declared *service* is down —
 	// which ends the type's drain for this pass.
 	private async execute(row: DbJobRow): Promise<RunOutcome> {
-		const job = toOrchestrationJob(row);
+		const job = dbRowToOrchestrationJob(row);
 		if (!this.isWorkflowEnabled()) {
 			// This id will never reach `running.begin` below — settle its claim here so a
 			// concurrent cancelJob() doesn't wait forever for a run that isn't coming.
@@ -481,8 +482,12 @@ export function dbQueueCountsSource(store: SqliteJobStore): QueueCountsSource {
  * write-only on the file side too — see `db/types.ts`'s `DbJobRow` doc), and
  * `deferUntil` is re-rendered as the ISO string `OrchestrationJob` declares from the
  * epoch-ms column.
+ *
+ * Exported (WP-7) so `Orchestrator.listJobs` can map DB rows the same way when
+ * merging them with file-backed jobs for the queue monitor's all-types view — the
+ * mapping logic has exactly one owner either way.
  */
-function toOrchestrationJob(row: DbJobRow): OrchestrationJob {
+export function dbRowToOrchestrationJob(row: DbJobRow): OrchestrationJob {
 	return {
 		id: row.id,
 		type: row.type,
@@ -497,6 +502,7 @@ function toOrchestrationJob(row: DbJobRow): OrchestrationJob {
 		failureKind: row.failureKind,
 		progress: row.progress,
 		deferUntil: row.deferUntil !== undefined ? new Date(row.deferUntil).toISOString() : undefined,
+		notes: row.notes ? row.notes : undefined,
 	};
 }
 

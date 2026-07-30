@@ -1,7 +1,7 @@
 import type CruciblePlugin from '../main';
 import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
+import type { JobStatus, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow, WorkflowContext } from './workflows/Workflow';
 import { CancelJobOutcome, RemoveQueuedOutcome, applyCancellation, cancelledResultFor } from './cancellation';
 import { logError } from '../log';
@@ -97,6 +97,46 @@ export interface JobBackend {
 	hasPending(): boolean;
 	/** Pull fresh candidates in (memory types only); no-op otherwise. */
 	refill(): void;
+}
+
+/**
+ * WP-7 seam: backend-level list/count/progress queries for ONE job type, so the
+ * reach-around consumers (queue monitor row source, intake buttons,
+ * `SearchJobProgress`) can move off direct `JobStore`/`SqliteJobStore` access without
+ * branching on persistence kind. Implemented by `FileJobBackend` (delegates to
+ * `JobStore.listFolder` + a JS filter/slice — file types die in WP-8, so this isn't
+ * optimized, per the queue-db investigation) and `DbJobBackend` (already-indexed SQL;
+ * `list`/`count`/`setProgress` predate this interface — see the WP-6 report's "The API
+ * WP-7 consumes"). Deliberately NOT implemented by `MemoryJobBackend`: the queue
+ * monitor renders memory rows through its own `enrichmentQueue` adapter, untouched by
+ * this seam.
+ *
+ * Return types are `Promise<X> | X` rather than a bare `Promise<X>`: the DB backend's
+ * node:sqlite calls are synchronous, and forcing them into real Promises would be a
+ * mechanical, test-breaking change (`tests/dbJobBackend.test.mjs` reads
+ * `DbJobBackend.list/count/setProgress` results synchronously, with no `await`) for no
+ * behavioral gain — every caller through this seam already `await`s the result, and
+ * `await`ing a non-Promise value resolves it immediately.
+ */
+export interface JobQuerySeam {
+	/** This type's rows in claim order. `limit`/`offset` are a real SQL LIMIT on the DB
+	 * backend; the file backend reads the whole folder then slices in JS. */
+	list(status: JobStatus, options?: { limit?: number; offset?: number }): Promise<OrchestrationJob[]> | OrchestrationJob[];
+	/** How many of this type sit in any of `statuses`. */
+	count(statuses: JobStatus[]): Promise<number> | number;
+	/** Progress line for a running job of this type; a no-op if the job can't be
+	 * resolved (already settled, wrong type, or never existed). */
+	setProgress(id: string, message: string): Promise<void> | void;
+}
+
+/** Duck-typed rather than an `instanceof` check — mirrors `resolveCountsSource`'s
+ * existing style in this file. A backend either carries the WP-7 seam (file, db) or
+ * doesn't (memory). */
+export function hasJobQuerySeam(backend: JobBackend): backend is JobBackend & JobQuerySeam {
+	const candidate = backend as Partial<JobQuerySeam>;
+	return typeof candidate.list === 'function'
+		&& typeof candidate.count === 'function'
+		&& typeof candidate.setProgress === 'function';
 }
 
 /**

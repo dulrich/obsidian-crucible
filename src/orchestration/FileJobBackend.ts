@@ -2,9 +2,9 @@ import { Notice, TFile } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
+import type { JobPriority, JobStatus, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow } from './workflows/Workflow';
-import { JobBackend, RunOutcome, fileQueueCountsSource, resolveTimeoutMs, runWorkflowWithTimeout, scheduleQueueChanged } from './JobBackend';
+import { JobBackend, JobQuerySeam, RunOutcome, fileQueueCountsSource, resolveTimeoutMs, runWorkflowWithTimeout, scheduleQueueChanged } from './JobBackend';
 import { CANCELLED_BEFORE_RUN, CancelJobOutcome, RemoveQueuedOutcome, RunSettlement, RunningJobRegistry } from './cancellation';
 import { logError } from '../log';
 import { routineJobNotice } from './notices';
@@ -16,7 +16,7 @@ import { classifyFailedJob } from './failedJobRepair';
 // `dedupeKey` onto the existing active job; the drain claims a queued file, moves it
 // to running, executes the workflow under the per-type/global timeout, and moves it
 // to done/failed with notes/output recorded.
-export class FileJobBackend implements JobBackend {
+export class FileJobBackend implements JobBackend, JobQuerySeam {
 	readonly drainsWithoutAutorun = false;
 	// File paths a worker has claimed but not yet moved to running. Guards the window
 	// between listFolder and move so two workers of this type can't claim the same job
@@ -43,6 +43,17 @@ export class FileJobBackend implements JobBackend {
 	 */
 	private readonly claiming = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
+	/**
+	 * `setProgress`'s job-id → TFile memoization (WP-7 seam). `SearchJobProgress` used
+	 * to hold this cache itself, scoped to one job's lifetime; moving the "resolve my
+	 * own running/ file" responsibility down into the backend (so `Orchestrator` can
+	 * dispatch `setProgress(id, msg)` without knowing persistence kind) would otherwise
+	 * cost a full `listFolder('running')` scan on every progress checkpoint instead of
+	 * once — the old per-instance cache is what kept a multi-hundred-file search batch
+	 * from re-scanning `running/` at every 10-file tick. Cleared in `execute`'s
+	 * `finally` once the job settles, so this doesn't grow unboundedly across a session.
+	 */
+	private readonly progressFileCache = new Map<string, TFile | null>();
 
 	constructor(
 		private readonly plugin: CruciblePlugin,
@@ -231,6 +242,52 @@ export class FileJobBackend implements JobBackend {
 		/* file types have no auto-source */
 	}
 
+	// ---- WP-7 seam: backend-level queries for the reach-around consumers ------------
+
+	/**
+	 * This type's jobs in claim order. `limit`/`offset` are applied in JS after the
+	 * whole folder is read and filtered — file types die in WP-8, so (per the queue-db
+	 * investigation's "don't optimize them") this stays a plain list-then-slice rather
+	 * than growing a query layer `JobStore` was never given.
+	 */
+	async list(status: JobStatus, options: { limit?: number; offset?: number } = {}): Promise<OrchestrationJob[]> {
+		const entries = await this.store.listFolder(status);
+		const jobs = entries.filter(e => e.job.type === this.type).map(e => e.job);
+		const offset = options.offset ?? 0;
+		return options.limit !== undefined ? jobs.slice(offset, offset + options.limit) : jobs.slice(offset);
+	}
+
+	/** How many of this type sit in any of `statuses` — one `listFolder` pass per
+	 * status, filtered to this type: the exact cost `intake.ts` paid inline before this
+	 * seam existed (two passes for the queued+running button check), just moved here. */
+	async count(statuses: JobStatus[]): Promise<number> {
+		let total = 0;
+		for (const status of statuses) {
+			const entries = await this.store.listFolder(status);
+			total += entries.filter(e => e.job.type === this.type).length;
+		}
+		return total;
+	}
+
+	/**
+	 * Progress line for a running job of this type — replaces `SearchJobProgress`'s own
+	 * scan-and-memoize of `running/` (`SearchIndexWorkflow.ts`'s old `resolveFile`); see
+	 * `progressFileCache`'s doc comment for why the memoization moved here rather than
+	 * disappearing. A miss (already settled, wrong type, or never existed) is a silent
+	 * no-op — matches the old `resolveFile` returning null.
+	 */
+	async setProgress(id: string, message: string): Promise<void> {
+		let file = this.progressFileCache.get(id);
+		if (file === undefined) {
+			const running = await this.store.listFolder('running');
+			file = running.find(e => e.job.id === id && e.job.type === this.type)?.file ?? null;
+			this.progressFileCache.set(id, file);
+		}
+		if (!file) return;
+		await this.store.setProgress(file, message);
+		this.emitQueueUpdate();
+	}
+
 	// Finds a queued or running job of this type whose params resolve to the same
 	// dedupe key, so callers can collapse repeat enqueues onto one job.
 	private async findActiveJob(key: string): Promise<{ job: OrchestrationJob; file: TFile } | null> {
@@ -377,6 +434,10 @@ export class FileJobBackend implements JobBackend {
 			await this.failEntry(moved, e instanceof Error ? e.message : String(e));
 		} finally {
 			run.finish(settlement);
+			// The job has left (or is leaving) running/ either way — the memoized progress
+			// lookup for this id is now stale, and the id is never reused (newJobId), so
+			// there is no reason to keep it around.
+			this.progressFileCache.delete(moved.job.id);
 		}
 		return 'ran';
 	}

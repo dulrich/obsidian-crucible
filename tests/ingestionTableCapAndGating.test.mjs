@@ -350,14 +350,17 @@ test('STRUCTURAL: SectionContext.refresh is built as the scroll-preserving wrapp
 
 /* ---------------------------------------------------- (#4) STRUCTURAL: no blank window */
 
-test('STRUCTURAL: renderQueueMonitor no longer empties the body before the listFolder awaits', () => {
+test('STRUCTURAL: renderQueueMonitor no longer empties the body before the listJobs awaits', () => {
+	// WP-7: the direct JobStore.listFolder reach-around moved onto
+	// Orchestrator.listJobs (the backend-agnostic seam), but the property under test —
+	// no body.empty() before the awaited fetch that populates rows — is unchanged.
 	const queueMonitorSrc = readFileSync('src/ingestion/sections/queueMonitor.ts', 'utf8');
 	const fnStart = queueMonitorSrc.indexOf('export async function renderQueueMonitor(');
 	assert.ok(fnStart >= 0, 'renderQueueMonitor not found');
-	const awaitIdx = queueMonitorSrc.indexOf('await Promise.all([store.listFolder', fnStart);
-	assert.ok(awaitIdx > fnStart, 'the listFolder await not found inside renderQueueMonitor');
+	const awaitIdx = queueMonitorSrc.indexOf('await Promise.all([orchestrator.listJobs', fnStart);
+	assert.ok(awaitIdx > fnStart, 'the listJobs await not found inside renderQueueMonitor');
 	const beforeAwait = queueMonitorSrc.slice(fnStart, awaitIdx);
-	assert.ok(!beforeAwait.includes('body.empty()'), 'body must not be emptied before the folder-scan awaits — that is the blank-window bug');
+	assert.ok(!beforeAwait.includes('body.empty()'), 'body must not be emptied before the query awaits — that is the blank-window bug');
 });
 
 /* -------------------------------------------- (WP-6) STRUCTURAL: Ignore double-render */

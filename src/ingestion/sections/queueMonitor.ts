@@ -1,4 +1,4 @@
-import { Notice, TFile } from 'obsidian';
+import { App, Modal, Notice, TFile } from 'obsidian';
 import type { JobType, OrchestrationJob } from '../../orchestration/types';
 import type { StopJobOutcome } from '../../orchestration/cancellation';
 import type { ServiceHealthSnapshot } from '../../orchestration/serviceHealth';
@@ -123,6 +123,107 @@ function searchBatchTitle(job: OrchestrationJob): string {
 	return kind;
 }
 
+// 'file' rows come from `Orchestrator.listJobs` (WP-7 seam — file- and, once WP-8
+// flips a type, db-backed jobs are indistinguishable here); 'memory' rows come from
+// enrichmentQueue. Hoisted to module scope so `toQueueRow` below can build one without
+// duplicating the shape twice inside `renderQueueMonitor`.
+type QueueRow = {
+	source: 'file' | 'memory';
+	status: 'queued' | 'running';
+	type: string;
+	// file rows: job id; memory rows: key used for Cancel
+	key: string;
+	// memory rows: videoId for dequeue calls
+	videoId?: string;
+	// memory rows/file rows: targetPath note link when available
+	targetPath?: string;
+	// memory rows: display title / channel fallback
+	title?: string;
+	created: string;
+	error?: string;
+	progress?: string;
+	// file rows only (WP-7 job-detail affordance) — no dedicated column, shown in the
+	// per-row Details modal instead: how `error` was classified, the free-text run
+	// narration (db rows only — see OrchestrationJob.notes' doc comment), and the raw
+	// params payload.
+	failureKind?: 'service' | 'job';
+	notes?: string;
+	params?: Record<string, unknown>;
+};
+
+function toQueueRow(job: OrchestrationJob, status: 'queued' | 'running'): QueueRow {
+	return {
+		source: 'file',
+		status,
+		type: job.type,
+		key: job.id,
+		targetPath: fileJobTargetPath(job),
+		title: fileJobTitle(job),
+		created: job.created ?? '',
+		error: job.error,
+		progress: job.progress,
+		failureKind: job.failureKind,
+		notes: job.notes,
+		params: job.params,
+	};
+}
+
+/**
+ * WP-7's job-detail affordance: post-cutover, a db-backed job has no note file to
+ * open, so this is the replacement surface — params (pretty-printed), error/
+ * failureKind, progress, and notes (when the backend carries them; see
+ * `OrchestrationJob.notes`), plus a copy-to-clipboard button. Works identically for
+ * file rows: same `QueueRow` fields, this WP's seam is what makes both sources land
+ * in the same shape by the time a row reaches this modal.
+ */
+class JobDetailModal extends Modal {
+	constructor(app: App, private readonly row: QueueRow) {
+		super(app);
+	}
+
+	onOpen(): void {
+		const { contentEl, titleEl } = this;
+		titleEl.setText(`Job detail: ${this.row.type}`);
+
+		const text = formatJobDetail(this.row);
+		// Reuses ChainInspectorModal's raw-text-in-a-modal class (src/chains.ts) rather
+		// than inventing a new one — same shape (monospace, wrapped, scroll-capped).
+		contentEl.createEl('pre', { text, cls: 'crucible-inspector-pre' });
+
+		const buttons = contentEl.createDiv({ cls: 'modal-button-container' });
+		const copy = buttons.createEl('button', { text: 'Copy to clipboard' });
+		copy.addEventListener('click', () => {
+			void navigator.clipboard.writeText(text);
+			new Notice('Job detail copied to clipboard.');
+		});
+		const close = buttons.createEl('button', { text: 'Close', cls: 'mod-cta' });
+		close.addEventListener('click', () => this.close());
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+// Exported for direct unit testing (tests/queueMonitorJobDetail.test.mjs) — a pure
+// function is easier to pin than driving the DOM-heavy modal/table machinery this
+// section otherwise needs a full Obsidian stub for.
+export function formatJobDetail(row: QueueRow): string {
+	const lines = [
+		`Type: ${row.type}`,
+		`ID: ${row.key}`,
+		`Status: ${row.status}`,
+		`Created: ${row.created}`,
+	];
+	if (row.targetPath) lines.push(`Target: ${row.targetPath}`);
+	if (row.progress) lines.push(`Progress: ${row.progress}`);
+	if (row.error) lines.push(`Error: ${row.error}`);
+	if (row.failureKind) lines.push(`Failure kind: ${row.failureKind}`);
+	lines.push('', 'Params:', JSON.stringify(row.params ?? {}, null, 2));
+	if (row.notes) lines.push('', 'Notes:', row.notes);
+	return lines.join('\n');
+}
+
 export function buildQueueMonitorSection(host: DashboardHost): void {
 	const card = host.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
 	const { countEl, metaEl } = host.createSectionHeader(
@@ -239,39 +340,22 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 }
 
 export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
-	// Body is intentionally NOT emptied here: `store.listFolder` below awaits two
-	// full folder scans, and clearing the body first left it visibly blank for
-	// that whole window on every queue event. Every branch below empties body
-	// itself, immediately before it writes — the error message, the empty state,
-	// and (via renderSortableTable's own `parent.empty()`) the table.
+	// Body is intentionally NOT emptied here: `orchestrator.listJobs` below awaits two
+	// full queries, and clearing the body first left it visibly blank for that whole
+	// window on every queue event. Every branch below empties body itself, immediately
+	// before it writes — the error message, the empty state, and (via
+	// renderSortableTable's own `parent.empty()`) the table.
 	//
-	// --- File-backed jobs (orchestrator job store) ---
-	type QueueRow = {
-		// 'file' rows come from jobStore; 'memory' rows come from enrichmentQueue
-		source: 'file' | 'memory';
-		status: 'queued' | 'running';
-		type: string;
-		// file rows: job id; memory rows: key used for Cancel
-		key: string;
-		// memory rows: videoId for dequeue calls
-		videoId?: string;
-		// memory rows: targetPath note link when available
-		targetPath?: string;
-		// memory rows: display title / channel fallback
-		title?: string;
-		created: string;
-		error?: string;
-		progress?: string;
-	};
-
-	const store = host.plugin.jobStore;
+	// --- Backend-agnostic jobs (Orchestrator.listJobs — file today, file+db once
+	// WP-8 flips a type; the queue monitor doesn't know or care which) ---
+	const orchestrator = host.plugin.orchestrator;
 	let fileRows: QueueRow[] = [];
-	if (store) {
+	if (orchestrator) {
 		try {
-			const [running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
+			const [running, queued] = await Promise.all([orchestrator.listJobs('running', { limit: QUEUE_MONITOR_RENDER_LIMIT }), orchestrator.listJobs('queued', { limit: QUEUE_MONITOR_RENDER_LIMIT })]);
 			fileRows = [
-				...running.map(e => ({ source: 'file' as const, status: 'running' as const, type: e.job.type, key: e.job.id, targetPath: fileJobTargetPath(e.job), title: fileJobTitle(e.job), created: e.job.created ?? '', error: e.job.error, progress: e.job.progress })),
-				...queued.map(e => ({ source: 'file' as const, status: 'queued' as const, type: e.job.type, key: e.job.id, targetPath: fileJobTargetPath(e.job), title: fileJobTitle(e.job), created: e.job.created ?? '', error: e.job.error, progress: e.job.progress })),
+				...running.map(job => toQueueRow(job, 'running')),
+				...queued.map(job => toQueueRow(job, 'queued')),
 			];
 		} catch (e) {
 			body.empty();
@@ -408,6 +492,14 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 							else run.disabled = false;
 						})();
 					});
+				}
+				// File/db rows only: memory rows already show their identifying fields
+				// (title/videoId/targetPath) directly in the table, and carry no params/
+				// notes/failureKind worth a modal.
+				if (r.source === 'file') {
+					const details = td.createEl('button', { text: 'Details' });
+					details.title = 'Show this job\'s params, error, progress and notes.';
+					details.addEventListener('click', () => new JobDetailModal(host.app, r).open());
 				}
 				renderCancelAction(host, td, r.type as JobType, r.key, r.status);
 			},

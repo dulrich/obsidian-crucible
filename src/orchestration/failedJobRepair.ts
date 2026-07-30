@@ -1,7 +1,6 @@
 import { Notice } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { OrchestrationJob } from './types';
-import { emitQueueChanged } from './JobBackend';
 import { logError } from '../log';
 import { ConfirmModal } from '../confirmModal';
 
@@ -104,22 +103,16 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 /**
- * Scans `failed/`, classifies every entry, and (unless `dryRun`) moves the
- * service-outage matches back to `queued/` — clearing their recorded error first so a
- * requeued job doesn't carry the prior run's diagnostic.
- *
- * `dryRun: true` mutates nothing: no store writes, no emit. It exists so the command
- * and the queue-monitor button can show the breakdown in a `ConfirmModal` before
- * anything happens.
- *
- * Emits `orchestration-queue-updated` exactly once for the whole run (never per job —
- * see the bulk-emit invariant on `Orchestrator.clearQueued`), and kicks the autorunner
- * once afterward so the requeued jobs start draining immediately rather than waiting
- * for the next event.
+ * The FILE arm: scans `failed/`, classifies every entry, and (unless `dryRun`) moves
+ * the service-outage matches back to `queued/` — clearing their recorded error first
+ * so a requeued job doesn't carry the prior run's diagnostic. Per-file loop, exactly
+ * as before WP-7 — file types are deleted in WP-8, not here, so this isn't rewritten
+ * onto anything new. No emit of its own: `requeueServiceFailures` below emits once for
+ * the combined file+db result.
  */
-export async function requeueServiceFailures(
+async function requeueServiceFailuresFile(
 	plugin: CruciblePlugin,
-	{ dryRun }: { dryRun: boolean },
+	dryRun: boolean,
 ): Promise<RequeueBreakdown> {
 	const store = plugin.jobStore;
 	await store.ensureFolders();
@@ -163,12 +156,55 @@ export async function requeueServiceFailures(
 		if (processed % 20 === 0) await yieldToEventLoop();
 	}
 
-	if (!dryRun && requeued > 0) {
-		await emitQueueChanged(plugin, store);
+	return { total: failed.length, byType, requeued, skipped };
+}
+
+function mergeByTypeCounts(a: Record<string, number>, b: Record<string, number>): Record<string, number> {
+	const out: Record<string, number> = { ...a };
+	for (const [type, count] of Object.entries(b)) out[type] = (out[type] ?? 0) + count;
+	return out;
+}
+
+/**
+ * Scans BOTH the file queue's `failed/` and (once a `db` type exists) the jobs DB for
+ * service-outage failures, and (unless `dryRun`) requeues the matches back to
+ * `queued`. Backend-dispatched (WP-7): the file arm is the per-file loop above,
+ * unchanged since before this WP; the db arm is `Orchestrator.requeueServiceOutageDbFailures`
+ * — one `UPDATE … WHERE failure_kind = 'service'` selecting on the column
+ * `DbJobBackend.failEntry` already stamped at settle time, no re-classification
+ * needed. `classifyFailedJob` stays the single source of truth either way: it is what
+ * stamps `failure_kind` in the first place, and it's still what the file arm runs
+ * fresh against `error` text (file jobs have no `failure_kind` column).
+ *
+ * `dryRun: true` mutates nothing: no store writes, no emit. It exists so the command
+ * and the queue-monitor button can show the breakdown in a `ConfirmModal` before
+ * anything happens.
+ *
+ * Emits `orchestration-queue-updated` exactly once for the whole run, through the
+ * combined file+db counts provider (never per job, never file-only once a db type
+ * exists — see the bulk-emit invariant on `Orchestrator.clearQueued`), and kicks the
+ * autorunner once afterward so the requeued jobs start draining immediately.
+ */
+export async function requeueServiceFailures(
+	plugin: CruciblePlugin,
+	{ dryRun }: { dryRun: boolean },
+): Promise<RequeueBreakdown> {
+	const fileResult = await requeueServiceFailuresFile(plugin, dryRun);
+	const dbResult = plugin.orchestrator.requeueServiceOutageDbFailures(dryRun);
+
+	const merged: RequeueBreakdown = {
+		total: fileResult.total + dbResult.total,
+		byType: mergeByTypeCounts(fileResult.byType, dbResult.byType),
+		requeued: fileResult.requeued + dbResult.requeued,
+		skipped: fileResult.skipped + (dbResult.total - dbResult.requeued),
+	};
+
+	if (!dryRun && merged.requeued > 0) {
+		await plugin.orchestrator.emitQueueChangedNow();
 		plugin.orchestrationAutoRunner?.kickAll();
 	}
 
-	return { total: failed.length, byType, requeued, skipped };
+	return merged;
 }
 
 function formatByType(byType: Record<string, number>): string {

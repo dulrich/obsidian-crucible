@@ -10,7 +10,6 @@ import {
 	type SearchServiceUnavailableErrorKind,
 	type SearchResponse,
 } from '../../search/types';
-import { scheduleQueueChanged } from '../JobBackend';
 
 const SEARCH_RETRY_AFTER_MS = 30_000;
 
@@ -324,29 +323,23 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 class SearchJobProgress {
-	private file: TFile | null | undefined;
-
 	constructor(
 		private readonly plugin: WorkflowContext['plugin'],
 		private readonly job: OrchestrationJob,
 	) {}
 
+	/**
+	 * WP-7: retired the scan-`running/`-for-my-own-TFile dance (and the JobStore-shaped
+	 * `scheduleQueueChanged` call it required) in favor of the backend-agnostic seam.
+	 * `Orchestrator.setJobProgress` dispatches to this job's own type's backend, which
+	 * resolves/writes its own row (a memoized folder lookup for file types — see
+	 * `FileJobBackend.progressFileCache`, which preserves the "was `queued 0, running
+	 * 0` fabricated payload every 10 files" fix below by construction — or a direct
+	 * indexed UPDATE for db types) and emits its own coalesced
+	 * `orchestration-queue-updated`, so a long batch still can't out-emit the 250ms
+	 * window.
+	 */
 	async update(message: string): Promise<void> {
-		const file = await this.resolveFile();
-		if (!file) return;
-		await this.plugin.jobStore.setProgress(file, message);
-		// Was `emit('orchestration-queue-updated', { queued: 0, running: 0 })` — a
-		// FABRICATED payload every 10 files, which every listener rendered as "the queue
-		// is empty" and the autorunner answered with a full kickAll(). It goes through
-		// the shared coalescer instead, so the counts are real and a long batch cannot
-		// out-emit the 250ms window.
-		scheduleQueueChanged(this.plugin, this.plugin.jobStore);
-	}
-
-	private async resolveFile(): Promise<TFile | null> {
-		if (this.file !== undefined) return this.file;
-		const running = await this.plugin.jobStore.listFolder('running');
-		this.file = running.find(entry => entry.job.id === this.job.id)?.file ?? null;
-		return this.file;
+		await this.plugin.orchestrator.setJobProgress(this.job.type, this.job.id, message);
 	}
 }

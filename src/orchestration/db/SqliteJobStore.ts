@@ -439,6 +439,46 @@ export class SqliteJobStore {
 		return result.changes > 0;
 	}
 
+	// ---- Bulk repair (WP-7's failedJobRepair db arm) -------------------------------
+
+	/**
+	 * Failed rows already classified `failure_kind = 'service'` at settle time
+	 * (`DbJobBackend.failEntry` stamps it via the same `classifyFailedJob` the file
+	 * backend and this repair tool share), grouped by type — the preview a bulk
+	 * requeue shows before executing. Mirrors the file arm's `RequeueBreakdown.byType`.
+	 */
+	serviceOutageFailedByType(): Record<string, number> {
+		const rows = this.db.prepare(
+			`SELECT type, COUNT(*) as c FROM jobs WHERE status = 'failed' AND failure_kind = 'service' GROUP BY type`,
+		).all();
+		const out: Record<string, number> = {};
+		for (const row of rows) out[String(row.type)] = Number(row.c);
+		return out;
+	}
+
+	/**
+	 * One UPDATE requeuing every `failed` row already classified `failure_kind =
+	 * 'service'` back to `queued`, clearing `error`/`failure_kind`/`defer_until` — the
+	 * db arm of `failedJobRepair`'s bulk requeue (queue-db investigation: "one
+	 * UPDATE…WHERE requeue" replacing the file backend's per-file yield-every-20 loop).
+	 * The classification already happened at settle time (`failEntry`), so this needs
+	 * no re-scan of error text — it just selects on the column. Returns the count moved.
+	 *
+	 * No `nowMs` parameter: unlike `transition`/`clearQueued`, this writes no
+	 * timestamp column (`settled_at` is cleared, not stamped — a requeued job is
+	 * `queued` again, not newly terminal), so there is nothing here for a caller's
+	 * clock to control.
+	 */
+	requeueServiceOutageFailed(): number {
+		const result = this.db.prepare(`
+			UPDATE jobs
+			SET status = 'queued', error = NULL, failure_kind = NULL, defer_until = NULL,
+				claimed_at = NULL, claim_token = NULL, settled_at = NULL
+			WHERE status = 'failed' AND failure_kind = 'service'
+		`).run();
+		return result.changes;
+	}
+
 	// ---- Retention ----------------------------------------------------------------
 
 	/**
