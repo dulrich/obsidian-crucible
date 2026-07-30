@@ -31,6 +31,8 @@ export async function renderUncapturedPosts(host: DashboardHost, body: HTMLEleme
 		body, ctx, rows,
 		emptyText: 'No uncaptured posts.',
 		defaultSort: { column: 'publishedAt', direction: 'desc' },
+		// rsp-wp6: postId is the natural stable key — one row per post.
+		rowKey: r => r.postId,
 		setCount: n => host.setSectionCount('uncapturedPosts', n),
 		columns: [
 			{ key: 'blogName', label: 'Author', sortable: true, sortKey: r => postAuthorLabel(r).toLowerCase(), render: (r, td) => renderPostAuthorCell(td, r) },

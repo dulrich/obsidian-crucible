@@ -21,28 +21,52 @@ export interface RenderTableSectionOptions<T> {
 	setCount: (n: number) => void;
 	defaultSort?: SortState;
 	limit?: number;
+	// rsp-wp6: forwarded straight through to renderSortableTable's own
+	// `rowKey` option — see its doc comment (sortableTable.ts) for the
+	// stability contract. Omit for tables with no natural stable key.
+	rowKey?: (row: T) => string;
 }
 
-// The scaffold shared by every list section: clear the body, publish the row
-// count, short-circuit to an empty-state message when there are no rows, seed
-// the default sort on first render, then hand off to the sortable table. Rows
-// beyond `limit` (default DEFAULT_TABLE_ROW_LIMIT) don't render at all — sorting
+const TABLE_CAPTION_CLS = 'crucible-ingestion-table-caption';
+
+// The scaffold shared by every list section: publish the row count, short-
+// circuit to an empty-state message when there are no rows, seed the default
+// sort on first render, then hand off to the sortable table. Rows beyond
+// `limit` (default DEFAULT_TABLE_ROW_LIMIT) don't render at all — sorting
 // happens on the full row set first (renderSortableTable's own `options.limit`
 // slices after sorting), so which rows are visible still reflects the active
 // sort, not insertion order.
+//
+// rsp-wp6: `body` is deliberately NOT emptied unconditionally at the top
+// anymore — for a keyed table, renderSortableTable owns its own subtree of
+// `body` and reconciles it in place; wiping `body` first every render would
+// tear down exactly the DOM the reconciler exists to preserve. The zero-rows
+// branch still empties `body` itself (there is nothing to reconcile), which
+// also self-heals the reconciler's cache: renderSortableTable's own staleness
+// check (`state.table.parentElement !== parent`) notices the table is gone
+// next time rows reappear and rebuilds clean.
 export function renderTableSection<T>(opts: RenderTableSectionOptions<T>): void {
-	const { body, ctx, rows, columns, emptyText, setCount, defaultSort, limit = DEFAULT_TABLE_ROW_LIMIT } = opts;
-	body.empty();
-	setCount(rows.length);
+	const { body, ctx, rows, columns, emptyText, setCount, defaultSort, limit = DEFAULT_TABLE_ROW_LIMIT, rowKey } = opts;
 	if (rows.length === 0) {
+		body.empty();
+		setCount(0);
 		body.createDiv({ cls: 'crucible-empty-state', text: emptyText });
 		return;
 	}
+	setCount(rows.length);
 	if (!ctx.sort && defaultSort) ctx.sort = defaultSort;
-	renderSortableTable(body, columns, rows, ctx, { limit });
+	renderSortableTable(body, columns, rows, ctx, { limit, rowKey });
+
+	// The caption is the one other thing renderTableSection puts directly into
+	// `body`, so with `body` no longer wiped every render (keyed path) it has
+	// to be reconciled the same way: remove whatever caption is there (if any)
+	// before deciding whether to add a current one, rather than letting a new
+	// one stack on top of a stale one every render.
+	const priorCaption = Array.from(body.children).find(c => (c as HTMLElement).className === TABLE_CAPTION_CLS);
+	if (priorCaption) priorCaption.remove();
 	if (rows.length > limit) {
 		body.createDiv({
-			cls: 'crucible-ingestion-table-caption',
+			cls: TABLE_CAPTION_CLS,
 			text: `showing ${limit} of ${rows.length}`,
 		});
 	}

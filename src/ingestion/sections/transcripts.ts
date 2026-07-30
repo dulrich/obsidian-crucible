@@ -23,6 +23,8 @@ export function renderUnrefinedTranscripts(host: DashboardHost, body: HTMLElemen
 		emptyText: 'No unrefined transcripts.',
 		// Default sort: created ascending (matches user's DataviewJS).
 		defaultSort: { column: 'created', direction: 'asc' },
+		// rsp-wp6: one row per transcript note — the vault path is the natural key.
+		rowKey: r => r.file.path,
 		setCount: n => host.setSectionCount('unrefinedTranscripts', n),
 		columns: [
 			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => renderFileLink(host.app, td, r.file) },

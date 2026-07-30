@@ -26,6 +26,8 @@ export function createOrphanedAttachmentsSection(host: DashboardHost): OrphanedA
 			body, ctx, rows,
 			emptyText: 'No orphaned attachments.',
 			defaultSort: { column: 'size', direction: 'desc' },
+			// rsp-wp6: one row per attachment file — the vault path is the natural key.
+			rowKey: r => r.file.path,
 			setCount: n => host.setSectionCount('orphanedAttachments', n),
 			columns: [
 				{ key: 'name', label: 'Name', sortable: true, sortKey: r => r.file.name.toLowerCase(), render: (r, td) => renderFileLink(host.app, td, r.file, r.file.name) },

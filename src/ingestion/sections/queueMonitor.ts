@@ -412,7 +412,15 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 				renderCancelAction(host, td, r.type as JobType, r.key, r.status);
 			},
 		},
-	], rows, ctx, { limit: QUEUE_MONITOR_RENDER_LIMIT });
+	], rows, ctx, {
+		limit: QUEUE_MONITOR_RENDER_LIMIT,
+		// rsp-wp6: file-backed rows key on the job id (unique per job); memory
+		// rows key on the enrichment queue's own dedupe key (unique per queue
+		// entry — see youtubeMetadataDedupeKey). The two id spaces are never
+		// compared to each other, but the source prefix keeps them visually
+		// distinct in a log and costs nothing.
+		rowKey: r => `${r.source}:${r.key}`,
+	});
 }
 
 // ONE Cancel button for both mechanisms — aborting a running job and dropping a
