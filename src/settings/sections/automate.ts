@@ -10,6 +10,7 @@ import { SearchWithContainer, sortByNameWithEmptyLast, addWarningIcon } from "..
 import { renderGuardConditionFields, normalizeGuardConditionForType } from "./guardConditionFields";
 import { renderEditTrigger, renderTriggerListSection } from "./triggers";
 import { bindText, bindToggle, bindDropdown, bindSearch, bindTextArea } from "../bind";
+import { confirmDestructive } from "../destructiveActions";
 
 function getChainCommandExtras(tab: CrucibleSettingTab): Command[] {
 	const chainOnlyCommands: Command[] = [
@@ -51,6 +52,22 @@ export function renderAutomateSettings(tab: CrucibleSettingTab, containerEl: HTM
 	renderShortcutSettings(tab, containerEl);
 }
 
+// clsl-WP-4: shared by both capture-delete entry points (list row + edit-form button) so
+// they confirm through the same registry id and behave identically.
+async function deleteCapture(tab: CrucibleSettingTab, index: number) {
+	const capture = tab.plugin.settings.captures[index];
+	if (!capture) return;
+	const label = capture.name || '(unnamed)';
+	if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'capture-delete', {
+		message: `Delete capture "${label}"? This cannot be undone.`,
+	}))) return;
+	tab.plugin.settings.captures.splice(index, 1);
+	tab.editingCaptureIndex = -1;
+	await tab.plugin.saveSettings();
+	tab.plugin.registerCaptures();
+	tab.display();
+}
+
 function renderCaptureListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	new Setting(containerEl).setName('Captures').setHeading();
 	containerEl.createEl('p', { text: 'Define workflows to quickly append, prepend, or replace text in notes.' });
@@ -78,10 +95,7 @@ function renderCaptureListSection(tab: CrucibleSettingTab, containerEl: HTMLElem
 					tab.display();
 				}))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete capture').onClick(async () => {
-					tab.plugin.settings.captures.splice(index, 1);
-					await tab.plugin.saveSettings();
-					tab.plugin.registerCaptures();
-					tab.display();
+					await deleteCapture(tab, index);
 				}));
 			const warning = getCaptureWarning(tab, capture);
 			if (warning) addWarningIcon(setting.nameEl, warning);
@@ -170,6 +184,9 @@ function renderChainListSection(tab: CrucibleSettingTab, containerEl: HTMLElemen
 					tab.display();
 				}))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete chain').onClick(async () => {
+					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-delete', {
+						message: `Delete chain "${chain.name || '(unnamed)'}"? This cannot be undone.`,
+					}))) return;
 					tab.plugin.settings.chains.splice(index, 1);
 					await tab.plugin.saveSettings();
 					tab.plugin.registerChains();
@@ -245,6 +262,9 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 				await save();
 			}).inputEl.addClass('pi-width-normal'));
 		row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove variable').onClick(async () => {
+			if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-variable-delete', {
+				message: `Delete variable "${key || '(unnamed)'}"?`,
+			}))) return;
 			delete variables[key];
 			chain.variables = variables;
 			await save();
@@ -289,6 +309,9 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 					tab.refreshDisplay();
 				}))
 			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove step').onClick(async () => {
+				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-step-delete', {
+					message: `Delete step ${index + 1} of chain "${chain.name || '(unnamed)'}"?`,
+				}))) return;
 				chain.steps.splice(index, 1);
 				await save();
 				tab.refreshDisplay();
@@ -533,7 +556,12 @@ function renderShortcutSettings(tab: CrucibleSettingTab, containerEl: HTMLElemen
 				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
 				new FileSuggest(tab.app, cb.inputEl);
 			})
-			.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => { tab.plugin.settings.shortcuts.splice(index, 1); await save(); tab.plugin.registerShortcuts(); tab.display(); }); });
+			.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => {
+				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'shortcut-delete', {
+					message: `Delete shortcut "${shortcut.name || '(unnamed)'}"?`,
+				}))) return;
+				tab.plugin.settings.shortcuts.splice(index, 1); await save(); tab.plugin.registerShortcuts(); tab.display();
+			}); });
 		s.infoEl.remove();
 	});
 	new Setting(group).addButton(bt => bt.setButtonText('Add shortcut').setCta().onClick(async () => { tab.plugin.settings.shortcuts.push({ name: '', file: '' }); await save(); tab.display(); }));
@@ -637,10 +665,6 @@ function renderEditCapture(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 
 	group.createEl('hr', { cls: 'crucible-row-divider' });
 	new Setting(group).addButton(bt => bt.setButtonText('Delete capture').setWarning().onClick(async () => {
-		tab.plugin.settings.captures.splice(tab.editingCaptureIndex, 1);
-		tab.editingCaptureIndex = -1;
-		await save();
-		tab.plugin.registerCaptures();
-		tab.display();
+		await deleteCapture(tab, tab.editingCaptureIndex);
 	}));
 }
