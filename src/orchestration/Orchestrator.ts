@@ -1,18 +1,28 @@
 import { Notice } from 'obsidian';
 import { JobStore } from './JobStore';
-import { JobType, OrchestrationEnqueueOptions, OrchestrationJob, ScanReport } from './types';
+import { JobPriority, JobStatus, JobType, OrchestrationEnqueueOptions, OrchestrationJob, ScanReport } from './types';
 import { Workflow } from './workflows/Workflow';
 import { JobTypeConfig, DEFAULT_JOB_TYPE_CONFIG } from './jobTypeConfig';
 import { MemoryJobQueue } from './MemoryJobQueue';
 import { MinIntervalGate } from './utils/rateLimit';
-import { JobBackend, QueueCountsProvider, QueueCountsSource, RunOutcome, emitQueueChanged, fileQueueCountsSource, resolveTimeoutMs } from './JobBackend';
+import {
+	JobBackend,
+	QueueCountsProvider,
+	QueueCountsSource,
+	RunOutcome,
+	emitQueueChanged,
+	fileQueueCountsSource,
+	hasJobQuerySeam,
+	resolveTimeoutMs,
+} from './JobBackend';
 import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { FileJobBackend } from './FileJobBackend';
 import { MemoryJobBackend } from './MemoryJobBackend';
-import { DbJobBackend, dbQueueCountsSource } from './DbJobBackend';
+import { DbJobBackend, dbQueueCountsSource, dbRowToOrchestrationJob } from './DbJobBackend';
 import { SqliteJobStore } from './db/SqliteJobStore';
 import { SqliteUnavailableError, openJobsDb, resolveJobsDbPath } from './db/sqlite';
+import { laneRank } from './lanes';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
 
@@ -33,6 +43,50 @@ export function staleRunningMsForTimeout(timeoutMs: number): number {
 // with the rest of the event loop rather than blocking it start-to-finish.
 function yieldToEventLoop(): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+// Same rank table `FileJobBackend`/`DbJobBackend` each keep their own copy of
+// (source citation: `JobStore.ts:18-22`) — duplicated here rather than exported from
+// either backend, matching the existing per-file pattern rather than inventing a new
+// shared module for one three-line switch.
+function priorityRank(priority: JobPriority): number {
+	switch (priority) {
+		case 'high': return 0;
+		case 'normal': return 1;
+		case 'low': return 2;
+	}
+}
+
+// The claim-order comparator `JobStore.listFolder` and `SqliteJobStore`'s
+// `ORDER BY lane_rank, priority_rank, created, id` both already apply on their own
+// side — this is what lets `listJobs` below merge two already-sorted lists (file +
+// db) into one globally-ordered list without re-deriving either store's own sort.
+function compareJobClaimOrder(a: OrchestrationJob, b: OrchestrationJob): number {
+	const lane = laneRank(a.lane) - laneRank(b.lane);
+	if (lane !== 0) return lane;
+	const priority = priorityRank(a.priority) - priorityRank(b.priority);
+	if (priority !== 0) return priority;
+	const created = a.created.localeCompare(b.created);
+	return created !== 0 ? created : a.id.localeCompare(b.id);
+}
+
+// Two-pointer merge of two already-sorted (claim-order) lists — the k-way-merge
+// building block `listJobs` uses to combine the file store's jobs (all types, one
+// shared folder) with the db store's jobs (all `db` types, one shared table) into a
+// single globally-ordered list, cheaply: each source stays a single query/read, no
+// matter how many job types share it.
+function mergeJobsInClaimOrder(a: OrchestrationJob[], b: OrchestrationJob[]): OrchestrationJob[] {
+	if (b.length === 0) return a;
+	if (a.length === 0) return b;
+	const out: OrchestrationJob[] = [];
+	let i = 0;
+	let j = 0;
+	while (i < a.length && j < b.length) {
+		out.push(compareJobClaimOrder(a[i]!, b[j]!) <= 0 ? a[i++]! : b[j++]!);
+	}
+	while (i < a.length) out.push(a[i++]!);
+	while (j < b.length) out.push(b[j++]!);
+	return out;
 }
 
 /** How the Orchestrator obtains its shared `SqliteJobStore`. Injectable so tests can
@@ -120,6 +174,18 @@ export class Orchestrator {
 	}
 
 	/**
+	 * Immediate (non-coalesced) `orchestration-queue-updated` emit, using the correct
+	 * combined provider — the same one `removeQueuedJob`/`clearQueued` already emit
+	 * through. Public so a bulk operation that lives outside this class but still needs
+	 * an exactly-once emit (`failedJobRepair`'s db+file bulk requeue) doesn't have to
+	 * reach for `plugin.jobStore` directly and silently undercount once a `db` type
+	 * exists.
+	 */
+	emitQueueChangedNow(): Promise<void> {
+		return emitQueueChanged(this.plugin, this.queueCountsProvider());
+	}
+
+	/**
 	 * Crash-lease + hang sweep over the DB queue, the `db` half of what
 	 * `scan()`'s stale-running loop does for file jobs. Per-type stale window is the
 	 * type's effective timeout + a 30s buffer (`staleRunningMsForTimeout`), and a job
@@ -145,6 +211,84 @@ export class Orchestrator {
 	pruneTerminalDbJobs(): number {
 		if (!this.dbStore) return 0;
 		return this.dbStore.pruneTerminal(Date.now(), this.plugin.settings.orchestrationJobRetentionDays);
+	}
+
+	// ---- WP-7 seam: backend-agnostic queries for the reach-around consumers ---------
+
+	/**
+	 * Jobs of ANY registered type in `status`, in claim order — what the queue monitor
+	 * table renders. Backend-agnostic on purpose: rather than asking each of the ~20
+	 * per-type backends for its own slice (which would cost the file store one full
+	 * `listFolder` scan PER TYPE for what used to be a single scan), this reads each
+	 * *underlying store* once — `this.store.listFolder(status)` already spans every
+	 * file-persisted type in one folder, and `this.dbStore.list(status, {})` (no type
+	 * filter) spans every db-persisted type in one table — and merges the two
+	 * already-sorted lists. Memory types are excluded: the queue monitor renders them
+	 * through its own `enrichmentQueue` adapter, untouched by this seam.
+	 *
+	 * `limit`/`offset` apply to the merged, globally-ordered result. The db half is
+	 * asked for a real SQL `LIMIT` sized to cover the requested window (`offset +
+	 * limit`) — the file half still reads its whole folder (file types die in WP-8) —
+	 * so a caller gets the "db LIMIT, file list-then-slice" split the brief describes
+	 * without the merge itself ever seeing more rows than it needs to.
+	 */
+	async listJobs(status: JobStatus, options: { limit?: number; offset?: number } = {}): Promise<OrchestrationJob[]> {
+		const fileEntries = await this.store.listFolder(status);
+		const fileJobs = fileEntries.map(e => e.job);
+		const dbWindow = options.limit !== undefined ? (options.offset ?? 0) + options.limit : undefined;
+		const dbJobs = this.dbStore ? this.dbStore.list(status, { limit: dbWindow }).map(dbRowToOrchestrationJob) : [];
+		const merged = mergeJobsInClaimOrder(fileJobs, dbJobs);
+		const offset = options.offset ?? 0;
+		return options.limit !== undefined ? merged.slice(offset, offset + options.limit) : merged.slice(offset);
+	}
+
+	/**
+	 * How many jobs of ONE type sit in any of `statuses` — the intake-button existence
+	 * check (`intake.ts`'s "is a blogs_tracker/youtube_tracker job already active").
+	 * Unlike `listJobs`, this is naturally per-type (a backend already scopes itself to
+	 * one type), so it just dispatches to that type's own `JobQuerySeam.count`. A type
+	 * with no backend, or a memory-persisted one (no seam), answers 0 — intake.ts only
+	 * ever asks about file-persisted tracker types today, so this path is dormant.
+	 */
+	async countJobs(type: JobType, statuses: JobStatus[]): Promise<number> {
+		const backend = this.backends.get(type);
+		if (!backend || !hasJobQuerySeam(backend)) return 0;
+		return backend.count(statuses);
+	}
+
+	/**
+	 * Progress line for one running job — replaces `SearchJobProgress`'s own scan of
+	 * `running/` for its TFile (`SearchIndexWorkflow.ts`). Dispatches to the job's own
+	 * type's backend, which knows how to resolve/write its own row (a memoized folder
+	 * lookup for file types, a direct indexed UPDATE for db types) and emits its own
+	 * coalesced `orchestration-queue-updated`. A type with no seam (memory) is a no-op.
+	 */
+	async setJobProgress(type: JobType, id: string, message: string): Promise<void> {
+		const backend = this.backends.get(type);
+		if (backend && hasJobQuerySeam(backend)) await backend.setProgress(id, message);
+	}
+
+	/**
+	 * The db arm of `failedJobRepair`'s bulk service-outage requeue — the file arm's
+	 * per-file loop stays in `failedJobRepair.ts` itself (deleted in WP-8, not this
+	 * WP). Lives here rather than on `DbJobBackend` because the requeue is queue-wide
+	 * (every `db` type shares one table), the same reason `clearQueued`/`scan()`'s db
+	 * hooks are Orchestrator-level rather than per-backend.
+	 *
+	 * `dryRun` computes the type breakdown without writing (the preview a `ConfirmModal`
+	 * shows); the live run skips that extra query — nothing downstream reads `byType`
+	 * after execution, only `requeued`/`skipped` totals — and reports the actual
+	 * `UPDATE`'s row count as `requeued`.
+	 */
+	requeueServiceOutageDbFailures(dryRun: boolean): { total: number; byType: Record<string, number>; requeued: number } {
+		if (!this.dbStore) return { total: 0, byType: {}, requeued: 0 };
+		const total = this.dbStore.count('failed');
+		if (dryRun) {
+			const byType = this.dbStore.serviceOutageFailedByType();
+			const requeued = Object.values(byType).reduce((sum, n) => sum + n, 0);
+			return { total, byType, requeued };
+		}
+		return { total, byType: {}, requeued: this.dbStore.requeueServiceOutageFailed() };
 	}
 
 	getConfig(type: JobType): JobTypeConfig {
@@ -441,6 +585,14 @@ export class Orchestrator {
 		const failed = this.store.countFolder('failed');
 		const cancelled = this.store.countFolder('cancelled');
 
+		// The db half of the sweep (WP-6 landed the hooks as no-ops with no `db` type
+		// registered; WP-7 wires them into the pass every scan already runs — including
+		// the silent auto-scan `main.ts`'s onLayoutReady fires via
+		// `orchestrator.scan({ notify: false })`, so retention doesn't wait for a manual
+		// Scan). Both are 0 today; the summary line below only mentions them once real.
+		const dbRecovered = this.recoverStaleDbJobs();
+		const dbPruned = this.pruneTerminalDbJobs();
+
 		const queuedMigrated = queued.filter(e => migratedPaths.has(e.file.path)).length;
 		const runningMigrated = running.filter(e => migratedPaths.has(e.file.path)).length;
 		const report: ScanReport = {
@@ -450,13 +602,17 @@ export class Orchestrator {
 			failed,
 			cancelled,
 			recovered,
+			dbRecovered,
+			dbPruned,
 		};
 
 		const summary =
 			`Orchestrate: inbox ${report.inbox}, running ${report.running}, done ${report.done}, failed ${report.failed}` +
 			(report.cancelled > 0 ? `, cancelled ${report.cancelled}` : '') +
 			(recovered > 0 ? `, recovered ${recovered}` : '') +
-			(migrated > 0 ? `, re-homed ${migrated}` : '');
+			(migrated > 0 ? `, re-homed ${migrated}` : '') +
+			(dbRecovered > 0 ? `, db recovered ${dbRecovered}` : '') +
+			(dbPruned > 0 ? `, db pruned ${dbPruned}` : '');
 		if (options.notify ?? true) new Notice(summary);
 		return report;
 	}

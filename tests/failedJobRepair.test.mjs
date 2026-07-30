@@ -145,12 +145,32 @@ function makeBus() {
 	};
 }
 
+// WP-7: requeueServiceFailures now dispatches its db arm through
+// `plugin.orchestrator.requeueServiceOutageDbFailures` and emits through
+// `plugin.orchestrator.emitQueueChangedNow()` instead of calling `emitQueueChanged`
+// directly. None of these tests register a `db`-persisted type, so the db arm must
+// stay a true no-op (mirrors `Orchestrator.requeueServiceOutageDbFailures`'s own
+// `!this.dbStore` early return) and the emit must reproduce the exact
+// `fileQueueCountsSource` shape (`{queued, running}` from two `listFolder` reads) so
+// every existing emit-count/payload assertion below is unaffected.
+function makeOrchestrator(store, bus) {
+	return {
+		requeueServiceOutageDbFailures: () => ({ total: 0, byType: {}, requeued: 0 }),
+		emitQueueChangedNow: async () => {
+			const [running, queued] = await Promise.all([store.listFolder('running'), store.listFolder('queued')]);
+			bus.emit('orchestration-queue-updated', { queued: queued.length, running: running.length });
+		},
+	};
+}
+
 function makePlugin(store) {
 	const kicks = [];
+	const bus = makeBus();
 	return {
 		jobStore: store,
-		ingestionEvents: makeBus(),
+		ingestionEvents: bus,
 		orchestrationAutoRunner: { kickAll: () => kicks.push(true) },
+		orchestrator: makeOrchestrator(store, bus),
 		kicks,
 	};
 }

@@ -74,16 +74,17 @@ export function createIntakeSection(host: DashboardHost): IntakeSection {
 		const btn = intakeButtons.get(kind);
 		if (!btn) return;
 		const jobType = INTAKE_JOB_TYPE[kind];
-		const store = host.plugin.jobStore;
-		if (!store) return;
+		const orchestrator = host.plugin.orchestrator;
+		if (!orchestrator) return;
 		let state: 'idle' | 'queued' | 'running' = 'idle';
 		try {
-			const running = await store.listFolder('running');
-			if (running.some(e => e.job.type === jobType)) {
+			// One seam call per state to check (WP-7): backend-agnostic count(statuses),
+			// replacing the two full listFolder passes this used to run inline. Running
+			// takes priority in the displayed state, same as before.
+			if (await orchestrator.countJobs(jobType, ['running']) > 0) {
 				state = 'running';
-			} else {
-				const queued = await store.listFolder('queued');
-				if (queued.some(e => e.job.type === jobType)) state = 'queued';
+			} else if (await orchestrator.countJobs(jobType, ['queued']) > 0) {
+				state = 'queued';
 			}
 		} catch {
 			state = 'idle';
