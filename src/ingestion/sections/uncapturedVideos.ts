@@ -29,8 +29,14 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 	}
 
 	async function render(body: HTMLElement, ctx: SectionContext): Promise<void> {
-		body.empty();
-		body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
+		// Compute-then-paint: the previous shape blanked the body to "Scanning…"
+		// before awaiting the whole-vault scan below, so even a single perfectly-
+		// coalesced render produced a visible flash. Await the scan first and let
+		// renderTableSection empty the body itself (below), immediately before it
+		// rebuilds — not a scan's-worth of time before that. Mirrors queueMonitor.ts's
+		// renderQueueMonitor (see its rationale comment). If the scan throws, nothing
+		// here has torn down the body yet, so the previous render stays on screen
+		// instead of being left blank.
 		const rows = await computeUncapturedVideoRows(host.app, host.plugin);
 		uncapturedVideosCache = rows;
 

@@ -18,8 +18,10 @@ function renderPostAuthorCell(td: HTMLElement, row: UncapturedPostRow): void {
 
 // --- Section: Uncaptured Posts ---
 export async function renderUncapturedPosts(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
-	body.empty();
-	body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
+	// Compute-then-paint (mirrors uncapturedVideos.ts / queueMonitor.ts): await
+	// the whole-vault scan before touching the DOM at all, so renderTableSection
+	// emptying the body itself below is the only teardown, and a throw here leaves
+	// the previous render on screen instead of a blanked "Scanning…" state.
 	const rows = await computeUncapturedPostRows(host.app, host.plugin);
 
 	renderTableSection<UncapturedPostRow>({

@@ -338,3 +338,170 @@ test('STRUCTURAL: cells.ts and its four call sites mark both the owning and comp
 		);
 	}
 });
+
+/* -------------------------------------------------------------- rsp-wp2: P1–P4 */
+//
+// P1 (queue-root exclusion), P2 (first-sighting + echo-leak fix), and P4 (intake
+// button state cache) all live in code that pulls the real 'obsidian' module
+// (ingestionDashboard.ts's App/TFile/debounce surface, intake.ts's feedIntake.ts
+// import), so per the block comment at the top of this file these stay STRUCTURAL
+// (source-text) assertions, same treatment as the WP-4/WP-6 tests above. Each is
+// paired with a BEHAVIORAL test that drives the actual guard/gate logic — lifted
+// verbatim from the source via regex, or reimplemented as the documented pattern
+// where lifting isn't practical — against representative inputs, so the semantics
+// are exercised, not just the presence of the right token. P3 (compute-then-paint)
+// is a pure ordering fact about the source, so it stays fully structural, matching
+// the existing renderQueueMonitor blank-window test above.
+
+test('STRUCTURAL: route() early-returns for any path under orchestrationQueueRoot, before every other branch', () => {
+	const routeStart = dashboardSrc.indexOf("const route = (path: string, reason: 'meta' | 'structural') => {");
+	assert.ok(routeStart >= 0, 'route() not found');
+	const guardRe = /const queueRoot = this\.plugin\.settings\.orchestrationQueueRoot;\s*\n\s*if \(queueRoot && \(path === queueRoot \|\| path\.startsWith\(`\$\{queueRoot\}\/`\)\)\) return;/;
+	const match = dashboardSrc.slice(routeStart).match(guardRe);
+	assert.ok(match, 'route() must early-return for paths under orchestrationQueueRoot (JobStore.ts inbox/running/done/failed/cancelled all live under this root)');
+	const guardIdx = routeStart + match.index;
+	const ignoredIdx = dashboardSrc.indexOf('if (path === IGNORED_IDS_NOTE)', routeStart);
+	assert.ok(guardIdx < ignoredIdx, 'the queue-root guard must run before the IGNORED_IDS_NOTE branch, so job-file churn never reaches ANY dashboard section');
+});
+
+test('BEHAVIORAL: the queue-root guard predicate (lifted from source) matches every JobStore lifecycle subfolder and nothing else', () => {
+	const guardRe = /if \((queueRoot && \(path === queueRoot \|\| path\.startsWith\(`\$\{queueRoot\}\/`\)\))\) return;/;
+	const match = dashboardSrc.match(guardRe);
+	assert.ok(match, 'queue-root guard expression not found in route()');
+	// Exercises the exact predicate text lifted from the source above, not a reimplementation.
+	const underQueueRoot = new Function('path', 'queueRoot', `return !!(${match[1]});`);
+	const root = '_crucible/orchestration/queue';
+	for (const bucket of ['inbox', 'running', 'done', 'failed', 'cancelled']) {
+		assert.equal(underQueueRoot(`${root}/${bucket}/job-1.md`, root), true, `${bucket}/ must match — JobStore.ts's STATUS_FOLDER mapping`);
+	}
+	assert.equal(underQueueRoot(root, root), true, 'the bare root path itself also matches');
+	assert.equal(underQueueRoot('_crucible/orchestration/queue2/job.md', root), false, 'a sibling folder sharing the string prefix must not be swallowed');
+	assert.equal(underQueueRoot('_crucible/orchestration/ignored.md', root), false, 'ignored.md is a sibling of the queue root, not under it');
+});
+
+test('STRUCTURAL: the IGNORED_IDS_NOTE route() block returns instead of falling through to the generic branches', () => {
+	const blockStart = dashboardSrc.indexOf('if (path === IGNORED_IDS_NOTE) {');
+	assert.ok(blockStart >= 0);
+	const blockEnd = dashboardSrc.indexOf('\n\t\t\t}', blockStart);
+	const block = dashboardSrc.slice(blockStart, blockEnd);
+	assert.match(
+		block,
+		/\n\t\t\t\treturn;\s*$/,
+		'the block must return before falling through to the folder-prefix / structural / meta branches below — otherwise the create case (vault.create of ignored.md, no echo check at all downstream) and the modify case (falls into the !prev first-sighting branch) both leak a second render',
+	);
+});
+
+test('STRUCTURAL: the meta-branch signature checks require an established baseline (prev) before scheduling a scan refresh', () => {
+	assert.match(dashboardSrc, /if \(prev && prev\.fm !== next\.fm\) \{/, 'a first sighting (no prev) must not fire the fm-driven scan refreshes');
+	assert.match(dashboardSrc, /if \(prev && prev\.links !== next\.links\) \{/, 'a first sighting (no prev) must not fire the orphans scan refresh');
+	assert.equal(dashboardSrc.includes('if (!prev || prev.fm !== next.fm)'), false, 'the old always-fire-on-first-sighting form must be gone');
+	assert.equal(dashboardSrc.includes('if (!prev || prev.links !== next.links)'), false, 'the old always-fire-on-first-sighting form must be gone');
+});
+
+test('BEHAVIORAL: first-sighting establishes a baseline without firing; a real change on a known path still fires', () => {
+	// Mirrors the corrected meta-branch shape: compute next, read prev, store next,
+	// then gate on `prev && prev.x !== next.x` (not `!prev || ...`).
+	const relevantSignatures = new Map();
+	const fired = [];
+	function routeMeta(path, fmSig) {
+		const next = { fm: fmSig, links: '' };
+		const prev = relevantSignatures.get(path);
+		relevantSignatures.set(path, next);
+		if (prev && prev.fm !== next.fm) fired.push(path);
+	}
+	routeMeta('a.md', 'sig-1');
+	assert.deepEqual(fired, [], 'the very first metadataCache event for a previously-unseen path must not schedule a scan refresh');
+	routeMeta('a.md', 'sig-1');
+	assert.deepEqual(fired, [], 'an unchanged signature on a known path still does not fire');
+	routeMeta('a.md', 'sig-2');
+	assert.deepEqual(fired, ['a.md'], 'a real frontmatter change on an already-baselined path still fires');
+	routeMeta('b.md', 'sig-1');
+	assert.deepEqual(fired, ['a.md'], 'a different previously-unseen path (b.md) also just baselines, not fires');
+});
+
+test('BEHAVIORAL: the ignored-ids route pattern never reaches the structural/meta branches on either the create or modify write', () => {
+	// Mirrors route()'s actual shape (IGNORED_IDS_NOTE handled-and-return, ahead of
+	// the `reason === 'structural'` branch and the meta first-sighting check) —
+	// proves the create case (Path 2c: the very first Ignore ever creates
+	// ignored.md via vault.create, reason 'structural') and the modify case (every
+	// later Ignore, reason 'meta') both terminate in the echo branch alone.
+	const IGNORED_IDS_NOTE = '_crucible/orchestration/ignored.md';
+	const calls = { echoBranch: 0, structural: 0, meta: 0 };
+	function route(path, reason) {
+		if (path === IGNORED_IDS_NOTE) { calls.echoBranch++; return; }
+		if (reason === 'structural') { calls.structural++; return; }
+		calls.meta++;
+	}
+	route(IGNORED_IDS_NOTE, 'structural'); // first-ever Ignore: vault.create
+	route(IGNORED_IDS_NOTE, 'meta'); // a later Ignore: vault.modify
+	assert.deepEqual(calls, { echoBranch: 2, structural: 0, meta: 0 }, 'ignored.md must never reach the unconditional structural branch or the first-sighting meta branch, on create or modify');
+});
+
+test('STRUCTURAL: uncapturedVideos / uncapturedPosts / controlCenters sections compute their rows before touching the DOM', () => {
+	const uvSrc = readFileSync('src/ingestion/sections/uncapturedVideos.ts', 'utf8');
+	const uvFnStart = uvSrc.indexOf('async function render(body: HTMLElement, ctx: SectionContext): Promise<void> {');
+	assert.ok(uvFnStart >= 0, 'uncapturedVideos.ts render() not found');
+	const uvAwaitIdx = uvSrc.indexOf('await computeUncapturedVideoRows', uvFnStart);
+	assert.ok(uvAwaitIdx > uvFnStart, 'the computeUncapturedVideoRows await not found');
+	assert.ok(!uvSrc.slice(uvFnStart, uvAwaitIdx).includes('body.empty()'), 'uncapturedVideos.ts must not empty the body before awaiting the scan — that is the flash bug');
+
+	const upSrc = readFileSync('src/ingestion/sections/uncapturedPosts.ts', 'utf8');
+	const upFnStart = upSrc.indexOf('export async function renderUncapturedPosts(');
+	assert.ok(upFnStart >= 0, 'renderUncapturedPosts not found');
+	const upAwaitIdx = upSrc.indexOf('await computeUncapturedPostRows', upFnStart);
+	assert.ok(upAwaitIdx > upFnStart, 'the computeUncapturedPostRows await not found');
+	assert.ok(!upSrc.slice(upFnStart, upAwaitIdx).includes('body.empty()'), 'uncapturedPosts.ts must not empty the body before awaiting the scan');
+
+	const ccSrc = readFileSync('src/ingestion/sections/controlCenters.ts', 'utf8');
+	const ccCases = [
+		['async function renderBlogControl(body: HTMLElement, ctx: SectionContext): Promise<void> {', 'await computeBlogControlRows'],
+		['async function renderChannelControl(body: HTMLElement, ctx: SectionContext): Promise<void> {', 'await computeChannelControlRows'],
+	];
+	for (const [fnStartNeedle, awaitNeedle] of ccCases) {
+		const fnStart = ccSrc.indexOf(fnStartNeedle);
+		assert.ok(fnStart >= 0, `${fnStartNeedle} not found`);
+		const awaitIdx = ccSrc.indexOf(awaitNeedle, fnStart);
+		assert.ok(awaitIdx > fnStart, `${awaitNeedle} await not found`);
+		assert.ok(!ccSrc.slice(fnStart, awaitIdx).includes('body.empty()'), `${fnStartNeedle} must not empty the body before awaiting the scan`);
+	}
+});
+
+test('STRUCTURAL: setIntakeButtonState caches the last-rendered state per button and early-returns when unchanged', () => {
+	const intakeSrc = readFileSync('src/ingestion/sections/intake.ts', 'utf8');
+	assert.match(
+		intakeSrc,
+		/const lastButtonState = new WeakMap<HTMLButtonElement, 'idle' \| 'queued' \| 'running'>\(\);/,
+		'intake.ts must track the last-rendered state per button element',
+	);
+	const fnStart = intakeSrc.indexOf("function setIntakeButtonState(btn: HTMLButtonElement, state: 'idle' | 'queued' | 'running'): void {");
+	assert.ok(fnStart >= 0, 'setIntakeButtonState not found');
+	const fnEnd = intakeSrc.indexOf('\n\t}', fnStart);
+	const fnBody = intakeSrc.slice(fnStart, fnEnd);
+	const guardIdx = fnBody.indexOf('if (lastButtonState.get(btn) === state) return;');
+	const emptyIdx = fnBody.indexOf('btn.empty();');
+	assert.ok(guardIdx >= 0, 'setIntakeButtonState must early-return when the state has not changed');
+	assert.ok(emptyIdx >= 0 && guardIdx < emptyIdx, 'the unchanged-state guard must run before btn.empty() — otherwise the DOM still rebuilds every call');
+});
+
+test('BEHAVIORAL: the button-state cache pattern skips the rebuild when state is unchanged and rebuilds on a real change', () => {
+	// Mirrors setIntakeButtonState's shape: a WeakMap<button, state> gate ahead of the rebuild.
+	const lastButtonState = new WeakMap();
+	let rebuilds = 0;
+	function setIntakeButtonState(btn, state) {
+		if (lastButtonState.get(btn) === state) return;
+		lastButtonState.set(btn, state);
+		rebuilds++;
+	}
+	const btn = {};
+	setIntakeButtonState(btn, 'idle');
+	assert.equal(rebuilds, 1, 'first call always rebuilds');
+	setIntakeButtonState(btn, 'idle');
+	setIntakeButtonState(btn, 'idle');
+	assert.equal(rebuilds, 1, 'repeated same-state queue ticks (~1x/sec) must not rebuild');
+	setIntakeButtonState(btn, 'queued');
+	assert.equal(rebuilds, 2, 'an actual state change still rebuilds');
+	setIntakeButtonState(btn, 'queued');
+	assert.equal(rebuilds, 2, 'still no rebuild once settled on the new state');
+	setIntakeButtonState(btn, 'running');
+	assert.equal(rebuilds, 3);
+});

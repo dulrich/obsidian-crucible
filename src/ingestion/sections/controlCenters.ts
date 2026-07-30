@@ -22,8 +22,11 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 
 	// --- Section: Blog control center ---
 	async function renderBlogControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
-		body.empty();
-		body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
+		// Compute-then-paint: await the scan before touching the DOM. renderControlCenter
+		// (unlike renderTableSection) does not clear `body` itself — it appends its filter
+		// row and table onto whatever is already there — so the single explicit clear right
+		// below stays as the one and only teardown, now happening after the scan resolves
+		// instead of before it. A throw here leaves the previous render intact.
 		const all = await computeBlogControlRows(host.app, host.plugin);
 		body.empty();
 
@@ -47,8 +50,7 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 
 	// --- Section: Channel control center ---
 	async function renderChannelControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
-		body.empty();
-		body.createDiv({ cls: 'crucible-empty-state', text: 'Scanning…' });
+		// Compute-then-paint — see renderBlogControl's comment above; same shape.
 		const all = await computeChannelControlRows(host.app, host.plugin);
 		body.empty();
 
