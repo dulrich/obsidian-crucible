@@ -21,6 +21,8 @@ export function renderUnprocessedClippings(host: DashboardHost, body: HTMLElemen
 	renderTableSection<ClippingRow>({
 		body, ctx, rows,
 		emptyText: 'No unprocessed clippings.',
+		// rsp-wp6: one row per clipping file — the vault path is the natural key.
+		rowKey: r => r.file.path,
 		setCount: n => host.setSectionCount('unprocessedClippings', n),
 		columns: [
 			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => renderFileLink(host.app, td, r.file) },
