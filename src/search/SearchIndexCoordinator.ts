@@ -1,4 +1,5 @@
 import { TAbstractFile, TFile } from 'obsidian';
+import { logWarn } from '../log';
 import type CruciblePlugin from '../main';
 import type { JobPriority } from '../orchestration/types';
 import { isSearchIndexablePath } from './chunker';
@@ -66,7 +67,8 @@ export class SearchIndexCoordinator {
 	// down, and a manual run bypasses the breaker by design.
 	reindex(file: TFile): void {
 		if (!this.indexable(file.path)) return;
-		void this.plugin.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority: 'high', lane: 'user', inputPaths: [file.path] });
+		this.plugin.orchestrator.enqueue('search_upsert_file', { path: file.path }, { priority: 'high', lane: 'user', inputPaths: [file.path] })
+			.catch((e) => logWarn('search reindex enqueue failed', file.path, e));
 	}
 
 	dispose(): void {
@@ -103,6 +105,7 @@ export class SearchIndexCoordinator {
 		// Upserts carry the note as an input path (note-lock + queue display); deletes don't bind to a
 		// file that may no longer exist.
 		const inputPaths = type === 'search_upsert_file' ? [path] : undefined;
-		void this.plugin.orchestrator.enqueue(type, { path }, { priority, lane: 'background', inputPaths });
+		this.plugin.orchestrator.enqueue(type, { path }, { priority, lane: 'background', inputPaths })
+			.catch((e) => logWarn('search index enqueue failed', type, path, e));
 	}
 }

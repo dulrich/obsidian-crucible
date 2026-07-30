@@ -249,7 +249,10 @@ export class TriggerRegistry {
 	private enqueueAll(trigger: OrchestrationTrigger, file?: TFile): void {
 		for (const seed of trigger.jobs(file)) {
 			// Dedupe keys absorb repeat fires; a null return just means "already queued".
-			void this.plugin.orchestrator.enqueue(seed.type, seed.params, { lane: 'background', ...seed.options });
+			// The enclosing try/catch is synchronous-only — a void'ed rejection here was
+			// uncaught (the "Folder already exists." startup storm). Catch it explicitly.
+			this.plugin.orchestrator.enqueue(seed.type, seed.params, { lane: 'background', ...seed.options })
+				.catch((e) => logWarn('trigger enqueue failed', seed.type, e));
 		}
 	}
 }
