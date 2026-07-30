@@ -267,7 +267,7 @@ export default class CruciblePlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.searchIndexCoordinator.markLayoutReady();
 			this.fileOpenIndex.markLayoutReady();
-			void this.orchestrator.scan({ notify: false });
+			this.orchestrator.scan({ notify: false }).catch((e) => logError('startup orchestrator scan failed', e));
 			void this.warnOnMissingSecrets();
 			// Obsidian replays vault.on('create') for every pre-existing file during
 			// vault indexing at startup — with a populated orchestration queue that's
@@ -403,9 +403,10 @@ export default class CruciblePlugin extends Plugin {
 	enqueueImageDescribeForNote(imagePath: string, sourceNotePath?: string): void {
 		if (!sourceNotePath) return;
 		if (!shouldEnqueueImageDescribe(this.settings, imagePath)) return;
-		void this.orchestrator.enqueue('image_describe_note', {
+		this.orchestrator.enqueue('image_describe_note', {
 			targetPath: sourceNotePath,
-		}, { priority: 'low', lane: 'background', inputPaths: [sourceNotePath, imagePath] });
+		}, { priority: 'low', lane: 'background', inputPaths: [sourceNotePath, imagePath] })
+			.catch((e) => logError('image_describe_note enqueue failed', e));
 	}
 
 	// Code-defined triggers (queue-first design): each one only ENQUEUES jobs, so
