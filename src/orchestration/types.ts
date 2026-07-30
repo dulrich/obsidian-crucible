@@ -62,6 +62,18 @@ export interface OrchestrationJob {
 	failureKind?: 'service' | 'job';
 	progress?: string;
 	deferUntil?: string;
+	/**
+	 * Free-text run narration (WP-7's job-detail affordance — the queue monitor's
+	 * replacement for the note file's `## Notes` section a db-backed job no longer
+	 * has). Populated for db rows (`DbJobRow.notes`, always present, folded in here
+	 * only when non-empty) at zero extra cost — it's already part of the row. Left
+	 * undefined for file rows: the markdown body isn't read as part of a normal
+	 * `list()`/`listFolder()` pass (that would cost a body read per row, on every
+	 * queue-monitor render, for a field the file backend never needed structured
+	 * before), so a file job's notes stay in its `## Notes` section on disk, same as
+	 * always.
+	 */
+	notes?: string;
 }
 
 // Distinct, machine-checkable failure reasons a workflow can surface so callers can
@@ -110,4 +122,10 @@ export interface ScanReport {
 	failed: number;
 	cancelled: number;
 	recovered: number;
+	/** `Orchestrator.recoverStaleDbJobs()`'s count, folded in here so the scan notice
+	 * can mention it once a `db` type exists — WP-6 landed the hook, WP-7 wires it into
+	 * `scan()`. Always 0 with no `db` type registered. */
+	dbRecovered: number;
+	/** `Orchestrator.pruneTerminalDbJobs()`'s count — same shape as `dbRecovered`. */
+	dbPruned: number;
 }

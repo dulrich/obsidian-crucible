@@ -151,6 +151,48 @@ test('scan does not re-queue a job this process is still executing, however stal
 	assert.deepEqual(moves, ['done'], 'it settled itself, exactly once');
 });
 
+// --- thq WP-7: scan() wires in the WP-6 db hooks -----------------------------------
+
+test('scan calls recoverStaleDbJobs and pruneTerminalDbJobs exactly once and folds their counts into the report', async () => {
+	globalThis.__orchestratorScanNotices = [];
+	const store = makeStore({});
+	const recoverCalls = [];
+	const pruneCalls = [];
+	const dbStore = {
+		recoverStale: (nowMs, staleMsForType, isProtected) => {
+			recoverCalls.push({ nowMs, staleMsForType, isProtected });
+			return 2;
+		},
+		pruneTerminal: (nowMs, retentionDays) => {
+			pruneCalls.push({ nowMs, retentionDays });
+			return 5;
+		},
+	};
+	const plugin = { settings: { orchestrationAutorunTimeoutSeconds: 600, orchestrationJobRetentionDays: 14 } };
+	const orchestrator = new Orchestrator(plugin, store, { openDbStore: () => dbStore });
+	orchestrator.register('command_run', { async run() { return { status: 'done' }; } },
+		{ persistence: 'db', maxParallel: 1, minIntervalMs: 0 });
+
+	const report = await orchestrator.scan({ notify: false });
+
+	assert.equal(recoverCalls.length, 1, 'scan must call recoverStaleDbJobs exactly once');
+	assert.equal(pruneCalls.length, 1, 'scan must call pruneTerminalDbJobs exactly once');
+	assert.equal(pruneCalls[0].retentionDays, 14, 'the configured retention setting reaches the db hook');
+	assert.equal(report.dbRecovered, 2);
+	assert.equal(report.dbPruned, 5);
+});
+
+test('scan reports dbRecovered/dbPruned as 0 with no db type registered — no db hooks fire', async () => {
+	const store = makeStore({});
+	const plugin = { settings: { orchestrationAutorunTimeoutSeconds: 600 } };
+	const orchestrator = new Orchestrator(plugin, store);
+
+	const report = await orchestrator.scan({ notify: false });
+
+	assert.equal(report.dbRecovered, 0);
+	assert.equal(report.dbPruned, 0);
+});
+
 function makeStore(folders) {
 	return {
 		ensureFolders: async () => {},
