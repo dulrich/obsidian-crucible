@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { setImmediate as yieldEventLoop } from 'node:timers/promises';
+import { setImmediate as yieldEventLoop, setTimeout as sleepMs } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 // Zero-dependency search companion: Node builtins only. There is no `npm install` step in
@@ -1680,6 +1680,26 @@ function clampLimit(value) {
 // but never half-written.
 export const UPSERT_SUB_BATCH_CHUNKS = 100;
 
+// WP-4: interactive-priority yield. A sub-batch is an uninterruptible ~3.4s synchronous
+// transaction (measured at the ~17s/500-chunk throughput this file's other comments cite) —
+// `yieldEventLoop()` between sub-batches only lets a QUEUED request start, it does not make the
+// flush loop stand aside once a search has actually landed. Without this, a user actively
+// searching mid-backfill gets exactly one sub-batch's worth of latency per query and then the
+// flush immediately claims the thread again for another 3.4s block. 1500ms is chosen as roughly
+// the gap a person leaves between typing a query and its follow-up (a refined term, a repeat
+// search) — long enough that a follow-up query lands in the open window and gets served promptly
+// rather than queuing behind another full sub-batch, short enough that the backfill still visibly
+// grinds forward between searches rather than looking stalled.
+export const INTERACTIVE_YIELD_MS = 1500;
+
+// Bounds INTERACTIVE_YIELD_MS's total cost across one flush. Deferral is deliberately per-search
+// (see lastInteractiveSearchAt below) so it decays on its own once queries stop arriving, but a
+// user who searches continuously — or a scripted client polling — must not be able to hold the
+// flush loop open indefinitely; a backfill has to finish. 15s caps the worst case to roughly ten
+// extra sub-batch-sized gaps before the flush runs the rest of its sub-batches back-to-back
+// regardless of further searches.
+export const INTERACTIVE_YIELD_CUMULATIVE_CAP_MS = 15_000;
+
 // Pure and exported for unit testing without a database — see the module-shape note at the top
 // of this file. `size <= 0` is treated as "no splitting" (one batch) rather than looping
 // forever.
@@ -1743,6 +1763,16 @@ export function createRequestHandler(db, options = {}) {
 	// controlled clock so the sentAt/skew deadline math is deterministic instead of racing the
 	// wall clock.
 	const now = options.now ?? Date.now;
+	// WP-4: injectable pause, same pattern and same reason as `now` above — production always
+	// gets the real `setTimeout` promise, and a real-HTTP test can inject a stub that records the
+	// requested duration and resolves immediately, so the interactive-yield/cumulative-cap tests
+	// are deterministic instead of actually sleeping 1500ms+ per case.
+	const delay = options.delay ?? sleepMs;
+	// WP-4: shared across every request this handler instance processes (not per-request state) —
+	// the flush loop below needs to know whether a search landed *during this flush*, and a
+	// search is necessarily a different request than the upsert. Read/written only through `now`
+	// so it participates in the same injected-clock determinism as the rest of the deadline math.
+	let lastInteractiveSearchAt = -Infinity;
 	// Every statement below is keyed by `(vault_id, id)` or `(vault_id, path)`, never by `id`
 	// alone. `ON CONFLICT(vault_id, id)` is the load-bearing half: under the old `ON
 	// CONFLICT(id)` an upsert from vault B silently re-labelled vault A's row as B's, which is
@@ -1961,6 +1991,16 @@ LIMIT 1
 				// is passed as the fallback so grouping matches the same `chunk.vaultId ?? body.vaultId`
 				// resolution used below when a chunk omits its own vaultId.
 				const subBatches = splitUpsertSubBatches(chunks, UPSERT_SUB_BATCH_CHUNKS, body.vaultId);
+				// WP-4: this flush's own interactive-yield state. `flushStartedAt` scopes
+				// `lastInteractiveSearchAt` (shared across every request this handler instance
+				// processes, since a search always arrives as a separate request from the flush) to
+				// "served during THIS flush" — a search served before this flush even started must
+				// not trigger a deferral here. `cumulativeDeferMs` is this flush's own running total
+				// against INTERACTIVE_YIELD_CUMULATIVE_CAP_MS; it is a fresh local for every
+				// /v1/chunks/upsert request, so the cap never carries over between flushes.
+				const flushStartedAt = now();
+				let cumulativeDeferMs = 0;
+				try {
 				for (let batchIndex = 0; batchIndex < subBatches.length; batchIndex++) {
 					const subBatch = subBatches[batchIndex];
 					db.exec('BEGIN');
@@ -2046,12 +2086,47 @@ LIMIT 1
 						db.exec('ROLLBACK');
 						throw e;
 					}
-					// Invalidate after every sub-batch commits, not only once at the end: upserts
-					// are idempotent per chunk (see the comment above UPSERT_SUB_BATCH_CHUNKS), so a
-					// later sub-batch throwing must not leave the vector matrix cache stale for the
-					// vaults earlier sub-batches already, successfully, wrote new vectors into.
+					if (batchIndex < subBatches.length - 1) {
+						await yieldEventLoop();
+						// WP-4: interactive-priority yield — see INTERACTIVE_YIELD_MS's declaration for
+						// the full rationale. `lastInteractiveSearchAt >= flushStartedAt` is what scopes
+						// this to a search that landed DURING this flush (the plain `yieldEventLoop()`
+						// above is what let it interleave at all); a search from before the flush began
+						// must not retrigger a deferral here. Per-search and self-decaying: once
+						// `INTERACTIVE_YIELD_MS` has elapsed since the last search with no further one
+						// arriving, `remaining` goes non-positive and this becomes a no-op again on its
+						// own, with no separate "reset" step needed. Bounded in total by
+						// `INTERACTIVE_YIELD_CUMULATIVE_CAP_MS` so continuous searching cannot stall the
+						// flush indefinitely.
+						if (lastInteractiveSearchAt >= flushStartedAt) {
+							const remaining = INTERACTIVE_YIELD_MS - (now() - lastInteractiveSearchAt);
+							const budgetLeft = INTERACTIVE_YIELD_CUMULATIVE_CAP_MS - cumulativeDeferMs;
+							if (remaining > 0 && budgetLeft > 0) {
+								const waitMs = Math.min(remaining, budgetLeft);
+								await delay(waitMs);
+								cumulativeDeferMs += waitMs;
+							}
+						}
+					}
+				}
+				} finally {
+					// WP-4: once per completed flush, per touched vault — moved off the per-sub-batch
+					// schedule above. During an active backfill, invalidating after every ~100-chunk
+					// commit meant the ~117MB/28.7k-chunk matrix (and `statsCache`, dropped on the same
+					// call) was rebuilt on effectively every search, at a measured ~800ms each; the
+					// matrix was never warm for the duration of the backfill. Trade-off, deliberate: a
+					// newly-upserted chunk is not vector-searchable until the WHOLE flush finishes, not
+					// after its own sub-batch. The `try { ... } finally` (rather than only invalidating
+					// after the loop) is what preserves the correctness invariant on a mid-flush throw:
+					// `touchedVaults` already holds every vault an EARLIER, successfully-committed
+					// sub-batch wrote into by the time a LATER sub-batch fails, and those vaults' cached
+					// matrix/stats are genuinely stale regardless of the later failure — they must still
+					// be invalidated here rather than left stale because the request as a whole 500s.
+					// (A vault that only appears here because it belongs to this request's own
+					// rolled-back sub-batch gets an extra, harmless invalidate: `invalidate` never
+					// discards real data, it only forces the next read to rebuild from whatever is
+					// actually on disk.)
 					for (const vault of touchedVaults) vectors.invalidate(vault);
-					if (batchIndex < subBatches.length - 1) await yieldEventLoop();
 				}
 				return json(res, 200, { ok: true, count: chunks.length });
 			}
@@ -2123,6 +2198,11 @@ LIMIT 1
 				// (normalizeSearchResponse), which is what makes this safe against both an old
 				// client talking to this companion and this companion answering an old client.
 				if (outcome.degraded) response.degraded = true;
+				// WP-4: mark this instant (per the injected clock, same as everything else above)
+				// as the most recent interactive search served. A concurrently in-flight upsert
+				// flush reads this at its next sub-batch boundary to decide whether to open an
+				// interactive-priority gap — see INTERACTIVE_YIELD_MS.
+				lastInteractiveSearchAt = now();
 				return json(res, 200, response);
 			}
 			return json(res, 404, { ok: false, error: 'not found' });
