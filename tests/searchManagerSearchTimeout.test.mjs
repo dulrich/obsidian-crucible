@@ -81,9 +81,12 @@ function settings(overrides = {}) {
 	};
 }
 
-function makeManager(overrides = {}) {
+// `providerManager` defaults to `{}` (unused unless a test enables semantic search) so every
+// existing call site keeps working unmodified — WP-3's embed-latency test is the first one that
+// needs a real (stubbed) `embed`.
+function makeManager(overrides = {}, providerManager = {}) {
 	const app = { metadataCache: { isUserIgnored: () => false } };
-	const manager = new SearchManager(app, settings(overrides), {});
+	const manager = new SearchManager(app, settings(overrides), providerManager);
 	return manager;
 }
 
@@ -125,7 +128,7 @@ test('SearchManager.search() logs a breadcrumb (elapsed + term count) via logWar
 		const logged = warnings[0].join(' ');
 		assert.match(logged, /timed out after \d+ms/, 'elapsed ms must be in the breadcrumb');
 		// "talking to a genius who also has thirty years of linux kernel experience" is 13 terms.
-		assert.match(logged, /\(13 terms\)/, 'term count must be in the breadcrumb');
+		assert.match(logged, /\(13 terms, embed \d+ms\)/, 'term count and WP-3\'s embed latency must both be in the breadcrumb');
 	} finally {
 		console.warn = originalWarn;
 		globalThis.__CRUCIBLE_DEBUG__ = false;
@@ -149,5 +152,48 @@ test('SearchManager.search() does NOT log a breadcrumb for a non-timeout failure
 	} finally {
 		console.warn = originalWarn;
 		globalThis.__CRUCIBLE_DEBUG__ = false;
+	}
+});
+
+// WP-3: embedQuery() runs and is measured entirely BEFORE `startedAt` (the timed window's own
+// clock read) — a cold embed must show up in the breadcrumb's `embed Xms` without moving
+// `elapsedMs` (which is measured from `startedAt`, after the embed already finished) by the same
+// amount. Overriding the module-global Date.now (same technique as
+// searchManagerQueryEmbedding.test.mjs's cooldown test) lets the stubbed `embed` call advance the
+// clock deterministically, rather than depending on real wall-clock timing.
+test('SearchManager.search() breadcrumb reports embedMs, measured outside the timed window', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (...args) => { warnings.push(args); };
+
+	const realNow = Date.now;
+	let now = realNow();
+	Date.now = () => now;
+	try {
+		const embed = async (_provider, _modelId, texts) => {
+			now += 1234; // simulates a cold model load taking real wall-clock time
+			return { embeddings: texts.map(() => [0.1, 0.2, 0.3]) };
+		};
+		const manager = makeManager({
+			searchSemanticEnabled: true,
+			searchEmbeddingModel: { providerId: 'p1', modelId: 'm1' },
+		}, { embed });
+		manager.client = () => ({
+			search: async () => { throw new SearchServiceUnavailableError('Search service /v1/search timed out after 4000ms', 'timeout'); },
+		});
+
+		await assert.rejects(manager.search('needle'), SearchServiceUnavailableError);
+
+		assert.equal(warnings.length, 1);
+		const logged = warnings[0].join(' ');
+		assert.match(logged, /embed 1234ms/, 'the measured embed latency must reach the breadcrumb');
+		// elapsedMs is measured from `startedAt`, which is read AFTER the embed already
+		// finished — so it must not also carry the 1234ms the embed took.
+		assert.doesNotMatch(logged, /timed out after 1[23]\d\dms/, 'elapsedMs must not double-count the embed time the client.search() call never actually spent');
+	} finally {
+		console.warn = originalWarn;
+		globalThis.__CRUCIBLE_DEBUG__ = false;
+		Date.now = realNow;
 	}
 });

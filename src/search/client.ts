@@ -128,6 +128,12 @@ export class SearchServiceClient {
 			rankingMode: options.rankingMode,
 			filters: options.filters,
 			budgetMs: Math.round(timeoutMs * SEARCH_QUERY_BUDGET_FRACTION),
+			// WP-3: the client's own clock at send time, so the companion's cooperative deadline
+			// can start counting from here instead of only from its own handler-dispatch clock —
+			// see resolveSearchDeadlineStart in scripts/search-companion.mjs. Additive and
+			// back-compatible both directions, same as budgetMs: an older companion that has
+			// never heard of `sentAt` simply ignores the extra field.
+			sentAt: Date.now(),
 		}, timeoutMs);
 		const response = normalizeSearchResponse(json);
 		const outdated = schemaOutdatedMessage(response.schemaVersion);
