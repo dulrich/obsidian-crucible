@@ -7,6 +7,7 @@ import { PERIOD_IDS, PeriodId, getPeriodConfig } from "../../periods";
 import { SearchWithContainer, addWarningIcon } from "../shared";
 import { bindToggle, bindDropdown, bindSearch } from "../bind";
 import { applySurround } from "../../surround";
+import { DESTRUCTIVE_ACTIONS, DestructiveTier, resolveConfirmRequired } from "../destructiveActions";
 
 export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	const s = tab.plugin.settings;
@@ -93,6 +94,68 @@ export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HT
 	const desc = containerEl.createDiv({ cls: 'crucible-variables-desc' });
 	desc.createEl('p', { text: 'Use these tokens in your template files. They will be replaced when a note is "materialized" or created in a mapped folder.' });
 	tab.renderTemplateVariableGrid(containerEl, tab.captureTemplateVariables());
+
+	renderDestructiveConfirmationsSettings(tab, containerEl);
+}
+
+const DESTRUCTIVE_TIERS: DestructiveTier[] = ['critical', 'high', 'medium', 'low'];
+const DESTRUCTIVE_TIER_LABELS: Record<DestructiveTier, string> = {
+	critical: 'Critical',
+	high: 'High',
+	medium: 'Medium',
+	low: 'Low',
+};
+
+// clsl-WP-3: framework only — see src/settings/destructiveActions.ts. This renders the
+// registry's settings surface; wiring individual delete handlers through
+// `confirmDestructive` is WP-4.
+function renderDestructiveConfirmationsSettings(tab: CrucibleSettingTab, containerEl: HTMLElement): void {
+	const s = tab.plugin.settings;
+	const save = () => tab.plugin.saveSettings();
+
+	new Setting(containerEl).setName('Destructive action confirmations').setHeading();
+	containerEl.createEl('p', { text: 'Destructive actions ask for confirmation by default. Turn confirmations off globally, per tier, or per action.' });
+
+	const overviewGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+	bindToggle(overviewGroup, {
+		name: 'Confirm destructive actions',
+		desc: 'Global default for every destructive action below. Per-tier and per-action toggles override this.',
+		get: () => s.destructiveConfirmGlobal,
+		set: (v) => { s.destructiveConfirmGlobal = v; },
+	}, save);
+
+	DESTRUCTIVE_TIERS.forEach(tier => {
+		overviewGroup.createEl('hr', { cls: 'crucible-row-divider' });
+		bindToggle(overviewGroup, {
+			name: `${DESTRUCTIVE_TIER_LABELS[tier]} actions`,
+			desc: `Overrides the global default for every ${DESTRUCTIVE_TIER_LABELS[tier].toLowerCase()}-tier action, unless a specific action below overrides it further.`,
+			// Tri-state is NOT modeled in the UI: this shows the tier's EFFECTIVE value (the
+			// explicit tier override if one is stored, else the global default) — flipping the
+			// toggle always writes an explicit per-tier override to destructiveConfirmTier,
+			// even when the new value happens to match the global default it was inheriting.
+			get: () => s.destructiveConfirmTier[tier] ?? s.destructiveConfirmGlobal,
+			set: (v) => { s.destructiveConfirmTier = { ...s.destructiveConfirmTier, [tier]: v }; },
+		}, save);
+	});
+
+	DESTRUCTIVE_TIERS.forEach(tier => {
+		const actions = DESTRUCTIVE_ACTIONS.filter(a => a.tier === tier);
+		if (actions.length === 0) return;
+
+		new Setting(containerEl).setName(`${DESTRUCTIVE_TIER_LABELS[tier]} actions`).setHeading();
+		const tierGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
+		actions.forEach((action, index) => {
+			if (index > 0) tierGroup.createEl('hr', { cls: 'crucible-row-divider' });
+			bindToggle(tierGroup, {
+				name: action.label,
+				desc: `${action.group} · resolves from the ${DESTRUCTIVE_TIER_LABELS[tier]} tier / global default unless overridden here.`,
+				// Same effective-value display as the tier toggles above: shows
+				// resolveConfirmRequired's current answer, writes an explicit per-action override.
+				get: () => resolveConfirmRequired(s, action.id),
+				set: (v) => { s.destructiveConfirmAction = { ...s.destructiveConfirmAction, [action.id]: v }; },
+			}, save);
+		});
+	});
 }
 
 function renderPeriodSettingsBlock(tab: CrucibleSettingTab, containerEl: HTMLElement, period: PeriodId): void {
