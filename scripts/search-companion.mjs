@@ -117,6 +117,29 @@ export function clampSearchBudgetMs(value) {
 	return Math.max(SEARCH_DEADLINE_MIN_MS, Math.min(ms, SEARCH_DEADLINE_MAX_MS));
 }
 
+// WP-3: resolves the instant the cooperative deadline should start counting from.
+// `receivedAt` alone (the companion's own clock, stamped once the request handler is finally
+// running) is blind to whatever queued the request ahead of it — the whole point of the
+// WP-3 investigation: a request queued behind an upsert flush sub-batch can burn most of its
+// client-side interactive timeout before the companion's handler ever gets to run, so a
+// deadline that only starts at `receivedAt` never sees that cost and the companion answers
+// "in budget" long after the client has already given up and thrown the response away. `sentAt`
+// is the client's own clock at send time (sent alongside `budgetMs`, src/search/client.ts),
+// which does see it.
+//
+// Guarded against clock skew: `sentAt` must land inside `[receivedAt - budgetMs, receivedAt]` —
+// a request cannot have been sent after it was received, and a `sentAt` claiming to be more
+// than a full budget's worth of clock disagreement into the past is not trustworthy queuing
+// evidence, just a skewed or malformed clock. Outside that window, absent, or non-numeric (an
+// older client that has never heard of `sentAt`) all fall back to `receivedAt` — the same
+// deadline shape this replaces, so a mixed-version fleet degrades cleanly in both directions.
+export function resolveSearchDeadlineStart(sentAt, receivedAt, budgetMs) {
+	const parsed = Number(sentAt);
+	if (!Number.isFinite(parsed)) return receivedAt;
+	if (parsed < receivedAt - budgetMs || parsed > receivedAt) return receivedAt;
+	return parsed;
+}
+
 // The fused ranking needs a candidate pool deeper than the requested page: a page whose
 // title matches the query can sit well below the top `limit` on raw bm25 and still deserve
 // the first slot after fusion.
@@ -1486,9 +1509,21 @@ export function runSearch(db, options) {
 
 	let match = built.primary;
 	let matchFallback = null;
-	let rows = statement.all(vaultId, match, poolSize);
 	let fallbackUsed = false;
 	let blendedTotal = null;
+	// WP-3 pre-flight checkpoint: every checkpoint below this line assumes the primary scan
+	// already ran and only bounds what happens *after* it — so a request that arrives already
+	// over budget (queued behind one or more upsert sub-batches before the handler even got to
+	// run) still paid for the scan itself. Check first and skip it entirely when already doomed;
+	// the rescue/vector/coverage checkpoints further down all call overBudget() on their own and
+	// see the same expired deadline, so they fall out with no special-casing beyond this.
+	let rows;
+	if (overBudget()) {
+		degraded = true;
+		rows = [];
+	} else {
+		rows = statement.all(vaultId, match, poolSize);
+	}
 	// `fallbackUsed` reports what actually contributed to this response, and that reading is
 	// the same in both branches — it just cannot be observed the same way. Under 'current' the
 	// loose-OR only ever runs *instead of* the primary (which returned nothing), so "it ran" and
@@ -1703,6 +1738,11 @@ export function createRequestHandler(db, options = {}) {
 	// take over without touching a single line of the request handling below — that is the
 	// seam doing its job.
 	const vectors = options.vectors ?? createVectorBackend(db);
+	// WP-3: injectable clock, same pattern as runSearch's own `now` option below — production
+	// always gets the real Date.now via the default, and a real-HTTP test can inject a
+	// controlled clock so the sentAt/skew deadline math is deterministic instead of racing the
+	// wall clock.
+	const now = options.now ?? Date.now;
 	// Every statement below is keyed by `(vault_id, id)` or `(vault_id, path)`, never by `id`
 	// alone. `ON CONFLICT(vault_id, id)` is the load-bearing half: under the old `ON
 	// CONFLICT(id)` an upsert from vault B silently re-labelled vault A's row as B's, which is
@@ -1794,6 +1834,12 @@ LIMIT 1
 	const coverageStatement = db.prepare(COVERAGE_SQL);
 
 	return async (req, res) => {
+		// WP-3: captured as the FIRST statement of the request handler, before anything else —
+		// including the URL parse and, further down, `await readJson`, which is itself a yield
+		// point a queued upsert flush sub-batch can preempt. This is what lets the /v1/search
+		// deadline (below) account for the time a request spent waiting for this handler to even
+		// start running, on top of whatever `sentAt` the client itself reports.
+		const receivedAt = now();
 		try {
 			const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
 			if (req.method === 'GET' && url.pathname === '/health') {
@@ -2018,7 +2064,14 @@ LIMIT 1
 				// valve rather than something a malformed request can widen or disable. Absent
 				// from an older client, which is exactly why clampSearchBudgetMs falls back to
 				// SEARCH_DEADLINE_DEFAULT_MS instead of requiring the field.
-				const deadlineAt = Date.now() + clampSearchBudgetMs(body.budgetMs);
+				const budgetMs = clampSearchBudgetMs(body.budgetMs);
+				// WP-3: `body.sentAt` (src/search/client.ts) lets the deadline start counting
+				// from the client's own send time instead of only from `receivedAt` — see
+				// resolveSearchDeadlineStart for the skew guard. `receivedAt` was captured as the
+				// very first statement of this handler, above, so it already reflects the queue
+				// wait ahead of `readJson`; `sentAt` reaches further back, past the wait for this
+				// handler to start running at all.
+				const deadlineAt = resolveSearchDeadlineStart(body.sentAt, receivedAt, budgetMs) + budgetMs;
 				const outcome = runSearch(db, {
 					vaultId,
 					query,
@@ -2039,6 +2092,9 @@ LIMIT 1
 					hydrate: hydrateChunk,
 					coverageStatement,
 					deadlineAt,
+					// Same injected clock as receivedAt above, so every overBudget() checkpoint
+					// inside runSearch reads the same (real, or test-controlled) time source.
+					now,
 				});
 				const response = {
 					// Computed from state, not hardcoded: 'hybrid' means a query embedding

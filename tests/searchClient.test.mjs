@@ -343,6 +343,25 @@ test('SearchServiceClient.search() surfaces a companion degraded flag, and toler
 	assert.equal(notDegraded.degraded, undefined, 'an older companion that never sends the field must normalize to undefined, not false');
 });
 
+// WP-3: `sentAt` is the client's own clock at send time, sent alongside `budgetMs` so the
+// companion can start its cooperative deadline from send time instead of only from its own
+// handler-dispatch clock (see resolveSearchDeadlineStart in scripts/search-companion.mjs).
+// Additive and back-compatible both directions, same as `budgetMs` itself.
+test('SearchServiceClient.search() sends sentAt as the current time', async () => {
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const before = Date.now();
+	await client.search({ query: 'x', limit: 1 });
+	const after = Date.now();
+
+	const sentAt = JSON.parse(globalThis.__searchClientRequests[0].body).sentAt;
+	assert.equal(typeof sentAt, 'number');
+	assert.ok(sentAt >= before && sentAt <= after, 'sentAt must be the client\'s own clock at send time');
+});
+
 test('SearchServiceClient throws SearchServiceUnavailableError with kind "timeout" when the request times out', async (t) => {
 	t.mock.timers.enable({ apis: ['setTimeout'] });
 	globalThis.__searchClientThrow = undefined;

@@ -676,7 +676,16 @@ export class SearchManager {
 	}
 
 	async search(query: string, limit?: number): Promise<SearchResponse> {
+		// WP-3: wall time of the query embed, measured here and folded into the timeout
+		// breadcrumb below — NOT into the timed window itself. The embed stays outside
+		// `startedAt`/the client timer on purpose (src/search/AGENTS.md, and the WP-3
+		// investigation this measurement comes from): folding a cold model load into the
+		// interactive timeout would turn "the embedder is warming up" into a spurious
+		// "companion unreachable"-class error. This only makes that invisible cost triageable
+		// from the log instead of changing what it's timed against.
+		const embedStartedAt = Date.now();
 		const queryEmbedding = await this.embedQuery(query);
+		const embedMs = Date.now() - embedStartedAt;
 		// Only when there is a vector to place — a keyword-only search has no space, and asking
 		// for one would probe the runtime on a path that has already decided not to embed.
 		const embeddingSpace = queryEmbedding ? (await this.activeEmbeddingSpaceId()) ?? undefined : undefined;
@@ -697,11 +706,13 @@ export class SearchManager {
 			// just shows "Search failed" and the companion-side cause (queued behind its own
 			// upsert flush, or a genuinely pathological query) is lost. Term count is a cheap
 			// client-side proxy for the companion's own term parsing (buildFtsQuery), not an
-			// exact echo of it — good enough for a debug breadcrumb, not a ranking input.
+			// exact echo of it — good enough for a debug breadcrumb, not a ranking input. WP-3
+			// adds `embedMs` so a first-run report doesn't require guessing whether a cold
+			// embedder ate the wall clock ahead of the (unaffected) timed window.
 			if (e instanceof SearchServiceUnavailableError && e.kind === 'timeout') {
 				const elapsedMs = Date.now() - startedAt;
 				const termCount = query.trim().split(/\s+/).filter(Boolean).length;
-				logWarn('search', `interactive search timed out after ${elapsedMs}ms (${termCount} terms)`);
+				logWarn('search', `interactive search timed out after ${elapsedMs}ms (${termCount} terms, embed ${embedMs}ms)`);
 			}
 			throw e;
 		}

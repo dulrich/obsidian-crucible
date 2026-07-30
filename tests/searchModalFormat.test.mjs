@@ -41,7 +41,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { formatScore, formatAttribution } = await import(pathToFileURL(outfile));
+const { formatScore, formatAttribution, formatSearchStatus } = await import(pathToFileURL(outfile));
 
 test('formatAttribution renders the vector rank beside text/title ranks', () => {
 	const parts = formatAttribution({ textRank: null, titleRank: null, vectorRank: 2, pooledChunks: 1 });
@@ -66,4 +66,27 @@ test('formatScore includes the vec score and the vector rank together for a hybr
 	});
 	assert.match(line, /vec 0\.987/);
 	assert.match(line, /vec #2/);
+});
+
+// WP-3: a `degraded: true` response gets its own distinct status wording — visually paired in
+// SearchModal.runSearch with the `is-degraded` CSS class — rather than reading like either a
+// complete result set or a failure.
+test('formatSearchStatus surfaces a degraded response distinctly from a normal one', () => {
+	const normal = formatSearchStatus(5, 5, 'fts', false);
+	const degraded = formatSearchStatus(0, 0, 'fts', false, false, true);
+	assert.doesNotMatch(normal, /Partial results/);
+	assert.match(degraded, /^Partial results — indexing in progress, retry in a moment/);
+});
+
+// The degraded prefix must not swallow the existing mode/FTS-only/rebuild-required suffixes —
+// those are independent facts about the same response.
+test('formatSearchStatus keeps the degraded prefix and the existing suffixes both present', () => {
+	const line = formatSearchStatus(3, 10, 'hybrid', true, true, true);
+	assert.match(line, /^Partial results — indexing in progress, retry in a moment · Showing 3 of 10 · hybrid · FTS only · index rebuild required$/);
+});
+
+// A default (omitted) `degraded` argument must stay the pre-WP-3 shape byte-for-byte — every
+// existing call site that doesn't know about `degraded` yet must be unaffected.
+test('formatSearchStatus defaults degraded to false, unchanged from before WP-3', () => {
+	assert.equal(formatSearchStatus(2, undefined, undefined, false), '2 results');
 });
