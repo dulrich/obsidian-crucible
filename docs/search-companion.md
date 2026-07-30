@@ -225,3 +225,18 @@ type-ahead search, which does not call it.
 - `POST /v1/search`
 
 All mutation/search requests include `vaultId` so multiple vaults can share one companion database. That sharing is only actually safe from **schema 5** onwards — see the `4→5` migration above. An implementation of this contract must key chunk storage on `vaultId + chunkId`, never on `chunkId` alone.
+
+### Timeouts and the cooperative search deadline
+
+The interactive search timeout is configurable: **Settings → Orchestrator → Search →
+Query timeout** (`searchQueryTimeoutMs`, default 4000ms, floor 3000). Indexing operations
+keep their own separate 60s budget — the two are never merged.
+
+`POST /v1/search` also accepts an optional `budgetMs`: the companion's own cooperative
+per-request deadline (the plugin sends ~80% of the query timeout; the server clamps the
+value to a sane range and defaults it when absent). Because the companion is
+single-threaded, the deadline is checked *between* query legs, never inside one. A
+request that exceeds its budget returns a well-formed partial response with
+`degraded: true` — the expensive legs (the zero-hit OR rescue, remaining coverage-term
+scans, the vector leg) are skipped rather than blocking the server. In-budget responses
+are unchanged, and clients that never send `budgetMs` get the server default.

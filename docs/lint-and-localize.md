@@ -13,6 +13,34 @@ Crucible's lint commands clean frontmatter, derived properties, transcript text,
 
 Frontmatter updates use Obsidian's frontmatter processor so YAML structure is preserved.
 
+## Lint: all pipeline
+
+`Lint: all` runs a fixed sequence of steps. The full pipeline is listed in **Settings →
+Lint → Lint: all pipeline**, in fire order; four steps can be toggled off per vault, and
+some others are controlled by their own existing settings (a blank key disables the
+matching step).
+
+| Step | Kind | Configurable |
+| --- | --- | --- |
+| Excluded-folder guard | structural | Lint excluded folders list |
+| Read note + word count | structural | — |
+| Parse frontmatter / insert block | structural | — |
+| Insert configured keys | frontmatter | Insert-keys list |
+| Created date | frontmatter | Created key (blank disables) |
+| Title stamp | frontmatter | Toggle |
+| Modified date | frontmatter | Modified key (blank disables) |
+| Word count property | frontmatter | Toggle |
+| Derive source IDs | frontmatter | Toggle |
+| Sort YAML properties | frontmatter | Toggle |
+| Blank line after YAML | content | Blank-line-after-YAML setting |
+| Re-read and diff | structural | — |
+| Dataview refresh | structural | — |
+| Completion notice | structural | — |
+
+Attachment localization is deliberately not part of this pipeline (see below). Running
+`Lint: all` with a step toggled off leaves that step's frontmatter untouched — it does
+not remove values written earlier.
+
 ## Word Count
 
 Word count is prose-only. It strips frontmatter, code, comments, embeds, SVG/script/style blocks, and reduces links to visible text before counting. Re-linting old notes can lower historical counts because markup tokens are no longer counted as prose.
