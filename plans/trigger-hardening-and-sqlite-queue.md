@@ -288,3 +288,19 @@ failedJobRepair}.ts` · `src/orchestration/db/*` (new) · `src/triggers/*` ·
 
 **Total ≈ 3.15 kSLOC, ~1930k raw tokens; ~1330k Claude-path / ~1040k Codex-path
 Opus/Sol-equivalent tokens.**
+
+## Outcome (closed 2026-07-30)
+
+All nine WPs landed on master, one commit each, every landing gate-verified:
+`17f7bec` wp1 (trigger exclusion + layout-ready start + adapter guards) · `2e53316`
+wp3 (danger hover + anchor scroll restore) · `43d7222` wp4 (image job timeouts) ·
+`631b9c6` ensureFolder race (direct follow-up) · `95ef7d5` wp2 (validation-gated
+enablement + scope estimate) · `57293b4` wp5 (SqliteJobStore) · `a62bb94` wp6
+(DbJobBackend + counts seam) · `dd8b0b4` wp7 (consumers onto the seam + job-detail
+modal) · `0c342e2` wp8 (cutover, net −1803 lines) · wp9 docs/close. Tests
+1119 → 1257 (101 files). Deviations worth knowing: WP-8 additionally preserved the
+enrichment auto-ENQUEUE source (not in the plan; deleting `MemoryJobQueue` would have
+orphaned the persisted toggle) and corrected the `drainsWithoutAutorun` premise (it
+never bypassed the auto-run toggle). Contracts recorded in `src/orchestration/AGENTS.md`
+(SQLite queue, scoped registration failure, frozen archive, auto-source, trigger
+hardening) and root `AGENTS.md` (dashboard scroll anchor).
