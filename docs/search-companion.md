@@ -237,6 +237,24 @@ per-request deadline (the plugin sends ~80% of the query timeout; the server cla
 value to a sane range and defaults it when absent). Because the companion is
 single-threaded, the deadline is checked *between* query legs, never inside one. A
 request that exceeds its budget returns a well-formed partial response with
-`degraded: true` — the expensive legs (the zero-hit OR rescue, remaining coverage-term
-scans, the vector leg) are skipped rather than blocking the server. In-budget responses
-are unchanged, and clients that never send `budgetMs` get the server default.
+`degraded: true` — the primary FTS scan (pre-flight gated) and the expensive legs (the
+zero-hit OR rescue, remaining coverage-term scans, the vector leg) are skipped rather
+than blocking the server. In-budget responses are unchanged, and clients that never send
+`budgetMs` get the server default.
+
+The request may also carry an optional `sentAt` (epoch ms, the client's clock at send
+time). When present and plausible — within `[receivedAt - budget, receivedAt]` after
+skew-guarding — the deadline counts from `sentAt` instead of from the moment the handler
+ran, so time a request spent **queued** behind an indexing sub-batch counts against its
+budget. That is what lets a search that arrives already doomed return fast partials
+(surfaced in the modal as "Partial results — indexing in progress, retry in a moment")
+instead of silently outliving the client's timeout. Absent or implausible `sentAt` falls
+back to the old behavior; both fields are additive and version-tolerant in both
+directions.
+
+Two backfill courtesies on the indexing side keep interactive search usable mid-rebuild:
+after serving a search, the upsert flush defers its next sub-batch briefly (~1.5s,
+capped at ~15s total per flush) so follow-up queries land in an open window; and the
+in-memory vector matrix is invalidated once per completed flush rather than after every
+sub-batch, so mid-backfill searches read a warm matrix (new chunks become
+vector-searchable when the flush completes).
