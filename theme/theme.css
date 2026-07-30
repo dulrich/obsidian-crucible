@@ -85,6 +85,7 @@ body[data-surround="med"] {
      surround. No new design decisions; refine to true N1 hues in a later pass. */
   --n1-red: #fb464c;
   --n1-red-rgb: 251, 70, 76;
+  --n1-red-hover: #ff5f64;
   --n1-orange: #e9973f;
   --n1-orange-rgb: 233, 151, 63;
   --n1-yellow: #e0de71;
@@ -152,6 +153,7 @@ body[data-surround="dark"] {
   /* Semantic palette — same as Med: both take Obsidian's `.theme-dark` set. */
   --n1-red: #fb464c;
   --n1-red-rgb: 251, 70, 76;
+  --n1-red-hover: #ff5f64;
   --n1-orange: #e9973f;
   --n1-orange-rgb: 233, 151, 63;
   --n1-yellow: #e0de71;
@@ -219,6 +221,7 @@ body[data-surround="light"] {
   /* Semantic palette — Obsidian's own `.theme-light` 8-colour set. */
   --n1-red: #e93147;
   --n1-red-rgb: 233, 49, 71;
+  --n1-red-hover: #c92338;
   --n1-orange: #ec7500;
   --n1-orange-rgb: 236, 117, 0;
   --n1-yellow: #e0ac00;
@@ -300,6 +303,17 @@ body.theme-light {
   --background-modifier-hover: var(--n1-panel-2);
   --background-modifier-active-hover: var(--n1-panel-2);
   --background-modifier-form-field: var(--n1-inset);
+
+  /* Danger-button hover — core ships rest/hover identical
+     (--background-modifier-error === --background-modifier-error-hover === the
+     8-colour --color-red), so button.mod-warning has no visible hover state.
+     --background-modifier-error is restated here (same value as --color-red
+     below) purely for self-documentation next to its hover sibling; core's own
+     `button.mod-warning:hover { background-color:
+     var(--background-modifier-error-hover) }` does the rest — no selectors
+     needed here. */
+  --background-modifier-error: var(--n1-red);
+  --background-modifier-error-hover: var(--n1-red-hover);
 
   /* Text */
   --text-normal: var(--n1-text);

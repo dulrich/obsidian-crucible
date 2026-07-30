@@ -229,6 +229,13 @@ class FakeElement {
 		this.clientHeight = 0;
 		this.style = { overflowY: 'visible' };
 		this.ownerDocument = null;
+		// A-1: plain settable fields — real offsetTop/isConnected are
+		// browser-computed (layout pass / document-attachment walk), but this
+		// harness has no layout engine, so tests position/detach elements
+		// directly the same way they already drive scrollHeight/clientHeight.
+		this.offsetTop = 0;
+		this.isConnected = true;
+		this._listeners = {};
 	}
 	// Mirrors real DOM behavior: a scroller can't scroll past its own content, so
 	// an out-of-range assignment silently clamps to [0, scrollHeight - clientHeight].
@@ -243,7 +250,13 @@ class FakeElement {
 	}
 	set scrollTop(value) {
 		const max = Math.max(0, this.scrollHeight - this.clientHeight);
-		this._scrollTop = Math.max(0, Math.min(value, max));
+		const next = Math.max(0, Math.min(value, max));
+		// A-3: mirrors real DOM firing 'scroll' only on an actual position change
+		// — a redundant re-assignment of the same clamped value (the readback
+		// re-assert path exercises this) must not spuriously fire the listener.
+		const changed = next !== this._scrollTop;
+		this._scrollTop = next;
+		if (changed) this._dispatch('scroll');
 	}
 	append(child) {
 		child.parentElement = this;
@@ -273,6 +286,16 @@ class FakeElement {
 	}
 	focus() {
 		if (this.ownerDocument) this.ownerDocument.activeElement = this;
+	}
+	addEventListener(type, cb) {
+		(this._listeners[type] ??= []).push(cb);
+	}
+	removeEventListener(type, cb) {
+		if (!this._listeners[type]) return;
+		this._listeners[type] = this._listeners[type].filter(l => l !== cb);
+	}
+	_dispatch(type) {
+		for (const cb of this._listeners[type] ?? []) cb();
 	}
 }
 
@@ -531,6 +554,127 @@ test('the double-rAF restore re-asserts once if a still-settling sibling clamps 
 		scroller.scrollHeight = 2000;
 		step(); // readback frame: sees the mismatch and re-asserts
 		assert.equal(scroller.scrollTop, 340, 'the readback re-assert recovers once the scroller is back to full size');
+	});
+});
+
+// --- A-1 anchor-delta restore + A-3 user-scroll cancel (thq WP-3) ---
+
+test('refreshWithScrollPreserved: anchor follows scrollTop when content above it grows (A-1)', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+
+		const region = scroller.append(new FakeElement('div'));
+		const rowAbove = region.append(new FakeElement('div', { className: 'row' }));
+		rowAbove.offsetTop = 100;
+		const anchorRow = region.append(new FakeElement('div', { className: 'row' }));
+		anchorRow.offsetTop = 260;
+		const rowBelow = region.append(new FakeElement('div', { className: 'row' }));
+		rowBelow.offsetTop = 500;
+
+		scroller.scrollTop = 250; // viewport top sits between rowAbove and anchorRow — anchorRow qualifies
+
+		await refreshWithScrollPreserved(region, () => {
+			// A section above the anchor (e.g. Queue Monitor) grows by 40px,
+			// pushing everything below it down. The keyed reconciler keeps the
+			// same row identities — only their offsetTop moves.
+			anchorRow.offsetTop += 40;
+			rowBelow.offsetTop += 40;
+			scroller.scrollTop = 0; // teardown/rebuild resets scrollTop like real DOM
+		});
+
+		flush();
+		assert.equal(scroller.scrollTop, 290, 'restored scrollTop follows the anchor, shifting by the same delta (40) the content above it grew — not pinned to the stale absolute 250');
+	});
+});
+
+test('refreshWithScrollPreserved: a detached anchor falls back to the absolute scrollTop restore (A-1)', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+
+		const region = scroller.append(new FakeElement('div'));
+		const anchorRow = region.append(new FakeElement('div', { className: 'row' }));
+		anchorRow.offsetTop = 300;
+
+		scroller.scrollTop = 260; // anchorRow (offsetTop 300) qualifies, offset = 40
+
+		await refreshWithScrollPreserved(region, () => {
+			// Unkeyed container rebuild (blogControl/channelControl, queueMonitor's
+			// body.empty() branches): the old row is gone entirely, not reconciled
+			// in place.
+			region.children.length = 0;
+			anchorRow.parentElement = null;
+			anchorRow.isConnected = false;
+			scroller.scrollTop = 0;
+		});
+
+		flush();
+		assert.equal(scroller.scrollTop, 260, 'absolute fallback restores the captured scrollTop once the anchor element is no longer connected/contained');
+	});
+});
+
+test('refreshWithScrollPreserved: a user scroll after renders settle cancels the pending restore (A-3)', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+		scroller.scrollTop = 340;
+
+		const region = scroller.append(new FakeElement('div'));
+
+		await refreshWithScrollPreserved(region, () => {
+			// Render-time reset (real teardown behavior) — must NOT itself be
+			// mistaken for a user scroll; it happens while the coordinator is busy.
+			region.children.length = 0;
+			scroller.scrollTop = 0;
+		});
+
+		// Renders have settled (count back to 0) but the restore's own writes
+		// haven't run yet — still behind the double rAF. A real scroll landing in
+		// this window means the user actively repositioned the view.
+		scroller.scrollTop = 120;
+
+		flush();
+		assert.equal(scroller.scrollTop, 120, 'the user-driven position is left alone; the coordinator does not fight it');
+	});
+});
+
+test('refreshWithScrollPreserved: a scroll caused by the render itself (while busy) does not cancel the restore', async () => {
+	await withRaf(async (flush) => {
+		const doc = makeDocument();
+		const scroller = new FakeElement('div');
+		scroller.ownerDocument = doc;
+		scroller.style.overflowY = 'auto';
+		scroller.scrollHeight = 2000;
+		scroller.clientHeight = 500;
+		scroller.scrollTop = 340;
+
+		const region = scroller.append(new FakeElement('div'));
+
+		await refreshWithScrollPreserved(region, () => {
+			// Several scrollTop-moving side effects during teardown/rebuild — all
+			// of them happen while the coordinator is "busy" (a render is still in
+			// flight) and must be ignored by the A-3 listener, exactly like the
+			// pre-existing collapse/regrow tests already rely on.
+			region.children.length = 0;
+			scroller.scrollTop = 999; // clamps
+			scroller.scrollTop = 0;
+		});
+
+		flush();
+		assert.equal(scroller.scrollTop, 340, 'render-time scrollTop churn is not treated as a user scroll — the absolute restore still lands');
 	});
 });
 
