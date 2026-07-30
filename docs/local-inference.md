@@ -513,7 +513,12 @@ Crucible: **one base URL for every provider entry, including chat** —
   `plans/image-descriptions-search.md`). Mark the provider `image-extraction` capable to use it
   for Image descriptions. Requests must carry `reasoning_effort: "none"` (Crucible's
   `describeImagePass` does this for local providers automatically) or the model spends the
-  completion budget on `reasoning_content` and returns empty `content`.
+  completion budget on `reasoning_content` and returns empty `content`. Crucible serializes
+  completion-class requests (chat + vision, not embeddings/rerank) against local providers by
+  default — measured on this box, one GPU gains nothing from concurrent vision calls and
+  in-flight stacking pushed the latency tail past the plugin's 120s timeout; the provider
+  editor's "Max concurrent requests" field overrides the default if your server genuinely
+  parallelizes. Images are also downscaled to a 1568px long edge before transcode.
 
 The embedding and rerank aliases are chosen to match the model ids already stored by route (c)
 below, specifically so that migrating a vault off that route onto this one is a **base-URL-only
