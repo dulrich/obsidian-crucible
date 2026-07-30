@@ -702,6 +702,14 @@ export interface CrucibleSettings {
 	searchQueryLogEnabled: boolean;
 	// The bound. Oldest entries are dropped first; clamped to [10, 5000] on read.
 	searchQueryLogMaxEntries: number;
+	// clsl-WP-3: destructive-action confirmation framework (src/settings/destructiveActions.ts).
+	// Resolution order per action id: destructiveConfirmAction[id] -> destructiveConfirmTier[tier]
+	// -> destructiveConfirmGlobal. Absent = inherit the next level up; the global default is true
+	// (confirm), so an empty vault-fresh settings object confirms every registered destructive
+	// action except the one entry seeded default-suppressed below (job-cancel).
+	destructiveConfirmGlobal: boolean;
+	destructiveConfirmTier: Record<string, boolean>;
+	destructiveConfirmAction: Record<string, boolean>;
 }
 
 export const DEFAULT_SETTINGS: CrucibleSettings = {
@@ -867,4 +875,10 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	// plus "Search: clear query log" are both one step away.
 	searchQueryLogEnabled: true,
 	searchQueryLogMaxEntries: SEARCH_QUERY_LOG_DEFAULT_MAX_ENTRIES,
+	destructiveConfirmGlobal: true,
+	destructiveConfirmTier: {},
+	// job-cancel is the one registered action that ships default-suppressed, preserving the
+	// documented single-row-cancel policy (queueMonitor.ts:159-162) — everything else inherits
+	// the tier/global default of "confirm".
+	destructiveConfirmAction: { 'job-cancel': false },
 }
