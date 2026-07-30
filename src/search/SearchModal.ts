@@ -130,12 +130,20 @@ export class VaultSearchModal extends Modal {
 		const generation = ++this.searchGeneration;
 		this.queryLogEntryId = null;
 		this.statusEl.setText('Searching...');
+		this.statusEl.toggleClass('is-degraded', false);
 		try {
 			const response = this.sweepMode
 				? await this.plugin.searchManager.sweep(query)
 				: await this.plugin.searchManager.search(query);
 			if (generation !== this.searchGeneration) return;
-			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false, response.rebuildRequired === true));
+			// WP-3: a `degraded: true` response is a well-formed partial (the companion's own
+			// cooperative deadline gave up on the rescue/vector/coverage legs, most likely
+			// because the request arrived queued behind an embedding backfill sub-batch) — not a
+			// failure and not a complete result set, so it needs its own distinct treatment
+			// rather than reading as either.
+			const degraded = response.degraded === true;
+			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false, response.rebuildRequired === true, degraded));
+			this.statusEl.toggleClass('is-degraded', degraded);
 			// The full reason rides along as a tooltip so the status line stays short but no
 			// degradation is silent. This is not only the rebuild-required case: WP-1 also sets
 			// `message` (without `rebuildRequired`) when a query embedding's width disagrees
@@ -165,6 +173,7 @@ export class VaultSearchModal extends Modal {
 			if (generation !== this.searchGeneration) return;
 			const message = e instanceof Error ? e.message : String(e);
 			this.statusEl.setText('Search failed');
+			this.statusEl.toggleClass('is-degraded', false);
 			new Notice(`Search failed: ${message}`);
 		}
 	}
@@ -354,11 +363,20 @@ export function formatRerankRow(meta: RerankRowMeta): string {
 	return `rerank ${movement} · score ${meta.relevanceScore.toFixed(3)}`;
 }
 
-function formatSearchStatus(visible: number, total: number | undefined, mode: string | undefined, ftsOnly: boolean, rebuildRequired = false): string {
+// Exported so tests/searchModalFormat.test.mjs can assert on the degraded wording without
+// instantiating a Modal — same reasoning as formatScore/formatAttribution below.
+export function formatSearchStatus(visible: number, total: number | undefined, mode: string | undefined, ftsOnly: boolean, rebuildRequired = false, degraded = false): string {
 	const count = typeof total === 'number' && total > visible
 		? `Showing ${visible} of ${total}`
 		: `${visible} results`;
-	return `${count}${mode ? ` · ${mode}` : ''}${ftsOnly ? ' · FTS only' : ''}${rebuildRequired ? ' · index rebuild required' : ''}`;
+	// WP-3: a `degraded: true` response is a well-formed partial, not a failure and not a
+	// complete result set — see runSearch's comment. Prepended rather than appended so it can't
+	// be lost past a long mode/FTS-only/rebuild-required suffix, and phrased as an action
+	// ("retry in a moment") rather than a status noun so it doesn't blur into a fourth flavor of
+	// "index rebuild required". `SearchModal.runSearch` pairs this with the `is-degraded` CSS
+	// class for the visual distinction the wording alone can't carry.
+	const degradedPrefix = degraded ? 'Partial results — indexing in progress, retry in a moment · ' : '';
+	return `${degradedPrefix}${count}${mode ? ` · ${mode}` : ''}${ftsOnly ? ' · FTS only' : ''}${rebuildRequired ? ' · index rebuild required' : ''}`;
 }
 
 // The per-stage explain line: base score, the ranks that were fused, every boost that

@@ -1004,6 +1004,16 @@ If your plugin does not need CSS, delete this file.
   font-size: 0.9em;
 }
 
+/* WP-3: a `degraded: true` response is a well-formed partial (the companion's own cooperative
+   deadline gave up early, most likely queued behind an embedding backfill), not a failure and
+   not a complete result set — the wording (formatSearchStatus) carries that distinction, and
+   this carries it visually. --text-warning matches the existing status-pill `.is-warn` treatment
+   elsewhere in this file rather than inventing a new hue for the same "not wrong, not done"
+   meaning. */
+.crucible-search-status.is-degraded {
+  color: var(--text-warning);
+}
+
 .crucible-search-results {
   display: flex;
   flex-direction: column;
