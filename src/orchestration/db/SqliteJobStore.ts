@@ -77,15 +77,19 @@ export class SqliteJobStore {
 	/** Rows in claim order — `ORDER BY lane_rank, priority_rank, created, id`, the
 	 * same comparator `claimNext` uses (see its doc comment for the rank-map
 	 * citation). `limit` follows SQLite's own convention: omitted/negative means no
-	 * limit. */
-	list(status: JobStatus, options: { limit?: number; offset?: number } = {}): DbJobRow[] {
+	 * limit. `type` narrows to one job type *inside* the statement, so it composes
+	 * with `limit` correctly (filtering a limited page in JS would silently return
+	 * fewer rows than asked for). */
+	list(status: JobStatus, options: { limit?: number; offset?: number; type?: JobType } = {}): DbJobRow[] {
 		const limit = options.limit ?? -1;
 		const offset = options.offset ?? 0;
+		const typeFilter = options.type ? ' AND type = ?' : '';
+		const params: unknown[] = options.type ? [status, options.type, limit, offset] : [status, limit, offset];
 		const rows = this.db.prepare(`
-			SELECT * FROM jobs WHERE status = ?
+			SELECT * FROM jobs WHERE status = ?${typeFilter}
 			ORDER BY lane_rank ASC, priority_rank ASC, created ASC, id ASC
 			LIMIT ? OFFSET ?
-		`).all(status, limit, offset);
+		`).all(...params);
 		return rows.map(mapRow);
 	}
 
@@ -170,6 +174,18 @@ export class SqliteJobStore {
 		return null;
 	}
 
+	/**
+	 * Claim one specific queued job by id — the manual per-job Run (`JobBackend.runJob`).
+	 * Deliberately ignores `defer_until`: the user is asking for this job *now*, which is
+	 * exactly what `FileJobBackend.claimById` does relative to its own `claimNext`
+	 * (`src/orchestration/FileJobBackend.ts:300-321`). Uses the same guarded
+	 * `UPDATE ... WHERE id=? AND status='queued'` as `claimNext`, so a job a drain
+	 * worker already claimed answers null rather than double-running.
+	 */
+	claimById(id: string, nowMs: number): DbJobRow | null {
+		return this.tryClaim(id, nowMs) ? this.get(id) : null;
+	}
+
 	private selectClaimCandidates(nowMs: number, allowedTypes?: JobType[]): string[] {
 		// An explicit empty `allowedTypes` array means "nothing is currently eligible"
 		// (e.g. every service this caller cares about is unhealthy) — distinct from
@@ -213,13 +229,25 @@ export class SqliteJobStore {
 	 * by the caller (WP-6/7 wire them to per-type timeout + 30s, per the queue-db
 	 * investigation's Durability §2). Returns the count recovered.
 	 */
-	recoverStale(nowMs: number, staleMsForType: (type: JobType) => number): number {
+	recoverStale(
+		nowMs: number,
+		staleMsForType: (type: JobType) => number,
+		isProtected?: (id: string, type: JobType) => boolean,
+	): number {
 		const running = this.db.prepare(`SELECT id, type, claim_token, claimed_at FROM jobs WHERE status = 'running'`).all();
 		let recovered = 0;
 		for (const row of running) {
 			const claimToken = row.claim_token != null ? String(row.claim_token as string) : null;
 			const claimedAt = row.claimed_at != null ? Number(row.claimed_at) : 0;
 			const type = row.type as JobType;
+			// A run this process is still executing is never stale, whatever the clock says
+			// — the sweep's premise is "no live timer owns this job", and `isRunning` is the
+			// counter-example (`JobBackend.isRunning`'s doc comment; the file-side guard is
+			// `Orchestrator.scan`'s `if (this.isRunning(...)) continue`). Without it, a job
+			// whose type disables the per-run timeout (`timeoutMs: 0` ⇒ a flat 1h stale
+			// window) and legitimately runs longer gets bounced running → queued and then
+			// claimed a second time, with both copies writing the same note.
+			if (isProtected?.(String(row.id), type)) continue;
 			const staleMs = staleMsForType(type);
 			const tokenMismatch = claimToken !== this.processToken;
 			const ageStale = claimedAt + staleMs < nowMs;
@@ -366,8 +394,14 @@ export class SqliteJobStore {
 	 * read/write per row. Returns the count moved, for the emit-exactly-once bulk-op
 	 * contract pinned by `tests/queueControl.test.mjs` (WP-6's concern; this store
 	 * just reports the number).
+	 *
+	 * `type` scopes the clear to one job type, because that is the granularity the
+	 * queue exposes: `Orchestrator.clearQueued(type)` clears exactly one type, and a
+	 * backend that cleared the whole table would silently retire every OTHER type's
+	 * queued work on a per-type "Clear queued" click. Omitted ⇒ every queued row
+	 * (what a future all-types caller wants).
 	 */
-	clearQueued(nowMs: number): number {
+	clearQueued(nowMs: number, type?: JobType): number {
 		const result = this.db.prepare(`
 			UPDATE jobs
 			SET status = 'cancelled',
@@ -376,9 +410,33 @@ export class SqliteJobStore {
 				claimed_at = NULL,
 				claim_token = NULL,
 				notes = CASE WHEN notes = '' THEN ? ELSE notes || char(10) || ? END
-			WHERE status = 'queued'
-		`).run(nowMs, CANCELLED_BEFORE_RUN, CANCELLED_BEFORE_RUN);
+			WHERE status = 'queued'${type ? ' AND type = ?' : ''}
+		`).run(...(type
+			? [nowMs, CANCELLED_BEFORE_RUN, CANCELLED_BEFORE_RUN, type]
+			: [nowMs, CANCELLED_BEFORE_RUN, CANCELLED_BEFORE_RUN]));
 		return result.changes;
+	}
+
+	/**
+	 * The single-row form of `clearQueued`: retires ONE queued job into `cancelled`,
+	 * with the same `CANCELLED_BEFORE_RUN` note. Guarded on `status = 'queued'` in the
+	 * statement itself, so a job a drain worker claimed between the caller's read and
+	 * this call answers `false` (⇒ `'not-queued'` at the backend, where `cancelJob`
+	 * addresses it instead) rather than being yanked out from under a live run — the
+	 * DB equivalent of `FileJobBackend.isRetirable`'s live-path check.
+	 */
+	cancelQueued(id: string, nowMs: number): boolean {
+		const result = this.db.prepare(`
+			UPDATE jobs
+			SET status = 'cancelled',
+				settled_at = ?,
+				defer_until = NULL,
+				claimed_at = NULL,
+				claim_token = NULL,
+				notes = CASE WHEN notes = '' THEN ? ELSE notes || char(10) || ? END
+			WHERE id = ? AND status = 'queued'
+		`).run(nowMs, CANCELLED_BEFORE_RUN, CANCELLED_BEFORE_RUN, id);
+		return result.changes > 0;
 	}
 
 	// ---- Retention ----------------------------------------------------------------
