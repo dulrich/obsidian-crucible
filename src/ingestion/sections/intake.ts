@@ -28,8 +28,17 @@ export interface IntakeSection {
 // both the intake sections and the Queue monitor's debounced refresh).
 export function createIntakeSection(host: DashboardHost): IntakeSection {
 	const intakeButtons = new Map<IntakeKind, HTMLButtonElement>();
+	// Last state rendered per button, so a queue tick that doesn't change the
+	// button's state (the common case — most ticks are unrelated job types)
+	// skips the DOM rebuild entirely instead of doing btn.empty() + rebuild
+	// ~1x/sec during queue churn. A WeakMap needs no explicit clearing on
+	// dashboard remount: createIntakeSection builds fresh <button> elements
+	// every mount, so a prior mount's entries simply become unreachable.
+	const lastButtonState = new WeakMap<HTMLButtonElement, 'idle' | 'queued' | 'running'>();
 
 	function setIntakeButtonState(btn: HTMLButtonElement, state: 'idle' | 'queued' | 'running'): void {
+		if (lastButtonState.get(btn) === state) return;
+		lastButtonState.set(btn, state);
 		btn.empty();
 		switch (state) {
 			case 'idle':
