@@ -1,4 +1,4 @@
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderFileLink } from '../render/cells';
 import { formatDate } from '../render/format';
 import { computeUnrefinedTranscriptRows } from '../data/transcripts';
@@ -15,6 +15,8 @@ export function renderUnrefinedTranscripts(host: DashboardHost, body: HTMLElemen
 		body.createDiv({ cls: 'crucible-empty-state', text: `Daily folder "${dailyFolder}" not found.` });
 		return;
 	}
+	// P5: skip the rebuild on an unchanged row set during an event-driven pass.
+	if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 
 	renderTableSection<TranscriptRow>({
 		body, ctx, rows,

@@ -1,4 +1,4 @@
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderFileLink, renderOpenButton } from '../render/cells';
 import { formatDateTime } from '../render/format';
 import { computeUnprocessedClippingRows } from '../data/clippings';
@@ -14,6 +14,9 @@ export function renderUnprocessedClippings(host: DashboardHost, body: HTMLElemen
 		body.createDiv({ cls: 'crucible-empty-state', text: `Inbox folder "${folder}" not found.` });
 		return;
 	}
+	// P5: an event-driven pass with an unchanged row set skips the rebuild
+	// entirely; a forced pass (header Refresh, ...) always repaints.
+	if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 
 	renderTableSection<ClippingRow>({
 		body, ctx, rows,

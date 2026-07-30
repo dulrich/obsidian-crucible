@@ -47,3 +47,80 @@ export function renderTableSection<T>(opts: RenderTableSectionOptions<T>): void 
 		});
 	}
 }
+
+// --- P5: row-model signature skip ---
+//
+// A "meta"/"structural" vault event that route() (ingestionDashboard.ts) lets
+// through a section's coarse path-prefix gate doesn't necessarily mean that
+// section's own computed rows changed — e.g. queue churn drags
+// uncapturedVideos/youtubeWithoutMetadata along on every tick even when no
+// video row actually changed. Every one of those wasted passes was tearing
+// down and rebuilding the section's whole table DOM. This tracks, per section
+// (keyed by the section's own long-lived TableStateContext object — one per
+// section, constructed once in buildSection/buildXSection and reused for
+// every render of that section for the life of the mount), the signature of
+// what was last actually painted, so a coordinated-flush ("event-driven")
+// pass can skip repainting when nothing has changed. A forced pass (header
+// Refresh button, sort-header click, Ignore/Unignore, or any other
+// user-triggered `ctx.refresh()`/`host.refresh()` call — see
+// TableStateContext.eventDriven's doc comment) always repaints.
+//
+// Keyed on the ctx object itself, not a SectionId string, so this stays
+// usable from render/controlCenter.ts (shared by two sections) and any
+// future call site without threading an id through. A WeakMap needs no
+// explicit clearing on dashboard unmount: buildSection/buildXSection
+// construct a fresh ctx object on every mount, so a prior mount's entries
+// simply become unreachable (same reasoning as intake.ts's lastButtonState).
+const lastRowSignatures = new WeakMap<TableStateContext, string>();
+
+// Deterministic, directly-comparable serialization of a section's row model
+// plus any extra render-affecting inputs a section reads OUTSIDE the row
+// objects themselves — e.g. youtubeWithoutMetadata's per-row in-flight badge
+// state or uncapturedVideos' per-row live enrichment-queue status, neither of
+// which lives on the row object, so two calls with byte-identical `rows`
+// could still need to repaint. Not a hash/digest: at the row counts these
+// tables render (capped at DEFAULT_TABLE_ROW_LIMIT, and even the uncapped
+// pre-cap scans top out in the low thousands) a full JSON string compare is
+// cheap, and skipping a digest step means zero collision risk for free —
+// "cheap and deterministic" doesn't require throwing away exactness.
+//
+// Row objects widely carry TFile references (row.file,
+// row.channelAboutFile, row.enrichmentFile, ...), and a TFile carries a
+// back-reference to Vault, which back-references its files — a plain
+// `JSON.stringify(rows)` throws on that cycle (or, if it somehow didn't,
+// would serialize the entire vault graph). The replacer collapses anything
+// duck-typed as a vault entry (a string `.path` alongside a `.vault` field)
+// down to just its path, which is the only part of a TFile that actually
+// identifies the row — the label text and every other rendered field already
+// come from plain values on the row itself. A belt-and-suspenders WeakSet
+// guards any other accidental cycle by collapsing a repeat visit rather than
+// throwing (this module has no obsidian import — see the test harness note
+// in tests/ingestionTableCapAndGating.test.mjs — so this can't `instanceof
+// TFile`; duck-typing is deliberate, not a shortcut).
+export function computeRowSignature(rows: unknown, extra?: unknown): string {
+	const seen = new WeakSet<object>();
+	const replacer = (_key: string, value: unknown): unknown => {
+		if (value && typeof value === 'object') {
+			const maybeFile = value as { path?: unknown; vault?: unknown };
+			if (typeof maybeFile.path === 'string' && 'vault' in maybeFile) return maybeFile.path;
+			if (seen.has(value)) return '[circular]';
+			seen.add(value);
+		}
+		return value;
+	};
+	return JSON.stringify({ rows, extra }, replacer);
+}
+
+// Returns true when the caller should repaint. Forced passes (the default —
+// `ctx.eventDriven !== true`) always repaint. An event-driven pass (the
+// coordinated flush) repaints only when `signature` differs from what was
+// last actually painted for this `ctx`. Either way, `signature` is always
+// recorded as the new baseline before returning — including on a forced
+// repaint — so a LATER event-driven pass compares against what is now truly
+// on screen, not a stale pre-forced-repaint snapshot.
+export function shouldRepaint(ctx: TableStateContext, signature: string): boolean {
+	const forced = ctx.eventDriven !== true;
+	const prev = lastRowSignatures.get(ctx);
+	lastRowSignatures.set(ctx, signature);
+	return forced || prev !== signature;
+}

@@ -1,5 +1,5 @@
 import { loadIgnoredBlogIds, loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderIgnoredIdCell, renderUnignoreButton } from '../render/cells';
 import { blogIgnoreUrl } from '../render/format';
 import type { DashboardHost, SectionContext } from '../render/types';
@@ -7,6 +7,8 @@ import type { DashboardHost, SectionContext } from '../render/types';
 // --- Section: Ignored blogs ---
 export async function renderIgnoredPosts(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
 	const rows = Array.from(await loadIgnoredBlogIds(host.app)).map(id => ({ id }));
+	// P5: skip the rebuild on an unchanged row set during an event-driven pass.
+	if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 	renderTableSection<{ id: string }>({
 		body, ctx, rows,
 		emptyText: 'No ignored blogs.',
@@ -22,6 +24,8 @@ export async function renderIgnoredPosts(host: DashboardHost, body: HTMLElement,
 // --- Section: Ignored videos ---
 export async function renderIgnoredVideos(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
 	const rows = Array.from(await loadIgnoredVideoIds(host.app)).map(id => ({ id }));
+	// P5: skip the rebuild on an unchanged row set during an event-driven pass.
+	if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 	renderTableSection<{ id: string }>({
 		body, ctx, rows,
 		emptyText: 'No ignored videos.',

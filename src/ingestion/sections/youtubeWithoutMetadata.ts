@@ -1,5 +1,5 @@
 import { Notice } from 'obsidian';
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderFileLink, renderIgnoreButton } from '../render/cells';
 import { formatDate } from '../render/format';
 import { computeYoutubeNoMetadataRows } from '../data/uncaptured';
@@ -16,6 +16,13 @@ function youtubeMetadataInFlight(host: DashboardHost): Map<string, 'queued' | 'r
 export async function renderYoutubeNoMetadata(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
 	const rows = await computeYoutubeNoMetadataRows(host.app);
 	const inFlight = youtubeMetadataInFlight(host);
+
+	// P5: the enqueue-metadata cell reads inFlight's LIVE per-path status,
+	// which doesn't live on YoutubeNoMetadataRow — fold each row's current
+	// in-flight state (not the whole map, which also covers unrelated paths
+	// outside this list) into the signature so a badge flip still repaints.
+	const inFlightExtra = rows.map(r => inFlight.get(r.file.path) ?? null);
+	if (!shouldRepaint(ctx, computeRowSignature(rows, inFlightExtra))) return;
 
 	renderTableSection<YoutubeNoMetadataRow>({
 		body, ctx, rows,

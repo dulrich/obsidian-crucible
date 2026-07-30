@@ -2,7 +2,7 @@ import { Notice } from 'obsidian';
 import { ConfirmModal } from '../../confirmModal';
 import { confirmDestructive } from '../../settings/destructiveActions';
 import { logWarn } from '../../log';
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderFileLink } from '../render/cells';
 import { formatDateTime } from '../render/format';
 import { computeOrphanedAttachmentRows } from '../data/orphanedAttachments';
@@ -20,6 +20,8 @@ export function createOrphanedAttachmentsSection(host: DashboardHost): OrphanedA
 	function render(body: HTMLElement, ctx: SectionContext): void {
 		const rows = computeOrphanedAttachmentRows(host.app);
 		orphanedAttachmentsCache = rows;
+		// P5: skip the rebuild on an unchanged row set during an event-driven pass.
+		if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 		renderTableSection<OrphanRow>({
 			body, ctx, rows,
 			emptyText: 'No orphaned attachments.',

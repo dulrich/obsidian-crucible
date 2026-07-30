@@ -108,6 +108,106 @@ test('minIntervalGate: a call after a full quiet period following a burst fires 
 	assert.deepEqual(calls, [0, 6000], 'fires immediately again once the quiet period has passed');
 });
 
+// --- P6 (rsp-wp5): coordinated dirty-set flush ---
+//
+// ingestionDashboard.ts pulls the real 'obsidian' App/TFile surface, so per
+// this file's and ingestionTableCapAndGating.test.mjs's established treatment
+// its markDirty/flushDirty wiring is verified STRUCTURALLY there (source-text
+// assertions against the real compiled shape: FAST_SECTIONS/SCAN_SECTIONS
+// membership, markDirty's routing, flushDirty's batch-and-clear order, the
+// single `eventDriven: true` call site). What's exercised here, BEHAVIORALLY,
+// is the actual coalescing/cadence semantics that shape guarantees — a
+// mirror of markDirty/flushDirty built on the REAL compiled minIntervalGate
+// above (not a reimplementation of it), driven with fake timers.
+function makeDirtyFlushHarness(fastIds, scanIds, renderLog) {
+	const dirty = new Set();
+	const flushDirty = (classIds) => {
+		const due = Array.from(dirty).filter(id => classIds.has(id));
+		if (due.length === 0) return;
+		for (const id of due) dirty.delete(id);
+		for (const id of due) renderLog.push(id);
+	};
+	const flushFast = minIntervalGate(() => flushDirty(fastIds), 150);
+	const flushScan = minIntervalGate(() => flushDirty(scanIds), 1000);
+	return {
+		markDirty(id) {
+			dirty.add(id);
+			if (fastIds.has(id)) flushFast();
+			else if (scanIds.has(id)) flushScan();
+		},
+	};
+}
+
+test('P6: a burst of N mark-dirty calls for one section produces exactly one render per flush window', (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+	const renders = [];
+	const { markDirty } = makeDirtyFlushHarness(new Set(['unprocessedClippings']), new Set(), renders);
+
+	markDirty('unprocessedClippings'); // t=0: leading fire (quiet-period start)
+	assert.deepEqual(renders, ['unprocessedClippings']);
+
+	// A burst of 20 repeated dirty marks inside the 150ms window must coalesce
+	// to the single already-scheduled trailing call, not one render per mark.
+	for (let i = 0; i < 20; i++) { t.mock.timers.tick(5); markDirty('unprocessedClippings'); }
+	assert.deepEqual(renders, ['unprocessedClippings'], 'no additional renders yet — still inside the 150ms window');
+	t.mock.timers.tick(50); // window closes at t=150
+	assert.deepEqual(renders, ['unprocessedClippings', 'unprocessedClippings'], 'exactly one trailing render for the whole 20-call burst');
+});
+
+test('P6: one flush renders every currently-dirty section of its class together, in one batch', (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+	const renders = [];
+	const fast = new Set(['unprocessedClippings', 'unrefinedTranscripts', 'blogIntake']);
+	const { markDirty } = makeDirtyFlushHarness(fast, new Set(), renders);
+
+	markDirty('unprocessedClippings'); // t=0: leading fire, alone (the others aren't dirty yet)
+	assert.deepEqual(renders, ['unprocessedClippings']);
+	renders.length = 0;
+
+	t.mock.timers.tick(50); // t=50: inside the window opened by the leading fire above
+	markDirty('unprocessedClippings');
+	markDirty('unrefinedTranscripts');
+	markDirty('blogIntake');
+	assert.deepEqual(renders, [], 'nothing renders until the trailing call fires');
+	t.mock.timers.tick(100); // window closes at t=150
+	assert.deepEqual(
+		renders.slice().sort(),
+		['blogIntake', 'unprocessedClippings', 'unrefinedTranscripts'],
+		'all three currently-dirty sections render together in the one trailing flush — a burst touching N sections costs one pass, not N',
+	);
+});
+
+test('P6: a burst of fast-class events does not drag a scan-class section along more often than its own ~1000ms floor', (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+	const renders = [];
+	const fast = new Set(['unprocessedClippings']);
+	const scan = new Set(['uncapturedVideos']);
+	const { markDirty } = makeDirtyFlushHarness(fast, scan, renders);
+
+	markDirty('uncapturedVideos'); // t=0: scan class's own leading fire
+	const scanRenderCount = () => renders.filter(id => id === 'uncapturedVideos').length;
+	assert.equal(scanRenderCount(), 1);
+
+	// Mirrors route()'s structural branch, which marks a fast-class section AND
+	// a scan-class section from the same event: sustained churn every 100ms
+	// (well under the fast class's 150ms floor) for 5 simulated seconds.
+	for (let i = 0; i < 50; i++) {
+		t.mock.timers.tick(100);
+		markDirty('unprocessedClippings');
+		markDirty('uncapturedVideos');
+	}
+	// 5000ms elapsed since the leading fire — a 1000ms floor allows at most one
+	// more render per elapsed 1000ms window (5 more, landing at t=1000..5000),
+	// never one per 100ms fast-class tick (which would be 50).
+	assert.ok(scanRenderCount() <= 6, `scan-class section rendered ${scanRenderCount()} times over 5000ms of continuous churn — must not exceed its ~1000ms floor (leading fire + at most 5 more)`);
+	assert.ok(scanRenderCount() >= 4, `sanity: the floor must still let it render periodically rather than starve under sustained churn — got ${scanRenderCount()}`);
+	const fastRenderCount = renders.filter(id => id === 'unprocessedClippings').length;
+	assert.ok(
+		fastRenderCount >= 3 * scanRenderCount(),
+		`the fast-class section (${fastRenderCount} renders), sharing none of the scan gate's flooring, must render markedly more often than the scan-class section (${scanRenderCount()} renders) it's churning alongside`,
+	);
+});
+
 // --- refreshWithScrollPreserved: scroll + focus capture/restore contract ---
 //
 // The real Obsidian DOM isn't available under plain Node, so this drives the actual

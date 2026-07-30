@@ -44,7 +44,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { renderTableSection, DEFAULT_TABLE_ROW_LIMIT } = await import(pathToFileURL(outfile).href);
+const { renderTableSection, DEFAULT_TABLE_ROW_LIMIT, computeRowSignature, shouldRepaint } = await import(pathToFileURL(outfile).href);
 
 /* ------------------------------------------------------------------- element stub */
 
@@ -185,62 +185,151 @@ test('renderTableSection still short-circuits to the empty state with zero rows,
 	assert.equal(body.children[0].textContent, 'Nothing here.');
 });
 
+/* ----------------------------------------------------- rsp-wp5 P5: row signature */
+//
+// computeRowSignature/shouldRepaint (render/section.ts) — the primitive every
+// section call site uses to skip a repaint when an event-driven pass's
+// computed row model is byte-identical to what's already painted. Both are
+// pure and DOM-free, so these drive them directly rather than through
+// renderTableSection.
+
+test('computeRowSignature is deterministic and reacts to row content changes', () => {
+	const rowsA = [{ id: 1, title: 'a' }, { id: 2, title: 'b' }];
+	const rowsB = [{ id: 1, title: 'a' }, { id: 2, title: 'b' }];
+	const rowsChanged = [{ id: 1, title: 'a' }, { id: 2, title: 'CHANGED' }];
+	assert.equal(computeRowSignature(rowsA), computeRowSignature(rowsB), 'two structurally-identical row arrays produce the same signature');
+	assert.notEqual(computeRowSignature(rowsA), computeRowSignature(rowsChanged), 'a changed field produces a different signature');
+});
+
+test('computeRowSignature folds `extra` into the signature — e.g. a live badge map not carried on the row itself', () => {
+	const rows = [{ videoId: 'v1' }];
+	const sigIdle = computeRowSignature(rows, ['idle']);
+	const sigRunning = computeRowSignature(rows, ['running']);
+	assert.notEqual(sigIdle, sigRunning, 'identical rows with different extra state must not collide');
+});
+
+test('computeRowSignature collapses a vault-entry-shaped object (duck-typed TFile) to its path instead of throwing on the vault back-reference cycle', () => {
+	// Mirrors the real TFile shape closely enough to exercise the duck-typed
+	// branch: a `.path` string plus a `.vault` back-reference that would form a
+	// cycle (vault -> files -> vault -> ...) under a plain JSON.stringify.
+	const vault = {};
+	const file = { path: 'a/b.md', vault, basename: 'b', stat: { mtime: 1 } };
+	vault.files = [file]; // the cycle
+	assert.doesNotThrow(() => computeRowSignature([{ file }]));
+	const sigSamePath = computeRowSignature([{ file: { path: 'a/b.md', vault, basename: 'DIFFERENT-BUT-IRRELEVANT' } }]);
+	assert.equal(computeRowSignature([{ file }]), sigSamePath, 'only the path identifies the row; unrelated TFile fields do not affect the signature');
+	const otherFile = { path: 'a/other.md', vault };
+	assert.notEqual(computeRowSignature([{ file }]), computeRowSignature([{ file: otherFile }]), 'a different path still produces a different signature');
+});
+
+test('shouldRepaint: a forced pass (no eventDriven flag) always repaints, even with an identical signature', () => {
+	const ctx = { sort: null, refresh: () => {} };
+	const sig = computeRowSignature([{ id: 1 }]);
+	assert.equal(shouldRepaint(ctx, sig), true, 'first call always repaints (no baseline yet)');
+	assert.equal(shouldRepaint(ctx, sig), true, 'forced (ctx.eventDriven unset) repaints again even though the signature has not changed');
+});
+
+test('shouldRepaint: an event-driven pass skips when the signature is unchanged, and repaints when it changes', () => {
+	const ctx = { sort: null, refresh: () => {}, eventDriven: true };
+	const sigA = computeRowSignature([{ id: 1 }]);
+	const sigB = computeRowSignature([{ id: 2 }]);
+	assert.equal(shouldRepaint(ctx, sigA), true, 'first event-driven pass has no baseline yet, so it repaints');
+	assert.equal(shouldRepaint(ctx, sigA), false, 'identical signature on a later event-driven pass skips the repaint');
+	assert.equal(shouldRepaint(ctx, sigB), true, 'a changed signature still repaints');
+	assert.equal(shouldRepaint(ctx, sigB), false, 'settles back to skipping once the new signature is the baseline');
+});
+
+test('shouldRepaint: a forced repaint updates the baseline, so a LATER event-driven pass compares against what is now on screen', () => {
+	const ctx = { sort: null, refresh: () => {} };
+	const sig = computeRowSignature([{ id: 1 }]);
+	assert.equal(shouldRepaint(ctx, sig), true, 'forced pass repaints');
+	ctx.eventDriven = true;
+	assert.equal(shouldRepaint(ctx, sig), false, 'an event-driven pass right after sees the forced pass\'s baseline, not a stale one, and skips');
+});
+
 /* ---------------------------------------------------- (#2 / #5) STRUCTURAL wiring */
 
 const dashboardSrc = readFileSync('src/ingestionDashboard.ts', 'utf8');
 
-test('STRUCTURAL: debouncedYoutubeNoMetadata runs through its own minIntervalGate, not a raw debounce', () => {
-	assert.match(
-		dashboardSrc,
-		/const gatedYoutubeNoMetadataRefresh = minIntervalGate\(\s*\(\) => this\.refresh\('youtubeWithoutMetadata'\),\s*YOUTUBE_NO_METADATA_MIN_INTERVAL_MS,?\s*\);/,
-		'youtubeWithoutMetadata must be wrapped in its own minIntervalGate instance',
-	);
-	assert.match(
-		dashboardSrc,
-		/const debouncedYoutubeNoMetadata = debounce\(\(\) => gatedYoutubeNoMetadataRefresh\(\), SCAN_DEBOUNCE_MS, true\);/,
-		'the outer Obsidian debounce must call the gate, not refresh(...) directly',
-	);
-	assert.notEqual(
-		'YOUTUBE_NO_METADATA_MIN_INTERVAL_MS',
-		'QUEUE_MONITOR_MIN_INTERVAL_MS',
-		'sanity: the two scans must use independently-named gate constants',
-	);
+test('STRUCTURAL (rsp-wp5 P6): FAST_SECTIONS / SCAN_SECTIONS partition every auto-refreshed SectionId into exactly one of the two cadence classes', () => {
+	const fastMatch = dashboardSrc.match(/FAST_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>\(\[([\s\S]*?)\]\);/);
+	const scanMatch = dashboardSrc.match(/SCAN_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>\(\[([\s\S]*?)\]\);/);
+	assert.ok(fastMatch, 'FAST_SECTIONS set not found');
+	assert.ok(scanMatch, 'SCAN_SECTIONS set not found');
+	const parseIds = (body) => Array.from(body.matchAll(/'([a-zA-Z]+)'/g)).map(m => m[1]);
+	const fast = parseIds(fastMatch[1]);
+	const scan = parseIds(scanMatch[1]);
+	for (const id of ['unprocessedClippings', 'unrefinedTranscripts', 'blogIntake', 'youtubeIntake', 'ignoredPosts', 'ignoredVideos']) {
+		assert.ok(fast.includes(id), `${id} must be in the fast (~150ms) cadence class`);
+	}
+	for (const id of ['uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments', 'youtubeWithoutMetadata', 'queueMonitor']) {
+		assert.ok(scan.includes(id), `${id} must be in the scan (~1000ms) cadence class — youtubeWithoutMetadata and queueMonitor kept their pre-P6 1000ms floor by living here`);
+	}
+	const overlap = fast.filter(id => scan.includes(id));
+	assert.deepEqual(overlap, [], 'no SectionId may belong to both cadence classes');
 });
 
-test('STRUCTURAL: the two intake-button folder scans run inside the gated queue-monitor path, not on every debounce tick', () => {
-	const gateStart = dashboardSrc.indexOf('const gatedQueueMonitorRefresh = minIntervalGate(');
-	assert.ok(gateStart >= 0, 'gatedQueueMonitorRefresh not found');
-	const gateEnd = dashboardSrc.indexOf('QUEUE_MONITOR_MIN_INTERVAL_MS);', gateStart);
-	const gateBody = dashboardSrc.slice(gateStart, gateEnd);
-	assert.ok(gateBody.includes("this.refresh('queueMonitor')"), 'queueMonitor refresh must be inside the gate');
-	assert.ok(gateBody.includes("this.intake.refreshIntakeButton('blog')"), 'blog intake-button scan must be inside the gate');
-	assert.ok(gateBody.includes("this.intake.refreshIntakeButton('youtube')"), 'youtube intake-button scan must be inside the gate');
+test('STRUCTURAL (rsp-wp5 P6): markDirty routes to the fast gate for FAST_SECTIONS ids and the scan gate for SCAN_SECTIONS ids, nothing else', () => {
+	const fnStart = dashboardSrc.indexOf('private markDirty(id: SectionId): void {');
+	assert.ok(fnStart >= 0, 'markDirty not found');
+	const fnEnd = dashboardSrc.indexOf('\n\t}', fnStart);
+	const body = dashboardSrc.slice(fnStart, fnEnd);
+	assert.ok(body.includes('this.dirty.add(id);'), 'markDirty must add the id to the dirty set');
+	assert.match(body, /if \(IngestionDashboardUI\.FAST_SECTIONS\.has\(id\)\) this\.flushFast\(\);/, 'FAST_SECTIONS ids must kick the fast gate');
+	assert.match(body, /else if \(IngestionDashboardUI\.SCAN_SECTIONS\.has\(id\)\) this\.flushScan\(\);/, 'SCAN_SECTIONS ids must kick the scan gate');
+});
 
-	const debouncedStart = dashboardSrc.indexOf('const debouncedQueueMonitor = debounce(');
-	const debouncedEnd = dashboardSrc.indexOf(';', debouncedStart);
-	const debouncedBody = dashboardSrc.slice(debouncedStart, debouncedEnd);
-	assert.ok(
-		!debouncedBody.includes('refreshIntakeButton'),
-		'the outer debounce must no longer call refreshIntakeButton directly — that ran ungated on every 150ms tick',
-	);
+test('STRUCTURAL (rsp-wp5 P6): flushDirty renders every currently-dirty section of its class in one batch, marked eventDriven, and clears them before rendering', () => {
+	const fnStart = dashboardSrc.indexOf('private flushDirty(classIds: ReadonlySet<SectionId>): void {');
+	assert.ok(fnStart >= 0, 'flushDirty not found');
+	const fnEnd = dashboardSrc.indexOf('\n\t}', fnStart);
+	const body = dashboardSrc.slice(fnStart, fnEnd);
+	const deleteIdx = body.indexOf('this.dirty.delete(id)');
+	const renderIdx = body.indexOf("refresh({ eventDriven: true })");
+	assert.ok(deleteIdx >= 0, 'flushDirty must clear each rendered id from the dirty set');
+	assert.ok(renderIdx >= 0, 'flushDirty must call refresh with eventDriven: true — the flag render/section.ts\'s shouldRepaint() gates the skip on');
+	assert.ok(deleteIdx < renderIdx, 'dirty ids must be cleared before rendering (so a mark arriving mid-render is not silently dropped)');
+	assert.ok(body.includes("due.map(id => this.sections.get(id)?.refresh"), 'every due id must be rendered together via one synchronous .map() pass (no await between calls), so the shared scroll coordinator batches them into one capture/restore');
+	assert.ok(body.includes("due.includes('queueMonitor')"), 'queueMonitor\'s flush must also refresh the two intake header buttons — the same coupling the pre-P6 gatedQueueMonitorRefresh had');
+	assert.ok(body.includes("refreshIntakeButton('blog')") && body.includes("refreshIntakeButton('youtube')"), 'both intake buttons must be refreshed alongside queueMonitor');
+
+	// The forced-vs-event-driven distinction P5's shouldRepaint() reads (see
+	// ctx.eventDriven's doc comment in render/types.ts) only holds if
+	// `eventDriven: true` is passed from exactly one call site — flushDirty's
+	// batch render. Every other refresh() call site (header Refresh button,
+	// sort-header clicks, Ignore/Unignore, this.refresh(id)) must pass no
+	// opts at all, which resolves to a forced pass.
+	const eventDrivenSites = dashboardSrc.match(/eventDriven: true/g) ?? [];
+	assert.equal(eventDrivenSites.length, 1, 'eventDriven: true must appear exactly once in ingestionDashboard.ts — flushDirty is the sole event-driven call site');
+});
+
+test('STRUCTURAL (rsp-wp5 P6): the debounce plumbing flushDirty replaces is gone — no Obsidian debounce import, no dead cadence constants', () => {
+	assert.equal(/[a-zA-Z_$][\w$]*\s*=\s*debounce\(/.test(dashboardSrc), false, 'no more `const x = debounce(...)` closures — the coordinated flush replaced all of them (comments may still name the pattern in prose)');
+	assert.ok(!/import \{[^}]*\bdebounce\b[^}]*\} from 'obsidian';/.test(dashboardSrc), 'the obsidian debounce import must be removed once nothing calls it');
+	assert.equal(dashboardSrc.includes('QUEUE_MONITOR_MIN_INTERVAL_MS'), false, 'the queueMonitor-specific gate constant is dead — queueMonitor now shares the SCAN class gate');
+	assert.equal(dashboardSrc.includes('YOUTUBE_NO_METADATA_MIN_INTERVAL_MS'), false, 'the youtubeWithoutMetadata-specific gate constant is dead — it now shares the SCAN class gate');
 });
 
 test('STRUCTURAL: SectionContext.refresh is built as the scroll-preserving wrapped function at every construction site', () => {
-	// ingestionDashboard.ts's generic buildSection().
+	// ingestionDashboard.ts's generic buildSection() — rsp-wp5 P5/P6: refresh now
+	// takes an optional opts param and stamps ctx.eventDriven before rendering,
+	// so every call site can be told apart by render/section.ts's shouldRepaint().
 	assert.match(
 		dashboardSrc,
-		/refresh: \(\) => refreshWithScrollPreserved\(body, \(\) => this\.renderSection\(id, body, ctx\)\),/,
-		'buildSection must wrap ctx.refresh in refreshWithScrollPreserved',
+		/refresh: \(opts\) => \{\s*ctx\.eventDriven = opts\?\.eventDriven === true;\s*return refreshWithScrollPreserved\(body, \(\) => this\.renderSection\(id, body, ctx\)\);\s*\},/,
+		'buildSection must wrap ctx.refresh in refreshWithScrollPreserved and stamp ctx.eventDriven from opts first',
 	);
 
-	// The private refresh(id) dispatcher becomes a plain dispatch — it must no
-	// longer call refreshWithScrollPreserved itself, since ctx.refresh now is that.
+	// The private refresh(id) dispatcher stays a plain dispatch — it must not
+	// call refreshWithScrollPreserved itself, since ctx.refresh now is that, and
+	// it must not pass eventDriven (every host.refresh(id)/refreshAll() call is
+	// a forced pass).
 	const dispatchStart = dashboardSrc.indexOf('private async refresh(id: SectionId): Promise<void> {');
 	assert.ok(dispatchStart >= 0, 'refresh(id) dispatcher not found');
 	const dispatchEnd = dashboardSrc.indexOf('\n\t}', dispatchStart);
 	const dispatchBody = dashboardSrc.slice(dispatchStart, dispatchEnd);
 	assert.ok(!dispatchBody.includes('refreshWithScrollPreserved'), 'refresh(id) must be a plain dispatch, not a second wrap');
-	assert.ok(dispatchBody.includes('await ctx.refresh();'), 'refresh(id) must just call the already-wrapped ctx.refresh()');
+	assert.ok(dispatchBody.includes('await ctx.refresh();'), 'refresh(id) must just call the already-wrapped ctx.refresh() with no opts (forced)');
 
 	// The other two SectionContext construction sites (queueMonitor.ts,
 	// queueControls.ts) get the same treatment — each imports and applies
@@ -291,8 +380,8 @@ test('STRUCTURAL: route() consumes the self-refresh echo marker for every id it 
 	for (const id of ['ignoredPosts', 'ignoredVideos', 'uncapturedPosts', 'uncapturedVideos', 'blogControl']) {
 		assert.match(
 			block,
-			new RegExp(`if \\(!consumeSelfRefreshedEcho\\('${id}'\\)\\) debounced${id[0].toUpperCase()}${id.slice(1)}\\(\\);`),
-			`the ${id} debounced refresh must be gated on consumeSelfRefreshedEcho('${id}'), not called unconditionally`,
+			new RegExp(`if \\(!consumeSelfRefreshedEcho\\('${id}'\\)\\) this\\.markDirty\\('${id}'\\);`),
+			`the ${id} dirty mark must be gated on consumeSelfRefreshedEcho('${id}'), not called unconditionally (rsp-wp5 P6: markDirty replaced the old per-section debounced${id[0].toUpperCase()}${id.slice(1)}() closure)`,
 		);
 	}
 	assert.match(dashboardSrc, /import \{ consumeSelfRefreshedEcho \} from '\.\/ingestion\/render\/echoSuppress';/, 'consumeSelfRefreshedEcho must be imported from the real echoSuppress module, not reimplemented');

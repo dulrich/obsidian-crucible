@@ -1,6 +1,7 @@
 import { Notice } from 'obsidian';
 import { renderChannelLink, renderExternalLink, renderFileLink } from '../render/cells';
 import { renderControlCenter, type ControlCenterFilter } from '../render/controlCenter';
+import { computeRowSignature, shouldRepaint } from '../render/section';
 import { computeBlogControlRows } from '../data/blogs';
 import { computeChannelControlRows } from '../data/channels';
 import { countWithPct, ratio } from '../render/format';
@@ -28,6 +29,13 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 		// below stays as the one and only teardown, now happening after the scan resolves
 		// instead of before it. A throw here leaves the previous render intact.
 		const all = await computeBlogControlRows(host.app, host.plugin);
+		// P5: the check must run BEFORE body.empty() — unlike renderTableSection's
+		// internal self-contained teardown, this section's only DOM clear is the
+		// explicit call right below, so gating after it would still blank the
+		// section on a skip. (A filter-button click is always a forced pass —
+		// see cells.ts/controlCenter.ts's `ctx.refresh()` — so it doesn't need to
+		// be folded into the signature here; it always repaints regardless.)
+		if (!shouldRepaint(ctx, computeRowSignature(all))) return;
 		body.empty();
 
 		renderControlCenter<BlogControlRow>({
@@ -52,6 +60,8 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 	async function renderChannelControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
 		// Compute-then-paint — see renderBlogControl's comment above; same shape.
 		const all = await computeChannelControlRows(host.app, host.plugin);
+		// P5: same reasoning as renderBlogControl — check before the only DOM clear.
+		if (!shouldRepaint(ctx, computeRowSignature(all))) return;
 		body.empty();
 
 		renderControlCenter<ChannelControlRow>({
