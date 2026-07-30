@@ -598,6 +598,12 @@ export interface CrucibleSettings {
 	orchestrationEnabled: boolean;
 	orchestrationQueueRoot: string;
 	orchestrationTimezone: string;
+	// Age-based retention for the SQLite job store's terminal rows (done/failed/
+	// cancelled), in days. `pruneTerminal` (src/orchestration/db/SqliteJobStore.ts)
+	// deletes settled rows older than this; blank/0 = keep forever. Not yet wired to
+	// any caller — WP-5 (storage layer) ships the setting + store method, WP-6/7 wire
+	// the periodic prune.
+	orchestrationJobRetentionDays: number;
 	// Queue-wide panic switch (default true) and the single master over all
 	// auto-draining. Off stops every type while preserving the per-type auto-run
 	// flags underneath, so re-enabling restores the exact prior configuration. Manual
@@ -814,6 +820,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
 	orchestrationTimezone: 'America/Mexico_City',
+	orchestrationJobRetentionDays: 30,
 	orchestrationQueueEnabled: true,
 	orchestrationJobTypeControls: {},
 	orchestrationMaxConcurrent: 3,

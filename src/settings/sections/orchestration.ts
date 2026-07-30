@@ -247,6 +247,17 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 	}, save);
 
 	globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(globalGroup, {
+		name: 'Job retention (days)',
+		desc: 'How long done/failed/cancelled history is kept in the jobs database before it is pruned. Blank or 0 keeps it forever.',
+		placeholder: '30',
+		width: 'pi-width-half',
+		get: () => String(s.orchestrationJobRetentionDays),
+		set: (v) => { const n = Number(v.trim()); s.orchestrationJobRetentionDays = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 30; },
+		min: 0,
+	}, save);
+
+	globalGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	let tzWarning: HTMLElement | null = null;
 	const setTzWarningVisibility = (valid: boolean) => {
 		if (!tzWarning) return;
