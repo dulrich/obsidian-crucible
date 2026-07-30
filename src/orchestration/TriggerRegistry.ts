@@ -4,6 +4,8 @@ import type CruciblePlugin from '../main';
 import type { JobType, OrchestrationEnqueueOptions } from './types';
 import type { TriggerDef } from '../types';
 import { triggerDefToOrchestrationTrigger } from '../triggers/triggerAdapter';
+import { isPluginManagedPath } from '../triggers/pluginManagedPath';
+import { INTERNAL_PLUGIN_FOLDER } from '../exclusions';
 import { logWarn } from '../log';
 
 export interface TriggerJobSeed {
@@ -87,6 +89,17 @@ export class TriggerRegistry {
 		return [...this.foundingTriggers, ...this.userTriggers];
 	}
 
+	// Job files under the orchestration queue root, and anything under the plugin's
+	// internal folder more broadly (link_registry, source_eval, cli-runs, debug.md,
+	// intake staging), are plugin-managed churn — not user note activity — and must
+	// never reach a trigger. This is the fix for the trigger-storm incident: a queue
+	// job's own create wrote a new job, which wrote a new job, unbounded. Deliberately
+	// NOT `_blog_metadata` — that folder is a legitimate trigger target (see the
+	// investigation's exclusion-predicate section).
+	private isPluginManagedPath(path: string): boolean {
+		return isPluginManagedPath(path, [this.plugin.settings.orchestrationQueueRoot, INTERNAL_PLUGIN_FOLDER]);
+	}
+
 	/** Registered triggers, for the settings UI. */
 	list(): readonly OrchestrationTrigger[] {
 		return this.allTriggers();
@@ -141,6 +154,7 @@ export class TriggerRegistry {
 
 	private waitForConsistentCache(event: TriggerEventName, file: TFile, useCurrentCache = false): void {
 		if (file.extension !== 'md') return;
+		if (this.isPluginManagedPath(file.path)) return;
 		if (useCurrentCache) {
 			const cache = this.plugin.app.metadataCache.getFileCache(file);
 			if (cache) {
@@ -158,6 +172,9 @@ export class TriggerRegistry {
 
 	private onCacheChanged(file: TFile, cache: CachedMetadata): void {
 		if (file.extension !== 'md') return;
+		// Essential, not redundant: metadataCache 'changed' reaches fireEvent directly
+		// (via evaluateCacheReadyEvent), bypassing waitForConsistentCache entirely.
+		if (this.isPluginManagedPath(file.path)) return;
 		const events = this.pendingConsistentEvents.get(file.path) ?? new Set<TriggerEventName>();
 		this.pendingConsistentEvents.delete(file.path);
 		events.add('metadata-changed');
@@ -191,6 +208,9 @@ export class TriggerRegistry {
 
 	private fireEvent(event: TriggerEventName, file: TFile, cache?: CachedMetadata): void {
 		if (file.extension !== 'md') return;
+		// Backstop: 'rename' reaches here with no cache wait, so it never passes
+		// through waitForConsistentCache/onCacheChanged above.
+		if (this.isPluginManagedPath(file.path)) return;
 		// While a command/chain holds the note's lock it is the sole mutator; its
 		// mid-flight writes must not spawn jobs (same gate as the auto edit-triggers).
 		if (this.isMaterializing() || this.plugin.noteLocks.isLocked(file.path)) return;

@@ -147,6 +147,92 @@ test('rename remains immediate because metadataCache.changed is not emitted for 
 	});
 });
 
+test('create of a job note under the orchestration queue root does not fire triggers', () => {
+	withFakeWindow(() => {
+		const harness = makeHarness();
+		const file = harness.addFile('_crucible/orchestration/queue/inbox/job-123.md');
+		const registry = makeStartedRegistry(harness, [looseTriggerDef({
+			events: ['create'],
+			commandId: 'obsidian-crucible:lint-note',
+		})]);
+
+		harness.emitVault('create', file);
+		harness.emitMetadataChanged(file, {});
+
+		assert.equal(harness.enqueues.length, 0);
+		registry.dispose();
+	});
+});
+
+test('create under the internal _crucible folder, outside the queue root, does not fire triggers', () => {
+	withFakeWindow(() => {
+		const harness = makeHarness();
+		const file = harness.addFile('_crucible/debug.md');
+		const registry = makeStartedRegistry(harness, [looseTriggerDef({
+			events: ['create'],
+			commandId: 'obsidian-crucible:lint-note',
+		})]);
+
+		harness.emitVault('create', file);
+		harness.emitMetadataChanged(file, {});
+
+		assert.equal(harness.enqueues.length, 0);
+		registry.dispose();
+	});
+});
+
+test('rename into the orchestration queue root does not fire triggers', () => {
+	withFakeWindow(() => {
+		const harness = makeHarness();
+		const file = harness.addFile('_crucible/orchestration/queue/running/job-123.md');
+		const registry = makeStartedRegistry(harness, [looseTriggerDef({
+			events: ['rename'],
+			commandId: 'obsidian-crucible:lint-note',
+		})]);
+
+		harness.emitVault('rename', file);
+
+		assert.equal(harness.enqueues.length, 0);
+		registry.dispose();
+	});
+});
+
+test('create of a normal note still fires triggers (regression pin)', () => {
+	withFakeWindow(() => {
+		const harness = makeHarness();
+		const file = harness.addFile('Clippings/note.md');
+		const registry = makeStartedRegistry(harness, [looseTriggerDef({
+			events: ['create'],
+			commandId: 'obsidian-crucible:lint-note',
+		})]);
+
+		harness.emitVault('create', file);
+		harness.emitMetadataChanged(file, {});
+
+		assert.equal(harness.enqueues.length, 1);
+		assert.equal(harness.enqueues[0].params.targetPath, 'Clippings/note.md');
+		registry.dispose();
+	});
+});
+
+// A scope/condition-free trigger def, unlike triggerDef() above (which pins
+// specific YouTube-metadata frontmatter) — for exercising the path-exclusion
+// chokepoints without an unrelated guard rejecting the match first.
+function looseTriggerDef({ events, commandId }) {
+	return {
+		id: `loose-${events.join('-')}`,
+		name: `Loose ${events.join(',')}`,
+		enabled: true,
+		on: { events },
+		conditions: [],
+		action: {
+			kind: 'command',
+			commandId,
+			args: {},
+		},
+	};
+}
+
 function makeStartedRegistry(harness, triggers) {
 	const registry = new TriggerRegistry(harness.plugin, () => false);
 	registry.setUserTriggers(triggers);
@@ -187,7 +273,10 @@ function makeHarness() {
 	const metadataHandlers = new Map();
 	const ingestionHandlers = new Map();
 	const plugin = {
-		settings: { orchestrationTriggersEnabled: {} },
+		settings: {
+			orchestrationTriggersEnabled: {},
+			orchestrationQueueRoot: '_crucible/orchestration/queue',
+		},
 		app: {
 			vault: {
 				on: (event, callback) => {
