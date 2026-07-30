@@ -23,6 +23,7 @@ import { renderEnqueueAllMetadataButton, renderYoutubeNoMetadata } from './inges
 import { createControlCentersSection, type ControlCentersSection } from './ingestion/sections/controlCenters';
 import { createOrphanedAttachmentsSection, type OrphanedAttachmentsSection } from './ingestion/sections/orphanedAttachments';
 import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ignored';
+import { consumeSelfRefreshedEcho } from './ingestion/render/echoSuppress';
 import { minIntervalGate, refreshWithScrollPreserved } from './ingestion/render/refresh';
 
 const DEBOUNCE_MS = 150;
@@ -196,11 +197,20 @@ export class IngestionDashboardUI {
 		// 'meta' = metadataCache 'changed' (fires per keystroke — gated below).
 		const route = (path: string, reason: 'meta' | 'structural') => {
 			if (path === IGNORED_IDS_NOTE) {
-				debouncedIgnoredPosts();
-				debouncedIgnoredVideos();
-				debouncedUncapturedPosts();
-				debouncedUncapturedVideos();
-				debouncedBlogControl();
+				// The Ignore/Unignore button handlers (render/cells.ts) already
+				// synchronously refresh whichever of these sections their action
+				// touched, then mark it via markSelfRefreshedForEcho — so this event,
+				// which that same write also fires, is the expected echo for those
+				// ids and would otherwise re-render already-current data a moment
+				// later (the "Ignore flashes twice" bug). consumeSelfRefreshedEcho
+				// skips exactly that one redundant call per id; any id NOT marked
+				// (e.g. a hand-edit of the note, or an id this exact action didn't
+				// touch) schedules its debounced refresh as before.
+				if (!consumeSelfRefreshedEcho('ignoredPosts')) debouncedIgnoredPosts();
+				if (!consumeSelfRefreshedEcho('ignoredVideos')) debouncedIgnoredVideos();
+				if (!consumeSelfRefreshedEcho('uncapturedPosts')) debouncedUncapturedPosts();
+				if (!consumeSelfRefreshedEcho('uncapturedVideos')) debouncedUncapturedVideos();
+				if (!consumeSelfRefreshedEcho('blogControl')) debouncedBlogControl();
 			}
 			const clipperRoot = this.plugin.settings.ingestionClipperInboxFolder;
 			const dailyRoot = this.plugin.settings.dailyFolder;

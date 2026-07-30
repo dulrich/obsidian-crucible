@@ -30,6 +30,23 @@ await esbuild.build({
 
 const { minIntervalGate, refreshWithScrollPreserved } = await import(pathToFileURL(outfile).href);
 
+// Covers WP-6's echo-suppression primitive (src/ingestion/render/echoSuppress.ts):
+// the one-shot, self-expiring marker that coalesces the "Ignore flashes and
+// re-renders twice" bug — a button handler's own immediate refresh plus the
+// vault-event-driven refresh the underlying write fires a moment later. Also
+// dependency-free, so it gets the same standalone-bundle treatment as refresh.ts.
+const echoOutfile = path.join(outdir, 'echoSuppress.mjs');
+await esbuild.build({
+	entryPoints: ['src/ingestion/render/echoSuppress.ts'],
+	bundle: true,
+	platform: 'node',
+	format: 'esm',
+	target: 'es2020',
+	outfile: echoOutfile,
+	logLevel: 'silent',
+});
+const { markSelfRefreshedForEcho, consumeSelfRefreshedEcho } = await import(pathToFileURL(echoOutfile).href);
+
 // --- minIntervalGate ---
 
 test('minIntervalGate: first call after a quiet period fires immediately', () => {
@@ -415,4 +432,55 @@ test('the double-rAF restore re-asserts once if a still-settling sibling clamps 
 		step(); // readback frame: sees the mismatch and re-asserts
 		assert.equal(scroller.scrollTop, 340, 'the readback re-assert recovers once the scroller is back to full size');
 	});
+});
+
+// --- echoSuppress: markSelfRefreshedForEcho / consumeSelfRefreshedEcho (WP-6) ---
+
+test('consumeSelfRefreshedEcho returns false when nothing was marked for that id', () => {
+	assert.equal(consumeSelfRefreshedEcho('echo-unmarked'), false);
+});
+
+test('consumeSelfRefreshedEcho returns true exactly once after a mark — the one-shot contract', () => {
+	markSelfRefreshedForEcho('echo-one-shot');
+	assert.equal(consumeSelfRefreshedEcho('echo-one-shot'), true, 'the expected echo is consumed and suppressed');
+	assert.equal(consumeSelfRefreshedEcho('echo-one-shot'), false, 'a second, unrelated event for the same id is not swallowed too');
+});
+
+test('marking one id does not suppress a different id — the exact-bug-class scope', () => {
+	markSelfRefreshedForEcho('echo-own');
+	assert.equal(consumeSelfRefreshedEcho('echo-companion'), false, 'a section that was not manually refreshed still schedules its debounced refresh');
+	assert.equal(consumeSelfRefreshedEcho('echo-own'), true, 'the marked id is still pending and gets suppressed once');
+});
+
+test('a marker older than the suppression window is not treated as the expected echo', (t) => {
+	t.mock.timers.enable({ apis: ['Date'], now: 0 });
+	markSelfRefreshedForEcho('echo-stale');
+	t.mock.timers.tick(10_000); // well past the 5s window — the expected echo never arrived
+	assert.equal(
+		consumeSelfRefreshedEcho('echo-stale'),
+		false,
+		'a stale marker falls through to a normal refresh rather than silently swallowing a later unrelated change',
+	);
+});
+
+test('one Ignore click yields exactly one render of the owning section and its companion — the WP-6 contract', () => {
+	// Mirrors the real shape: the button handler marks both ids and renders them
+	// immediately (own section via ctx.refresh(), companion via host.refresh());
+	// the vault-event-driven route() dispatch arrives afterward and must render
+	// neither again.
+	const renders = { uncapturedVideosTest: 0, ignoredVideosTest: 0 };
+
+	// 1) The click handler's immediate, synchronous refresh (post-write).
+	markSelfRefreshedForEcho('uncapturedVideosTest');
+	markSelfRefreshedForEcho('ignoredVideosTest');
+	renders.uncapturedVideosTest++; // ctx.refresh()
+	renders.ignoredVideosTest++; // host.refresh(companionId)
+
+	// 2) The event-routed dispatch the underlying vault write also triggers —
+	// gated exactly the way ingestionDashboard.ts's route() is: only render if
+	// this is NOT the expected echo of the write we already handled above.
+	if (!consumeSelfRefreshedEcho('uncapturedVideosTest')) renders.uncapturedVideosTest++;
+	if (!consumeSelfRefreshedEcho('ignoredVideosTest')) renders.ignoredVideosTest++;
+
+	assert.deepEqual(renders, { uncapturedVideosTest: 1, ignoredVideosTest: 1 }, 'each section renders exactly once per click, not twice');
 });
