@@ -22,7 +22,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { evaluateSyncGuard } = await import(pathToFileURL(outfile).href);
+const { evaluateSyncGuard, evaluateSyncGuards } = await import(pathToFileURL(outfile).href);
 
 test('property-equals keeps scalar exact-match behavior', () => {
 	assert.equal(evaluateSyncGuard(
@@ -62,4 +62,17 @@ test('property-in-set ignores blank configured values', () => {
 		{ type: 'property-in-set', property: 'channelId', values: [' ', 'CHANNEL_A'] },
 		{ fm: { channelId: 'CHANNEL_A' }, tags: [] },
 	), true);
+});
+
+// Pin: an empty condition list vacuously passes (both AND-mode `every` and
+// OR-mode `some` over []). This is the existing, deliberate semantic — a
+// trigger with a broad scope and zero conditions matches everything in
+// scope, not nothing. It's part of why the trigger-storm incident trigger
+// (blank scope, empty conditions) matched every created file; the fix for
+// that lives in TriggerRegistry's plugin-managed-path exclusion and the
+// adapter's empty-action/empty-events guards, not here.
+test('empty conditions vacuously pass in both AND and OR mode', () => {
+	assert.equal(evaluateSyncGuards([], { fm: {}, tags: [] }, 'all'), true);
+	assert.equal(evaluateSyncGuards([], { fm: {}, tags: [] }, 'any'), true);
+	assert.equal(evaluateSyncGuards([], { fm: {}, tags: [] }), true);
 });
