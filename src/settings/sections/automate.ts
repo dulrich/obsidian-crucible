@@ -68,6 +68,21 @@ async function deleteCapture(tab: CrucibleSettingTab, index: number) {
 	tab.display();
 }
 
+// Shared by both chain-delete entry points (list row + edit-form button) so they confirm
+// through the same registry id and behave identically — same shape as deleteCapture above.
+async function deleteChain(tab: CrucibleSettingTab, index: number) {
+	const chain = tab.plugin.settings.chains[index];
+	if (!chain) return;
+	if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-delete', {
+		message: `Delete chain "${chain.name || '(unnamed)'}"? This cannot be undone.`,
+	}))) return;
+	tab.plugin.settings.chains.splice(index, 1);
+	tab.editingChainIndex = -1;
+	await tab.plugin.saveSettings();
+	tab.plugin.registerChains();
+	tab.display();
+}
+
 function renderCaptureListSection(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	new Setting(containerEl).setName('Captures').setHeading();
 	containerEl.createEl('p', { text: 'Define workflows to quickly append, prepend, or replace text in notes.' });
@@ -184,13 +199,7 @@ function renderChainListSection(tab: CrucibleSettingTab, containerEl: HTMLElemen
 					tab.display();
 				}))
 				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Delete chain').onClick(async () => {
-					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-delete', {
-						message: `Delete chain "${chain.name || '(unnamed)'}"? This cannot be undone.`,
-					}))) return;
-					tab.plugin.settings.chains.splice(index, 1);
-					await tab.plugin.saveSettings();
-					tab.plugin.registerChains();
-					tab.display();
+					await deleteChain(tab, index);
 				}));
 		});
 	}
@@ -538,6 +547,10 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	}));
 	actionRow.addButton(bt => bt.setButtonText('Preview chain').onClick(() => {
 		tab.plugin.chainManager.previewChain(chain);
+	}));
+
+	new Setting(containerEl).addButton(bt => bt.setButtonText('Delete chain').setWarning().onClick(async () => {
+		await deleteChain(tab, tab.editingChainIndex);
 	}));
 }
 
