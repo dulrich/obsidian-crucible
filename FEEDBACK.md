@@ -31,6 +31,7 @@ tags: ""
 - [ ] unclear: danger buttons have no rollover, or it's invisible in the Crucible theme (med)
 - [ ] re-render flash appears gone, only remaining non-perfect symptom is scroll moves when viewing a lower section and a higher open Queue Monitor (typically) changes height, causing scroll position drift
 - [ ] `references/x-post-metadata-ingestion-findings.md`
+- [ ] just saw an image timeout after ... warning popup
 
 ---
 

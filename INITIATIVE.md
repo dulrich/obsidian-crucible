@@ -10,6 +10,8 @@ initiative-title: Obsidian Crucible
 pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
+review-after-commits: 20
+review-after-lines: 1500
 ---
 
 ---
