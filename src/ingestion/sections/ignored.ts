@@ -14,7 +14,7 @@ export async function renderIgnoredPosts(host: DashboardHost, body: HTMLElement,
 		setCount: n => host.setSectionCount('ignoredPosts', n),
 		columns: [
 			{ key: 'id', label: 'Blog ID', sortable: true, sortKey: r => r.id.toLowerCase(), render: (r, td) => renderIgnoredIdCell(td, r.id, blogIgnoreUrl(r.id)) },
-			{ key: 'unignore', label: '', render: (r, td) => renderUnignoreButton(td, host.app, 'blog', r.id, ctx, () => void host.refresh('uncapturedPosts')) },
+			{ key: 'unignore', label: '', render: (r, td) => renderUnignoreButton(td, host, 'blog', r.id, 'ignoredPosts', 'uncapturedPosts', ctx) },
 		],
 	});
 }
@@ -29,7 +29,7 @@ export async function renderIgnoredVideos(host: DashboardHost, body: HTMLElement
 		setCount: n => host.setSectionCount('ignoredVideos', n),
 		columns: [
 			{ key: 'id', label: 'Video ID', sortable: true, sortKey: r => r.id.toLowerCase(), render: (r, td) => renderIgnoredIdCell(td, r.id, `https://www.youtube.com/watch?v=${r.id}`) },
-			{ key: 'unignore', label: '', render: (r, td) => renderUnignoreButton(td, host.app, 'youtube', r.id, ctx, () => void host.refresh('uncapturedVideos')) },
+			{ key: 'unignore', label: '', render: (r, td) => renderUnignoreButton(td, host, 'youtube', r.id, 'ignoredVideos', 'uncapturedVideos', ctx) },
 		],
 	});
 }

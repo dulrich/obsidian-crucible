@@ -26,7 +26,7 @@ export async function renderYoutubeNoMetadata(host: DashboardHost, body: HTMLEle
 			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => renderFileLink(host.app, td, r.file) },
 			{ key: 'created', label: 'Create Date', sortable: true, sortKey: r => r.created, render: (r, td) => td.setText(formatDate(r.created)) },
 			{ key: 'enqueue', label: '', render: (r, td) => renderEnqueueMetadataCell(host, td, r, inFlight) },
-			{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host.app, 'youtube', r.videoId, ctx, () => void host.refresh('ignoredVideos')) },
+			{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'youtube', r.videoId, 'youtubeWithoutMetadata', 'ignoredVideos', ctx) },
 		],
 	});
 }
