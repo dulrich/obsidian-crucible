@@ -51,6 +51,15 @@ export function bindText(container: HTMLElement, spec: TextFieldSpec, save: Save
 export interface ToggleFieldSpec extends FieldSpecBase {
 	get: () => boolean;
 	set: (value: boolean) => void;
+	/**
+	 * Optional veto hook, checked only when the user turns the toggle ON (turning it
+	 * off is never gated). A non-null return blocks the change: `set`/`save`/`after`
+	 * never run and the visual toggle reverts to off. Return null to allow the change
+	 * through as normal.
+	 */
+	guard?: () => string | null;
+	/** Called with the veto message when `guard` blocks a change; the caller decides how/where to display it. */
+	onGuardRejected?: (message: string) => void;
 }
 
 export function bindToggle(container: HTMLElement, spec: ToggleFieldSpec, save: Save): Setting {
@@ -58,7 +67,19 @@ export function bindToggle(container: HTMLElement, spec: ToggleFieldSpec, save: 
 	setting.addToggle(t => {
 		if (spec.tooltip !== undefined) t.setTooltip(spec.tooltip);
 		t.setValue(spec.get());
-		t.onChange(async (v) => { spec.set(v); await save(); if (spec.after) await spec.after(); });
+		t.onChange(async (v) => {
+			if (v && spec.guard) {
+				const reason = spec.guard();
+				if (reason) {
+					t.setValue(false);
+					if (spec.onGuardRejected) spec.onGuardRejected(reason);
+					return;
+				}
+			}
+			spec.set(v);
+			await save();
+			if (spec.after) await spec.after();
+		});
 	});
 	return setting;
 }

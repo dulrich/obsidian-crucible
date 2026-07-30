@@ -43,6 +43,7 @@ import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow
 import { ImageDescribeBackfillWorkflow, ImageDescribeBatchWorkflow, ImageDescribeNoteWorkflow } from './orchestration/workflows/ImageDescribeWorkflow';
 import { OrchestrationAutoRunner } from './orchestration/OrchestrationAutoRunner';
 import { TriggerRegistry } from './orchestration/TriggerRegistry';
+import { TriggerValidationCtx, validateTrigger } from './triggers/triggerValidation';
 import { registerStaticCommands } from './commands';
 import { SearchManager } from './search/SearchManager';
 import { SearchIndexCoordinator } from './search/SearchIndexCoordinator';
@@ -783,8 +784,29 @@ export default class CruciblePlugin extends Plugin {
 
 	// Load user-defined triggers from settings into the engine. Mirrors registerChains():
 	// call on load and after any trigger edit so the live registry tracks settings.
+	//
+	// Defense-in-depth (thq WP-2): the settings UI already gates the Enable toggle on
+	// validateTrigger, but a hand-edited data.json can still carry an invalid-yet-
+	// enabled def (a deleted chain, a blank chainName like the trigger-storm incident).
+	// Filter every def through the same validator here before it ever reaches the
+	// adapter/registry — an invalid def is skipped (not rewritten, not deleted, its
+	// `enabled` flag untouched on disk) with a logWarn naming the first error.
 	registerTriggers() {
-		this.triggers.setUserTriggers(this.settings.triggers);
+		const ctx: TriggerValidationCtx = {
+			chainNames: this.settings.chains.map(c => c.name),
+			hasInternalCommand: (id) => this.chainManager.hasInternalCommand(id),
+			knownJobTypes: this.orchestrator.jobTypes(),
+			folderExists: (folder) => this.app.vault.getAbstractFileByPath(folder) instanceof TFolder,
+		};
+		const validDefs = this.settings.triggers.filter(def => {
+			const { errors } = validateTrigger(def, ctx);
+			if (errors.length > 0) {
+				logWarn('trigger', def.id, errors[0]);
+				return false;
+			}
+			return true;
+		});
+		this.triggers.setUserTriggers(validDefs);
 	}
 
 	registerChains() {
