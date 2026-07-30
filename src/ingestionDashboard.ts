@@ -196,6 +196,17 @@ export class IngestionDashboardUI {
 		// reason 'structural' = vault create/delete/rename (can change everything);
 		// 'meta' = metadataCache 'changed' (fires per keystroke — gated below).
 		const route = (path: string, reason: 'meta' | 'structural') => {
+			// P1: job files are real vault notes under orchestrationQueueRoot
+			// (JobStore.ts's inbox/running/done/failed/cancelled all live directly
+			// under this root), so every enqueue (create), claim/settle (rename —
+			// dispatched TWICE, old+new path), and clear hits this listener. No
+			// dashboard section reads job files; queue-driven UI updates arrive via
+			// the 'orchestration-queue-updated' / 'enrichment-queue-updated' bus
+			// events below, which already have their own gated listeners. Bail before
+			// any other branch so queue churn costs nothing here.
+			const queueRoot = this.plugin.settings.orchestrationQueueRoot;
+			if (queueRoot && (path === queueRoot || path.startsWith(`${queueRoot}/`))) return;
+
 			if (path === IGNORED_IDS_NOTE) {
 				// The Ignore/Unignore button handlers (render/cells.ts) already
 				// synchronously refresh whichever of these sections their action
@@ -211,6 +222,17 @@ export class IngestionDashboardUI {
 				if (!consumeSelfRefreshedEcho('uncapturedPosts')) debouncedUncapturedPosts();
 				if (!consumeSelfRefreshedEcho('uncapturedVideos')) debouncedUncapturedVideos();
 				if (!consumeSelfRefreshedEcho('blogControl')) debouncedBlogControl();
+				// P2: return here — this path is handled in full above. Without this,
+				// both the 'meta' event fired by vault.modify (existing note) and the
+				// 'structural' create event fired the first time ignored.md is written
+				// fall through to the generic branches below: 'meta' would hit the
+				// `!prev` first-sighting check and re-schedule the same sections ~1s
+				// later (the echo markers only cover THIS block), and 'structural'
+				// would fire all five scan refreshes unconditionally with no echo
+				// check at all (the create case, when ignored.md doesn't exist yet).
+				// ignored.md never matches any of the path-prefix branches below, so
+				// returning here changes nothing else it would otherwise reach.
+				return;
 			}
 			const clipperRoot = this.plugin.settings.ingestionClipperInboxFolder;
 			const dailyRoot = this.plugin.settings.dailyFolder;
@@ -244,18 +266,26 @@ export class IngestionDashboardUI {
 
 			// metadataCache 'changed': only refresh a scan section when the data it
 			// depends on actually changed since we last saw this path. Body keystrokes
-			// leave both signatures untouched, so nothing re-renders.
+			// leave both signatures untouched, so nothing re-renders. P2: a first
+			// sighting of a path (no `prev`) only establishes the baseline — it does
+			// NOT schedule a refresh. Before this fix `!prev` treated "never seen this
+			// path before" as "changed," so the very first metadataCache event for ANY
+			// previously-unseen path fired all five scan refreshes unconditionally —
+			// that path already got its due refresh from the 'structural' branch above
+			// when the file was created (which always fires on create, regardless of
+			// signature), so re-firing here on the very next 'meta' event was pure
+			// duplication. A real change on an already-baselined path still fires.
 			const next = this.relevantSignature(path);
 			const prev = this.relevantSignatures.get(path);
 			this.relevantSignatures.set(path, next);
-			if (!prev || prev.fm !== next.fm) {
+			if (prev && prev.fm !== next.fm) {
 				// source/post-id/yt-video-id/yt-metadata drive the uncaptured + no-metadata lists.
 				debouncedUncapturedPosts();
 				debouncedUncapturedVideos();
 				debouncedBlogControl();
 				debouncedYoutubeNoMetadata();
 			}
-			if (!prev || prev.links !== next.links) {
+			if (prev && prev.links !== next.links) {
 				// The set of referenced attachments drives orphan status.
 				debouncedOrphans();
 			}
