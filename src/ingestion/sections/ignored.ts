@@ -13,6 +13,8 @@ export async function renderIgnoredPosts(host: DashboardHost, body: HTMLElement,
 		body, ctx, rows,
 		emptyText: 'No ignored blogs.',
 		defaultSort: { column: 'id', direction: 'asc' },
+		// rsp-wp6: the blog id itself is the natural stable key.
+		rowKey: r => r.id,
 		setCount: n => host.setSectionCount('ignoredPosts', n),
 		columns: [
 			{ key: 'id', label: 'Blog ID', sortable: true, sortKey: r => r.id.toLowerCase(), render: (r, td) => renderIgnoredIdCell(td, r.id, blogIgnoreUrl(r.id)) },
@@ -30,6 +32,8 @@ export async function renderIgnoredVideos(host: DashboardHost, body: HTMLElement
 		body, ctx, rows,
 		emptyText: 'No ignored videos.',
 		defaultSort: { column: 'id', direction: 'asc' },
+		// rsp-wp6: the video id itself is the natural stable key.
+		rowKey: r => r.id,
 		setCount: n => host.setSectionCount('ignoredVideos', n),
 		columns: [
 			{ key: 'id', label: 'Video ID', sortable: true, sortKey: r => r.id.toLowerCase(), render: (r, td) => renderIgnoredIdCell(td, r.id, `https://www.youtube.com/watch?v=${r.id}`) },

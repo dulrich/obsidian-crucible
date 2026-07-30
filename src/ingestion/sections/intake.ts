@@ -101,6 +101,8 @@ export function createIntakeSection(host: DashboardHost): IntakeSection {
 			body, ctx, rows,
 			emptyText: 'No blog tracker runs yet.',
 			defaultSort: { column: 'runAt', direction: 'desc' },
+			// rsp-wp6: one row per intake-run note — the vault path is the natural key.
+			rowKey: r => r.file.path,
 			setCount: n => host.setSectionCount('blogIntake', n),
 			columns: [
 				{ key: 'runAt', label: 'Run At', sortable: true, sortKey: r => r.runAt, render: (r, td) => renderFileLink(host.app, td, r.file, r.runAt || r.file.basename) },
@@ -124,6 +126,8 @@ export function createIntakeSection(host: DashboardHost): IntakeSection {
 			body, ctx, rows,
 			emptyText: 'No YouTube tracker runs yet.',
 			defaultSort: { column: 'runAt', direction: 'desc' },
+			// rsp-wp6: one row per intake-run note — the vault path is the natural key.
+			rowKey: r => r.file.path,
 			setCount: n => host.setSectionCount('youtubeIntake', n),
 			columns: [
 				{ key: 'runAt', label: 'Run At', sortable: true, sortKey: r => r.runAt, render: (r, td) => renderFileLink(host.app, td, r.file, r.runAt || r.file.basename) },

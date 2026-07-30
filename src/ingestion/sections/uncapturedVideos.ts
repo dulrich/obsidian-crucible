@@ -52,6 +52,8 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 				body, ctx, rows,
 				emptyText: 'No uncaptured videos.',
 				defaultSort: { column: 'publishedAt', direction: 'desc' },
+				// rsp-wp6: videoId is the natural stable key — one row per video.
+				rowKey: r => r.videoId,
 				setCount: n => host.setSectionCount('uncapturedVideos', n),
 				columns: [
 					{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => r.channelAboutFile ? renderFileLink(host.app, td, r.channelAboutFile, displayLabel(r.channelName)) : renderChannelLink(td, r.channelId, r.channelName) },

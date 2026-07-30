@@ -38,6 +38,13 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 		if (!shouldRepaint(ctx, computeRowSignature(all))) return;
 		body.empty();
 
+		// rsp-wp6: left unkeyed. A natural key exists (r.blogKey), but this
+		// `body.empty()` right above tears down and recreates the `tableBody`
+		// div renderControlCenter builds internally on every render, so a
+		// rowKey here would reconcile rows inside a container that's already
+		// brand-new each time — no DOM to reuse, just reconciler bookkeeping
+		// for nothing. Keying this section for real means first changing this
+		// function to only clear the filter-buttons row, not the whole body.
 		renderControlCenter<BlogControlRow>({
 			body, ctx, rows: all,
 			filter: blogFilter,
@@ -64,6 +71,9 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 		if (!shouldRepaint(ctx, computeRowSignature(all))) return;
 		body.empty();
 
+		// rsp-wp6: left unkeyed — same reasoning as renderBlogControl above
+		// (r.channelId would be the natural key once this body.empty() is
+		// narrowed to just the filter row).
 		renderControlCenter<ChannelControlRow>({
 			body, ctx, rows: all,
 			filter: channelFilter,

@@ -17,10 +17,20 @@ export interface RenderControlCenterOptions<T extends ControlCenterRow> {
 	defaultSort?: SortState;
 	setCount: (n: number) => void;
 	columns: Column<T>[];
+	// rsp-wp6: forwarded to renderTableSection's own `rowKey` — see its doc
+	// comment. Not used by either call site today: both blogControl and
+	// channelControl (controlCenters.ts) unconditionally `body.empty()` the
+	// OUTER section body — which owns the `tableBody` div this module builds
+	// below — before calling in, so the reconciler's target container is torn
+	// down and recreated every render regardless of what's passed here. Wiring
+	// stays in place so a future pass that fixes controlCenters.ts's own
+	// teardown (a natural key already exists on both row types — channelId /
+	// blogKey) doesn't also need a signature change here.
+	rowKey?: (row: T) => string;
 }
 
 export function renderControlCenter<T extends ControlCenterRow>(opts: RenderControlCenterOptions<T>): void {
-	const { body, ctx, rows, filter, setFilter, emptyText, defaultSort, setCount, columns } = opts;
+	const { body, ctx, rows, filter, setFilter, emptyText, defaultSort, setCount, columns, rowKey } = opts;
 	const controls = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
 	const filters: Array<{ id: ControlCenterFilter; label: string }> = [
 		{ id: 'all', label: 'All' },
@@ -51,5 +61,6 @@ export function renderControlCenter<T extends ControlCenterRow>(opts: RenderCont
 		defaultSort,
 		setCount,
 		columns,
+		rowKey,
 	});
 }
