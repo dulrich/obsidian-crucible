@@ -1,6 +1,37 @@
 import { Provider, ProviderCatalogModel, ProviderCompletionResult, ProviderEmbeddingResult, ProviderFinishReason, ProviderImageExtractionResult, ProviderModelDescription, ProviderRerankResult, ProviderRerankResultItem } from '../types';
 import { logWarn } from '../log';
 
+/**
+ * Races `promise` against a `ms` timer. Obsidian's `requestUrl` (and the in-renderer
+ * `OffscreenCanvas` transcode in `orchestration/utils/imageDescribe.ts`, which also races through
+ * this) take no `AbortSignal`, so a timeout cannot cancel the underlying work — it can only stop
+ * *waiting* on it. On timeout this rejects with an `Error` labeled `label` (`... timed out after
+ * <n>ms` —
+ * `TIMEOUT_FAILURE_RE`/`TRANSIENT_FAILURE_RE` key on this exact literal shape, so don't change it).
+ * `Promise.race` has already attached a handler to the original `promise` as part of racing it, so
+ * its late settlement (abandoned, but not orphaned) never surfaces as an unhandled promise
+ * rejection.
+ *
+ * thq WP-4 (B-1): lives here rather than in `orchestration/utils/imageDescribe.ts` (its original
+ * home) so `providers.ts` can reuse it for `ProviderManager.describeImage`'s per-pass timer without
+ * providers.ts — a low-level module every completion-class caller depends on — reaching *up* into
+ * an orchestration-domain, image-description-specific utility (and, concretely, pulling that
+ * module's `search/imageDescriptionStore.ts`/`search/imageTranscode.ts` transitive imports into
+ * every test that bundles `providers.ts`). `providers/shared.ts` is already a dependency-free leaf
+ * (only `../types` + `../log`, no `obsidian` value imports) that `providers.ts` imports today, so
+ * it sits below both consumers instead of beside either one. `imageDescribe.ts` re-exports this
+ * under its old name for source/test compatibility — see the comment there.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+	});
+	return Promise.race([promise, timeout]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
+}
+
 // Everything a per-provider HTTP client needs to issue a request: the provider config, the
 // resolved model id, and the API key (already loaded + validated by ProviderManager). Each
 // client reads provider.baseUrl / provider.kind for its own URL + header quirks.

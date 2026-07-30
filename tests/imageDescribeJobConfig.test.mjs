@@ -15,8 +15,21 @@ await mkdir(outdir, { recursive: true });
 // Same stub shape as youtubeMetadataJob.test.mjs: jobTypeConfig.ts's dependency chain (via
 // utils/youtubeApi.ts) imports from 'obsidian'. Only the pure dedupe-key functions are
 // exercised here; nothing from the stub is actually called.
+//
+// thq WP-4 (B-4): `resolveTimeoutMs` (JobBackend.ts) is bundled alongside jobTypeConfig.ts (same
+// stdin multi-export technique as tests/workflowCancellation.test.mjs) so the per-type timeoutMs
+// on the image job configs can be asserted end to end — "does the config's timeoutMs actually win
+// over the global setting" — rather than only pinning the raw field value.
 await esbuild.build({
-	entryPoints: ['src/orchestration/jobTypeConfig.ts'],
+	stdin: {
+		contents: [
+			"export * from './src/orchestration/jobTypeConfig';",
+			"export { resolveTimeoutMs } from './src/orchestration/JobBackend';",
+		].join('\n'),
+		resolveDir: '.',
+		sourcefile: 'imageDescribeJobConfig-test-entry.ts',
+		loader: 'ts',
+	},
 	bundle: true,
 	platform: 'node',
 	format: 'esm',
@@ -52,6 +65,7 @@ const {
 	imageDescribeBatchJobConfig,
 	imageDescribeNoteDedupeKey,
 	imageDescribeNoteJobConfig,
+	resolveTimeoutMs,
 } = await import(pathToFileURL(outfile).href);
 
 // ── image_describe_note ──────────────────────────────────────────────────────
@@ -121,4 +135,45 @@ test('imageDescribeBatchJobConfig: declares the image-description-provider servi
 test('imageDescribeBackfillJobConfig: does NOT declare the image-description-provider service — it only enqueues batches and prunes the store, never calls the provider itself', () => {
 	const config = imageDescribeBackfillJobConfig();
 	assert.equal(config.services, undefined);
+});
+
+// ── thq WP-4 (B-4): per-type timeoutMs on the image job types ───────────────────
+//
+// Investigation ground truth (`runs/dispatch/thq-feedback-items-investigation.md` §3): the
+// generic 600s job-level backstop (`orchestrationAutorunTimeoutSeconds`) killed a resumed
+// `image_describe_batch` that legitimately needed ~16 min of serial local model time. These pin
+// the arithmetic from `jobTypeConfig.ts`'s comment (mirroring, not importing, the constants —
+// IMAGE_DESCRIBE_PASS_TIMEOUT_MS=120_000, IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS=30_000,
+// IMAGE_DESCRIBE_BATCH_IMAGES=100 as of this writing) so a change to either side shows up as a
+// failing test rather than silent drift.
+
+const EXPECTED_BATCH_TIMEOUT_MS = 100 * (2 * 120_000 + 30_000) + 5 * 60_000; // 27_300_000ms (~7.6h)
+const EXPECTED_NOTE_TIMEOUT_MS = EXPECTED_BATCH_TIMEOUT_MS * 5; // 136_500_000ms (~37.9h)
+
+test('imageDescribeBatchJobConfig: timeoutMs is sized from images-per-job x 2 passes x pass-timeout + transcode + slack, well above the 600s generic default', () => {
+	const config = imageDescribeBatchJobConfig();
+	assert.equal(config.timeoutMs, EXPECTED_BATCH_TIMEOUT_MS);
+	assert.ok(config.timeoutMs > 600_000, 'must exceed the generic backstop that killed the observed resumed batch');
+});
+
+test('imageDescribeNoteJobConfig: timeoutMs is a generous multiple of the batch ceiling (a note\'s image count is unbounded)', () => {
+	const config = imageDescribeNoteJobConfig();
+	assert.equal(config.timeoutMs, EXPECTED_NOTE_TIMEOUT_MS);
+	assert.ok(config.timeoutMs > imageDescribeBatchJobConfig().timeoutMs, 'the note backstop must be at least as generous as the batch one');
+});
+
+test('resolveTimeoutMs: the image job types\' per-type timeoutMs wins over the global autorun setting', () => {
+	const fakePlugin = { settings: { orchestrationAutorunTimeoutSeconds: 600 } };
+	assert.equal(resolveTimeoutMs(fakePlugin, imageDescribeBatchJobConfig()), EXPECTED_BATCH_TIMEOUT_MS);
+	assert.equal(resolveTimeoutMs(fakePlugin, imageDescribeNoteJobConfig()), EXPECTED_NOTE_TIMEOUT_MS);
+});
+
+test('resolveTimeoutMs: a type with no timeoutMs override (e.g. the backfill fan-out) still falls back to the global autorun setting', () => {
+	const fakePlugin = { settings: { orchestrationAutorunTimeoutSeconds: 45 } };
+	assert.equal(resolveTimeoutMs(fakePlugin, imageDescribeBackfillJobConfig()), 45_000);
+});
+
+test('resolveTimeoutMs: an explicit timeoutMs of 0 disables the backstop rather than falling back', () => {
+	const fakePlugin = { settings: { orchestrationAutorunTimeoutSeconds: 600 } };
+	assert.equal(resolveTimeoutMs(fakePlugin, { timeoutMs: 0 }), 0);
 });

@@ -20,6 +20,16 @@ import { classifyFailure, type ImageDescriptionStore } from '../../search/imageD
 import { logWarn } from '../../log';
 import type { ServiceFailureKind } from '../serviceHealth';
 import { imageMimeType, localizedImageInfo, extractMetadataSections, type LocalizedImageInfo } from './imageMetadata';
+import { withTimeout } from '../../providers/shared';
+
+// thq WP-4 (B-1): `withTimeout` moved to `providers/shared.ts` so `providers.ts` (a low-level
+// module every completion-class caller depends on) doesn't have to reach up into this
+// orchestration-domain, image-description-specific file to reuse it — see that file's doc comment
+// for the full reasoning. Re-exported under its original name so existing imports/tests
+// (`tests/imageDescribe.test.mjs`) that pull `withTimeout` off this module's bundle keep working
+// unchanged, and so the transcode wrap just below (still local to this file) reads the same as
+// before.
+export { withTimeout };
 
 // rsp-wp1 Part B: photos currently inflate to ~25MB PNGs on transcode (a raw decode+re-encode at
 // native resolution), raising prefill cost for every vision pass. 1568px is comfortably above
@@ -103,25 +113,6 @@ export class ImageDescribeInfraAbort extends Error {
 }
 
 export class ImageDescribeConfigError extends Error {}
-
-/**
- * Races `promise` against a `ms` timer (the `raceWorkflowTimeout` precedent in
- * `orchestration/JobBackend.ts`, applied at the single-image granularity). Obsidian's
- * `requestUrl` (and the in-renderer `OffscreenCanvas` transcode) take no `AbortSignal`, so a
- * timeout cannot cancel the underlying work — it can only stop *waiting* on it. On timeout this
- * rejects with an `Error` labeled `label`; `Promise.race` has already attached a handler to the
- * original `promise` as part of racing it, so its late settlement (abandoned, but not orphaned)
- * never surfaces as an unhandled promise rejection.
- */
-export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-	});
-	return Promise.race([promise, timeout]).finally(() => {
-		if (timer) clearTimeout(timer);
-	});
-}
 
 /**
  * Pure dimension math for the downscale cap: shrink-only, aspect-preserved. Split out from
@@ -375,19 +366,21 @@ async function describeOneImage(
 			transcodeMs = Date.now() - transcodeStarted;
 		}
 
+		// thq WP-4 (B-1): the per-pass timer used to be armed HERE, wrapping the whole
+		// `describeImage` call — including the wait for the per-provider concurrency slot (limit 1
+		// on local providers, shared with every other completion-class call). That let queue-wait
+		// alone burn the 120s budget before inference even started. The timer now lives inside
+		// `describeImage` itself (`providers.ts`), armed only once the slot is acquired — pass the
+		// same `IMAGE_DESCRIBE_PASS_TIMEOUT_MS` constant through instead of wrapping the call here.
 		const narrativeStarted = Date.now();
-		const narrative = await withTimeout(
-			plugin.providerManager.describeImage(provider, modelId, finalBytes, finalMime, 'narrative'),
-			IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
-			'image description (narrative pass)',
+		const narrative = await plugin.providerManager.describeImage(
+			provider, modelId, finalBytes, finalMime, 'narrative', IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
 		);
 		const narrativeMs = Date.now() - narrativeStarted;
 
 		const extractionStarted = Date.now();
-		const extraction = await withTimeout(
-			plugin.providerManager.describeImage(provider, modelId, finalBytes, finalMime, 'extraction'),
-			IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
-			'image description (extraction pass)',
+		const extraction = await plugin.providerManager.describeImage(
+			provider, modelId, finalBytes, finalMime, 'extraction', IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
 		);
 		const extractionMs = Date.now() - extractionStarted;
 

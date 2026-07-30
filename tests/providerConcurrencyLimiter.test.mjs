@@ -297,3 +297,126 @@ test('ProviderManager.describeImage: a caller-side race (withTimeout-style) that
 	deferreds[1].resolve(chatOkResponse('second narrative'));
 	await callB;
 });
+
+// ── B-1 (thq WP-4): the optional per-pass timer now lives inside the limiter ────
+//
+// Investigation ground truth (`runs/dispatch/thq-feedback-items-investigation.md` §3): the old
+// `withTimeout` wrap lived at the `imageDescribe.ts` call site, around the ENTIRE
+// `providerManager.describeImage(...)` call — including the wait for a limit-1 local provider's
+// slot. These pin the fix: `describeImage`'s optional `timeoutMs` only starts its clock once the
+// slot is actually acquired, and (per the release-on-settle test above, unaffected by this change)
+// racing it never frees the slot early.
+
+test('ProviderManager.describeImage: an optional timeoutMs does NOT time out while queued behind a slow holder — the clock only starts once the slot is acquired', async () => {
+	resetRequests();
+	const deferreds = [];
+	globalThis.__providerResponder = async () => {
+		const d = createDeferred();
+		deferreds.push(d);
+		return d.promise;
+	};
+
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const provider = localProvider();
+
+	// callA holds the only slot with no timeout of its own, indefinitely.
+	const callA = manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'narrative');
+	callA.catch(() => {});
+
+	// callB queues behind it with a short timeoutMs.
+	const callB = manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'narrative', 30);
+	let callBSettled = false;
+	callB.then(() => { callBSettled = true; }, () => { callBSettled = true; });
+
+	// Outlast callB's 30ms budget while it is still queued — if the timer started at call time
+	// (the old bug), callB would already have rejected by now.
+	await new Promise(resolve => setTimeout(resolve, 80));
+	assert.equal(globalThis.__providerRequests.length, 1, 'callB must still be queued behind callA, not dispatched');
+	assert.equal(callBSettled, false, 'callB must not have timed out while merely waiting for the slot');
+
+	// Release callA; callB now acquires the slot and its request answers immediately — well inside
+	// its 30ms budget, proving the timer only started once the slot was actually granted.
+	deferreds[0].resolve(chatOkResponse('first'));
+	await callA;
+	await flush();
+	assert.equal(globalThis.__providerRequests.length, 2, 'releasing callA lets callB dispatch');
+
+	deferreds[1].resolve(chatOkResponse('second'));
+	assert.equal(await callB, 'second');
+});
+
+test('ProviderManager.describeImage: a slow pass AFTER acquisition times out, with the "timed out after <n>ms" shape and the pass label', async () => {
+	resetRequests();
+	globalThis.__providerResponder = () => new Promise(() => {}); // never settles
+
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const provider = localProvider();
+
+	await assert.rejects(
+		() => manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'narrative', 20),
+		(err) => {
+			assert.match(err.message, /timed out after \d+ms/);
+			assert.equal(err.message, 'image description (narrative pass) timed out after 20ms');
+			return true;
+		},
+	);
+});
+
+test('ProviderManager.describeImage: the extraction pass carries its own label in the timeout message', async () => {
+	resetRequests();
+	globalThis.__providerResponder = () => new Promise(() => {}); // never settles
+
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const provider = localProvider();
+
+	await assert.rejects(
+		() => manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'extraction', 15),
+		(err) => {
+			assert.equal(err.message, 'image description (extraction pass) timed out after 15ms');
+			return true;
+		},
+	);
+});
+
+test('ProviderManager.describeImage: without timeoutMs, no timer is armed at all — a slow pass just awaits normally', async () => {
+	resetRequests();
+	const d = createDeferred();
+	globalThis.__providerResponder = async () => d.promise;
+
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const provider = localProvider();
+
+	const call = manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'narrative');
+	await new Promise(resolve => setTimeout(resolve, 40));
+	d.resolve(chatOkResponse('late but fine'));
+	assert.equal(await call, 'late but fine');
+});
+
+test('ProviderManager.describeImage: a timeout still releases the slot only once the underlying request actually settles (release-on-settle preserved under the new timer)', async () => {
+	resetRequests();
+	const deferreds = [];
+	globalThis.__providerResponder = async () => {
+		const d = createDeferred();
+		deferreds.push(d);
+		return d.promise;
+	};
+
+	const manager = new ProviderManager(fakeApp, fakeSecrets);
+	const provider = localProvider();
+
+	// callA times out quickly, but its underlying request is still "in flight" (deferred, not
+	// resolved) — release-on-settle means the slot must not free up yet.
+	const callA = manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'narrative', 15);
+	await assert.rejects(() => callA, /timed out after 15ms/);
+
+	const callB = manager.describeImage(provider, 'gemma-4', imageBytes, 'image/png', 'narrative');
+	await flush();
+	assert.equal(globalThis.__providerRequests.length, 1, 'callB must still be queued — callA\'s slot has not released despite its caller-facing timeout');
+
+	deferreds[0].resolve(chatOkResponse('late narrative'));
+	await flush();
+	assert.equal(globalThis.__providerRequests.length, 2, 'the slot only frees once callA\'s real request settles');
+
+	deferreds[1].resolve(chatOkResponse('second narrative'));
+	assert.equal(await callB, 'second narrative');
+});

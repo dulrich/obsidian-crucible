@@ -9,6 +9,11 @@ import {
 	type ServiceId,
 } from './serviceHealth';
 import { coerceVideoId } from './utils/youtubeApi';
+import {
+	IMAGE_DESCRIBE_BATCH_IMAGES,
+	IMAGE_DESCRIBE_PASS_TIMEOUT_MS,
+	IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS,
+} from './utils/imageDescribe';
 
 // Per-type behavior for the unified queue. File types are backed by the markdown
 // JobStore (inbox/running/done/failed); memory types run in-memory under the same
@@ -151,6 +156,42 @@ export function imageDescribeNoteDedupeKey(p: Record<string, unknown>): string {
 	return targetPath ? `note:${targetPath}` : '';
 }
 
+// thq WP-4 (B-4): the generic job-level backstop (`orchestrationAutorunTimeoutSeconds`, live
+// default 600s) was killing legitimately long-running image jobs — a resumed 100-image
+// `image_describe_batch` needs ~16 min of serial local model time, well past the 600s default,
+// and died with the popup "Orchestrate: <id> -> failed (Timed out after 600s)" while it was still
+// making progress (`runs/dispatch/thq-feedback-items-investigation.md` §3). Size each image job
+// type's own `timeoutMs` from its real worst-case budget instead of the one-size-fits-all
+// setting, so the backstop only ever fires for a genuine hang, never for slow-but-legitimate
+// serial completion.
+//
+// Per-image worst case: both provider passes (narrative + extraction) time out at
+// IMAGE_DESCRIBE_PASS_TIMEOUT_MS each, plus one IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS if the image
+// needed transcoding = 2*120_000 + 30_000 = 270_000ms.
+const IMAGE_DESCRIBE_PER_IMAGE_WORST_CASE_MS = 2 * IMAGE_DESCRIBE_PASS_TIMEOUT_MS + IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS;
+// A few minutes of slack around the boundary for claim/dispatch overhead, not part of the
+// per-image budget itself.
+const IMAGE_DESCRIBE_TIMEOUT_SLACK_MS = 5 * 60_000;
+
+// image_describe_batch: IMAGE_DESCRIBE_BATCH_IMAGES (100) images per job x the 270_000ms
+// per-image worst case + slack = 100 * 270_000 + 300_000 = 27_300_000ms (~7.6h). That reads huge
+// for a "backstop," and it is meant to: it's a true every-image-times-out-on-every-pass ceiling,
+// not the expected runtime (a healthy batch finishes in minutes). In practice the batch's
+// consecutive-timeout breaker (`IMAGE_DESCRIBE_CONSECUTIVE_TIMEOUT_LIMIT`, `imageDescribe.ts`)
+// aborts the job on 3 timeouts in a row long before this could ever be reached — this backstop
+// exists only to catch a genuine hang outside that machinery (e.g. an await with no per-call
+// timeout at all), which is exactly the class of failure a job-level timer is for.
+const IMAGE_DESCRIBE_BATCH_TIMEOUT_MS =
+	IMAGE_DESCRIBE_BATCH_IMAGES * IMAGE_DESCRIBE_PER_IMAGE_WORST_CASE_MS + IMAGE_DESCRIBE_TIMEOUT_SLACK_MS;
+
+// image_describe_note: unlike the batch job (capped at IMAGE_DESCRIBE_BATCH_IMAGES per job by
+// construction), a note's embedded-image count is unbounded in principle. Rather than guess a
+// second images-per-job figure, take a generous multiple of the batch ceiling: 5x covers a note
+// with up to ~500 embedded images at the same worst-case-per-image math, comfortably above any
+// note this plugin has seen in practice, while still being a finite backstop instead of disabling
+// the timeout (0) outright.
+const IMAGE_DESCRIBE_NOTE_TIMEOUT_MS = IMAGE_DESCRIBE_BATCH_TIMEOUT_MS * 5;
+
 // idh-WP-2: `services` lets the drain's `servicesHealthyFor` gate stop claiming further
 // image_describe_note/image_describe_batch jobs while the infra breaker in `imageDescribe.ts`
 // has reported the provider unhealthy (`ImageDescribeNoteWorkflow`/`ImageDescribeBatchWorkflow`
@@ -158,7 +199,11 @@ export function imageDescribeNoteDedupeKey(p: Record<string, unknown>): string {
 // timeouts). `imageDescribeBackfillJobConfig` deliberately does NOT declare it — the backfill job
 // only enqueues batches and prunes the store; it never calls the provider itself.
 export function imageDescribeNoteJobConfig(): JobTypeConfig {
-	return { ...fileJobConfig(imageDescribeNoteDedupeKey), services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER] };
+	return {
+		...fileJobConfig(imageDescribeNoteDedupeKey),
+		services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER],
+		timeoutMs: IMAGE_DESCRIBE_NOTE_TIMEOUT_MS,
+	};
 }
 
 // One backfill fan-out at a time — see searchEmbedMissingJobConfig's identical reasoning: this
@@ -180,7 +225,11 @@ export function imageDescribeBatchDedupeKey(p: Record<string, unknown>): string 
 }
 
 export function imageDescribeBatchJobConfig(): JobTypeConfig {
-	return { ...fileJobConfig(imageDescribeBatchDedupeKey), services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER] };
+	return {
+		...fileJobConfig(imageDescribeBatchDedupeKey),
+		services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER],
+		timeoutMs: IMAGE_DESCRIBE_BATCH_TIMEOUT_MS,
+	};
 }
 
 export function searchFileJobConfig(): JobTypeConfig {
