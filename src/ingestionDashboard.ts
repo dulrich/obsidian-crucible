@@ -10,7 +10,7 @@ import { IGNORED_IDS_NOTE } from './orchestration/utils/ignoredIds';
 import { RemoteVideo } from './orchestration/utils/youtube';
 import { RemotePost } from './orchestration/utils/blogs';
 import { blogMetadataRoot } from './orchestration/utils/blogsApi';
-import type { EnrichmentQueueEntry } from './orchestration/EnrichmentQueueAdapter';
+import { ENRICHMENT_JOB_TYPE } from './orchestration/jobTypeConfig';
 import type { DashboardHost, SectionContext, SectionId } from './ingestion/render/types';
 import { renderUnprocessedClippings } from './ingestion/sections/clippings';
 import { renderUnrefinedTranscripts } from './ingestion/sections/transcripts';
@@ -179,7 +179,11 @@ export class IngestionDashboardUI {
 			this.app.metadataCache.offref(ref);
 		}
 		this.eventRefs.length = 0;
-		this.plugin.enrichmentQueue?.setAutoSource(null);
+		// The enrichment auto-source closes over this dashboard's row cache, so it must
+		// not outlive the dashboard. Clearing the SOURCE (not the enabled flag) is the
+		// point: the user's Auto-enqueue preference is persisted and survives, there is
+		// simply nothing to pull candidates from while no dashboard is mounted.
+		this.plugin.orchestrator?.setAutoSource(ENRICHMENT_JOB_TYPE, null);
 		this.intake.clear();
 		this.sections.clear();
 		this.relevantSignatures.clear();
@@ -231,14 +235,16 @@ export class IngestionDashboardUI {
 		// reason 'structural' = vault create/delete/rename (can change everything);
 		// 'meta' = metadataCache 'changed' (fires per keystroke — gated below).
 		const route = (path: string, reason: 'meta' | 'structural') => {
-			// P1: job files are real vault notes under orchestrationQueueRoot
-			// (JobStore.ts's inbox/running/done/failed/cancelled all live directly
-			// under this root), so every enqueue (create), claim/settle (rename —
-			// dispatched TWICE, old+new path), and clear hits this listener. No
-			// dashboard section reads job files; queue-driven UI updates arrive via
-			// the 'orchestration-queue-updated' / 'enrichment-queue-updated' bus
-			// events below, which already have their own gated listeners. Bail before
-			// any other branch so queue churn costs nothing here.
+			// P1: job files USED to be real vault notes under orchestrationQueueRoot
+			// (inbox/running/done/failed/cancelled all lived directly under this root),
+			// so every enqueue (create), claim/settle (rename — dispatched TWICE, old+new
+			// path), and clear hit this listener and cost five full-vault scans. thq WP-8
+			// moved the queue into the plugin database, so no new event can arrive from
+			// here — but the folder survives as a frozen archive of ~20k notes until the
+			// user deletes it, and deleting it fires one event per note. The guard is
+			// therefore kept, and is if anything more load-bearing on that one day than it
+			// was in steady state. Queue UI updates arrive via the
+			// 'orchestration-queue-updated' bus event, which has its own gated listener.
 			const queueRoot = this.plugin.settings.orchestrationQueueRoot;
 			if (queueRoot && (path === queueRoot || path.startsWith(`${queueRoot}/`))) return;
 
@@ -338,12 +344,11 @@ export class IngestionDashboardUI {
 				else { this.markDirty('youtubeIntake'); this.markDirty('uncapturedVideos'); }
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => this.markDirty('uncapturedVideos')));
-			this.disposers.push(bus.on('enrichment-queue-updated', () => {
-				this.markDirty('queueMonitor');
-				// Metadata-fetch jobs live in the enrichment (memory) queue now, so the
-				// "captures without metadata" badges track this event, not the file queue.
-				this.markDirty('youtubeWithoutMetadata');
-			}));
+			// thq WP-8: the separate 'enrichment-queue-updated' listener is gone with the
+			// memory queue that emitted it. Nothing is lost — metadata fetches are ordinary
+			// jobs now, so they emit 'orchestration-queue-updated', and that listener
+			// already marked the identical pair of sections. Having the db backend emit
+			// both events instead would have been strictly more code for the same result.
 			this.disposers.push(bus.on('orchestration-queue-updated', () => {
 				this.markDirty('queueMonitor');
 				this.markDirty('youtubeWithoutMetadata');
@@ -500,5 +505,4 @@ export class IngestionDashboardUI {
 }
 
 // Re-export for re-use elsewhere if needed.
-export type { EnrichmentQueueEntry };
 export type { BlogOutcome, YoutubeChannelOutcome, RemoteVideo, RemotePost };

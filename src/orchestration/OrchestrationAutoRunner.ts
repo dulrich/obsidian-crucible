@@ -12,7 +12,7 @@ const INITIAL_FILE_DRAIN_DELAY_MS = 5000;
 /**
  * The guaranteed wake.
  *
- * Recovery used to hang on `FileJobBackend.scheduleRetryWake` — ONE `setTimeout` per
+ * Recovery used to hang on the backend's own `scheduleRetryWake` — ONE `setTimeout` per
  * backend that every new deferral *replaced*, firing a kick through an optional chain
  * (`plugin.orchestrationAutoRunner?.kickDrainType`). Lose that timer (a later deferral
  * with a longer delay overwrites it, the optional chain is nullish during teardown, a
@@ -30,8 +30,9 @@ export const SERVICE_HEALTH_TICK_MS = 60_000;
 // `maxParallel` workers, each spaced by the type's shared MinIntervalGate, with a
 // global Semaphore bounding total in-flight jobs across all types. Every type
 // auto-drains only when the queue-wide Enabled switch is on and the type's own
-// per-type auto-run flag is set; memory types (folded enrichment) additionally kick
-// their own drains on queue changes. See autorunGate.ts for the gate model.
+// per-type auto-run flag is set; a type declaring `JobTypeConfig.drainsWithoutAutorun`
+// (enrichment) additionally skips the initial drain delay. See autorunGate.ts for the
+// gate model.
 export class OrchestrationAutoRunner {
 	private disposed = false;
 	private unsubscribe: (() => void) | null = null;
@@ -93,14 +94,14 @@ export class OrchestrationAutoRunner {
 		this.healthTimer = null;
 	}
 
-	// Manual "Run next": execute a single file-backed job regardless of autorun.
+	// Manual "Run next": execute a single queued job regardless of autorun.
 	async runOnce(): Promise<void> {
 		if (this.disposed) return;
 		await this.orchestrator.runNext();
 	}
 
 	// Manual "Run" of one specific queued job, ignoring the auto-run gate: claims and
-	// runs exactly the job identified by `key` (file job id / memory entry key),
+	// runs exactly the job identified by `key` (the job id),
 	// reusing the backend claim guards so it can't double-run a job a drain already
 	// took. Bounded by the global semaphore; no per-type pacing (one-shot user intent).
 	async runJob(type: JobType, key: string): Promise<RunOutcome> {
@@ -131,14 +132,14 @@ export class OrchestrationAutoRunner {
 	//
 	// The second `cancelJob` covers the race of a drain claiming the job in the window
 	// between the two calls. It used to be the only defense, and an incomplete one: a
-	// claim in flight (JobStore.move under the cache write-barrier can take ~2s;
-	// MemoryJobQueue's claim flip is near-instant but not provably zero) is invisible
+	// claim in flight (the markdown queue's move under the cache write-barrier could
+	// take ~2s; the guarded UPDATE is near-instant but not provably zero) is invisible
 	// to *both* `running` and `queued` while it is in progress, so either `cancelJob`
 	// call landing inside that window still answered 'not-running' for a job that then
-	// visibly started — the caller was left with 'not-found'. Both backends'
-	// `cancelJob` now wait out an in-flight claim before answering (see `claiming` on
-	// FileJobBackend / MemoryJobBackend), so *either* call here can catch the race
-	// honestly; the second call remains as the belt-and-suspenders for a claim that
+	// visibly started — the caller was left with 'not-found'. `cancelJob` now waits out
+	// an in-flight claim before answering (see `claiming` on DbJobBackend), so *either*
+	// call here can catch the race honestly; the second call remains as the
+	// belt-and-suspenders for a claim that
 	// starts strictly after the first `cancelJob` already returned.
 	async stopJob(type: JobType, key: string): Promise<StopJobOutcome> {
 		const running = await this.orchestrator.cancelJob(type, key);
@@ -201,8 +202,8 @@ export class OrchestrationAutoRunner {
 	}
 
 	// The auto-run gate: every type drains only when the queue-wide Enabled switch is
-	// on and the type's own per-type auto-run flag is set (memory types don't wait on
-	// the initial file-drain delay).
+	// on and the type's own per-type auto-run flag is set (a drainsWithoutAutorun type
+	// additionally doesn't wait out the initial drain delay).
 	private shouldDrain(type: JobType): boolean {
 		return computeShouldDrain({
 			queueEnabled: this.plugin.settings.orchestrationQueueEnabled !== false,
@@ -251,11 +252,13 @@ export class OrchestrationAutoRunner {
 			// token, which is why it sits immediately before the claim.
 			if (!manual && !this.orchestrator.servicesHealthyFor(type)) return;
 
-			// Memory types know precisely when they are empty (and can refill); file
-			// types report "maybe" (hasPending === true), so this block is a no-op for
-			// them and the actual emptiness check is the claim inside runNextOfType.
+			// `hasPending` is exact (one indexed COUNT(*)), so an empty type is a real
+			// answer rather than the markdown queue's "maybe" — which is what makes the
+			// auto-source refill worth attempting here: the queue is genuinely drained,
+			// so this is exactly when the source should be asked for more. `refill` is a
+			// no-op for the types (all but enrichment) that have no source registered.
 			if (!this.orchestrator.hasPending(type)) {
-				this.orchestrator.refillMemory(type);
+				await this.orchestrator.refill(type);
 				if (!this.orchestrator.hasPending(type)) {
 					// The servicesHealthyFor call above may have just acquired a half-open
 					// probe token on the promise of a claim that turned out not to exist — no

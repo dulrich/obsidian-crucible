@@ -1,5 +1,4 @@
 import type CruciblePlugin from '../main';
-import type { JobStore } from './JobStore';
 import type { JobTypeConfig } from './jobTypeConfig';
 import type { JobStatus, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
 import type { Workflow, WorkflowContext } from './workflows/Workflow';
@@ -19,20 +18,23 @@ import { logError } from '../log';
 export type RunOutcome = 'ran' | 'empty' | 'disabled' | 'blocked';
 
 /**
- * One persistence strategy for a registered job type. `FileJobBackend` (durable,
- * markdown-backed) and `MemoryJobBackend` (transient, in-memory) implement this so
- * the Orchestrator and the autorun drain dispatch to a backend instead of branching
- * on `config.persistence` in every method.
+ * One persistence strategy for a registered job type. `DbJobBackend` (durable,
+ * SQLite-backed) is the only implementation since thq WP-8 retired the markdown
+ * `FileJobBackend` and the in-memory `MemoryJobBackend`; the interface stays because
+ * it is what lets the Orchestrator and the autorun drain dispatch to a backend instead
+ * of branching on `config.persistence` in every method.
  */
 export interface JobBackend {
-	/** True when the type drains even with the autorun toggle off (memory types). */
+	/** True when the type drains even with its per-type auto-run toggle off — the
+	 * enrichment contract, now `JobTypeConfig.drainsWithoutAutorun` rather than a
+	 * property of a whole backend class. */
 	readonly drainsWithoutAutorun: boolean;
 	/** Enqueue a job; returns the (real or synthetic) job, or null if rejected. */
 	enqueue(params: Record<string, unknown>, options?: OrchestrationEnqueueOptions): Promise<OrchestrationJob | null>;
 	/** Claim and run at most one job, reporting the outcome to the drain loop. */
 	runNext(): Promise<RunOutcome>;
 	/**
-	 * Claim and run one specific queued job by key (file job id / memory entry key),
+	 * Claim and run one specific queued job by key (the job id),
 	 * bypassing the auto-run gate. Reuses the same claim guard as the drain, so it
 	 * cannot double-run a job a worker already claimed. `empty` if not found/claimable.
 	 */
@@ -70,10 +72,9 @@ export interface JobBackend {
 	 * work that has not started. Takes the same claim guard the drain takes, so a job
 	 * can never be retired out from under a worker that is about to run it.
 	 *
-	 * `'failed'` is the case worth keeping distinct: `JobStore.move` rolls its rename
-	 * back and rethrows when the frontmatter write fails, so a throw means the job
-	 * *stayed queued*. The caller must not report success — and must not report it as
-	 * missing either, because it is still sitting in the queue.
+	 * `'failed'` is the case worth keeping distinct: the store refused the write, so the
+	 * job *stayed queued*. The caller must not report success — and must not report it
+	 * as missing either, because it is still sitting in the queue.
 	 *
 	 * Deliberately does NOT emit `orchestration-queue-updated`; see `clearQueued`.
 	 */
@@ -88,28 +89,27 @@ export interface JobBackend {
 	 *    happens to be rendering (the Queue Monitor caps its table at 100 rows while
 	 *    a search rebuild enqueues hundreds of jobs).
 	 *  * It emits **nothing**. `orchestration-queue-updated` triggers a full
-	 *    `listFolder` re-read in every listener plus `OrchestrationAutoRunner.kickAll()`,
+	 *    queue re-read in every listener plus `OrchestrationAutoRunner.kickAll()`,
 	 *    so a per-item emit over a several-hundred-job clear is that many re-reads and
 	 *    that many kicks. The Orchestrator emits once for the whole operation instead.
 	 */
 	clearQueued(): Promise<number>;
-	/** Whether work is (or might be) waiting. File types answer "maybe" (always true). */
+	/** Whether work is waiting — one indexed COUNT(*) over this type's queued rows. */
 	hasPending(): boolean;
-	/** Pull fresh candidates in (memory types only); no-op otherwise. */
-	refill(): void;
 }
 
 /**
  * WP-7 seam: backend-level list/count/progress queries for ONE job type, so the
- * reach-around consumers (queue monitor row source, intake buttons,
- * `SearchJobProgress`) can move off direct `JobStore`/`SqliteJobStore` access without
- * branching on persistence kind. Implemented by `FileJobBackend` (delegates to
- * `JobStore.listFolder` + a JS filter/slice — file types die in WP-8, so this isn't
- * optimized, per the queue-db investigation) and `DbJobBackend` (already-indexed SQL;
- * `list`/`count`/`setProgress` predate this interface — see the WP-6 report's "The API
- * WP-7 consumes"). Deliberately NOT implemented by `MemoryJobBackend`: the queue
- * monitor renders memory rows through its own `enrichmentQueue` adapter, untouched by
- * this seam.
+ * reach-around consumers (queue monitor row source, intake buttons, the enrichment
+ * badges, `SearchJobProgress`) read through a backend rather than a storage layer.
+ * Implemented by `DbJobBackend` over already-indexed SQL — `list`/`count`/`setProgress`
+ * predate this interface (see the WP-6 report's "The API WP-7 consumes").
+ *
+ * Kept separate from `JobBackend` rather than folded into it now that there is one
+ * implementation: `JobBackend` is the *lifecycle* contract the drain dispatches on,
+ * this is the *query* contract the UI reads through, and a future backend could
+ * legitimately implement the first without the second (`hasJobQuerySeam` is what makes
+ * that answerable instead of a crash).
  *
  * Return types are `Promise<X> | X` rather than a bare `Promise<X>`: the DB backend's
  * node:sqlite calls are synchronous, and forcing them into real Promises would be a
@@ -119,8 +119,7 @@ export interface JobBackend {
  * `await`ing a non-Promise value resolves it immediately.
  */
 export interface JobQuerySeam {
-	/** This type's rows in claim order. `limit`/`offset` are a real SQL LIMIT on the DB
-	 * backend; the file backend reads the whole folder then slices in JS. */
+	/** This type's rows in claim order. `limit`/`offset` map to a real SQL LIMIT. */
 	list(status: JobStatus, options?: { limit?: number; offset?: number }): Promise<OrchestrationJob[]> | OrchestrationJob[];
 	/** How many of this type sit in any of `statuses`. */
 	count(statuses: JobStatus[]): Promise<number> | number;
@@ -129,9 +128,8 @@ export interface JobQuerySeam {
 	setProgress(id: string, message: string): Promise<void> | void;
 }
 
-/** Duck-typed rather than an `instanceof` check — mirrors `resolveCountsSource`'s
- * existing style in this file. A backend either carries the WP-7 seam (file, db) or
- * doesn't (memory). */
+/** Duck-typed rather than an `instanceof` check, so a backend declares the seam by
+ * carrying its methods rather than by inheriting from anything. */
 export function hasJobQuerySeam(backend: JobBackend): backend is JobBackend & JobQuerySeam {
 	const candidate = backend as Partial<JobQuerySeam>;
 	return typeof candidate.list === 'function'
@@ -149,62 +147,23 @@ export function hasJobQuerySeam(backend: JobBackend): backend is JobBackend & Jo
  * the event, and the wire payload it produces is unchanged
  * (`{ queued: number, running: number }`).
  *
- * Async on purpose: the file implementation is two awaited `listFolder` passes, and
- * flattening it to a sync shape would mean changing what the file path counts (its
- * cheap sync alternative, `countFolder`, counts folder *children* rather than parsed
- * job files).
+ * Still async after the cutover even though `dbQueueCountsSource` answers synchronously:
+ * the emit path is already async end-to-end, and a counts source is exactly the kind of
+ * thing a future backend (a remote queue, say) would need to await.
  */
 export interface QueueCountsSource {
 	queueCounts(): Promise<{ queued: number; running: number }>;
 }
 
-/**
- * What the emit helpers accept. The `JobStore` arm is a transitional convenience so
- * every existing call site that already holds the file store (`FileJobBackend`,
- * `Orchestrator`, `failedJobRepair`, `SearchIndexWorkflow`) keeps compiling and
- * behaving identically — it is adapted to a `QueueCountsSource` on the way in. When the
- * file backend is deleted (WP-8) this union collapses to `QueueCountsSource`.
- */
-export type QueueCountsProvider = QueueCountsSource | JobStore;
-
-// Memoized per JobStore so the adapter's *identity* is stable: the coalescer below is
-// keyed on the resolved source, and a fresh adapter object per call would give every
-// emit its own window (i.e. no coalescing at all).
-const fileCountsSources = new WeakMap<object, QueueCountsSource>();
-
-/** The file queue's counts, exactly as `emitQueueChanged` derived them before the
- * seam existed: one `listFolder` pass per active bucket, in parallel. */
-export function fileQueueCountsSource(store: JobStore): QueueCountsSource {
-	const existing = fileCountsSources.get(store);
-	if (existing) return existing;
-	const source: QueueCountsSource = {
-		async queueCounts() {
-			const [queued, running] = await Promise.all([
-				store.listFolder('queued'),
-				store.listFolder('running'),
-			]);
-			return { queued: queued.length, running: running.length };
-		},
-	};
-	fileCountsSources.set(store, source);
-	return source;
-}
-
-function resolveCountsSource(provider: QueueCountsProvider): QueueCountsSource {
-	const candidate = provider as QueueCountsSource;
-	if (typeof candidate.queueCounts === 'function') return candidate;
-	return fileQueueCountsSource(provider as JobStore);
-}
-
 // The single "the queue changed" emit, with the current bucket counts.
-// Exported (rather than staying private to FileJobBackend) because bulk operations
+// Exported (rather than staying private to the backend) because bulk operations
 // have to emit exactly once for the whole batch: every listener answers this event
 // with a full re-read of the queue, and the autorunner answers it with kickAll().
-export async function emitQueueChanged(plugin: CruciblePlugin, source: QueueCountsProvider): Promise<void> {
+export async function emitQueueChanged(plugin: CruciblePlugin, source: QueueCountsSource): Promise<void> {
 	const bus = plugin.ingestionEvents;
 	if (!bus) return;
 	try {
-		const counts = await resolveCountsSource(source).queueCounts();
+		const counts = await source.queueCounts();
 		bus.emit('orchestration-queue-updated', { queued: counts.queued, running: counts.running });
 	} catch (err) {
 		logError('failed to emit orchestration-queue-updated', err);
@@ -214,11 +173,12 @@ export async function emitQueueChanged(plugin: CruciblePlugin, source: QueueCoun
 /**
  * Coalescing window for the per-job queue-changed emits.
  *
- * Every `orchestration-queue-updated` costs two full `listFolder` passes here, a
- * `listFolder` re-read in each UI listener, and a `kickAll()` in the autorunner that
- * can cost another `listFolder` per enabled type. At ~2 emits per job (claim +
- * settle) that is quadratic in queue depth: draining the 2,022-job requeue cohort
- * ran into millions of awaited `readJob` calls on the main thread.
+ * Every `orchestration-queue-updated` costs a counts query here, a full queue re-read in
+ * each UI listener, and a `kickAll()` in the autorunner that can cost another query per
+ * enabled type. At ~2 emits per job (claim + settle) that is quadratic in queue depth:
+ * draining the 2,022-job requeue cohort ran into millions of awaited per-job frontmatter
+ * reads on the main thread back when the queue was markdown. The counts are cheap now,
+ * but the listener-side re-read and the kick fan-out are not, so the window stays.
  */
 export const QUEUE_CHANGE_COALESCE_MS = 250;
 
@@ -228,10 +188,9 @@ interface QueueChangeCoalescer {
 }
 
 // Per counts source (i.e. per queue), so two backends draining different types out of
-// the same queue share one window rather than each getting its own. `fileQueueCountsSource`
-// memoizes its adapter per JobStore and `DbJobBackend` memoizes its own per SqliteJobStore,
-// so "same queue" still resolves to one key exactly as it did when this was keyed on the
-// JobStore itself.
+// the same queue share one window rather than each getting its own. `dbQueueCountsSource`
+// memoizes its adapter per SqliteJobStore, so "same queue" resolves to one key exactly
+// as it did when this was keyed on the JobStore itself.
 const queueChangeCoalescers = new WeakMap<QueueCountsSource, QueueChangeCoalescer>();
 
 /**
@@ -247,8 +206,7 @@ const queueChangeCoalescers = new WeakMap<QueueCountsSource, QueueChangeCoalesce
  * `removeQueuedJob` emit exactly once for the whole operation, which is a stronger
  * guarantee than coalescing and is asserted by tests.
  */
-export function scheduleQueueChanged(plugin: CruciblePlugin, provider: QueueCountsProvider): void {
-	const source = resolveCountsSource(provider);
+export function scheduleQueueChanged(plugin: CruciblePlugin, source: QueueCountsSource): void {
 	let state = queueChangeCoalescers.get(source);
 	if (!state) {
 		state = { lastEmitAt: 0, timer: null };

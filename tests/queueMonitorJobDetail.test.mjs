@@ -105,7 +105,7 @@ test('formatJobDetail renders target, progress, error, failureKind and pretty-pr
 	assert.match(text, /Params:\n\{\n {2}"paths": \[\n {4}"a\.md",\n {4}"b\.md"\n {2}\],\n {2}"batchIndex": 2\n\}/);
 });
 
-test('formatJobDetail appends notes last, only when present (db rows only today — see OrchestrationJob.notes)', () => {
+test('formatJobDetail appends notes last, only when present', () => {
 	const withoutNotes = formatJobDetail(row());
 	assert.doesNotMatch(withoutNotes, /Notes:/);
 
@@ -113,12 +113,24 @@ test('formatJobDetail appends notes last, only when present (db rows only today 
 	assert.match(withNotes, /Notes:\nline one\nline two$/);
 });
 
-test('formatJobDetail is exported for the Details button — STRUCTURAL: gated to file/db rows only', () => {
-	// Memory rows (youtube_metadata_fetch) already show their identifying fields
-	// directly in the table and carry no params/notes/failureKind worth a modal — this
-	// pins the gate so a future edit can't silently drop it (or silently widen it to
-	// memory rows, which would open the modal on a shape formatJobDetail never sees
-	// today).
+test('formatJobDetail is exported for the Details button — STRUCTURAL: rendered for every row, ungated', () => {
+	// thq WP-8: the button used to be gated to `r.source === 'file'`, because the other
+	// row source (in-memory enrichment entries) carried no params/notes/failureKind for
+	// the modal to show. There is one row source now and every row is a real job, so the
+	// gate is gone — and its absence is worth pinning, because re-introducing a
+	// per-row-source condition here would silently hide the only remaining surface a
+	// db-backed job has (there is no job note to open any more).
 	const src = readFileSync('src/ingestion/sections/queueMonitor.ts', 'utf8');
-	assert.match(src, /if \(r\.source === 'file'\) \{\s*\n\s*const details = td\.createEl\('button', \{ text: 'Details' \}\);/);
+	assert.doesNotMatch(src, /r\.source/, 'QueueRow has no `source` discriminant post-cutover');
+	assert.match(src, /const details = td\.createEl\('button', \{ text: 'Details' \}\);/);
+});
+
+test('STRUCTURAL: the queue monitor reads every row through the Orchestrator seam, never a store', () => {
+	// The reach-around this whole track exists to close. Both statuses go through
+	// `orchestrator.listJobs` with a real query-level cap; nothing here touches a
+	// storage layer, and no second row source is merged in.
+	const src = readFileSync('src/ingestion/sections/queueMonitor.ts', 'utf8');
+	assert.match(src, /orchestrator\.listJobs\('running', \{ limit: QUEUE_MONITOR_RENDER_LIMIT \}\)/);
+	assert.match(src, /orchestrator\.listJobs\('queued', \{ limit: QUEUE_MONITOR_RENDER_LIMIT \}\)/);
+	assert.doesNotMatch(src, /jobStore|listFolder|enrichmentQueue/);
 });

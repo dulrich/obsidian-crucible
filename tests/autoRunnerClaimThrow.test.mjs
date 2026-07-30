@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -14,6 +15,11 @@ import esbuild from 'esbuild';
 // until some unrelated later event) and surfaced as an unhandled rejection at the
 // `void this.drainType(...)` call site. The fix contains the throw inside the worker's
 // own try/catch so the drain — and its redrain replay — completes normally.
+//
+// thq WP-8 swapped the fake markdown JobStore for a real `:memory:` SqliteJobStore; the
+// injected claim throw (the thing under test) is unchanged.
+globalThis.require = createRequire(import.meta.url);
+
 const outdir = path.join(tmpdir(), 'obsidian-crucible-autorunner-claim-throw-tests');
 const outfile = path.join(outdir, 'autoRunnerClaimThrow.mjs');
 
@@ -25,6 +31,8 @@ await esbuild.build({
 		contents: [
 			"export { Orchestrator } from './src/orchestration/Orchestrator';",
 			"export { OrchestrationAutoRunner } from './src/orchestration/OrchestrationAutoRunner';",
+			"export { SqliteJobStore } from './src/orchestration/db/SqliteJobStore';",
+			"export { openJobsDb } from './src/orchestration/db/sqlite';",
 		].join('\n'),
 		resolveDir: '.',
 		sourcefile: 'autorunner-claim-throw-test-entry.ts',
@@ -34,6 +42,7 @@ await esbuild.build({
 	platform: 'node',
 	format: 'esm',
 	target: 'es2020',
+	external: ['node:sqlite'],
 	plugins: [{
 		name: 'obsidian-test-stub',
 		setup(build) {
@@ -62,46 +71,22 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { Orchestrator, OrchestrationAutoRunner } = await import(pathToFileURL(outfile).href);
+const { Orchestrator, OrchestrationAutoRunner, SqliteJobStore, openJobsDb } = await import(pathToFileURL(outfile).href);
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 const settle = async (turns = 12) => { for (let i = 0; i < turns; i++) await flush(); };
 
-const STORE_FOLDERS = {
-	queued: 'queue/inbox',
-	running: 'queue/running',
-	done: 'queue/done',
-	failed: 'queue/failed',
-	cancelled: 'queue/cancelled',
-};
+function newStore() {
+	return new SqliteJobStore(openJobsDb(':memory:'));
+}
 
-function makeStore(initial = {}) {
-	const folders = { queued: [...(initial.queued ?? [])], running: [], done: [], failed: [], cancelled: [] };
-	return {
-		folders,
-		ensureFolders: async () => {},
-		folderForStatus: (status) => STORE_FOLDERS[status],
-		listFolder: async (status) => [...(folders[status] ?? [])],
-		countFolder: () => 0,
-		appendNotes: async () => {},
-		setError: async () => {},
-		setFailureKind: async () => {},
-		setOutputPaths: async () => {},
-		setPartial: async () => {},
-		setProgress: async () => {},
-		setDeferred: async () => {},
-		move: async (file, job, toStatus) => {
-			for (const bucket of Object.values(folders)) {
-				const idx = bucket.findIndex(e => e.file === file);
-				if (idx >= 0) bucket.splice(idx, 1);
-			}
-			const name = file.path.split('/').pop();
-			file.path = `${STORE_FOLDERS[toStatus]}/${name}`;
-			const moved = { file, job: { ...job, status: toStatus } };
-			folders[toStatus].push(moved);
-			return moved;
-		},
-	};
+let seedCounter = 0;
+function seedQueued(store, ids) {
+	for (const id of ids) {
+		seedCounter += 1;
+		store.insert({ id, type: FILE_TYPE, created: `2026-01-01T00:00:00.${String(seedCounter).padStart(3, '0')}Z`, params: {} });
+	}
+	return store;
 }
 
 function makePlugin() {
@@ -134,17 +119,13 @@ function makeRunner(plugin, orchestrator) {
 }
 
 const FILE_TYPE = 'search_upsert_file';
-const FILE_CONFIG = { persistence: 'file', maxParallel: 1, minIntervalMs: 0 };
-
-function queuedEntry(id) {
-	return { file: { path: `queue/inbox/${id}.md` }, job: { id, type: FILE_TYPE, status: 'queued', params: {} } };
-}
+const FILE_CONFIG = { persistence: 'db', maxParallel: 1, minIntervalMs: 0 };
 
 test('a claim throw ends the worker iteration without crashing the drain, and is logged', async () => {
 	const ran = [];
 	const plugin = makePlugin();
-	const store = makeStore({ queued: [queuedEntry('job-a')] });
-	const orchestrator = new Orchestrator(plugin, store);
+	const store = seedQueued(newStore(), ['job-a']);
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
 	orchestrator.register(FILE_TYPE, { async run(job) { ran.push(job.id); return { status: 'done' }; } }, FILE_CONFIG);
 	// Simulate the claim path itself throwing — e.g. the JobStore.move claim-path fault —
 	// rather than a job-level failure (which the backend already turns into a settled
@@ -180,8 +161,8 @@ test('a claim throw ends the worker iteration without crashing the drain, and is
 test('a claim throw does not swallow a kick that lands mid-drain: the redrain replay still runs', async () => {
 	const ran = [];
 	const plugin = makePlugin();
-	const store = makeStore({ queued: [] });
-	const orchestrator = new Orchestrator(plugin, store);
+	const store = newStore();
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
 	orchestrator.register(FILE_TYPE, { async run(job) { ran.push(job.id); return { status: 'done' }; } }, FILE_CONFIG);
 
 	const realRunNextOfType = orchestrator.runNextOfType.bind(orchestrator);
@@ -204,7 +185,7 @@ test('a claim throw does not swallow a kick that lands mid-drain: the redrain re
 		// A job arrives, and a second kick lands while the first drain is still in
 		// flight (about to hit the injected claim throw) — this is exactly the
 		// "redrainRequested" case the fix must not strand.
-		store.folders.queued.push(queuedEntry('job-mid-drain'));
+		seedQueued(store, ['job-mid-drain']);
 		runner.kickAll();
 
 		await settle(30);

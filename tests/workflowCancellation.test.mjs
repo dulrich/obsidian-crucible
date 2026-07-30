@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import esbuild from 'esbuild';
+
+// The cooperative-cancellation path end to end: the pure classification, the run
+// registry, the backend's settle mapping, the note lock unwinding, and the stale
+// sweep's refusal to resurrect a job that is still winding down.
+//
+// thq WP-8 rewrote the harness, not the assertions: these drove a fake markdown
+// `JobStore` (plus, for four of them, the in-memory backend) and now drive a real
+// `SqliteJobStore` on `:memory:` through the one remaining backend. Nothing was
+// dropped — the four memory-backend tests migrated onto `youtube_metadata_fetch`,
+// which is a durable type now, so they still pin the enrichment queue's cancellation
+// behavior specifically.
+
+globalThis.require = createRequire(import.meta.url);
 
 const outdir = path.join(tmpdir(), 'obsidian-crucible-cancellation-tests');
 const outfile = path.join(outdir, 'cancellation.mjs');
@@ -12,18 +26,19 @@ const outfile = path.join(outdir, 'cancellation.mjs');
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 
-// One bundle over the whole cancellation path — the seam, both backends, the
-// orchestrator's stale sweep, and the real NoteLockManager — so the tests exercise
-// the wiring rather than a re-implementation of it.
+// One bundle over the whole cancellation path — the seam, the backend, the
+// orchestrator's stale sweep, the storage layer, and the real NoteLockManager — so the
+// tests exercise the wiring rather than a re-implementation of it.
 await esbuild.build({
 	stdin: {
 		contents: [
 			"export * from './src/orchestration/cancellation';",
 			"export * from './src/orchestration/JobBackend';",
-			"export { FileJobBackend } from './src/orchestration/FileJobBackend';",
-			"export { MemoryJobBackend } from './src/orchestration/MemoryJobBackend';",
+			"export { DbJobBackend } from './src/orchestration/DbJobBackend';",
 			"export { Orchestrator } from './src/orchestration/Orchestrator';",
 			"export { NoteLockManager } from './src/orchestration/NoteLockManager';",
+			"export { SqliteJobStore } from './src/orchestration/db/SqliteJobStore';",
+			"export { openJobsDb } from './src/orchestration/db/sqlite';",
 		].join('\n'),
 		resolveDir: '.',
 		sourcefile: 'cancellation-test-entry.ts',
@@ -33,6 +48,7 @@ await esbuild.build({
 	platform: 'node',
 	format: 'esm',
 	target: 'es2020',
+	external: ['node:sqlite'],
 	plugins: [{
 		name: 'obsidian-test-stub',
 		setup(build) {
@@ -62,10 +78,11 @@ await esbuild.build({
 });
 
 const {
-	FileJobBackend,
-	MemoryJobBackend,
+	DbJobBackend,
 	NoteLockManager,
 	Orchestrator,
+	SqliteJobStore,
+	openJobsDb,
 	JobCancelledError,
 	RunningJobRegistry,
 	applyCancellation,
@@ -81,66 +98,41 @@ function deferred() {
 	return { promise, resolve };
 }
 
-// A minimal in-memory JobStore: enough surface for FileJobBackend.execute() to move
-// a job between buckets and for Orchestrator.scan() to sweep them.
-function makeStore(initial = {}) {
-	const folders = {
-		queued: [...(initial.queued ?? [])],
-		running: [...(initial.running ?? [])],
-		done: [],
-		failed: [],
-		cancelled: [],
-	};
-	const notes = [];
-	const errors = [];
-	return {
-		folders,
-		notes,
-		errors,
-		ensureFolders: async () => {},
-		listFolder: async (status) => folders[status] ?? [],
-		countFolder: (status) => (folders[status] ?? []).length,
-		appendNotes: async (file, lines) => { notes.push({ file, lines }); },
-		setError: async (file, message) => { errors.push({ file, message }); },
-		setOutputPaths: async () => {},
-		setPartial: async () => {},
-		setDeferred: async () => {},
-		setProgress: async () => {},
-		move: async (file, job, toStatus) => {
-			for (const bucket of Object.values(folders)) {
-				const idx = bucket.findIndex(e => e.file === file);
-				if (idx >= 0) bucket.splice(idx, 1);
-			}
-			const moved = { file, job: { ...job, status: toStatus } };
-			folders[toStatus].push(moved);
-			return moved;
-		},
-	};
+function newStore() {
+	return new SqliteJobStore(openJobsDb(':memory:'));
+}
+
+function seedQueued(store, id, type = TEST_TYPE) {
+	store.insert({ id, type, created: new Date().toISOString(), params: {} });
+	return id;
 }
 
 function makePlugin(overrides = {}) {
 	return {
 		settings: {
 			orchestrationEnabled: true,
+			orchestrationQueueEnabled: true,
 			orchestrationAutorunTimeoutSeconds: 0,
 			orchestrationRoutineNoticesEnabled: {},
+			orchestrationJobRetentionDays: 30,
 			...(overrides.settings ?? {}),
 		},
 		ingestionEvents: null,
 		orchestrationAutoRunner: null,
-		app: { vault: { getAbstractFileByPath: () => null } },
+		app: { vault: { getAbstractFileByPath: () => null }, workspace: { onLayoutReady: () => {} } },
 		...overrides,
 	};
 }
 
-// `command_run` is the type used throughout: FileJobBackend.isWorkflowEnabled has no
+// `command_run` is the type used throughout: DbJobBackend.isWorkflowEnabled has no
 // settings toggle for it, so it is enabled by default and the tests exercise the
 // cancellation path rather than the enablement gate.
 const TEST_TYPE = 'command_run';
-const TEST_CONFIG = { persistence: 'file', minIntervalMs: 0, maxParallel: 1 };
+const ENRICHMENT_TYPE = 'youtube_metadata_fetch';
+const TEST_CONFIG = { persistence: 'db', minIntervalMs: 0, maxParallel: 1 };
 
-function fileBackend(workflow, { store = makeStore(), plugin = makePlugin() } = {}) {
-	const backend = new FileJobBackend(plugin, store, TEST_TYPE, TEST_CONFIG, workflow);
+function backendFor(workflow, { store = newStore(), plugin = makePlugin(), type = TEST_TYPE, config = TEST_CONFIG } = {}) {
+	const backend = new DbJobBackend(plugin, store, type, config, workflow);
 	return { backend, store, plugin };
 }
 
@@ -221,12 +213,10 @@ test('a cancelled running workflow stops at its next checkpoint and settles as c
 		},
 	};
 
-	const file = { path: 'queue/running/job-1.md' };
-	const job = { id: 'job-1', type: TEST_TYPE, status: 'running', params: {} };
-	const store = makeStore({ running: [{ file, job }] });
-	const { backend } = fileBackend(workflow, { store });
+	const { backend, store } = backendFor(workflow);
+	seedQueued(store, 'job-1');
 
-	const execution = runExecute(backend, { file, job });
+	const execution = backend.runJob('job-1');
 
 	await reachedCheckpoint.promise;
 	const cancelling = backend.cancelJob('job-1');
@@ -237,9 +227,9 @@ test('a cancelled running workflow stops at its next checkpoint and settles as c
 	await execution;
 
 	assert.deepEqual(iterations, [0], 'the loop stopped at the checkpoint after the one in flight');
-	assert.equal(store.folders.cancelled.length, 1, 'the job landed in the cancelled bucket');
-	assert.equal(store.folders.failed.length, 0, 'and emphatically not in failed');
-	assert.equal(store.folders.cancelled[0].job.status, 'cancelled');
+	assert.equal(store.count('cancelled'), 1, 'the job landed in the cancelled bucket');
+	assert.equal(store.count('failed'), 0, 'and emphatically not in failed');
+	assert.equal(store.get('job-1').status, 'cancelled');
 	assert.equal(backend.isCancelling('job-1'), false, 'settled, so recovery may look at it again');
 });
 
@@ -261,12 +251,10 @@ test('cancellation releases the note lock — no note is left greyed out', async
 		},
 	};
 
-	const file = { path: 'queue/running/job-lock.md' };
-	const job = { id: 'job-lock', type: TEST_TYPE, status: 'running', params: {} };
-	const store = makeStore({ running: [{ file, job }] });
-	const { backend } = fileBackend(workflow, { store });
+	const { backend, store } = backendFor(workflow);
+	seedQueued(store, 'job-lock');
 
-	const execution = runExecute(backend, { file, job });
+	const execution = backend.runJob('job-lock');
 	await inside.promise;
 	assert.equal(locks.isLocked('notes/target.md'), true);
 
@@ -277,17 +265,12 @@ test('cancellation releases the note lock — no note is left greyed out', async
 
 	assert.equal(locks.isLocked('notes/target.md'), false,
 		'the abort unwound through withLock\'s finally');
-	assert.equal(store.folders.cancelled.length, 1);
+	assert.equal(store.count('cancelled'), 1);
 });
 
 // --- 3. stale recovery must not resurrect a cancelling job ------------------
 
 test('Orchestrator.scan() does not resurrect a cancelled job that is still settling', async () => {
-	const stale = new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString();
-	const file = { path: 'queue/running/job-stale.md' };
-	const job = { id: 'job-stale', type: TEST_TYPE, status: 'running', created: stale, updated: stale, params: {} };
-	const store = makeStore({ running: [{ file, job }] });
-
 	const hold = deferred();
 	const workflow = {
 		async run(_job, ctx) {
@@ -298,26 +281,29 @@ test('Orchestrator.scan() does not resurrect a cancelled job that is still settl
 	};
 
 	const plugin = makePlugin();
-	const orchestrator = new Orchestrator(plugin, store);
+	const store = newStore();
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
 	orchestrator.register(TEST_TYPE, workflow, TEST_CONFIG);
+	seedQueued(store, 'job-stale');
 
-	const execution = runExecuteViaBackend(orchestrator, TEST_TYPE, { file, job });
+	const execution = orchestrator.runJob(TEST_TYPE, 'job-stale');
 	await flush();
+	// Backdate the claim well past the stale cutoff, so without the isRunning guard the
+	// sweep below would bounce it running → queued and the work would run a second time.
+	store.db.prepare('UPDATE jobs SET claimed_at = ? WHERE id = ?').run(Date.now() - 10 * 60 * 60 * 1000, 'job-stale');
 
 	const cancelling = orchestrator.cancelJob(TEST_TYPE, 'job-stale');
 	assert.equal(orchestrator.isCancelling(TEST_TYPE, 'job-stale'), true);
 
-	// The job is well past the stale cutoff, so without the guard this sweep would
-	// bounce it running → queued and the work would run a second time.
 	const midFlight = await orchestrator.scan({ notify: false });
 	assert.equal(midFlight.recovered, 0, 'a live, cancelling run is not stale');
-	assert.equal(store.folders.running.length, 1);
-	assert.equal(store.folders.queued.length, 0, 'never re-queued');
+	assert.equal(store.get('job-stale').status, 'running');
+	assert.equal(store.count('queued'), 0, 'never re-queued');
 
 	hold.resolve();
 	assert.equal(await cancelling, 'cancelled');
 	await execution;
-	assert.equal(store.folders.cancelled.length, 1);
+	assert.equal(store.count('cancelled'), 1);
 
 	const after = await orchestrator.scan({ notify: false });
 	assert.equal(after.cancelled, 1, 'the scan report counts the cancelled bucket');
@@ -338,12 +324,10 @@ test('a workflow with no cooperative checkpoint still terminates cleanly', async
 		},
 	};
 
-	const file = { path: 'queue/running/job-deaf.md' };
-	const job = { id: 'job-deaf', type: TEST_TYPE, status: 'running', params: {} };
-	const store = makeStore({ running: [{ file, job }] });
-	const { backend } = fileBackend(workflow, { store });
+	const { backend, store } = backendFor(workflow);
+	seedQueued(store, 'job-deaf');
 
-	const execution = runExecute(backend, { file, job });
+	const execution = backend.runJob('job-deaf');
 	await flush();
 
 	const cancelling = backend.cancelJob('job-deaf');
@@ -355,8 +339,8 @@ test('a workflow with no cooperative checkpoint still terminates cleanly', async
 	await execution;
 
 	assert.equal(observed, true, 'the signal was raised; the workflow simply never checked it');
-	assert.equal(store.folders.done.length, 1, 'completed work is recorded as done, not as cancelled');
-	assert.equal(store.folders.cancelled.length, 0);
+	assert.equal(store.count('done'), 1, 'completed work is recorded as done, not as cancelled');
+	assert.equal(store.count('cancelled'), 0);
 });
 
 test('a workflow that ignores the signal and then fails is still not filed as a failure', async () => {
@@ -369,25 +353,38 @@ test('a workflow that ignores the signal and then fails is still not filed as a 
 		},
 	};
 
-	const file = { path: 'queue/running/job-swallow.md' };
-	const job = { id: 'job-swallow', type: TEST_TYPE, status: 'running', params: {} };
-	const store = makeStore({ running: [{ file, job }] });
-	const { backend } = fileBackend(workflow, { store });
+	const { backend, store } = backendFor(workflow);
+	seedQueued(store, 'job-swallow');
 
-	const execution = runExecute(backend, { file, job });
+	const execution = backend.runJob('job-swallow');
 	await flush();
 	const cancelling = backend.cancelJob('job-swallow');
 	release.resolve();
 
 	assert.equal(await cancelling, 'cancelled');
 	await execution;
-	assert.equal(store.folders.failed.length, 0, 'a cancel must not pollute failure diagnostics');
-	assert.equal(store.folders.cancelled.length, 1);
+	assert.equal(store.count('failed'), 0, 'a cancel must not pollute failure diagnostics');
+	assert.equal(store.count('cancelled'), 1);
 });
 
-// --- the memory backend takes the same path ---------------------------------
+// --- the enrichment type takes the same path --------------------------------
+//
+// `youtube_metadata_fetch` was the in-memory queue's only type before thq WP-8, with
+// its own settle vocabulary (pending/running/done/failed/cancelled) and its own
+// backend. These four used to exercise `MemoryJobBackend`; they now exercise the same
+// durable backend as everything else, which is the point — the enrichment queue no
+// longer has a differently-behaved cancel.
 
-test('the memory backend settles a cancelled entry into the cancelled state', async () => {
+const enrichmentConfig = {
+	persistence: 'db',
+	drainsWithoutAutorun: true,
+	minIntervalMs: 0,
+	maxParallel: 1,
+	terminalRetentionMs: 60_000,
+	dedupeKey: params => String(params.key ?? ''),
+};
+
+test('the enrichment type settles a cancelled job into the cancelled state, with no error', async () => {
 	const release = deferred();
 	const workflow = {
 		async run(_job, ctx) {
@@ -396,91 +393,60 @@ test('the memory backend settles a cancelled entry into the cancelled state', as
 			return { status: 'done' };
 		},
 	};
-	const plugin = makePlugin();
-	const backend = new MemoryJobBackend(plugin, 'youtube_metadata_fetch', {
-		persistence: 'memory',
-		minIntervalMs: 0,
-		maxParallel: 1,
-		terminalRetentionMs: 60_000,
-		dedupeKey: params => String(params.key ?? ''),
-	}, workflow);
+	const { backend, store } = backendFor(workflow, { type: ENRICHMENT_TYPE, config: enrichmentConfig });
 
-	await backend.enqueue({ key: 'note:a.md' });
-	const running = backend.runJob('note:a.md');
+	const job = await backend.enqueue({ key: 'note:a.md' });
+	const running = backend.runJob(job.id);
 	await flush();
 
-	const cancelling = backend.cancelJob('note:a.md');
-	assert.equal(backend.isCancelling('note:a.md'), true);
+	const cancelling = backend.cancelJob(job.id);
+	assert.equal(backend.isCancelling(job.id), true);
 	release.resolve();
 
 	assert.equal(await cancelling, 'cancelled');
 	assert.equal(await running, 'ran');
-	assert.equal(backend.getQueue().getEntry('note:a.md').status, 'cancelled');
-	assert.equal(backend.getQueue().getEntry('note:a.md').error, undefined,
-		'cancelled entries carry no error');
+	assert.equal(store.get(job.id).status, 'cancelled');
+	assert.equal(store.get(job.id).error, undefined, 'cancelled jobs carry no error');
 });
 
-test('cancelling a pending memory entry reports not-running', async () => {
+test('cancelling a queued enrichment job reports not-running', async () => {
 	const workflow = { async run() { return { status: 'done' }; } };
-	const backend = new MemoryJobBackend(makePlugin(), 'youtube_metadata_fetch', {
-		persistence: 'memory',
-		minIntervalMs: 0,
-		maxParallel: 1,
-		dedupeKey: params => String(params.key ?? ''),
-	}, workflow);
-	await backend.enqueue({ key: 'note:b.md' });
-	assert.equal(await backend.cancelJob('note:b.md'), 'not-running',
+	const { backend } = backendFor(workflow, { type: ENRICHMENT_TYPE, config: enrichmentConfig });
+
+	const job = await backend.enqueue({ key: 'note:b.md' });
+	assert.equal(await backend.cancelJob(job.id), 'not-running',
 		'queued work is removed by a queue operation, not by an abort');
 });
 
-// --- R1: MemoryJobBackend.synthJob reports live state, not a hardcoded 'running' -
-
-test("enqueue() returns a job that reports the entry's real (queued) status", async () => {
+test("enqueue() returns a job that reports its real (queued) status", async () => {
 	const workflow = { async run() { return { status: 'done' }; } };
-	const backend = new MemoryJobBackend(makePlugin(), 'youtube_metadata_fetch', {
-		persistence: 'memory',
-		minIntervalMs: 0,
-		maxParallel: 1,
-		dedupeKey: params => String(params.key ?? ''),
-	}, workflow);
+	const { backend, store } = backendFor(workflow, { type: ENRICHMENT_TYPE, config: enrichmentConfig });
 
 	const job = await backend.enqueue({ key: 'note:c.md' });
 	assert.equal(job.status, 'queued',
-		'the entry has not been claimed yet — synthJob used to hardcode "running" for every caller');
+		'the job has not been claimed yet — the memory backend used to hardcode "running" for every caller');
 
-	// Sanity: the same entry really does flip to running once actually claimed.
-	const claimed = backend.getQueue().claimEntry('note:c.md');
-	assert.equal(claimed.status, 'running');
+	// Sanity: the same job really does flip to running once actually claimed.
+	assert.equal(store.claimById(job.id, Date.now()).status, 'running');
 });
 
-// --- R2: stopJob's claim-window honesty --------------------------------------
+// --- stopJob's claim-window honesty ------------------------------------------
 //
-// Between a drain claiming a job (removing it from `queued`) and that claim actually
-// registering the run in `running`, the job used to be invisible to both — file-side
-// this is JobStore.move's cache write-barrier window (up to ~2s), memory-side it is
-// the near-instant gap before RunningJobRegistry.begin() runs. A cancelJob() landing
-// in that window used to answer 'not-running' for a job that then visibly started.
+// Between a drain claiming a job and that claim registering the run in `running`, the
+// job used to be invisible to both, and a cancelJob() landing in that window answered
+// 'not-running' for a job that then visibly started. On the markdown queue the window
+// was JobStore.move's cache write-barrier (up to ~2s); here the claim is a synchronous
+// guarded UPDATE and `execute` reaches `running.begin()` with no await in between, so
+// the window is a single JS turn and cannot be opened from outside. The guard is kept
+// anyway (see `claiming` in DbJobBackend), because a future await inserted anywhere in
+// that path would silently reopen the bug — so the guard itself is what this pins,
+// by placing an id in the claiming map the way a claim does.
 
-test('FileJobBackend.cancelJob waits out an in-flight claim instead of answering not-running', async () => {
-	const file = { path: 'queue/queued/job-race.md' };
-	const job = { id: 'job-race', type: TEST_TYPE, status: 'queued', params: {} };
-	const store = makeStore({ queued: [{ file, job }] });
-
-	// Simulate JobStore.move's cache write-barrier: the claim (queued → running) does
-	// not land until the test explicitly releases it.
-	const moveGate = deferred();
-	const realMove = store.move;
-	store.move = async (f, j, toStatus) => {
-		await moveGate.promise;
-		return realMove(f, j, toStatus);
-	};
-
+test('cancelJob waits out an in-flight claim instead of answering not-running', async () => {
 	const workflow = { async run() { return { status: 'done' }; } };
-	const { backend } = fileBackend(workflow, { store });
+	const { backend } = backendFor(workflow);
 
-	const drain = backend.runNext(); // starts claiming; blocks inside the slowed move
-	await flush();
-	await flush();
+	backend.registerClaiming('job-race');
 
 	let cancelSettled = false;
 	const cancelling = backend.cancelJob('job-race').then(outcome => { cancelSettled = true; return outcome; });
@@ -488,22 +454,20 @@ test('FileJobBackend.cancelJob waits out an in-flight claim instead of answering
 	assert.equal(cancelSettled, false,
 		'a claim is in flight for this id; cancelJob must wait it out rather than answer immediately');
 
-	moveGate.resolve(); // let the claim land
-	const outcome = await cancelling;
-	assert.notEqual(outcome, 'not-running',
-		'the job was seconds from running; reporting not-running here is the exact lie stopJob used to tell');
-	assert.ok(outcome === 'cancelled' || outcome === 'completed',
-		`expected an honest terminal cancel outcome, got ${outcome}`);
+	// The claim lands: `execute` registers the run, then settles the claim.
+	const run = backend.running.begin('job-race');
+	backend.settleClaiming('job-race');
+	await flush();
+	assert.equal(cancelSettled, false, 'and it now waits on the RUN it just found, not on the claim');
 
-	await drain;
-	const settledCount = store.folders.running.length + store.folders.cancelled.length + store.folders.done.length;
-	assert.equal(settledCount, 1, 'the job landed somewhere real — it did not vanish mid-claim');
+	run.finish('cancelled');
+	assert.equal(await cancelling, 'cancelled',
+		'the job was a turn from running; reporting not-running here is the exact lie stopJob used to tell');
 });
 
 test('a cancelJob issued before any claim starts is unaffected — still an immediate not-running', async () => {
-	const store = makeStore({ queued: [] });
 	const workflow = { async run() { return { status: 'done' }; } };
-	const { backend } = fileBackend(workflow, { store });
+	const { backend } = backendFor(workflow);
 	assert.equal(await backend.cancelJob('nobody-claimed-this'), 'not-running');
 });
 
@@ -519,14 +483,3 @@ test('runWorkflowWithTimeout refuses to start a workflow cancelled before dispat
 	assert.equal(result.status, 'cancelled');
 	assert.equal(started, false, 'every workflow gets an entry checkpoint for free');
 });
-
-// FileJobBackend.execute is private; the drain reaches it through runJob's claim,
-// which needs a real vault. Calling it directly is the narrowest way to exercise the
-// settle path without rebuilding JobStore's folder semantics in the test.
-function runExecute(backend, moved) {
-	return backend.execute(moved);
-}
-
-function runExecuteViaBackend(orchestrator, type, moved) {
-	return orchestrator.backends.get(type).execute(moved);
-}

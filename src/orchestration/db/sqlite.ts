@@ -88,8 +88,8 @@ export const JOBS_SCHEMA_VERSION = 1;
 //   - `lane_rank` / `priority_rank`, generated VIRTUAL columns rather than stored
 //     data, taking item 1's offered option ("or computed rank columns if you rank
 //     lanes/priorities numerically"). The CASE expressions are the exact rank maps
-//     from `LANE_RANK` (`src/orchestration/lanes.ts:3-6`) and `PRIORITY_RANK`
-//     (`src/orchestration/JobStore.ts:17-21`), copied as literals rather than
+//     from `LANE_RANK` (`src/orchestration/lanes.ts:3-6`) and the priority rank the
+//     backends each keep their own copy of, copied as literals rather than
 //     computed in JS so the claim-order index can use them directly — SQLite
 //     generated columns are computed at read time, not stored, so keeping them in
 //     sync with the TS rank maps only matters if a rank map ever changes, which is

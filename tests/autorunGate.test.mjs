@@ -51,19 +51,19 @@ test('any type is idle when its per-type auto-run is off', () => {
 	}
 });
 
-test('memory type drains immediately when its per-type auto-run is on (no file-drain wait)', () => {
+test('a drainsWithoutAutorun type drains immediately when its per-type auto-run is on (no initial-drain wait)', () => {
 	assert.equal(computeShouldDrain({
 		queueEnabled: true, drainsWithoutAutorun: true, typeAutorun: true, fileDrainReady: false,
 	}), true);
 });
 
-test('file type drains when its per-type auto-run is on once the file-drain delay has elapsed', () => {
+test('an ordinary type drains when its per-type auto-run is on once the initial drain delay has elapsed', () => {
 	assert.equal(computeShouldDrain({
 		queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: true, fileDrainReady: true,
 	}), true);
 });
 
-test('file type with auto-run on still waits for the initial file-drain delay', () => {
+test('an ordinary type with auto-run on still waits out the initial drain delay', () => {
 	assert.equal(computeShouldDrain({
 		queueEnabled: true, drainsWithoutAutorun: false, typeAutorun: true, fileDrainReady: false,
 	}), false);

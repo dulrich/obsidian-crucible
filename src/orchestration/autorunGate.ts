@@ -8,9 +8,9 @@ import type { JobType } from './types';
 // One uniform rule for every job type: a type auto-drains only when the queue-wide
 // panic switch (queueEnabled) is on AND its own per-type auto-run flag is explicitly
 // true. Absent that flag it stays idle (opt-in) so nothing drains behind the user's
-// back. `drainsWithoutAutorun` no longer gates — it only distinguishes readiness:
-// memory types (the folded enrichment queue) kick their own drains immediately,
-// while file types additionally wait out the initial file-drain delay.
+// back. `drainsWithoutAutorun` (JobTypeConfig, per type) no longer gates — it only
+// distinguishes READINESS: a type declaring it (enrichment) kicks its own drains
+// immediately, while every other type additionally waits out the initial drain delay.
 //
 // Note: auto-run is EXECUTION control (drain). Whether jobs are automatically
 // *enqueued* is a separate concern owned elsewhere (e.g. the enrichment auto-source
@@ -34,7 +34,7 @@ export type JobTypeControlsMap = Partial<Record<JobType, JobTypeControl>>;
 export interface AutorunGateInputs {
 	/** The queue-wide panic switch (settings.orchestrationQueueEnabled). Off vetoes every type. */
 	queueEnabled: boolean;
-	/** Memory types kick their own drains; file types wait the initial file-drain delay. Readiness only. */
+	/** A type declaring JobTypeConfig.drainsWithoutAutorun kicks its own drains; every other type waits the initial drain delay. Readiness only. */
 	drainsWithoutAutorun: boolean;
 	/** The per-type auto-run flag from settings, if any. Unset ⇒ idle. */
 	typeAutorun: boolean | undefined;
@@ -53,8 +53,8 @@ export function typeAutorunEnabled(inputs: AutorunGateInputs): boolean {
 
 export function computeShouldDrain(inputs: AutorunGateInputs & { fileDrainReady: boolean }): boolean {
 	if (!typeAutorunEnabled(inputs)) return false;
-	// Memory types kick their own drains; file types additionally wait out the
-	// initial file-drain delay.
+	// A type declaring drainsWithoutAutorun kicks its own drains; every other type
+	// additionally waits out the initial drain delay.
 	return inputs.drainsWithoutAutorun || inputs.fileDrainReady;
 }
 
