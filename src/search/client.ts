@@ -14,8 +14,22 @@ export { SearchServiceUnavailableError } from './types';
 export { SEARCH_REQUIRED_SCHEMA_VERSION } from './types';
 
 // Health probes and searches are interactive: a companion that has not answered in 5s is
-// treated as down so the UI stops waiting on it.
+// treated as down so the UI stops waiting on it. Still the default for `search()` when a caller
+// (a test, or a future call site) does not pass its own timeout — SearchManager now threads the
+// user-configurable `searchQueryTimeoutMs` setting through explicitly (WP-5; see
+// SEARCH_QUERY_BUDGET_FRACTION below), so this constant's search-side role is now "the fallback
+// when nothing configured one," not "the only interactive search timeout that exists." The
+// health-probe role is unchanged — health() keeps this as its own default budget.
 const SEARCH_SERVICE_TIMEOUT_MS = 5000;
+
+// WP-5: fraction of the interactive search timeout sent to the companion as its own cooperative
+// per-request deadline (`budgetMs` on POST /v1/search). Comfortably under 1 so the companion's
+// own budget is always shorter than the client's — the companion should give up on the slow
+// legs and answer with whatever it has well before the client's own timeout would abandon the
+// request outright and throw the response away entirely. This is the client half of the
+// two-timeout law's new third budget (src/search/AGENTS.md): distinct from, and derived from,
+// the *interactive* timeout only — never the indexing one.
+const SEARCH_QUERY_BUDGET_FRACTION = 0.8;
 
 /**
  * Budget for a health probe issued from the background indexing/availability path
@@ -92,7 +106,14 @@ export class SearchServiceClient {
 		return normalizeFileStates(json);
 	}
 
-	async search(options: SearchQueryOptions): Promise<SearchResponse> {
+	// `timeoutMs` defaults to the interactive constant for any caller that doesn't pass one (a
+	// test, or a future call site); SearchManager threads the user-configurable
+	// `searchQueryTimeoutMs` setting through explicitly (WP-5). `budgetMs` — the companion's own
+	// cooperative deadline (WP-5, scripts/search-companion.mjs) — is always derived from
+	// whichever timeout is actually in effect here, at SEARCH_QUERY_BUDGET_FRACTION of it, so the
+	// two stay in the documented relationship (companion budget strictly under client timeout)
+	// automatically rather than needing to be kept in sync by every caller.
+	async search(options: SearchQueryOptions, timeoutMs: number = SEARCH_SERVICE_TIMEOUT_MS): Promise<SearchResponse> {
 		const json = await this.post('/v1/search', {
 			vaultId: this.vaultId,
 			query: options.query,
@@ -106,7 +127,8 @@ export class SearchServiceClient {
 			// companion has always received, and its ranking is unchanged.
 			rankingMode: options.rankingMode,
 			filters: options.filters,
-		});
+			budgetMs: Math.round(timeoutMs * SEARCH_QUERY_BUDGET_FRACTION),
+		}, timeoutMs);
 		const response = normalizeSearchResponse(json);
 		const outdated = schemaOutdatedMessage(response.schemaVersion);
 		if (!outdated) return response;
@@ -247,6 +269,10 @@ function normalizeSearchResponse(value: unknown): SearchResponse {
 		semanticAvailable: typeof raw.semanticAvailable === 'boolean' ? raw.semanticAvailable : undefined,
 		message: typeof raw.message === 'string' ? raw.message : undefined,
 		schemaVersion: numberField(raw.schemaVersion),
+		// WP-5: additive-only field. A companion that predates the cooperative deadline (or an
+		// in-budget response from a current one) simply omits it, which must normalize to
+		// `undefined`, not a coerced `false` — `degraded === true` is the only meaningful state.
+		degraded: raw.degraded === true ? true : undefined,
 	};
 }
 

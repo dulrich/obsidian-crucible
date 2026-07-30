@@ -86,6 +86,37 @@ const MAX_QUERY_TERMS = 24;
 const DEFAULT_LIMIT = 12;
 const MAX_LIMIT = 100;
 
+// WP-5: companion-side cooperative deadline for /v1/search. The server is single-threaded with
+// a synchronous `DatabaseSync`, so it cannot preempt a running SQL statement — the bound is
+// checked BETWEEN statements/scans (runSearch's checkpoints below), never inside one. This is
+// deliberately a *server-owned* budget, separate from and shorter than the client's own
+// interactive timeout (`searchQueryTimeoutMs`, `src/search/client.ts`): the two-timeout law in
+// `src/search/AGENTS.md` says the interactive and indexing budgets stay separate, and this adds
+// a third, narrower one scoped to a single request rather than collapsing anything.
+//
+// Ground truth (WP-2, clsl-wp2-search-latency-2026-07-29, 28.7k-chunk index copy): a
+// pathological 15-term query totals 674-800ms server-side, ~65% of it the zero-hit loose-OR
+// rescue (built.fallback) and the rest the coverage leg's per-term scans — a single request
+// cannot reach the old hardcoded 5s client timeout on its own. The real 5s producer is a
+// request queuing behind the companion's own upsert flush (~17s/500 chunks at the live index
+// size), which this deadline does not fix (see the flush-yield note in the WP-5 report) but
+// does bound: a request that lands mid-queue and only gets to run once most of its budget is
+// already gone degrades to a well-formed partial response instead of running to completion
+// regardless of how late it started.
+const SEARCH_DEADLINE_DEFAULT_MS = 3200;
+const SEARCH_DEADLINE_MIN_MS = 500;
+const SEARCH_DEADLINE_MAX_MS = 20_000;
+
+// Exported so the request handler and tests share one clamp. A client-sent `budgetMs` of 0,
+// negative, NaN, or absurdly large is clamped rather than trusted outright — the deadline is a
+// server-side safety valve, not something a malformed or hostile request can disable by asking
+// for Infinity, nor something that can starve even the cheap primary FTS clause by asking for 0.
+export function clampSearchBudgetMs(value) {
+	const ms = Number(value);
+	if (!Number.isFinite(ms)) return SEARCH_DEADLINE_DEFAULT_MS;
+	return Math.max(SEARCH_DEADLINE_MIN_MS, Math.min(ms, SEARCH_DEADLINE_MAX_MS));
+}
+
 // The fused ranking needs a candidate pool deeper than the requested page: a page whose
 // title matches the query can sit well below the top `limit` on raw bm25 and still deserve
 // the first slot after fusion.
@@ -1321,7 +1352,7 @@ export function makeTextSnippet(text, tokens = 18) {
 // the index each term matches — the same variable that governs search latency generally (see
 // src/search/AGENTS.md). That is measured by the bake-off, not guessed at here.
 function runCoverageLeg(db, options) {
-	const outcome = { used: false, scores: null, rows: [] };
+	const outcome = { used: false, scores: null, rows: [], degraded: false };
 	const terms = Array.isArray(options.terms) ? options.terms : [];
 	const expanded = Array.isArray(options.expanded) ? options.expanded : [];
 	// Fewer than two terms cannot express co-occurrence, and a one-term query's strict AND is
@@ -1329,6 +1360,12 @@ function runCoverageLeg(db, options) {
 	if (terms.length < COVERAGE_MIN_TERMS || expanded.length !== terms.length) return outcome;
 
 	const statement = options.statement ?? db.prepare(COVERAGE_SQL);
+	// WP-5: the deadline this leg's own comment already called out as the real cost risk (up to
+	// MAX_QUERY_TERMS FTS scans, measured +580ms at 9+ terms) — checked BETWEEN term scans, never
+	// inside one. `now`/`deadlineAt` default to a real clock / no deadline so every pre-WP-5 call
+	// site (every existing test, every plugin request today) is unaffected.
+	const now = options.now ?? Date.now;
+	const deadlineAt = options.deadlineAt ?? Infinity;
 	// Distinct terms per path, and per chunk: the path count is the coverage score, the chunk
 	// count picks which chunk to hydrate for a path the FTS pool never returned (the one that
 	// covers the most of the query is the one worth showing the user).
@@ -1336,6 +1373,14 @@ function runCoverageLeg(db, options) {
 	const chunkTerms = new Map();
 	const chunkPath = new Map();
 	for (const expression of expanded) {
+		// Stopping early still returns real, if partial, coverage: every term already scanned
+		// stays in pathTerms/chunkTerms, so a path's score (count / terms.length, computed below)
+		// can only be an UNDERcount of its true coverage, never an overcount — safe in the
+		// direction that matters for an additive, never-authoritative fourth RRF leg.
+		if (now() >= deadlineAt) {
+			outcome.degraded = true;
+			break;
+		}
 		// A path/chunk can appear many times for one term; the Sets make the count distinct-by-
 		// term rather than by-hit, which is what "how many of the query's terms" means.
 		const seenPaths = new Set();
@@ -1428,6 +1473,16 @@ export function runSearch(db, options) {
 	const built = buildFtsQuery(options.query);
 	const poolSize = Math.max(limit * SEARCH_POOL_FACTOR, SEARCH_POOL_MIN);
 	const ranking = rankingModeFlags(options.rankingMode ?? DEFAULT_RANKING_MODE);
+	// WP-5 cooperative deadline. `now`/`deadlineAt` default to a real clock / no deadline
+	// (Infinity), so every call site that does not opt in — every existing test, and any future
+	// caller that omits `deadlineAt` — runs exactly the pre-WP-5 code path and can never produce
+	// a `degraded` response. A request that finishes inside budget is therefore byte-identical to
+	// before this change; only a request that is genuinely over budget at a checkpoint changes
+	// shape at all.
+	const now = options.now ?? Date.now;
+	const deadlineAt = options.deadlineAt ?? Infinity;
+	let degraded = false;
+	const overBudget = () => now() >= deadlineAt;
 
 	let match = built.primary;
 	let matchFallback = null;
@@ -1447,43 +1502,81 @@ export function runSearch(db, options) {
 	// FTS scan for zero added paths — and a one- or two-character prefix query is the most
 	// expensive scan the companion runs (see src/search/AGENTS.md's latency table).
 	if (ranking.blend && built.terms.length >= 2 && built.fallback !== built.primary) {
-		matchFallback = built.fallback;
-		const fallbackRows = statement.all(vaultId, matchFallback, poolSize);
-		const blended = blendPooledRows(rows, fallbackRows);
-		rows = blended.rows;
-		fallbackUsed = blended.added > 0;
-		// The loose-OR match set is a strict superset of the primary's (a document matching the
-		// phrase, or every term in one chunk, matches the OR of those terms too), so the OR's
-		// own distinct-path count is exactly the blended candidate total — no double counting.
-		if (fallbackRows.length > 0) blendedTotal = Number(fallbackRows[0].total_paths ?? fallbackRows.length);
+		// WP-5 checkpoint: the blend fallback is a second full bm25/snippet/pooled scan, exactly
+		// as expensive as the zero-hit rescue below. `blend` is not the default mode, but a
+		// caller that explicitly asked for it still gets the same budget protection.
+		if (overBudget()) {
+			degraded = true;
+		} else {
+			matchFallback = built.fallback;
+			const fallbackRows = statement.all(vaultId, matchFallback, poolSize);
+			const blended = blendPooledRows(rows, fallbackRows);
+			rows = blended.rows;
+			fallbackUsed = blended.added > 0;
+			// The loose-OR match set is a strict superset of the primary's (a document matching
+			// the phrase, or every term in one chunk, matches the OR of those terms too), so the
+			// OR's own distinct-path count is exactly the blended candidate total — no double
+			// counting.
+			if (fallbackRows.length > 0) blendedTotal = Number(fallbackRows[0].total_paths ?? fallbackRows.length);
+		}
 	} else if (rows.length === 0 && built.fallback !== built.primary) {
-		match = built.fallback;
-		fallbackUsed = true;
-		rows = statement.all(vaultId, match, poolSize);
+		// WP-5 checkpoint, and the load-bearing one: WP-2 measured the zero-hit loose-OR rescue
+		// as ~65% of a pathological query's total server-side cost (~435-454ms of ~674-800ms). It
+		// is one monolithic prepared statement — there is no internal checkpoint to add inside
+		// it — so the only place to bound it is the gate immediately before running it at all. On
+		// budget exceed, skip the rescue and return exactly what the strict-AND primary produced
+		// (here, zero rows), marked degraded rather than blocking to completion regardless of how
+		// much of the budget the primary clause and any queuing ahead of this request already
+		// spent.
+		if (overBudget()) {
+			degraded = true;
+		} else {
+			match = built.fallback;
+			fallbackUsed = true;
+			rows = statement.all(vaultId, match, poolSize);
+		}
 	}
 
-	const vector = runVectorLeg(db, {
-		vaultId,
-		vectors: options.vectors,
-		queryEmbedding: options.queryEmbedding,
-		embeddingSpace: options.embeddingSpace,
-		poolSize,
-		hydrate: options.hydrate,
-		knownPaths: new Set(rows.map(row => row.path)),
-	});
-
-	const coverage = ranking.coverage
-		? runCoverageLeg(db, {
+	// WP-5 checkpoint around the vector leg: normally 13-33ms (a KNN scan), but a matrix rebuild
+	// mid-backfill measures up to ~800ms (src/search/AGENTS.md). Skipped entirely over budget
+	// rather than degrading it internally — like the rescue, it is not worth a partial-scan
+	// checkpoint on its own, and a search missing its semantic leg is exactly the existing
+	// FTS-only degrade path (`vector.available: false`), not a new failure shape.
+	let vector = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null };
+	if (overBudget()) {
+		degraded = true;
+	} else {
+		vector = runVectorLeg(db, {
 			vaultId,
-			terms: built.terms,
-			expanded: built.expanded,
+			vectors: options.vectors,
+			queryEmbedding: options.queryEmbedding,
+			embeddingSpace: options.embeddingSpace,
 			poolSize,
-			statement: options.coverageStatement,
 			hydrate: options.hydrate,
-			// Both already-present sets, so one path never enters the fusion twice.
-			knownPaths: new Set([...rows.map(row => row.path), ...vector.rows.map(row => row.path)]),
-		})
-		: { used: false, scores: null, rows: [] };
+			knownPaths: new Set(rows.map(row => row.path)),
+		});
+	}
+
+	let coverage = { used: false, scores: null, rows: [], degraded: false };
+	if (ranking.coverage) {
+		if (overBudget()) {
+			degraded = true;
+		} else {
+			coverage = runCoverageLeg(db, {
+				vaultId,
+				terms: built.terms,
+				expanded: built.expanded,
+				poolSize,
+				statement: options.coverageStatement,
+				hydrate: options.hydrate,
+				// Both already-present sets, so one path never enters the fusion twice.
+				knownPaths: new Set([...rows.map(row => row.path), ...vector.rows.map(row => row.path)]),
+				now,
+				deadlineAt,
+			});
+			if (coverage.degraded) degraded = true;
+		}
+	}
 
 	// `total` stays the distinct-path FTS match count plus the paths only the vector scan
 	// found. A vector-only path that FTS would also have matched *beyond* the pool is
@@ -1515,6 +1608,7 @@ export function runSearch(db, options) {
 		embeddingModel: vector.model,
 		embeddingSpace: vector.space,
 		note: vector.note,
+		degraded,
 	};
 }
 
@@ -1919,6 +2013,12 @@ LIMIT 1
 				const body = await readJson(req);
 				const vaultId = requireString(body.vaultId, 'vaultId');
 				const query = requireString(body.query, 'query');
+				// WP-5: the client's own cooperative-deadline hint (~80% of its own interactive
+				// timeout, per src/search/client.ts), clamped server-side so it stays a safety
+				// valve rather than something a malformed request can widen or disable. Absent
+				// from an older client, which is exactly why clampSearchBudgetMs falls back to
+				// SEARCH_DEADLINE_DEFAULT_MS instead of requiring the field.
+				const deadlineAt = Date.now() + clampSearchBudgetMs(body.budgetMs);
 				const outcome = runSearch(db, {
 					vaultId,
 					query,
@@ -1938,6 +2038,7 @@ LIMIT 1
 					rankingMode: parseRankingMode(body.rankingMode),
 					hydrate: hydrateChunk,
 					coverageStatement,
+					deadlineAt,
 				});
 				const response = {
 					// Computed from state, not hardcoded: 'hybrid' means a query embedding
@@ -1960,6 +2061,12 @@ LIMIT 1
 					if (outcome.matchFallback) response.matchFallback = outcome.matchFallback;
 				}
 				if (outcome.note) response.message = outcome.note;
+				// WP-5: additive-only. A request that finished inside budget carries no
+				// `degraded` field at all, so it stays byte-identical to the pre-deadline
+				// response shape — the client tolerates its absence unconditionally
+				// (normalizeSearchResponse), which is what makes this safe against both an old
+				// client talking to this companion and this companion answering an old client.
+				if (outcome.degraded) response.degraded = true;
 				return json(res, 200, response);
 			}
 			return json(res, 404, { ok: false, error: 'not found' });

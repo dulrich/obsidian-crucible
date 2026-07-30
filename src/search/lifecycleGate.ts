@@ -61,6 +61,30 @@ export class CompanionAvailabilityGate {
 		private readonly suppressProbing: () => boolean = () => false,
 	) {}
 
+	// WP-5 escalation guard: an interactive `/v1/search` response (success OR a WP-5 `degraded:
+	// true` partial) is direct proof the companion is up and answering RIGHT NOW, so any earlier
+	// probe timeouts are stale evidence — reset the streak rather than let them keep accumulating
+	// toward SEARCH_PROBE_TIMEOUT_ESCALATION_THRESHOLD.
+	//
+	// This closes the gap the mid-operation-failure split (see the client-side two-timeout note
+	// above) didn't: a background health probe and an interactive search hit the SAME
+	// single-threaded, synchronous-SQLite companion, so a slow-but-answering interactive query can
+	// make consecutive probes time out for reasons that have nothing to do with the companion
+	// being down — before this, three such probe timeouts in a row still escalated to the full
+	// 5-minute `markOffline` latch even while every search kept succeeding.
+	//
+	// Why this cannot mask a genuinely dead companion: it is only ever invoked by SearchManager
+	// after a real `/v1/search` HTTP response actually arrived (see SearchManager.search()). A
+	// companion that is truly down never returns that response at all — every interactive search
+	// against it throws (refused, server-error, or its own timeout) instead of calling this — so
+	// the probe-timeout streak accumulates completely undisturbed and the escalation still fires
+	// on schedule. This method has no effect on `onlineUntil`/`offlineUntil` either: it only
+	// clears the streak that feeds the escalation threshold, it does not itself mark the
+	// companion online or short-circuit the next probe.
+	noteInteractiveSearchResponse(): void {
+		this.consecutiveProbeTimeouts = 0;
+	}
+
 	// Why the last probe said "unavailable", when the companion told us. `available()`
 	// collapses to a boolean, but not every unavailable state means "not running" — a
 	// reachable companion serving an outdated index schema is also `ok: false`, and telling

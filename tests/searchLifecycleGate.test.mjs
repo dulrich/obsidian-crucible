@@ -292,6 +292,61 @@ test('offline copy: a refused outage leaves no reason (the container-restart fal
 	assert.equal(gate.lastUnavailableReason(), null);
 });
 
+// ── WP-5 (clsl-wp5-search-latch-safety): escalation guard ─────────────────────────────────
+//
+// A slow-but-answering interactive search and a background health probe hit the SAME
+// single-threaded, synchronous-SQLite companion. Before this, three consecutive probe timeouts
+// escalated to the full 5-minute markOffline latch even while the companion was demonstrably up
+// — proven by every one of those interactive searches actually succeeding in the same window.
+// `noteInteractiveSearchResponse()` is what SearchManager.search() calls after any real
+// `/v1/search` HTTP response (success or a WP-5 `degraded: true` partial) arrives, and it must
+// reset the streak just like a probe's own success does (see the pre-existing "a success between
+// timeouts resets the consecutive-timeout streak" test above, which pins the probe-side half).
+test('slow search + concurrent probe timeouts: an interactive search response resets the streak, so the escalation does not latch', async () => {
+	let now = 1_000;
+	const gate = new CompanionAvailabilityGate(() => now);
+	const timeout = async () => { throw new SearchServiceUnavailableError('timed out', 'timeout'); };
+	const ok = async () => ({ ok: true });
+
+	// One short of the escalation threshold via probe timeouts alone.
+	for (let i = 1; i < SEARCH_PROBE_TIMEOUT_ESCALATION_THRESHOLD; i++) {
+		await gate.available(timeout);
+		now += SEARCH_TRANSIENT_OFFLINE_MS + 1;
+	}
+
+	// A slow interactive search comes back on its own (never going through available()/probe() at
+	// all — this is not a probe succeeding, it's an unrelated request the gate must still learn
+	// from).
+	gate.noteInteractiveSearchResponse();
+
+	// One more probe timeout: if the streak had NOT reset, this alone would hit the threshold and
+	// latch the full 5-minute offline window. It must not.
+	assert.equal(await gate.available(timeout), false);
+	now += SEARCH_TRANSIENT_OFFLINE_MS + 1;
+	assert.equal(await gate.available(ok), true, 'recovered after only the short transient window — the escalation never latched');
+});
+
+// The mechanism cannot mask a companion that is actually down: noteInteractiveSearchResponse is
+// only ever called by SearchManager after a real HTTP response arrives, and a genuinely dead
+// companion never produces one — every interactive search against it throws instead. Simulated
+// here by simply never calling the reset: the escalation proceeds exactly as documented above.
+test('a genuinely dead companion is unaffected: with no interactive response ever arriving, the escalation still latches on schedule', async () => {
+	let now = 1_000;
+	let checks = 0;
+	const gate = new CompanionAvailabilityGate(() => now);
+	const timeout = async () => { checks++; throw new SearchServiceUnavailableError('timed out', 'timeout'); };
+
+	for (let i = 1; i < SEARCH_PROBE_TIMEOUT_ESCALATION_THRESHOLD; i++) {
+		await gate.available(timeout);
+		now += SEARCH_TRANSIENT_OFFLINE_MS + 1;
+	}
+	assert.equal(await gate.available(timeout), false);
+	assert.equal(checks, SEARCH_PROBE_TIMEOUT_ESCALATION_THRESHOLD);
+
+	now += SEARCH_TRANSIENT_OFFLINE_MS + 1;
+	assert.equal(await gate.available(async () => { checks++; return { ok: true }; }), false, 'still short-circuits: the escalation latched for the full window');
+});
+
 test('offline copy: an escalated timeout carries its own honest reason, never the container-restart hint', async () => {
 	let now = 1_000;
 	const gate = new CompanionAvailabilityGate(() => now);

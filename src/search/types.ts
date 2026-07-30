@@ -362,6 +362,17 @@ export interface SearchResponse {
 	message?: string;
 	schemaVersion?: number;
 	rebuildRequired?: boolean;
+	/**
+	 * WP-5: the companion hit its own cooperative per-request deadline and returned a
+	 * well-formed *partial* response — the zero-hit rescue was skipped, the coverage leg stopped
+	 * scanning further terms, or the vector leg was skipped outright — rather than blocking until
+	 * every leg finished. Additive and optional: an in-budget response omits the field entirely
+	 * (byte-identical to the pre-WP-5 shape), and a companion that predates this change never
+	 * sends it, which normalizes to the same `undefined`. The client does not retry on this — a
+	 * degraded response is still a real, ranked answer, just possibly missing the rescue/coverage/
+	 * vector contribution.
+	 */
+	degraded?: boolean;
 }
 
 export interface SearchFileState {
