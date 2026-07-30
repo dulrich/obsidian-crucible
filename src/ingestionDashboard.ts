@@ -1,4 +1,4 @@
-import { App, EventRef, TFile, debounce, setIcon } from 'obsidian';
+import { App, EventRef, TFile, setIcon } from 'obsidian';
 import type CruciblePlugin from './main';
 import {
 	BlogOutcome,
@@ -26,25 +26,18 @@ import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ig
 import { consumeSelfRefreshedEcho } from './ingestion/render/echoSuppress';
 import { minIntervalGate, refreshWithScrollPreserved } from './ingestion/render/refresh';
 
+// P6: the two cadence classes the coordinated flush (below) enforces per
+// SectionId, replacing what used to be ~10 independent Obsidian
+// `debounce(fn, ms, true)` closures (trailing-only "resetTimer" debounces)
+// plus two separate `minIntervalGate` instances (queueMonitor,
+// youtubeWithoutMetadata). FAST is the cheap, purely event-driven sections;
+// SCAN is the full-vault-scan sections (uncaptured lists, no-metadata,
+// orphans) plus the two sections that already needed a cadence FLOOR to keep
+// rendering during sustained churn (queueMonitor, youtubeWithoutMetadata) —
+// both already effectively floored at 1000ms via minIntervalGate, so folding
+// them into the SCAN class changes nothing about their observed cadence.
 const DEBOUNCE_MS = 150;
-// Vault-scan sections (uncaptured lists, no-metadata, orphans) recompute the
-// whole vault, so they get a longer debounce than the cheap, event-driven ones.
 const SCAN_DEBOUNCE_MS = 1000;
-// Queue-monitor bursts (a queue drain firing 'enrichment-queue-updated' /
-// 'orchestration-queue-updated' repeatedly) coalesce at JobBackend.ts's 250ms and
-// land here every DEBOUNCE_MS (150ms) — a full table rebuild ~4x/sec. That cadence
-// is fine for a cheap section but queueMonitor's is not, so its actual refresh is
-// additionally cadence-gated to at most once per this interval (see
-// registerListeners' use of minIntervalGate). This does NOT change DEBOUNCE_MS or
-// the 250ms coalesce — both stay as the event-arrival cadence; this only throttles
-// how often the resulting full rebuild is allowed to run.
-const QUEUE_MONITOR_MIN_INTERVAL_MS = 1000;
-// Own gate for the "captures without metadata" scan (a full-vault scan) — see
-// registerListeners' use of minIntervalGate. Kept as a distinct gate instance from
-// QUEUE_MONITOR_MIN_INTERVAL_MS (same magnitude, independent timing state) rather
-// than folding it into the queue-monitor gate, so the two scans' cadences don't
-// couple to each other's call pattern.
-const YOUTUBE_NO_METADATA_MIN_INTERVAL_MS = 1000;
 
 // Lifecycle/registry controller for the Ingestion dashboard: owns mounting,
 // listener wiring, and the section registry (header chrome, count/meta slots,
@@ -61,6 +54,38 @@ export class IngestionDashboardUI {
 	// (which fires on every keystroke) skip those refreshes when nothing relevant
 	// to them changed — the source of the "dashboard flashes while typing" bug.
 	private readonly relevantSignatures = new Map<string, { fm: string; links: string }>();
+
+	// P6: sections marked dirty by vault/metadataCache/event-bus traffic (route()
+	// and the bus handlers below), pending a coordinated flush. Sections the
+	// user drives directly (queueControls, channelControl — forced-only, no
+	// auto-refresh trigger) are never marked dirty and so never touch this set.
+	private readonly dirty = new Set<SectionId>();
+	private static readonly FAST_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
+		'unprocessedClippings', 'unrefinedTranscripts', 'blogIntake', 'youtubeIntake',
+		'ignoredPosts', 'ignoredVideos',
+	]);
+	private static readonly SCAN_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
+		'uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments',
+		'youtubeWithoutMetadata', 'queueMonitor',
+	]);
+	// Two cadence-classed gates, reusing the same tested minIntervalGate
+	// primitive the pre-P6 code already relied on for youtubeWithoutMetadata
+	// and queueMonitor (see render/refresh.ts) — leading-immediate +
+	// bounded-trailing semantics, so a lone dirty section still renders right
+	// away and a sustained burst still renders periodically rather than being
+	// starved until the first quiet gap (the bug an Obsidian resetTimer
+	// debounce has). Each call flushes every CURRENTLY dirty section in its
+	// class together, in one coordinated pass (see flushDirty), so the shared
+	// scroll coordinator (refreshWithScrollPreserved) captures/restores once
+	// per batch instead of once per section.
+	private readonly flushFast = minIntervalGate(
+		() => this.flushDirty(IngestionDashboardUI.FAST_SECTIONS),
+		DEBOUNCE_MS,
+	);
+	private readonly flushScan = minIntervalGate(
+		() => this.flushDirty(IngestionDashboardUI.SCAN_SECTIONS),
+		SCAN_DEBOUNCE_MS,
+	);
 
 	private readonly host: DashboardHost;
 	private readonly intake: IntakeSection;
@@ -158,41 +183,51 @@ export class IngestionDashboardUI {
 		this.intake.clear();
 		this.sections.clear();
 		this.relevantSignatures.clear();
+		// P6: drop any pending dirty marks. A minIntervalGate trailing call already
+		// scheduled at this point may still fire once more after unmount, but
+		// flushDirty's `this.sections.get(id)?.refresh(...)` is a safe no-op once
+		// sections is empty — same non-issue the pre-P6 debounce closures had.
+		this.dirty.clear();
 		this.container.empty();
 	}
 
-	private registerListeners(): void {
-		const debouncedClippings = debounce(() => void this.refresh('unprocessedClippings'), DEBOUNCE_MS, true);
-		const debouncedTranscripts = debounce(() => void this.refresh('unrefinedTranscripts'), DEBOUNCE_MS, true);
-		const debouncedBlogIntake = debounce(() => void this.refresh('blogIntake'), DEBOUNCE_MS, true);
-		const debouncedYoutubeIntake = debounce(() => void this.refresh('youtubeIntake'), DEBOUNCE_MS, true);
-		const debouncedUncapturedPosts = debounce(() => void this.refresh('uncapturedPosts'), SCAN_DEBOUNCE_MS, true);
-		const debouncedUncapturedVideos = debounce(() => void this.refresh('uncapturedVideos'), SCAN_DEBOUNCE_MS, true);
-		const debouncedIgnoredPosts = debounce(() => void this.refresh('ignoredPosts'), DEBOUNCE_MS, true);
-		const debouncedIgnoredVideos = debounce(() => void this.refresh('ignoredVideos'), DEBOUNCE_MS, true);
-		const debouncedBlogControl = debounce(() => void this.refresh('blogControl'), SCAN_DEBOUNCE_MS, true);
-		// Own cadence gate, distinct from the queue monitor's below: this is a
-		// full-vault scan (computeYoutubeNoMetadataRows), and the outer
-		// SCAN_DEBOUNCE_MS Obsidian debounce below (resetTimer=true) only fires
-		// after a full quiet period — during a sustained queue drain that never
-		// quiets for a full second, it would never fire at all. minIntervalGate's
-		// leading-immediate + bounded-trailing semantics guarantee at most one scan
-		// per interval regardless of how continuous the event stream is.
-		const gatedYoutubeNoMetadataRefresh = minIntervalGate(() => this.refresh('youtubeWithoutMetadata'), YOUTUBE_NO_METADATA_MIN_INTERVAL_MS);
-		const debouncedYoutubeNoMetadata = debounce(() => gatedYoutubeNoMetadataRefresh(), SCAN_DEBOUNCE_MS, true);
-		// The queue monitor's own render — and the two intake-button folder scans,
-		// which used to run ungated on every DEBOUNCE_MS (150ms) firing regardless
-		// of the queue-monitor gate — are cadence-gated together on top of the
-		// DEBOUNCE_MS trigger below, so a queue-event burst costs at most one
-		// folder-scan set per QUEUE_MONITOR_MIN_INTERVAL_MS, not one per debounce tick.
-		const gatedQueueMonitorRefresh = minIntervalGate(() => {
-			void this.refresh('queueMonitor');
-			void this.intake.refreshIntakeButton('blog');
-			void this.intake.refreshIntakeButton('youtube');
-		}, QUEUE_MONITOR_MIN_INTERVAL_MS);
-		const debouncedQueueMonitor = debounce(() => gatedQueueMonitorRefresh(), DEBOUNCE_MS, true);
-		const debouncedOrphans = debounce(() => void this.refresh('orphanedAttachments'), SCAN_DEBOUNCE_MS, true);
+	// P6: marks `id` dirty and kicks its cadence class's gate. Idempotent to
+	// call repeatedly for the same id (the Set absorbs duplicates and the
+	// minIntervalGate absorbs repeated calls within its window into one
+	// trailing invocation) — every route()/bus-handler call site below just
+	// calls this instead of its own independent debounce closure.
+	private markDirty(id: SectionId): void {
+		this.dirty.add(id);
+		if (IngestionDashboardUI.FAST_SECTIONS.has(id)) this.flushFast();
+		else if (IngestionDashboardUI.SCAN_SECTIONS.has(id)) this.flushScan();
+	}
 
+	// One coordinated pass: renders every CURRENTLY dirty section belonging to
+	// `classIds` together. Firing every section's refresh synchronously here —
+	// before awaiting any of them — guarantees they overlap in time rather
+	// than relying on incidental timer landing, which is what lets the shared
+	// scroll coordinator in refreshWithScrollPreserved capture once (on the
+	// first call, before any of the batch has started tearing down) and
+	// restore once (after the whole batch has settled) instead of once per
+	// section. queueMonitor's flush additionally refreshes the two intake
+	// header buttons — the same coupling the old gatedQueueMonitorRefresh had,
+	// since both were driven by the same enrichment-/orchestration-queue-
+	// updated bus events; refreshIntakeButton's own internal state cache
+	// (setIntakeButtonState) already makes an unconditional call here cheap
+	// when nothing changed.
+	private flushDirty(classIds: ReadonlySet<SectionId>): void {
+		const due = Array.from(this.dirty).filter(id => classIds.has(id));
+		if (due.length === 0) return;
+		for (const id of due) this.dirty.delete(id);
+		const renders = due.map(id => this.sections.get(id)?.refresh({ eventDriven: true }));
+		if (due.includes('queueMonitor')) {
+			renders.push(this.intake.refreshIntakeButton('blog'));
+			renders.push(this.intake.refreshIntakeButton('youtube'));
+		}
+		void Promise.all(renders);
+	}
+
+	private registerListeners(): void {
 		// reason 'structural' = vault create/delete/rename (can change everything);
 		// 'meta' = metadataCache 'changed' (fires per keystroke — gated below).
 		const route = (path: string, reason: 'meta' | 'structural') => {
@@ -216,12 +251,12 @@ export class IngestionDashboardUI {
 				// later (the "Ignore flashes twice" bug). consumeSelfRefreshedEcho
 				// skips exactly that one redundant call per id; any id NOT marked
 				// (e.g. a hand-edit of the note, or an id this exact action didn't
-				// touch) schedules its debounced refresh as before.
-				if (!consumeSelfRefreshedEcho('ignoredPosts')) debouncedIgnoredPosts();
-				if (!consumeSelfRefreshedEcho('ignoredVideos')) debouncedIgnoredVideos();
-				if (!consumeSelfRefreshedEcho('uncapturedPosts')) debouncedUncapturedPosts();
-				if (!consumeSelfRefreshedEcho('uncapturedVideos')) debouncedUncapturedVideos();
-				if (!consumeSelfRefreshedEcho('blogControl')) debouncedBlogControl();
+				// touch) is marked dirty as before.
+				if (!consumeSelfRefreshedEcho('ignoredPosts')) this.markDirty('ignoredPosts');
+				if (!consumeSelfRefreshedEcho('ignoredVideos')) this.markDirty('ignoredVideos');
+				if (!consumeSelfRefreshedEcho('uncapturedPosts')) this.markDirty('uncapturedPosts');
+				if (!consumeSelfRefreshedEcho('uncapturedVideos')) this.markDirty('uncapturedVideos');
+				if (!consumeSelfRefreshedEcho('blogControl')) this.markDirty('blogControl');
 				// P2: return here — this path is handled in full above. Without this,
 				// both the 'meta' event fired by vault.modify (existing note) and the
 				// 'structural' create event fired the first time ignored.md is written
@@ -236,31 +271,31 @@ export class IngestionDashboardUI {
 			}
 			const clipperRoot = this.plugin.settings.ingestionClipperInboxFolder;
 			const dailyRoot = this.plugin.settings.dailyFolder;
-			if (clipperRoot && path.startsWith(`${clipperRoot}/`)) debouncedClippings();
-			if (dailyRoot && path.startsWith(`${dailyRoot}/`)) debouncedTranscripts();
+			if (clipperRoot && path.startsWith(`${clipperRoot}/`)) this.markDirty('unprocessedClippings');
+			if (dailyRoot && path.startsWith(`${dailyRoot}/`)) this.markDirty('unrefinedTranscripts');
 			if (path.startsWith(`${INTAKE_ROOT_BLOGS}/`)) {
-				debouncedBlogIntake();
-				debouncedUncapturedPosts();
-				debouncedBlogControl();
+				this.markDirty('blogIntake');
+				this.markDirty('uncapturedPosts');
+				this.markDirty('blogControl');
 			}
 			if (path.startsWith(`${INTAKE_ROOT_YOUTUBE}/`)) {
-				debouncedYoutubeIntake();
-				debouncedUncapturedVideos();
+				this.markDirty('youtubeIntake');
+				this.markDirty('uncapturedVideos');
 			}
 			const ytRoot = this.plugin.settings.orchestrationYoutubeMetadataRoot;
-			if (ytRoot && path.startsWith(`${ytRoot}/`)) debouncedUncapturedVideos();
+			if (ytRoot && path.startsWith(`${ytRoot}/`)) this.markDirty('uncapturedVideos');
 			const blogRoot = blogMetadataRoot(this.plugin);
-			if (blogRoot && path.startsWith(`${blogRoot}/`)) debouncedBlogControl();
+			if (blogRoot && path.startsWith(`${blogRoot}/`)) this.markDirty('blogControl');
 
 			if (reason === 'structural') {
 				// A note/attachment appeared, vanished, or moved — recompute the
 				// scan sections and drop any stale signature for the path.
 				this.relevantSignatures.delete(path);
-				debouncedUncapturedPosts();
-				debouncedUncapturedVideos();
-				debouncedBlogControl();
-				debouncedYoutubeNoMetadata();
-				debouncedOrphans();
+				this.markDirty('uncapturedPosts');
+				this.markDirty('uncapturedVideos');
+				this.markDirty('blogControl');
+				this.markDirty('youtubeWithoutMetadata');
+				this.markDirty('orphanedAttachments');
 				return;
 			}
 
@@ -280,14 +315,14 @@ export class IngestionDashboardUI {
 			this.relevantSignatures.set(path, next);
 			if (prev && prev.fm !== next.fm) {
 				// source/post-id/yt-video-id/yt-metadata drive the uncaptured + no-metadata lists.
-				debouncedUncapturedPosts();
-				debouncedUncapturedVideos();
-				debouncedBlogControl();
-				debouncedYoutubeNoMetadata();
+				this.markDirty('uncapturedPosts');
+				this.markDirty('uncapturedVideos');
+				this.markDirty('blogControl');
+				this.markDirty('youtubeWithoutMetadata');
 			}
 			if (prev && prev.links !== next.links) {
 				// The set of referenced attachments drives orphan status.
-				debouncedOrphans();
+				this.markDirty('orphanedAttachments');
 			}
 		};
 
@@ -299,22 +334,22 @@ export class IngestionDashboardUI {
 		const bus = this.plugin.ingestionEvents;
 		if (bus) {
 			this.disposers.push(bus.on('tracker-run', e => {
-				if (e.kind === 'blog') { debouncedBlogIntake(); debouncedUncapturedPosts(); debouncedBlogControl(); }
-				else { debouncedYoutubeIntake(); debouncedUncapturedVideos(); }
+				if (e.kind === 'blog') { this.markDirty('blogIntake'); this.markDirty('uncapturedPosts'); this.markDirty('blogControl'); }
+				else { this.markDirty('youtubeIntake'); this.markDirty('uncapturedVideos'); }
 			}));
-			this.disposers.push(bus.on('metadata-enriched', () => debouncedUncapturedVideos()));
+			this.disposers.push(bus.on('metadata-enriched', () => this.markDirty('uncapturedVideos')));
 			this.disposers.push(bus.on('enrichment-queue-updated', () => {
-				debouncedQueueMonitor();
+				this.markDirty('queueMonitor');
 				// Metadata-fetch jobs live in the enrichment (memory) queue now, so the
 				// "captures without metadata" badges track this event, not the file queue.
-				debouncedYoutubeNoMetadata();
+				this.markDirty('youtubeWithoutMetadata');
 			}));
 			this.disposers.push(bus.on('orchestration-queue-updated', () => {
-				debouncedQueueMonitor();
-				debouncedYoutubeNoMetadata();
+				this.markDirty('queueMonitor');
+				this.markDirty('youtubeWithoutMetadata');
 			}));
-			this.disposers.push(bus.on('clipping-captured', () => debouncedClippings()));
-			this.disposers.push(bus.on('transcript-refined', () => debouncedTranscripts()));
+			this.disposers.push(bus.on('clipping-captured', () => this.markDirty('unprocessedClippings')));
+			this.disposers.push(bus.on('transcript-refined', () => this.markDirty('unrefinedTranscripts')));
 		}
 	}
 
@@ -388,11 +423,18 @@ export class IngestionDashboardUI {
 			sort: null,
 			// SectionContext.refresh is itself the scroll-preserving wrapped function
 			// (render/refresh.ts) so every call site — the header Refresh button,
-			// sort-header clicks, Ignore/Un-ignore, per-row action buttons, and this
-			// class's own refresh(id) dispatch below — gets scroll preservation for
-			// free, and participates in the shared dashboard-level scroll coordinator
-			// alongside every other section's refresh.
-			refresh: () => refreshWithScrollPreserved(body, () => this.renderSection(id, body, ctx)),
+			// sort-header clicks, Ignore/Un-ignore, per-row action buttons, and the
+			// coordinated flush's dirty-section dispatch (flushDirty above) — gets
+			// scroll preservation for free, and participates in the shared
+			// dashboard-level scroll coordinator alongside every other section's
+			// refresh. P5: `opts.eventDriven` is set on `ctx` BEFORE the render call
+			// so render/section.ts's shouldRepaint() can read it — true only for
+			// flushDirty's calls; every other call site here passes no opts, which
+			// resolves to a forced (always-repaint) pass.
+			refresh: (opts) => {
+				ctx.eventDriven = opts?.eventDriven === true;
+				return refreshWithScrollPreserved(body, () => this.renderSection(id, body, ctx));
+			},
 		};
 		this.sections.set(id, ctx);
 		refreshBtn.addEventListener('click', () => void ctx.refresh());

@@ -5,7 +5,7 @@ import {
 	listYoutubeIntakeRuns,
 	listBlogsIntakeRuns,
 } from '../../orchestration/utils/feedIntake';
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderFileLink } from '../render/cells';
 import { lastRunLabel } from '../render/format';
 import type { DashboardHost, IntakeKind, SectionContext } from '../render/types';
@@ -95,6 +95,8 @@ export function createIntakeSection(host: DashboardHost): IntakeSection {
 	function renderBlogIntake(body: HTMLElement, ctx: SectionContext): void {
 		const rows = listBlogsIntakeRuns(host.app);
 		host.setSectionMeta('blogIntake', lastRunLabel(rows.map(r => r.runAt)));
+		// P5: skip the rebuild on an unchanged row set during an event-driven pass.
+		if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 		renderTableSection<BlogsIntakeRunStat>({
 			body, ctx, rows,
 			emptyText: 'No blog tracker runs yet.',
@@ -116,6 +118,8 @@ export function createIntakeSection(host: DashboardHost): IntakeSection {
 	function renderYoutubeIntake(body: HTMLElement, ctx: SectionContext): void {
 		const rows = listYoutubeIntakeRuns(host.app);
 		host.setSectionMeta('youtubeIntake', lastRunLabel(rows.map(r => r.runAt)));
+		// P5: skip the rebuild on an unchanged row set during an event-driven pass.
+		if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 		renderTableSection<YoutubeIntakeRunStat>({
 			body, ctx, rows,
 			emptyText: 'No YouTube tracker runs yet.',

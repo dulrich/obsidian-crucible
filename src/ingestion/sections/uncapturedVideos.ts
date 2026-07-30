@@ -1,5 +1,5 @@
 import type { EnrichmentQueueItem } from '../../orchestration/EnrichmentQueueAdapter';
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderEnrichedCell, renderFileLink, renderIgnoreButton, renderChannelLink, renderExternalLink } from '../render/cells';
 import { displayLabel, formatDuration } from '../render/format';
 import { computeUncapturedVideoRows } from '../data/uncaptured';
@@ -40,23 +40,34 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		const rows = await computeUncapturedVideoRows(host.app, host.plugin);
 		uncapturedVideosCache = rows;
 
-		renderTableSection<UncapturedVideoRow>({
-			body, ctx, rows,
-			emptyText: 'No uncaptured videos.',
-			defaultSort: { column: 'publishedAt', direction: 'desc' },
-			setCount: n => host.setSectionCount('uncapturedVideos', n),
-			columns: [
-				{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => r.channelAboutFile ? renderFileLink(host.app, td, r.channelAboutFile, displayLabel(r.channelName)) : renderChannelLink(td, r.channelId, r.channelName) },
-				{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
-				{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
-				{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
-				{ key: 'watch', label: '', render: (r, td) => renderExternalLink(td, r.url, 'watch') },
-				{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'youtube', r.videoId, 'uncapturedVideos', 'ignoredVideos', ctx) },
-				{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r) },
-			],
-		});
+		// P5: the 'enriched' column (renderEnrichedCell) reads the enrichment
+		// queue's LIVE per-video status (pending/running/absent) — state that
+		// does not live on UncapturedVideoRow itself, so two passes with
+		// byte-identical `rows` could still need to repaint. Fold each row's
+		// current status into the signature (not the whole queue map, which
+		// would also react to unrelated videos not in this list).
+		const enrichedExtra = rows.map(r => host.plugin.enrichmentQueue?.getEntry(r.videoId)?.status ?? null);
+		if (shouldRepaint(ctx, computeRowSignature(rows, enrichedExtra))) {
+			renderTableSection<UncapturedVideoRow>({
+				body, ctx, rows,
+				emptyText: 'No uncaptured videos.',
+				defaultSort: { column: 'publishedAt', direction: 'desc' },
+				setCount: n => host.setSectionCount('uncapturedVideos', n),
+				columns: [
+					{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => r.channelAboutFile ? renderFileLink(host.app, td, r.channelAboutFile, displayLabel(r.channelName)) : renderChannelLink(td, r.channelId, r.channelName) },
+					{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
+					{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
+					{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
+					{ key: 'watch', label: '', render: (r, td) => renderExternalLink(td, r.url, 'watch') },
+					{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'youtube', r.videoId, 'uncapturedVideos', 'ignoredVideos', ctx) },
+					{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r) },
+				],
+			});
+		}
 
 		// Refresh the queue's auto-source so it stays aligned with current sort.
+		// Not gated on the paint skip above — this is queue bookkeeping, not DOM
+		// work, and must stay live even on a pass that skipped repainting.
 		if (host.plugin.enrichmentQueue?.isAutoSourceEnabled()) {
 			host.plugin.enrichmentQueue.setAutoSource(() => uncapturedQueueItems());
 		}
