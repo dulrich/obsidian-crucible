@@ -425,6 +425,12 @@ export interface Provider {
 	// Session-cached model list from the provider's own list endpoint (WP-C). See
 	// ProviderModelCatalog's doc comment for the D2 boundary this field sits behind.
 	modelCatalog?: ProviderModelCatalog;
+	// rsp-wp1: caps in-flight completion-class requests (chat/completions, incl. vision passes —
+	// NOT embed/rerank, a different model/latency class) for this provider id, gated at the
+	// ProviderManager chokepoint (src/providers.ts). Absent, zero or negative resolves to the
+	// default: 1 for local providers (openai-compatible), unlimited otherwise — see
+	// resolveProviderConcurrencyLimit. An explicit positive value always overrides the default.
+	maxConcurrentRequests?: number;
 }
 
 export interface FxPair {

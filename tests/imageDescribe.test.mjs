@@ -48,8 +48,10 @@ await esbuild.build({
 });
 
 const {
+	clampLongEdge,
 	computeReferencedImagePaths,
 	describeMd5Images,
+	IMAGE_DESCRIBE_MAX_LONG_EDGE_PX,
 	importLegacyImageMetadataSidecars,
 	referencingNotePaths,
 	resolveNoteImages,
@@ -280,6 +282,77 @@ test('withTimeout: resolves normally when the promise settles before ms elapses'
 test('withTimeout: propagates the original promise\'s rejection when it rejects before ms elapses', async () => {
 	const fails = new Promise((_resolve, reject) => setTimeout(() => reject(new Error('boom')), 5));
 	await assert.rejects(() => withTimeout(fails, 1000, 'fast op'), /boom/);
+});
+
+// ── clampLongEdge: rsp-wp1 Part B downscale dimension math ──────────────────
+
+test('clampLongEdge: a source already at or under the cap is returned unchanged (shrink-only, never grows)', () => {
+	assert.deepEqual(clampLongEdge(800, 600, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 800, height: 600 });
+	assert.deepEqual(clampLongEdge(1568, 400, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 1568, height: 400 });
+	assert.deepEqual(clampLongEdge(2, 2, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 2, height: 2 });
+});
+
+test('clampLongEdge: a landscape source over the cap shrinks its width to the cap and scales height, preserving aspect ratio', () => {
+	// 3136x2000 -> long edge 3136 halves exactly to 1568; height scales by the same factor.
+	assert.deepEqual(clampLongEdge(3136, 2000, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 1568, height: 1000 });
+});
+
+test('clampLongEdge: a portrait source over the cap shrinks its height to the cap and scales width, preserving aspect ratio', () => {
+	assert.deepEqual(clampLongEdge(2000, 3136, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 1000, height: 1568 });
+});
+
+test('clampLongEdge: a square source over the cap shrinks both dimensions to the cap', () => {
+	assert.deepEqual(clampLongEdge(5000, 5000, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 1568, height: 1568 });
+});
+
+test('clampLongEdge: rounds to whole pixels and never collapses a dimension to 0', () => {
+	const result = clampLongEdge(10000, 1, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX);
+	assert.equal(result.width, 1568);
+	assert.ok(Number.isInteger(result.height));
+	assert.ok(result.height >= 1);
+});
+
+test('clampLongEdge: a non-positive edge is returned unchanged rather than dividing by zero', () => {
+	assert.deepEqual(clampLongEdge(0, 0, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX), { width: 0, height: 0 });
+});
+
+test('IMAGE_DESCRIBE_MAX_LONG_EDGE_PX is the documented ~1568px cap', () => {
+	assert.equal(IMAGE_DESCRIBE_MAX_LONG_EDGE_PX, 1568);
+});
+
+// ── describeMd5Images: downscale is wired into the WebP/AVIF transcode path ─
+
+test('describeMd5Images: an oversized WebP image is downscaled to the long-edge cap before it is drawn to the transcode canvas', async (t) => {
+	const originalCreateImageBitmap = globalThis.createImageBitmap;
+	const originalOffscreenCanvas = globalThis.OffscreenCanvas;
+	t.after(() => {
+		globalThis.createImageBitmap = originalCreateImageBitmap;
+		globalThis.OffscreenCanvas = originalOffscreenCanvas;
+	});
+	// A 4000x2000 "photo" — long edge well over the 1568px cap.
+	globalThis.createImageBitmap = async () => ({ width: 4000, height: 2000 });
+	const seenCanvasSizes = [];
+	const transcodedBytes = new Uint8Array([9, 9, 9]);
+	globalThis.OffscreenCanvas = class {
+		constructor(width, height) {
+			this.width = width;
+			this.height = height;
+			seenCanvasSizes.push({ width, height });
+		}
+		getContext() { return { drawImage() {} }; }
+		async convertToBlob({ type }) { return new Blob([transcodedBytes], { type }); }
+	};
+
+	const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
+	const files = new Map([['a/photo_MD5.webp', { bytes }]]);
+	const plugin = createFakePlugin({ files });
+	const image = { path: 'a/photo_MD5.webp', md5: 'photo-md5', ext: 'webp' };
+
+	const result = await describeMd5Images(plugin, provider, 'model-1', [image]);
+
+	assert.equal(result.describedCount, 1);
+	// 4000x2000 -> long edge 4000 scales to 1568; height scales by the same factor (2000 * 1568/4000 = 784).
+	assert.deepEqual(seenCanvasSizes, [{ width: 1568, height: 784 }]);
 });
 
 // ── describeMd5Images: per-image failure isolation ──────────────────────────

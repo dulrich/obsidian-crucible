@@ -15,11 +15,22 @@
 import { TFile } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import { providerModality, type CrucibleSettings, type Provider } from '../../types';
-import { needsVisionTranscode, transcodeToPng, extractSvgText } from '../../search/imageTranscode';
+import { needsVisionTranscode, extractSvgText } from '../../search/imageTranscode';
 import { classifyFailure, type ImageDescriptionStore } from '../../search/imageDescriptionStore';
 import { logWarn } from '../../log';
 import type { ServiceFailureKind } from '../serviceHealth';
 import { imageMimeType, localizedImageInfo, extractMetadataSections, type LocalizedImageInfo } from './imageMetadata';
+
+// rsp-wp1 Part B: photos currently inflate to ~25MB PNGs on transcode (a raw decode+re-encode at
+// native resolution), raising prefill cost for every vision pass. 1568px is comfortably above
+// what current vision models extract further detail from at, and only ever shrinks — a source
+// already under the cap passes through untouched.
+//
+// This duplicates `transcodeToPng`'s small createImageBitmap/OffscreenCanvas shape (see
+// `../../search/imageTranscode.ts`) rather than adding a parameter to it: this work package's
+// hard constraints forbid touching anything under `src/search/`, so the downscale-then-encode
+// step lives here instead, as `transcodeToPngDownscaled` below.
+export const IMAGE_DESCRIBE_MAX_LONG_EDGE_PX = 1568;
 
 /** Files per `image_describe_batch` job — the `SEARCH_REBUILD_BATCH_FILES` precedent applied to
  * the image backfill: ~4,751 unique referenced images / 100 gives ~48 job files, not 4,751. */
@@ -110,6 +121,39 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 	return Promise.race([promise, timeout]).finally(() => {
 		if (timer) clearTimeout(timer);
 	});
+}
+
+/**
+ * Pure dimension math for the downscale cap: shrink-only, aspect-preserved. Split out from
+ * `transcodeToPngDownscaled` so it's testable under plain `node --test` without a DOM (same split
+ * `needsVisionTranscode`/`transcodeToPng` already draw in `../../search/imageTranscode.ts`).
+ * A source already at or under `maxLongEdge` (or with a non-positive edge) passes through
+ * unchanged — this must never *grow* a smaller image.
+ */
+export function clampLongEdge(width: number, height: number, maxLongEdge: number): { width: number; height: number } {
+	const longEdge = Math.max(width, height);
+	if (longEdge <= 0 || longEdge <= maxLongEdge) return { width, height };
+	const scale = maxLongEdge / longEdge;
+	return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+/**
+ * Like `transcodeToPng` (`../../search/imageTranscode.ts`) but caps the long edge at
+ * `IMAGE_DESCRIBE_MAX_LONG_EDGE_PX` before drawing — see that constant's comment for why this is
+ * a local duplicate rather than a parameter added to the shared function. Renderer-only
+ * (`createImageBitmap`/`OffscreenCanvas`), same as the function it mirrors.
+ */
+export async function transcodeToPngDownscaled(bytes: ArrayBuffer, mime: string): Promise<{ bytes: ArrayBuffer; mime: 'image/png' }> {
+	const blob = new Blob([bytes], { type: mime });
+	const bitmap = await createImageBitmap(blob);
+	const { width, height } = clampLongEdge(bitmap.width, bitmap.height, IMAGE_DESCRIBE_MAX_LONG_EDGE_PX);
+	const canvas = new OffscreenCanvas(width, height);
+	const ctx = canvas.getContext('2d');
+	if (!ctx) throw new Error('transcodeToPngDownscaled: failed to acquire an OffscreenCanvas 2d context');
+	ctx.drawImage(bitmap, 0, 0, width, height);
+	const pngBlob = await canvas.convertToBlob({ type: 'image/png' });
+	const pngBytes = await pngBlob.arrayBuffer();
+	return { bytes: pngBytes, mime: 'image/png' };
 }
 
 function truncateFailureMessage(e: unknown): string {
@@ -325,7 +369,7 @@ async function describeOneImage(
 		let transcodeMs: number | undefined;
 		if (needsVisionTranscode(image.ext)) {
 			const transcodeStarted = Date.now();
-			const transcoded = await withTimeout(transcodeToPng(bytes, finalMime), IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS, 'image transcode');
+			const transcoded = await withTimeout(transcodeToPngDownscaled(bytes, finalMime), IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS, 'image transcode');
 			finalBytes = transcoded.bytes;
 			finalMime = transcoded.mime;
 			transcodeMs = Date.now() - transcodeStarted;

@@ -3,7 +3,7 @@ import { Notice, Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderCatalogModel, ProviderKind, ProviderModel, ProviderModelRef, providerModality } from "../../types";
 import { agentCommandId } from "../../agents";
-import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey } from "../../providers";
+import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey, resolveProviderConcurrencyLimit } from "../../providers";
 import { FileSuggest, FolderSuggest, ProviderModelSuggest } from "../../suggesters";
 import { confirmDestructive } from "../destructiveActions";
 import {
@@ -284,7 +284,50 @@ function renderEditProvider(tab: CrucibleSettingTab, containerEl: HTMLElement, p
 	}
 
 	containerEl.createEl('hr', { cls: 'crucible-row-divider' });
+	renderMaxConcurrentRequestsSetting(containerEl, provider, save);
+
+	containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 	renderProviderModelsList(tab, containerEl, provider);
+}
+
+// rsp-wp1: caps in-flight completion-class requests (chat, image description — not embed/rerank)
+// for this provider, gated in ProviderManager (src/providers.ts). Blank keeps the default:
+// resolveProviderConcurrencyLimit(provider) with maxConcurrentRequests cleared shows what that
+// default actually resolves to for this provider's kind, rather than a hardcoded "1 or
+// unlimited" guess drifting from the real resolution logic.
+function renderMaxConcurrentRequestsSetting(containerEl: HTMLElement, provider: Provider, save: () => Promise<void>) {
+	const defaultLimit = resolveProviderConcurrencyLimit({ ...provider, maxConcurrentRequests: undefined });
+	const defaultLabel = Number.isFinite(defaultLimit) ? String(defaultLimit) : 'Unlimited';
+	new Setting(containerEl)
+		.setName('Max concurrent requests')
+		.setDesc(
+			`Blank uses the default (currently ${defaultLabel} for this provider): local providers `
+			+ '(openai-compatible) default to 1 — a single-GPU local model gains no throughput from '
+			+ 'concurrency, and extra in-flight requests just push each other\'s wall-clock time past '
+			+ 'the timeout — while cloud providers default to unlimited. Applies to completion-class '
+			+ 'requests only (chat, image description); embeddings and reranking are never limited.',
+		)
+		.addText(t => {
+			t.setPlaceholder(defaultLabel)
+				.setValue(provider.maxConcurrentRequests ? String(provider.maxConcurrentRequests) : '')
+				.onChange(async (v) => {
+					const trimmed = v.trim();
+					if (!trimmed) {
+						delete provider.maxConcurrentRequests;
+						await save();
+						return;
+					}
+					const n = Number(trimmed);
+					if (Number.isFinite(n) && n > 0) {
+						provider.maxConcurrentRequests = Math.floor(n);
+						await save();
+					}
+				});
+			t.inputEl.type = 'number';
+			t.inputEl.min = '1';
+			t.inputEl.step = '1';
+			t.inputEl.addClass('pi-width-half');
+		});
 }
 
 // The provider API-key control is identical for every kind that has one (only the
