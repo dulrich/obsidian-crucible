@@ -117,7 +117,7 @@ test('multi-event command trigger adapts to an event list and preserves jobs', (
 	}]);
 });
 
-test('multi-event trigger with an empty event list defaults to create', () => {
+test('multi-event trigger with an explicitly empty event list adapts to no events', () => {
 	const def = {
 		id: 't-empty-events',
 		name: 'Empty events',
@@ -128,7 +128,92 @@ test('multi-event trigger with an empty event list defaults to create', () => {
 	};
 	const trigger = triggerDefToOrchestrationTrigger(def, pluginWithFrontmatter({}));
 
-	assert.deepEqual(trigger.on, { events: ['create'] });
+	// Deliberately no fallback to ['create'] — an explicitly emptied event list
+	// goes inert instead of silently re-arming on the broadest event.
+	assert.deepEqual(trigger.on, { events: [] });
+});
+
+test('a single on.event (no events array) keeps working unchanged', () => {
+	const def = {
+		id: 't-single-event',
+		name: 'Single event',
+		enabled: true,
+		on: { event: 'create' },
+		conditions: [],
+		action: { kind: 'chain', chainName: 'Capture' },
+	};
+	const trigger = triggerDefToOrchestrationTrigger(def, pluginWithFrontmatter({}));
+
+	assert.deepEqual(trigger.on, { event: 'create' });
+});
+
+test('chain-kind trigger seeds chain_run with chainName and targetPath', () => {
+	const def = {
+		id: 't-chain',
+		name: 'Run capture chain',
+		enabled: true,
+		on: { event: 'create' },
+		conditions: [],
+		action: { kind: 'chain', chainName: 'Capture' },
+	};
+	const file = { path: 'Clippings/note.md', parent: { path: 'Clippings' } };
+	const trigger = triggerDefToOrchestrationTrigger(def, pluginWithFrontmatter({}));
+
+	assert.equal(trigger.guard(file), true);
+	assert.deepEqual(trigger.jobs(file), [{
+		type: 'chain_run',
+		params: { chainName: 'Capture', targetPath: 'Clippings/note.md' },
+	}]);
+});
+
+test('chain-kind trigger with an empty/whitespace chainName seeds no job', () => {
+	const blankDef = {
+		id: 't-chain-empty',
+		name: 'Blank chain',
+		enabled: true,
+		on: { event: 'create' },
+		conditions: [],
+		action: { kind: 'chain', chainName: '' },
+	};
+	const whitespaceDef = {
+		id: 't-chain-whitespace',
+		name: 'Whitespace chain',
+		enabled: true,
+		on: { event: 'create' },
+		conditions: [],
+		action: { kind: 'chain', chainName: '   ' },
+	};
+	const file = { path: 'note.md', parent: { path: '' } };
+	const blankTrigger = triggerDefToOrchestrationTrigger(blankDef, pluginWithFrontmatter({}));
+	const whitespaceTrigger = triggerDefToOrchestrationTrigger(whitespaceDef, pluginWithFrontmatter({}));
+
+	assert.deepEqual(blankTrigger.jobs(file), []);
+	assert.deepEqual(whitespaceTrigger.jobs(file), []);
+});
+
+test('command-kind trigger with an empty/whitespace commandId seeds no job', () => {
+	const blankDef = {
+		id: 't-command-empty',
+		name: 'Blank command',
+		enabled: true,
+		on: { event: 'create' },
+		conditions: [],
+		action: { kind: 'command', commandId: '', args: {} },
+	};
+	const whitespaceDef = {
+		id: 't-command-whitespace',
+		name: 'Whitespace command',
+		enabled: true,
+		on: { event: 'create' },
+		conditions: [],
+		action: { kind: 'command', commandId: '   ', args: {} },
+	};
+	const file = { path: 'note.md', parent: { path: '' } };
+	const blankTrigger = triggerDefToOrchestrationTrigger(blankDef, pluginWithFrontmatter({}));
+	const whitespaceTrigger = triggerDefToOrchestrationTrigger(whitespaceDef, pluginWithFrontmatter({}));
+
+	assert.deepEqual(blankTrigger.jobs(file), []);
+	assert.deepEqual(whitespaceTrigger.jobs(file), []);
 });
 
 test('trigger guard accepts channelId in a configured property set', () => {

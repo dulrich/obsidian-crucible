@@ -249,7 +249,6 @@ export default class CruciblePlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
 			if (file instanceof TFile) this.noteLocks.handleRename(oldPath, file.path);
 		}));
-		this.triggers.start();
 
 		registerInternalCommands(this);
 		this.registerAgents();
@@ -270,6 +269,15 @@ export default class CruciblePlugin extends Plugin {
 			this.fileOpenIndex.markLayoutReady();
 			void this.orchestrator.scan({ notify: false });
 			void this.warnOnMissingSecrets();
+			// Obsidian replays vault.on('create') for every pre-existing file during
+			// vault indexing at startup — with a populated orchestration queue that's
+			// thousands of job-note creates. Starting triggers here (after that
+			// replay has settled) skips the storm instead of reacting to it.
+			// start() is idempotent (the `started` guard) and registration still runs
+			// after the noteLock rename handler above, so path re-keying on rename
+			// still wins the race; user-trigger schedule anchoring in setUserTriggers
+			// (called from registerTriggers() above) is unaffected either way.
+			this.triggers.start();
 		});
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
