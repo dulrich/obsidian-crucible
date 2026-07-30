@@ -27,8 +27,28 @@ export interface SortState {
 }
 
 export interface TableStateContext {
-	refresh: () => Promise<void> | void;
+	// P6: the coordinated flush (ingestionDashboard.ts) calls this with
+	// `{ eventDriven: true }` for its automatic, coalesced passes. Every other
+	// call site — the header Refresh button (buildSection), a sort-header click
+	// (sortableTable.ts), Ignore/Unignore and other user-action refreshes
+	// (cells.ts, controlCenter.ts, orphanedAttachments.ts, controlCenters.ts,
+	// uncapturedPosts.ts) — calls `ctx.refresh()` with no opts, which is a
+	// forced pass. `refresh` is responsible for setting `ctx.eventDriven`
+	// (`opts?.eventDriven === true`) *before* invoking the section's render
+	// function, since that's what the P5 row-signature skip in
+	// render/section.ts (`shouldRepaint`) reads to decide whether an unchanged
+	// row model may skip repainting.
+	refresh: (opts?: { eventDriven?: boolean }) => Promise<void> | void;
 	sort: SortState | null;
+	// P5: transient — set by `refresh()` immediately before it calls the
+	// section's render function, consumed by `shouldRepaint()` in
+	// render/section.ts. true only during the coordinated flush's automatic
+	// passes; left false (or unset) by every forced call, which always
+	// repaints regardless of whether the computed row signature matches the
+	// last-painted one. Not reset back to false after a call — `refresh`
+	// re-asserts it (to whichever value is correct) on every invocation, so a
+	// stale leftover value can never be read.
+	eventDriven?: boolean;
 }
 
 // Shared per-section view state: the body element a section renders into, its

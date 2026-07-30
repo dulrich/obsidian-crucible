@@ -1,6 +1,6 @@
 import { Notice } from 'obsidian';
 import { runBlogIngestCommand } from '../../orchestration/utils/blogsApi';
-import { renderTableSection } from '../render/section';
+import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderAuthorCell, renderExternalLink, renderFileLink, renderIgnoreButton } from '../render/cells';
 import { displayLabel } from '../render/format';
 import { computeUncapturedPostRows } from '../data/uncaptured';
@@ -23,6 +23,9 @@ export async function renderUncapturedPosts(host: DashboardHost, body: HTMLEleme
 	// emptying the body itself below is the only teardown, and a throw here leaves
 	// the previous render on screen instead of a blanked "Scanning…" state.
 	const rows = await computeUncapturedPostRows(host.app, host.plugin);
+	// P5: an event-driven pass with an unchanged row set skips the rebuild;
+	// a forced pass (header Refresh, post-Ignore refresh, ...) always repaints.
+	if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 
 	renderTableSection<UncapturedPostRow>({
 		body, ctx, rows,
