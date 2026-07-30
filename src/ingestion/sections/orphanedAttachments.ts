@@ -1,5 +1,6 @@
 import { Notice } from 'obsidian';
 import { ConfirmModal } from '../../confirmModal';
+import { confirmDestructive } from '../../settings/destructiveActions';
 import { logWarn } from '../../log';
 import { renderTableSection } from '../render/section';
 import { renderFileLink } from '../render/cells';
@@ -78,6 +79,9 @@ function renderDeleteButton(host: DashboardHost, td: HTMLElement, row: OrphanRow
 	btn.addClass('mod-warning');
 	btn.addEventListener('click', () => {
 		void (async () => {
+			if (!(await confirmDestructive(host.app, host.plugin.settings, 'orphaned-attachment-delete', {
+				message: `Trash orphaned attachment "${row.file.name}"? It will go to the vault's configured trash.`,
+			}))) return;
 			btn.disabled = true;
 			try {
 				await host.app.fileManager.trashFile(row.file);

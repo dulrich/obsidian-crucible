@@ -9,6 +9,7 @@ import { CrucibleCommandPaletteFilterMode, CrucibleCommandPaletteHintCharsetMode
 import { FileTypeGroup, commitSelectedExtensions, deriveFileTypeGroups, resolveSelectedExtensions } from "../../fileTypes";
 import { SearchWithContainer } from "../shared";
 import { bindToggle, bindDropdown, bindText, bindNumber, Save } from "../bind";
+import { confirmDestructive } from "../destructiveActions";
 
 function getChainOnlyCommandList(): { id: string, name: string }[] {
 	return [
@@ -456,6 +457,9 @@ function renderPinnedCommandList(tab: CrucibleSettingTab, containerEl: HTMLEleme
 				.setIcon('trash')
 				.setTooltip('Remove from pinned')
 				.onClick(async () => {
+					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'pinned-command-delete', {
+						message: `Unpin command "${getCommandSuggestDisplayName(tab.app, id)}"?`,
+					}))) return;
 					pinned.splice(index, 1);
 					await tab.plugin.saveSettings();
 					tab.refreshDisplay();
@@ -516,6 +520,9 @@ function renderPaletteFilterSection(tab: CrucibleSettingTab, containerEl: HTMLEl
 				.setIcon('trash')
 				.setTooltip('Remove')
 				.onClick(async () => {
+					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'palette-list-entry-delete', {
+						message: `Remove "${getCommandSuggestDisplayName(tab.app, id)}" from the ${mode === 'whitelist' ? 'whitelist' : 'blacklist'}?`,
+					}))) return;
 					const idx = list.indexOf(id);
 					if (idx !== -1) list.splice(idx, 1);
 					await tab.plugin.saveSettings();

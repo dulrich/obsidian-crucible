@@ -3,6 +3,7 @@ import { Setting, Notice } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { ImageConvertFormat, LocalizeMediaType, OBSIDIAN_NATIVE_EMBED_FORMATS } from "../../types";
 import { bindToggle, bindText, bindNumber, bindDropdown } from "../bind";
+import { confirmDestructive } from "../destructiveActions";
 
 function getLocalizeFlag(tab: CrucibleSettingTab, type: LocalizeMediaType, kind: 'attached' | 'pasted'): boolean {
 	const s = tab.plugin.settings;
@@ -106,5 +107,11 @@ export function renderLocalizeAttachmentsSettings(tab: CrucibleSettingTab, conta
 	bindToggle(store, { name: 'Debug mode', desc: 'Log each note\'s attachment matches and per-image decisions to _crucible/debug.md (shared with Chain debug).', get: () => s.localizeAttachmentsDebugMode, set: (v) => { s.localizeAttachmentsDebugMode = v; } }, save);
 
 	const actions = containerEl.createDiv({ cls: 'crucible-settings-group' });
-	new Setting(actions).setName('Run now').addButton(bt => bt.setButtonText('Localize this note').onClick(async () => { const f = tab.app.workspace.getActiveFile(); if (f && f.extension === 'md') await tab.plugin.attachmentLocalizer.localizeNote(f); else new Notice('Open a Markdown note first'); })).addButton(bt => bt.setButtonText('Localize vault').setWarning().onClick(async () => { await tab.plugin.attachmentLocalizer.localizeVault(); }));
+	new Setting(actions).setName('Run now').addButton(bt => bt.setButtonText('Localize this note').onClick(async () => { const f = tab.app.workspace.getActiveFile(); if (f && f.extension === 'md') await tab.plugin.attachmentLocalizer.localizeNote(f); else new Notice('Open a Markdown note first'); })).addButton(bt => bt.setButtonText('Localize vault').setWarning().onClick(async () => {
+		const noteCount = tab.app.vault.getMarkdownFiles().length;
+		if (!(await confirmDestructive(tab.app, s, 'localize-vault-run', {
+			message: `Run "Localize attachments" on all ${noteCount} Markdown note${noteCount === 1 ? '' : 's'} in the vault? This downloads remote media and moves local attachments across the vault.`,
+		}))) return;
+		await tab.plugin.attachmentLocalizer.localizeVault();
+	}));
 }

@@ -38,39 +38,42 @@ export interface DestructiveAction {
  */
 export const DESTRUCTIVE_ACTIONS: DestructiveAction[] = [
 	// --- critical ---
-	{ id: 'chain-delete', label: 'Delete chain', tier: 'critical', group: 'Automate' }, // automate.ts:172
-	{ id: 'capture-delete', label: 'Delete capture', tier: 'critical', group: 'Automate' }, // automate.ts:80 + :639 (two entry points)
-	{ id: 'agent-delete', label: 'Delete agent', tier: 'critical', group: 'AI' }, // ai.ts:904
-	{ id: 'trigger-delete', label: 'Delete trigger', tier: 'critical', group: 'Automate' }, // triggers.ts:145 + :465 (two entry points)
-	{ id: 'provider-delete', label: 'Delete provider', tier: 'critical', group: 'AI' }, // ai.ts:115 — existing exemplar, migrates onto this framework in WP-4
+	// clsl-WP-4: file:line comments below point at the actual `confirmDestructive('<id>', …)`
+	// call site(s) as of the WP-4 retrofit landing — refreshed from the pre-retrofit audit
+	// evidence. Still "where to look, not a contract": they will drift again as call sites move.
+	{ id: 'chain-delete', label: 'Delete chain', tier: 'critical', group: 'Automate' }, // automate.ts:187
+	{ id: 'capture-delete', label: 'Delete capture', tier: 'critical', group: 'Automate' }, // automate.ts:61 — deleteCapture(), shared by both entry points (list row + edit-form button)
+	{ id: 'agent-delete', label: 'Delete agent', tier: 'critical', group: 'AI' }, // ai.ts:915 — deleteAgent(), shared by both entry points (list row + edit-form button)
+	{ id: 'trigger-delete', label: 'Delete trigger', tier: 'critical', group: 'Automate' }, // triggers.ts:122 — deleteTrigger(), shared by both entry points (list row + edit-form button)
+	{ id: 'provider-delete', label: 'Delete provider', tier: 'critical', group: 'AI' }, // ai.ts:125 — deleteProvider(), migrated off its bare-ConfirmModal exemplar in WP-4
 
 	// --- high ---
-	{ id: 'api-key-clear', label: 'Clear API key', tier: 'high', group: 'AI' }, // shared.ts:109 — one mount covers all provider keys + YouTube
-	{ id: 'chain-step-delete', label: 'Delete chain step', tier: 'high', group: 'Automate' }, // automate.ts:291 — the misclick-geometry one
-	{ id: 'trigger-guard-condition-delete', label: 'Delete trigger guard condition', tier: 'high', group: 'Automate' }, // triggers.ts:201
-	{ id: 'orphaned-attachment-delete', label: 'Delete orphaned attachment', tier: 'high', group: 'Dashboard' }, // ingestion/sections/orphanedAttachments.ts:76
-	{ id: 'lint-vault-run', label: 'Run Lint: all on vault', tier: 'high', group: 'Lint' }, // lint.ts:21 — bulk mutation
-	{ id: 'localize-vault-run', label: 'Run Localize attachments on vault', tier: 'high', group: 'Lint' }, // localize.ts:109 — bulk mutation
+	{ id: 'api-key-clear', label: 'Clear API key', tier: 'high', group: 'AI' }, // shared.ts:122 (mountSecretControl) — one mount covers provider keys (ai.ts) + YouTube (orchestration.ts)
+	{ id: 'chain-step-delete', label: 'Delete chain step', tier: 'high', group: 'Automate' }, // automate.ts:312 — the misclick-geometry one
+	{ id: 'trigger-guard-condition-delete', label: 'Delete trigger guard condition', tier: 'high', group: 'Automate' }, // triggers.ts:216
+	{ id: 'orphaned-attachment-delete', label: 'Delete orphaned attachment', tier: 'high', group: 'Dashboard' }, // ingestion/sections/orphanedAttachments.ts:82
+	{ id: 'lint-vault-run', label: 'Run Lint: all on vault', tier: 'high', group: 'Lint' }, // lint.ts:49 — bulk mutation
+	{ id: 'localize-vault-run', label: 'Run Localize attachments on vault', tier: 'high', group: 'Lint' }, // localize.ts:112 — bulk mutation
 
 	// --- medium ---
-	{ id: 'chain-variable-delete', label: 'Delete chain variable', tier: 'medium', group: 'Automate' }, // automate.ts:247
-	{ id: 'provider-model-delete', label: 'Delete provider model', tier: 'medium', group: 'AI' }, // ai.ts:539
-	{ id: 'guard-condition-value-delete', label: 'Delete guard condition value', tier: 'medium', group: 'Automate' }, // guardConditionFields.ts:202
-	{ id: 'lint-excluded-folder-delete', label: 'Delete lint excluded folder', tier: 'medium', group: 'Lint' }, // lint.ts:67
+	{ id: 'chain-variable-delete', label: 'Delete chain variable', tier: 'medium', group: 'Automate' }, // automate.ts:265
+	{ id: 'provider-model-delete', label: 'Delete provider model', tier: 'medium', group: 'AI' }, // ai.ts:544
+	{ id: 'guard-condition-value-delete', label: 'Delete guard condition value', tier: 'medium', group: 'Automate' }, // guardConditionFields.ts:269
+	{ id: 'lint-excluded-folder-delete', label: 'Delete lint excluded folder', tier: 'medium', group: 'Lint' }, // lint.ts:113
 
 	// --- low ---
-	{ id: 'folder-template-delete', label: 'Delete folder template', tier: 'low', group: 'Configure' }, // configure.ts:85
-	{ id: 'pinned-folder-delete', label: 'Delete pinned folder', tier: 'low', group: 'Configure' }, // configure.ts:180
-	{ id: 'shortcut-delete', label: 'Delete shortcut', tier: 'low', group: 'Automate' }, // automate.ts:536
-	{ id: 'pinned-command-delete', label: 'Delete pinned command', tier: 'low', group: 'Commands' }, // commands.ts:455
-	{ id: 'palette-list-entry-delete', label: 'Delete palette list entry', tier: 'low', group: 'Commands' }, // commands.ts:515
-	{ id: 'constrained-binding-model-delete', label: 'Delete constrained-binding model', tier: 'low', group: 'AI' }, // ai.ts:1187
-	{ id: 'fx-pair-delete', label: 'Delete FX pair', tier: 'low', group: 'Orchestrator' }, // orchestration.ts:740
-	{ id: 'weather-location-delete', label: 'Delete weather location', tier: 'low', group: 'Orchestrator' }, // orchestration.ts:818
-	{ id: 'model-ref-clear', label: 'Clear model reference', tier: 'low', group: 'Orchestrator' }, // orchestration.ts:343 / 451 / 486 — one id covers all three
+	{ id: 'folder-template-delete', label: 'Delete folder template', tier: 'low', group: 'Configure' }, // configure.ts:87
+	{ id: 'pinned-folder-delete', label: 'Delete pinned folder', tier: 'low', group: 'Configure' }, // configure.ts:251
+	{ id: 'shortcut-delete', label: 'Delete shortcut', tier: 'low', group: 'Automate' }, // automate.ts:560
+	{ id: 'pinned-command-delete', label: 'Delete pinned command', tier: 'low', group: 'Commands' }, // settings/sections/commands.ts:460
+	{ id: 'palette-list-entry-delete', label: 'Delete palette list entry', tier: 'low', group: 'Commands' }, // settings/sections/commands.ts:523
+	{ id: 'constrained-binding-model-delete', label: 'Delete constrained-binding model', tier: 'low', group: 'AI' }, // ai.ts:1200
+	{ id: 'fx-pair-delete', label: 'Delete FX pair', tier: 'low', group: 'Orchestrator' }, // orchestration.ts:761
+	{ id: 'weather-location-delete', label: 'Delete weather location', tier: 'low', group: 'Orchestrator' }, // orchestration.ts:842
+	{ id: 'model-ref-clear', label: 'Clear model reference', tier: 'low', group: 'Orchestrator' }, // orchestration.ts:345 / 466 / 504 — one id covers all three
 	// default-suppressed (see DEFAULT_SETTINGS.destructiveConfirmAction in src/types.ts): preserves
 	// the documented single-row-cancel policy at queueMonitor.ts:159-162. Still overridable on.
-	{ id: 'job-cancel', label: 'Cancel job', tier: 'low', group: 'Dashboard' }, // queueMonitor.ts:454
+	{ id: 'job-cancel', label: 'Cancel job', tier: 'low', group: 'Dashboard' }, // ingestion/sections/queueMonitor.ts:460
 ];
 
 /**

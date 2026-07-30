@@ -7,7 +7,7 @@ import { PERIOD_IDS, PeriodId, getPeriodConfig } from "../../periods";
 import { SearchWithContainer, addWarningIcon } from "../shared";
 import { bindToggle, bindDropdown, bindSearch } from "../bind";
 import { applySurround } from "../../surround";
-import { DESTRUCTIVE_ACTIONS, DestructiveTier, resolveConfirmRequired } from "../destructiveActions";
+import { DESTRUCTIVE_ACTIONS, DestructiveTier, confirmDestructive, resolveConfirmRequired } from "../destructiveActions";
 
 export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	const s = tab.plugin.settings;
@@ -83,7 +83,12 @@ export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HT
 				new FileSuggest(tab.app, cb.inputEl);
 			})
 			.addExtraButton(cb => {
-				cb.setIcon('trash').onClick(async () => { s.folderTemplates.splice(index, 1); await save(); tab.display(); });
+				cb.setIcon('trash').onClick(async () => {
+					if (!(await confirmDestructive(tab.app, s, 'folder-template-delete', {
+						message: `Delete folder template mapping for "${ft.folder || '(unnamed)'}"?`,
+					}))) return;
+					s.folderTemplates.splice(index, 1); await save(); tab.display();
+				});
 			});
 		setting.infoEl.remove();
 	});
@@ -243,6 +248,9 @@ function renderPinnedFoldersSettings(tab: CrucibleSettingTab, containerEl: HTMLE
 				cb.setIcon('trash')
 					.setTooltip('Remove pinned folder')
 					.onClick(async () => {
+						if (!(await confirmDestructive(tab.app, s, 'pinned-folder-delete', {
+							message: `Delete pinned folder "${folder || '(unnamed)'}"?`,
+						}))) return;
 						s.moveFilePinnedFolders.splice(index, 1);
 						await save();
 						tab.display();

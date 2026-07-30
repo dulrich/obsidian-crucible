@@ -1,5 +1,6 @@
-import { Setting, setIcon, ExtraButtonComponent, TextComponent } from "obsidian";
-import { Provider, ProviderKind, ProviderModelRef } from "../types";
+import { App, Setting, setIcon, ExtraButtonComponent, TextComponent } from "obsidian";
+import { CrucibleSettings, Provider, ProviderKind, ProviderModelRef } from "../types";
+import { confirmDestructive } from "./destructiveActions";
 
 /** A SearchComponent exposes its wrapping element as `containerEl` at runtime. */
 export interface SearchWithContainer {
@@ -98,6 +99,14 @@ export function mountSecretControl(setting: Setting, opts: {
 	// True when this key was previously saved but now reads empty — i.e. it vanished
 	// from the store out-of-band. Renders a warning state prompting re-entry.
 	expectedButMissing?: () => boolean;
+	// clsl-WP-4: this one mount point serves both provider keys (ai.ts) and the YouTube
+	// key (orchestration.ts) — routed through the shared `api-key-clear` registry id, with
+	// `message` naming which key is being cleared so the two surfaces stay distinguishable.
+	confirm: {
+		app: App;
+		settings: CrucibleSettings;
+		message: string;
+	};
 }): void {
 	const placeholder = opts.placeholder ?? 'Enter API key...';
 	const indicatorText = opts.indicatorText ?? 'API Key in Obsidian Secrets';
@@ -110,6 +119,9 @@ export function mountSecretControl(setting: Setting, opts: {
 			.setIcon('trash')
 			.setTooltip('Clear API key')
 			.onClick(async () => {
+				if (!(await confirmDestructive(opts.confirm.app, opts.confirm.settings, 'api-key-clear', {
+					message: opts.confirm.message,
+				}))) return;
 				await opts.clear();
 				renderInput(true);
 			});

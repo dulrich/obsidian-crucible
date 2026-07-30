@@ -6,6 +6,7 @@ import { FileSuggest, FolderSuggest, CurrencySuggest, LocationSuggest } from "..
 import { isValidTimezone } from "../../orchestration/utils/dates";
 import { YOUTUBE_DATA_API_SECRET_KEY, deleteYoutubeApiKey, loadYoutubeApiKey, storeYoutubeApiKey } from "../../orchestration/utils/youtubeApi";
 import { addWarningIcon, mountSecretControl } from "../shared";
+import { confirmDestructive } from "../destructiveActions";
 import { bindToggle, bindText, bindNumber, bindSearch, bindTextArea, bindDropdown } from "../bind";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 import type { JobType } from "../../orchestration/types";
@@ -341,6 +342,9 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			}).open();
 		}))
 		.addButton(bt => bt.setButtonText('Clear').onClick(async () => {
+			if (!(await confirmDestructive(tab.app, s, 'model-ref-clear', {
+				message: 'Clear the search embedding model reference?',
+			}))) return;
 			delete s.searchEmbeddingModel;
 			await save();
 			tab.display();
@@ -459,6 +463,9 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			}).open();
 		}))
 		.addButton(bt => bt.setButtonText('Clear').onClick(async () => {
+			if (!(await confirmDestructive(tab.app, s, 'model-ref-clear', {
+				message: 'Clear the image description model reference?',
+			}))) return;
 			delete s.imageMetadataExtractionModel;
 			await save();
 			tab.display();
@@ -494,6 +501,9 @@ export function renderOrchestrationSettings(tab: CrucibleSettingTab, containerEl
 			}).open();
 		}))
 		.addButton(bt => bt.setButtonText('Clear').onClick(async () => {
+			if (!(await confirmDestructive(tab.app, s, 'model-ref-clear', {
+				message: 'Clear the reranker model reference?',
+			}))) return;
 			delete s.searchRerankModel;
 			await save();
 			tab.display();
@@ -748,6 +758,9 @@ function renderEditDailyBriefWorkflow(tab: CrucibleSettingTab, containerEl: HTML
 				t.inputEl.addClass('pi-width-normal');
 			});
 			row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove pair').onClick(async () => {
+				if (!(await confirmDestructive(tab.app, s, 'fx-pair-delete', {
+					message: `Delete FX pair "${pair.label || `${pair.base} -> ${pair.quote}` || '(unnamed)'}"?`,
+				}))) return;
 				fxPairs.splice(index, 1);
 				await save();
 				tab.display();
@@ -826,6 +839,9 @@ function renderEditDailyBriefWorkflow(tab: CrucibleSettingTab, containerEl: HTML
 				t.inputEl.addClass('pi-width-small');
 			});
 			row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove location').onClick(async () => {
+				if (!(await confirmDestructive(tab.app, s, 'weather-location-delete', {
+					message: `Delete weather location "${loc.label || '(unnamed)'}"?`,
+				}))) return;
 				locations.splice(index, 1);
 				await save();
 				tab.display();
@@ -925,6 +941,11 @@ function renderEditYoutubeTrackerWorkflow(tab: CrucibleSettingTab, containerEl: 
 		store: (v) => storeYoutubeApiKey(tab.plugin, v),
 		clear: () => deleteYoutubeApiKey(tab.plugin),
 		expectedButMissing: () => tab.plugin.secretRegistry.isRegistered(YOUTUBE_DATA_API_SECRET_KEY),
+		confirm: {
+			app: tab.app,
+			settings: tab.plugin.settings,
+			message: 'Clear the stored YouTube Data API key? The per-video metadata fetch command will fail until a new key is set.',
+		},
 	});
 }
 

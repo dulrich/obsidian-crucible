@@ -5,6 +5,7 @@ import { GuardCondition, GuardConditionType, GuardConditionValueKind } from "../
 import { FileSuggest, FolderSuggest, TagSuggest, YoutubeChannelSuggest } from "../../suggesters";
 import { SearchWithContainer } from "../shared";
 import { bindText, bindNumber } from "../bind";
+import { confirmDestructive } from "../destructiveActions";
 
 export const GUARD_TYPE_LABELS: Record<GuardConditionType, string> = {
 	'has-tag': 'Note has tag',
@@ -264,7 +265,12 @@ function renderGuardValueSetting(
 	}
 	if (opts.remove) {
 		setting.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove value').onClick(() => {
-			void opts.remove?.();
+			void (async () => {
+				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'guard-condition-value-delete', {
+					message: `Delete guard condition value "${opts.get() || '(empty)'}"?`,
+				}))) return;
+				await opts.remove?.();
+			})();
 		}));
 	}
 }
