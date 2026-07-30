@@ -1,7 +1,7 @@
 import type { App, TFile } from 'obsidian';
 import type { LocalizeMediaType } from '../../types';
 import type CruciblePlugin from '../../main';
-import type { EnrichmentQueueItem } from '../../orchestration/EnrichmentQueueAdapter';
+import type { JobSeed } from '../../orchestration/Orchestrator';
 
 export type IntakeKind = 'blog' | 'youtube';
 
@@ -90,7 +90,7 @@ export interface DashboardHost {
 	// The enrichment auto-source: uncaptured videos without an enrichment file yet,
 	// in the uncaptured-videos section's current sort order. Owned by
 	// uncapturedVideos.ts but read by queueControls.ts too, so it stays on the host.
-	uncapturedQueueItems(): EnrichmentQueueItem[];
+	uncapturedQueueItems(): JobSeed[];
 }
 
 export interface Column<T> {

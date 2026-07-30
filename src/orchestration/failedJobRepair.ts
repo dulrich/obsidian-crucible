@@ -1,21 +1,20 @@
 import { Notice } from 'obsidian';
 import type CruciblePlugin from '../main';
 import type { OrchestrationJob } from './types';
-import { logError } from '../log';
 import { ConfirmModal } from '../confirmModal';
 
 // Retroactive repair for the cohort a service outage leaves behind, plus the
-// forward-looking classification `FileJobBackend.failEntry` stamps on every new
+// forward-looking classification `DbJobBackend.failEntry` stamps on every new
 // failure.
 //
 // Context this exists for: one companion outage wrote 2,022 per-job failure files
-// into `failed/` (error text `ERR_CONNECTION_REFUSED`) before `ServiceHealthRegistry`
+// into the failed bucket (error text `ERR_CONNECTION_REFUSED`) before `ServiceHealthRegistry`
 // (WP-2) existed to recognize a dependency outage as one event instead of N job
 // failures. Those files are indistinguishable from a genuine failure except by their
 // error text, so this module's whole job is to draw that line conservatively: an
 // error text this doesn't recognize is `'genuine'`, never `'service-outage'` — a job
 // requeued by mistake costs nothing (it just runs and, if the underlying problem
-// persists, fails again and lands right back in `failed/`), but a genuine failure
+// persists, fails again and lands right back in failed), but a genuine failure
 // swept up by an overbroad pattern loses the diagnostic and silently retries
 // something that was never going to succeed.
 
@@ -88,123 +87,51 @@ export function classifyFailedJob(_job: Pick<OrchestrationJob, 'type'>, errorTex
 }
 
 export interface RequeueBreakdown {
-	/** Every job currently in `failed/`, matched or not. */
+	/** Every job currently failed, matched or not. */
 	total: number;
 	/** Count of service-outage matches, by job type. */
 	byType: Record<string, number>;
 	/** Count of jobs classified `'service-outage'` (and, on execute, actually moved). */
 	requeued: number;
-	/** Count of jobs classified `'genuine'` (left untouched in `failed/`). */
+	/** Count of jobs classified `'genuine'` (left untouched in the failed bucket). */
 	skipped: number;
 }
 
-function yieldToEventLoop(): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, 0));
-}
-
 /**
- * The FILE arm: scans `failed/`, classifies every entry, and (unless `dryRun`) moves
- * the service-outage matches back to `queued/` — clearing their recorded error first
- * so a requeued job doesn't carry the prior run's diagnostic. Per-file loop, exactly
- * as before WP-7 — file types are deleted in WP-8, not here, so this isn't rewritten
- * onto anything new. No emit of its own: `requeueServiceFailures` below emits once for
- * the combined file+db result.
- */
-async function requeueServiceFailuresFile(
-	plugin: CruciblePlugin,
-	dryRun: boolean,
-): Promise<RequeueBreakdown> {
-	const store = plugin.jobStore;
-	await store.ensureFolders();
-	const failed = await store.listFolder('failed');
-
-	const byType: Record<string, number> = {};
-	let requeued = 0;
-	let skipped = 0;
-	let processed = 0;
-
-	for (const entry of failed) {
-		const classification = classifyFailedJob(entry.job, entry.job.error);
-		if (classification !== 'service-outage') {
-			skipped++;
-			processed++;
-			if (processed % 20 === 0) await yieldToEventLoop();
-			continue;
-		}
-
-		byType[entry.job.type] = (byType[entry.job.type] ?? 0) + 1;
-		requeued++;
-
-		if (!dryRun) {
-			try {
-				await store.clearError(entry.file);
-				await store.move(entry.file, entry.job, 'queued');
-			} catch (err) {
-				// One job the store refused to move must not abort the run for the
-				// thousands behind it — leave it in failed/ (JobStore.move rolls its own
-				// rename back on failure) and count it honestly rather than as requeued.
-				logError(`failedJobRepair: could not requeue ${entry.job.id}; leaving it in failed/`, err);
-				requeued--;
-				skipped++;
-				const remaining = (byType[entry.job.type] ?? 1) - 1;
-				if (remaining <= 0) delete byType[entry.job.type];
-				else byType[entry.job.type] = remaining;
-			}
-		}
-
-		processed++;
-		if (processed % 20 === 0) await yieldToEventLoop();
-	}
-
-	return { total: failed.length, byType, requeued, skipped };
-}
-
-function mergeByTypeCounts(a: Record<string, number>, b: Record<string, number>): Record<string, number> {
-	const out: Record<string, number> = { ...a };
-	for (const [type, count] of Object.entries(b)) out[type] = (out[type] ?? 0) + count;
-	return out;
-}
-
-/**
- * Scans BOTH the file queue's `failed/` and (once a `db` type exists) the jobs DB for
- * service-outage failures, and (unless `dryRun`) requeues the matches back to
- * `queued`. Backend-dispatched (WP-7): the file arm is the per-file loop above,
- * unchanged since before this WP; the db arm is `Orchestrator.requeueServiceOutageDbFailures`
- * — one `UPDATE … WHERE failure_kind = 'service'` selecting on the column
- * `DbJobBackend.failEntry` already stamped at settle time, no re-classification
- * needed. `classifyFailedJob` stays the single source of truth either way: it is what
- * stamps `failure_kind` in the first place, and it's still what the file arm runs
- * fresh against `error` text (file jobs have no `failure_kind` column).
+ * Scans the queue's failed bucket for service-outage failures and (unless `dryRun`)
+ * requeues the matches. One `UPDATE … WHERE failure_kind = 'service'` on the column
+ * `DbJobBackend.failEntry` already stamped at settle time — no re-classification pass,
+ * where the markdown queue needed a per-file classify/clearError/move loop with an
+ * event-loop yield every 20 entries to stay responsive over the 2,022-file cohort.
+ * `classifyFailedJob` is still the single source of truth: it is what stamps
+ * `failure_kind` in the first place.
  *
  * `dryRun: true` mutates nothing: no store writes, no emit. It exists so the command
  * and the queue-monitor button can show the breakdown in a `ConfirmModal` before
  * anything happens.
  *
- * Emits `orchestration-queue-updated` exactly once for the whole run, through the
- * combined file+db counts provider (never per job, never file-only once a db type
- * exists — see the bulk-emit invariant on `Orchestrator.clearQueued`), and kicks the
- * autorunner once afterward so the requeued jobs start draining immediately.
+ * Emits `orchestration-queue-updated` exactly once for the whole run (never per job —
+ * see the bulk-emit invariant on `Orchestrator.clearQueued`), and kicks the autorunner
+ * once afterward so the requeued jobs start draining immediately.
  */
 export async function requeueServiceFailures(
 	plugin: CruciblePlugin,
 	{ dryRun }: { dryRun: boolean },
 ): Promise<RequeueBreakdown> {
-	const fileResult = await requeueServiceFailuresFile(plugin, dryRun);
-	const dbResult = plugin.orchestrator.requeueServiceOutageDbFailures(dryRun);
-
-	const merged: RequeueBreakdown = {
-		total: fileResult.total + dbResult.total,
-		byType: mergeByTypeCounts(fileResult.byType, dbResult.byType),
-		requeued: fileResult.requeued + dbResult.requeued,
-		skipped: fileResult.skipped + (dbResult.total - dbResult.requeued),
+	const result = plugin.orchestrator.requeueServiceOutageFailures(dryRun);
+	const breakdown: RequeueBreakdown = {
+		total: result.total,
+		byType: result.byType,
+		requeued: result.requeued,
+		skipped: result.total - result.requeued,
 	};
 
-	if (!dryRun && merged.requeued > 0) {
+	if (!dryRun && breakdown.requeued > 0) {
 		await plugin.orchestrator.emitQueueChangedNow();
 		plugin.orchestrationAutoRunner?.kickAll();
 	}
 
-	return merged;
+	return breakdown;
 }
 
 function formatByType(byType: Record<string, number>): string {
@@ -218,9 +145,9 @@ function requeueConfirmMessage(breakdown: RequeueBreakdown): string {
 			+ 'service-outage pattern, so there is nothing to requeue.';
 	}
 	return `${breakdown.total} failed job${breakdown.total === 1 ? '' : 's'} scanned: ${breakdown.requeued} classified `
-		+ `as a service outage (${formatByType(breakdown.byType)}) and will move back to queued/ with their recorded `
+		+ `as a service outage (${formatByType(breakdown.byType)}) and will move back to queued with their recorded `
 		+ `error cleared. ${breakdown.skipped} classified as genuine failure${breakdown.skipped === 1 ? '' : 's'} and `
-		+ 'will stay in failed/ untouched. Unclassifiable text is always treated as genuine.';
+		+ 'will stay failed, untouched. Unclassifiable text is always treated as genuine.';
 }
 
 /**
@@ -251,6 +178,6 @@ export async function runServiceOutageRequeueFlow(plugin: CruciblePlugin): Promi
 
 	const result = await requeueServiceFailures(plugin, { dryRun: false });
 	new Notice(`Orchestrate: requeued ${result.requeued} job${result.requeued === 1 ? '' : 's'}; `
-		+ `${result.skipped} genuine failure${result.skipped === 1 ? '' : 's'} left in failed/.`);
+		+ `${result.skipped} genuine failure${result.skipped === 1 ? '' : 's'} left failed.`);
 	return result;
 }

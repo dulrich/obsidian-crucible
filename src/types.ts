@@ -596,13 +596,24 @@ export interface CrucibleSettings {
 	crucibleFileOpenPaletteExtensions: string[];
 	// Orchestrator
 	orchestrationEnabled: boolean;
+	/**
+	 * LEGACY (thq WP-8). The queue no longer reads, writes or sweeps this folder — jobs
+	 * live in the plugin's own `jobs.sqlite`. It survives for exactly two reasons: the
+	 * one-time frozen-archive notice has to name the folder it is telling the user they
+	 * may delete, and the ingestion dashboard's `route()` guard still drops events under
+	 * it so a user browsing (or finally deleting) thousands of archived job notes
+	 * doesn't fan them into full-vault rescans.
+	 */
 	orchestrationQueueRoot: string;
+	/** Whether the one-time "the old queue folder is a frozen archive" notice has been
+	 * shown. Persisted so it appears once and never again — see
+	 * `maybeShowArchiveNotice` (src/orchestration/archiveNotice.ts). */
+	orchestrationArchiveNoticeShown: boolean;
 	orchestrationTimezone: string;
 	// Age-based retention for the SQLite job store's terminal rows (done/failed/
 	// cancelled), in days. `pruneTerminal` (src/orchestration/db/SqliteJobStore.ts)
-	// deletes settled rows older than this; blank/0 = keep forever. Not yet wired to
-	// any caller — WP-5 (storage layer) ships the setting + store method, WP-6/7 wire
-	// the periodic prune.
+	// deletes settled rows older than this; blank/0 = keep forever. Applied on every
+	// `Orchestrator.scan()` — the manual Scan command and the silent startup scan.
 	orchestrationJobRetentionDays: number;
 	// Queue-wide panic switch (default true) and the single master over all
 	// auto-draining. Off stops every type while preserving the per-type auto-run
@@ -819,6 +830,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	crucibleFileOpenPaletteExtensions: [],
 	orchestrationEnabled: true,
 	orchestrationQueueRoot: '_crucible/orchestration/queue',
+	orchestrationArchiveNoticeShown: false,
 	orchestrationTimezone: 'America/Mexico_City',
 	orchestrationJobRetentionDays: 30,
 	orchestrationQueueEnabled: true,

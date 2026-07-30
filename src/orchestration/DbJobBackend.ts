@@ -22,45 +22,50 @@ import { classifyFailedJob } from './failedJobRepair';
 import { newJobId, nowIso } from './utils/dates';
 
 /**
- * Durable, SQLite-backed job type (thq WP-6). Same observable behavior as
- * `FileJobBackend` — the enablement gates, the dedupe-with-promotion collapse, the
- * settle mapping, the failure `Notice`, the deferral wake, the coalesced queue-changed
- * emits — over `SqliteJobStore` (thq WP-5) instead of markdown files under
- * `orchestrationQueueRoot`.
+ * The queue backend (thq WP-6; the only one since WP-8 retired the markdown
+ * `FileJobBackend` and the in-memory `MemoryJobBackend`). Every registered job type
+ * gets one of these over the shared `SqliteJobStore` (thq WP-5): the enablement gates,
+ * the dedupe-with-promotion collapse, the settle mapping, the failure `Notice`, the
+ * deferral wake and the coalesced queue-changed emits are all as they were when jobs
+ * were markdown files under `orchestrationQueueRoot`.
  *
- * What genuinely differs, and why none of it is observable:
+ * Three things the storage change made *structurally* impossible rather than merely
+ * fixed, which is why the corresponding recovery machinery is gone:
  *
  *  * **No rename dance.** A job's bucket is a column, not a folder, so the
  *    claim/settle path is a single guarded UPDATE rather than rename-then-frontmatter.
- *    That removes `JobStore.move`'s rollback invariant (a transition either applies or
- *    it doesn't) and makes the file backend's whole "aborted claim" recovery class
- *    unrepresentable — see `SqliteJobStore.claimNext`.
- *  * **No `claimed` set.** The file backend needs one because its claim spans an await
- *    (`store.move`); here the claim IS the atomic `UPDATE ... WHERE status='queued'`,
- *    so two workers cannot both win it.
- *  * **`hasPending` is honest.** File types answer "maybe" (always true) because
- *    emptiness is only discovered during the claim; a `COUNT(*)` over an index answers
- *    it exactly.
+ *    A transition applies or it doesn't — no half-moved job, and therefore no
+ *    "aborted claim" state to recover from (see `SqliteJobStore.claimNext`).
+ *  * **No `claimed` set.** The markdown claim spanned an await, so two workers could
+ *    race it; here the claim IS the atomic `UPDATE ... WHERE status='queued'`.
+ *  * **`hasPending` is honest.** The markdown queue answered "maybe" (always true)
+ *    because emptiness was only discovered during the claim; a `COUNT(*)` over an
+ *    index answers it exactly.
  *
- * What is deliberately identical: `running`/`claiming` bookkeeping (so `isRunning`,
- * `isCancelling` and the non-async `cancelJob` behave exactly as the other two
- * backends), and the fact that `clearQueued` emits nothing — the Orchestrator emits
- * once for the whole bulk operation.
+ * What is deliberately unchanged: `running`/`claiming` bookkeeping (so `isRunning`,
+ * `isCancelling` and the non-async `cancelJob` behave as every caller already expects),
+ * and the fact that `clearQueued` emits nothing — the Orchestrator emits once for the
+ * whole bulk operation.
  */
 export class DbJobBackend implements JobBackend, JobQuerySeam {
-	// File-like semantics: the autorunner drains this type, and the autorun toggle
-	// gates it. Only memory types drain regardless of the toggle.
-	readonly drainsWithoutAutorun = false;
+	/**
+	 * Drain readiness for this type — see `JobTypeConfig.drainsWithoutAutorun` for what
+	 * it does and does not gate (its name overstates it). Per-type config since thq
+	 * WP-8 rather than a per-backend constant: it was `false` on `FileJobBackend` and
+	 * `true` on `MemoryJobBackend`, so collapsing both onto this one durable backend
+	 * would otherwise have silently added the 5s initial-drain delay to enrichment.
+	 */
+	readonly drainsWithoutAutorun: boolean;
 	// Runs currently executing, keyed by job id — the same key `runJob`/`cancelJob` take.
 	private readonly running = new RunningJobRegistry();
 	/**
-	 * Job ids currently mid-claim — the DB-side mirror of `FileJobBackend.claiming`.
-	 * The window it covers is a single synchronous JS turn here (node:sqlite is
-	 * synchronous, and `execute` reaches `running.begin` before its first await),
-	 * rather than the file backend's ~2s `store.move`. Tracked anyway for the same
-	 * reason `MemoryJobBackend` tracks it despite an equally tiny window: `cancelJob`
-	 * must never depend on that gap staying zero, and all three backends must answer
-	 * `stopJob`'s claim-window question the same way.
+	 * Job ids currently mid-claim. The window it covers is a single synchronous JS turn
+	 * (node:sqlite is synchronous, and `execute` reaches `running.begin` before its
+	 * first await), where the markdown queue's claim spanned a ~2s `store.move` under
+	 * the metadata-cache write barrier. Tracked anyway, deliberately: `cancelJob` must
+	 * never depend on that gap staying zero — a future await inserted anywhere in this
+	 * path would silently reopen the "cancel answers not-running for a job that then
+	 * visibly starts" bug this exists to close.
 	 */
 	private readonly claiming = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -71,7 +76,9 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 		private readonly type: JobType,
 		private readonly config: JobTypeConfig,
 		private readonly workflow: Workflow,
-	) {}
+	) {
+		this.drainsWithoutAutorun = config.drainsWithoutAutorun === true;
+	}
 
 	async enqueue(params: Record<string, unknown>, options: OrchestrationEnqueueOptions = {}): Promise<OrchestrationJob | null> {
 		if (!this.plugin.settings.orchestrationEnabled) {
@@ -93,8 +100,8 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 					&& lane === existing.lane
 					&& priorityRank(priority) < priorityRank(existing.priority);
 				if (promotesLane || promotesPriority) {
-					// Mirrors FileJobBackend.enqueue: the lane only moves when it is the lane
-					// that promoted, but priority is written for either promotion.
+					// The lane only moves when it is the lane that promoted, but priority is
+					// written for either promotion.
 					this.store.promote(existing.id, promotesLane ? lane : undefined, priority);
 					this.emitQueueUpdate();
 					routineJobNotice(this.plugin, this.type, `Orchestrate: promoted ${this.type} (${existing.id})`);
@@ -137,8 +144,8 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 	//
 	// Deliberately NOT an `async` function: several callers read `isCancelling(id)`
 	// synchronously right after calling this (no await), relying on `running.cancel`'s
-	// own abort() having already run by then. See the identical note on
-	// FileJobBackend.cancelJob / MemoryJobBackend.cancelJob.
+	// own abort() having already run by then. An unconditional `async`/`await` would
+	// delay the abort() by a microtask tick even when there is no claim to wait for.
 	cancelJob(id: string): Promise<CancelJobOutcome> {
 		const claiming = this.claiming.get(id);
 		if (!claiming) return this.running.cancel(id);
@@ -179,16 +186,12 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 		return this.store.clearQueued(Date.now(), this.type);
 	}
 
-	// Exact, unlike the file backend's "maybe": one indexed COUNT(*) over
+	// Exact, unlike the markdown queue's "maybe": one indexed COUNT(*) over
 	// (type, status). Scoped to this type on purpose — the autorunner asks it per type
 	// before starting a worker, and an unscoped count would start a drain for a type
 	// whose queue is empty every time any OTHER type had work.
 	hasPending(): boolean {
 		return this.store.countByTypeAndStatus(this.type, ['queued']) > 0;
-	}
-
-	refill(): void {
-		/* db types have no auto-source */
 	}
 
 	// ---- WP-7 seam: the queries the reach-around consumers move onto ----------------
@@ -385,10 +388,16 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 			// Stamps how this failure classifies so a sweep can read the column instead of
 			// re-pattern-matching `error`. Same classifier the retroactive repair tool uses
 			// — single source of truth for the pattern table. One UPDATE here, where the
-			// file backend needs three writes (setError, setFailureKind, move).
+			// markdown queue needed three writes (setError, setFailureKind, move).
 			const kind = classifyFailedJob(job, error) === 'service-outage' ? 'service' : 'job';
 			this.store.transition(job.id, 'failed', Date.now(), { error, failureKind: kind });
 			this.emitQueueUpdate();
+			// A missing credential makes every other candidate of this type hopeless too,
+			// so stop the auto-source re-offering work that cannot run. Gated on the TYPED
+			// reason, never on a substring of `error`, so a transient 403 whose message
+			// happens to mention "API key" can't latch the source off — the same rule
+			// `MemoryJobBackend` applied before the cutover.
+			if (result?.failureReason === 'no-api-key') this.plugin.orchestrator?.disableAutoSource(this.type);
 		} catch (err) {
 			logError(
 				`failed to settle job ${job.id} into failed; it stays running for the stale sweep to recover (original error: ${error})`,
@@ -419,7 +428,7 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 	/**
 	 * The stored dedupe key, namespaced by job type.
 	 *
-	 * The file backend gets per-type dedupe for free: it walks the queue and skips
+	 * The markdown queue got per-type dedupe for free: it walked the queue and skipped
 	 * entries whose `job.type` differs before comparing keys. A single indexed
 	 * `dedupe_key` lookup has no such filter, and the key functions genuinely collide
 	 * across types — `youtubeMetadataDedupeKey` and `imageDescribeNoteDedupeKey` both
@@ -458,8 +467,9 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 	}
 }
 
-// Memoized per store so every DB backend sharing one queue shares one coalescing
-// window — the same property `fileQueueCountsSource` preserves for the file queue.
+// Memoized per store so every backend sharing one queue shares one coalescing window:
+// the coalescer keys on the resolved source's identity, and a fresh adapter object per
+// call would give every emit its own window (i.e. no coalescing at all).
 const dbCountsSources = new WeakMap<SqliteJobStore, QueueCountsSource>();
 
 /** The DB queue's counts for `orchestration-queue-updated`: two indexed COUNT(*)s,

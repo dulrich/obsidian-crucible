@@ -18,10 +18,11 @@ const outfile = path.join(outdir, 'dbJobBackend.mjs');
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 
-// One bundle over the whole DB control path — the backend, the Orchestrator's
-// three-way dispatch, and the storage layer underneath it — so these exercise the real
-// wiring rather than a re-implementation. Mirrors tests/queueControl.test.mjs (the file
-// backend's equivalent) and tests/sqliteJobStore.test.mjs (the storage layer's).
+// One bundle over the whole control path — the backend, the Orchestrator's registration
+// dispatch, and the storage layer underneath it — so these exercise the real wiring
+// rather than a re-implementation. This file covers the BACKEND in isolation;
+// tests/queueControl.test.mjs covers the same path through the autorunner, and
+// tests/sqliteJobStore.test.mjs the storage layer beneath it.
 await esbuild.build({
 	stdin: {
 		contents: [
@@ -116,17 +117,6 @@ function seed(store, type, count, params = {}) {
 		ids.push(id);
 	}
 	return ids;
-}
-
-// A stand-in for the markdown JobStore the Orchestrator still holds. Only the surface
-// the queue-changed counts source touches is needed here — no `db` test reads a file
-// job, but the combined counts source sums both halves, so the file half must answer.
-function makeFileStore() {
-	return {
-		ensureFolders: async () => {},
-		listFolder: async () => [],
-		countFolder: () => 0,
-	};
 }
 
 function makeBus() {
@@ -571,7 +561,7 @@ test('hasPending is exact and scoped to the type', async () => {
 test('Orchestrator.register builds a DbJobBackend for a db type, sharing one store', async () => {
 	const store = newStore();
 	const plugin = makePlugin();
-	const orchestrator = new Orchestrator(plugin, makeFileStore(), { openDbStore: () => store });
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
 	orchestrator.register('command_run', inertWorkflow, dbConfig());
 	orchestrator.register('chain_run', inertWorkflow, dbConfig());
 
@@ -586,7 +576,7 @@ test('Orchestrator.register builds a DbJobBackend for a db type, sharing one sto
 test('a db bulk clear emits exactly one orchestration-queue-updated, carrying the DB counts', async () => {
 	const bus = makeBus();
 	const store = newStore();
-	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), makeFileStore(), { openDbStore: () => store });
+	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), { openDbStore: () => store });
 	orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig());
 	seed(store, TEST_TYPE, 40);
 
@@ -599,7 +589,7 @@ test('a db bulk clear emits exactly one orchestration-queue-updated, carrying th
 
 test('a db clear that removes nothing emits nothing', async () => {
 	const bus = makeBus();
-	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), makeFileStore(), { openDbStore: () => newStore() });
+	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), { openDbStore: () => newStore() });
 	orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig());
 
 	assert.equal(await orchestrator.clearQueued(TEST_TYPE), 0);
@@ -609,7 +599,7 @@ test('a db clear that removes nothing emits nothing', async () => {
 test('a single-row db cancel emits once', async () => {
 	const bus = makeBus();
 	const store = newStore();
-	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), makeFileStore(), { openDbStore: () => store });
+	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), { openDbStore: () => store });
 	orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig());
 	const [id] = seed(store, TEST_TYPE, 2);
 
@@ -619,7 +609,7 @@ test('a single-row db cancel emits once', async () => {
 
 test('an unavailable jobs DB surfaces a Notice and fails the registration — no silent fallback', () => {
 	resetNotices();
-	const orchestrator = new Orchestrator(makePlugin(), makeFileStore(), {
+	const orchestrator = new Orchestrator(makePlugin(), {
 		openDbStore: () => { throw new SqliteUnavailableError('node:sqlite is unavailable in this runtime.'); },
 	});
 
@@ -637,7 +627,7 @@ test('recoverStaleDbJobs requeues a lease a previous plugin load left behind, wh
 	const db = newDb();
 	const previousLoad = newStore(db, 'load-1');
 	const current = newStore(db, 'load-2');
-	const orchestrator = new Orchestrator(makePlugin(), makeFileStore(), { openDbStore: () => current });
+	const orchestrator = new Orchestrator(makePlugin(), { openDbStore: () => current });
 	orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig());
 
 	const [id] = seed(current, TEST_TYPE, 1);
@@ -654,7 +644,7 @@ test('recoverStaleDbJobs recovers an age-stale claim and never a run this proces
 	const db = newDb();
 	const store = newStore(db);
 	const plugin = makePlugin({ settings: { orchestrationAutorunTimeoutSeconds: 0 } });
-	const orchestrator = new Orchestrator(plugin, makeFileStore(), { openDbStore: () => store });
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
 	const hold = deferred();
 	orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig());
 	orchestrator.register('chain_run', { async run() { await hold.promise; return { status: 'done' }; } }, dbConfig());
@@ -684,7 +674,7 @@ test('recoverStaleDbJobs recovers an age-stale claim and never a run this proces
 test('pruneTerminalDbJobs deletes settled jobs past the retention setting and keeps the rest', async () => {
 	const store = newStore();
 	const plugin = makePlugin({ settings: { orchestrationJobRetentionDays: 30 } });
-	const orchestrator = new Orchestrator(plugin, makeFileStore(), { openDbStore: () => store });
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
 	orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig());
 
 	const [old, fresh] = seed(store, TEST_TYPE, 2);
@@ -700,12 +690,47 @@ test('pruneTerminalDbJobs deletes settled jobs past the retention setting and ke
 	assert.equal(orchestrator.pruneTerminalDbJobs(), 0, '0 means keep forever');
 });
 
-test('the sweeps are no-ops with no db type registered', () => {
-	const orchestrator = new Orchestrator(makePlugin(), makeFileStore(), { openDbStore: () => { throw new Error('never opened'); } });
-	orchestrator.register(TEST_TYPE, inertWorkflow, { persistence: 'file', maxParallel: 1, minIntervalMs: 0 });
+test('the sweeps are no-ops before any type has registered — the store is opened lazily', () => {
+	// thq WP-8 migration of "the sweeps are no-ops with no db type registered": there is
+	// no such thing as a non-db type any more, so the reachable version of the same
+	// property is "nothing has registered yet, so no store exists". The invariant is what
+	// matters — a sweep must answer 0 rather than throw or force the DB open, because
+	// `scan()` calls both unconditionally and can run before/without registration
+	// (notably when registration itself failed).
+	const orchestrator = new Orchestrator(makePlugin(), { openDbStore: () => { throw new Error('never opened'); } });
 
 	assert.equal(orchestrator.recoverStaleDbJobs(), 0);
 	assert.equal(orchestrator.pruneTerminalDbJobs(), 0);
+});
+
+test('scan() answers an all-zero report before any type has registered, and never opens the store', async () => {
+	// The registration-failure path: main.ts catches the throw and carries on, and the
+	// startup scan still runs. It must not re-throw (which would surface as an unhandled
+	// rejection from onLayoutReady) or re-attempt the open.
+	const plugin = makePlugin();
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => { throw new Error('never opened'); } });
+
+	const report = await orchestrator.scan({ notify: false });
+	assert.deepEqual(report, { inbox: 0, running: 0, done: 0, failed: 0, cancelled: 0, recovered: 0, pruned: 0 });
+});
+
+test('a registration that cannot open the store leaves the orchestrator usable — and inert', async () => {
+	// The "orchestration dead, plugin alive" contract main.ts depends on. After the
+	// throw, every entry point answers its empty value rather than throwing again, so a
+	// dashboard render or a trigger firing mid-session degrades instead of crashing.
+	const plugin = makePlugin();
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => { throw new Error('no node:sqlite'); } });
+
+	assert.throws(() => orchestrator.register(TEST_TYPE, inertWorkflow, dbConfig()), /no node:sqlite/);
+	assert.deepEqual(orchestrator.jobTypes(), [], 'a failed registration leaves nothing half-registered');
+	assert.equal(await orchestrator.enqueue(TEST_TYPE, {}), null);
+	assert.deepEqual(await orchestrator.listJobs('queued'), []);
+	assert.equal(await orchestrator.countJobs(TEST_TYPE, ['queued']), 0);
+	assert.deepEqual(await orchestrator.listTypeJobs(TEST_TYPE, ['queued', 'running']), []);
+	assert.equal(orchestrator.hasPending(TEST_TYPE), false);
+	assert.equal(await orchestrator.clearQueued(), 0);
+	// And the visible failure the user actually gets.
+	assert.ok(notices().some(m => m.includes('the job queue database is unavailable')));
 });
 
 // --- 9. the WP-7 seam --------------------------------------------------------------

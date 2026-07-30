@@ -78,9 +78,9 @@ test('imageDescribeNoteDedupeKey: no targetPath -> empty string (no dedupe key)'
 	assert.equal(imageDescribeNoteDedupeKey({}), '');
 });
 
-test('imageDescribeNoteJobConfig: file-backed, single worker, dedupeKey matches imageDescribeNoteDedupeKey', () => {
+test('imageDescribeNoteJobConfig: durable, single worker, dedupeKey matches imageDescribeNoteDedupeKey', () => {
 	const config = imageDescribeNoteJobConfig();
-	assert.equal(config.persistence, 'file');
+	assert.equal(config.persistence, 'db');
 	assert.equal(config.maxParallel, 1);
 	assert.equal(config.dedupeKey({ targetPath: 'a/b.md' }), 'note:a/b.md');
 });

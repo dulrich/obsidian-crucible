@@ -1,5 +1,5 @@
 import type CruciblePlugin from '../main';
-import type { MemoryJobSeed } from './MemoryJobQueue';
+import type { JobType } from './types';
 import {
 	SERVICE_IMAGE_DESCRIPTION_PROVIDER,
 	SERVICE_SEARCH_COMPANION,
@@ -15,20 +15,41 @@ import {
 	IMAGE_DESCRIBE_TRANSCODE_TIMEOUT_MS,
 } from './utils/imageDescribe';
 
-// Per-type behavior for the unified queue. File types are backed by the markdown
-// JobStore (inbox/running/done/failed); `db` types are backed by the SQLite
-// `SqliteJobStore`/`DbJobBackend` (durable, no vault files); memory types run
-// in-memory under the same runner/gate (the folded enrichment queue).
-// `maxParallel`/`minIntervalMs` may be implemented as getters so they track live
-// settings.
+// Per-type behavior for the unified queue. Every type is backed by the SQLite
+// `SqliteJobStore`/`DbJobBackend` (durable, no vault files) since thq WP-8 retired the
+// markdown `JobStore` and the in-memory queue. `maxParallel`/`minIntervalMs` may be
+// implemented as getters so they track live settings.
 export interface JobTypeConfig {
 	/**
-	 * Which `JobBackend` `Orchestrator.register` builds for this type. `'db'` is the
-	 * destination for every durable type (thq WP-8 flips them and deletes the other
-	 * two); no type declares it yet, so the DB path is dormant in production and
-	 * exercised only by tests until then.
+	 * Which `JobBackend` `Orchestrator.register` builds for this type.
+	 *
+	 * Exactly one legal value today — thq WP-8 flipped every type to `'db'` and deleted
+	 * the `'file'` (markdown `JobStore`) and `'memory'` (`MemoryJobQueue`) arms. The
+	 * field is deliberately kept rather than dropped: it is what states that a job type
+	 * *has* a persistence strategy, so adding a second backend later is a new union
+	 * member plus a `createBackend` case, not a re-derivation of where the choice lives.
 	 */
-	persistence: 'file' | 'memory' | 'db';
+	persistence: 'db';
+	/**
+	 * Drain READINESS: a type declaring this starts draining as soon as the plugin is
+	 * up, where every other type additionally waits out the initial drain delay
+	 * (`INITIAL_FILE_DRAIN_DELAY_MS`, 5s past layout-ready). It is also the flag
+	 * `Orchestrator.runNext` reads to skip a type when answering a manual "Run next" —
+	 * a type that drains on its own shouldn't consume the user's one explicit run.
+	 *
+	 * **The name is historical and overstates it.** It does NOT bypass the per-type
+	 * auto-run toggle: `computeShouldDrain` (autorunGate.ts) requires `typeAutorun ===
+	 * true` for every type, and only then consults this flag. It read as a gate bypass
+	 * when it was a hard-coded property of `MemoryJobBackend`, and the name outlived
+	 * that. Renaming it is a fleet-wide change to a settings-adjacent concept and is
+	 * deliberately not folded into the cutover.
+	 *
+	 * It became per-type config in thq WP-8 because it used to be `false` on
+	 * `FileJobBackend` and `true` on `MemoryJobBackend` — collapsing both onto one
+	 * durable backend would otherwise have silently added a 5s startup delay to
+	 * enrichment. Absent = false.
+	 */
+	drainsWithoutAutorun?: boolean;
 	/** Per-type worker count for the drain (default 1). A per-type user override wins unless `maxParallelFixed` is set. */
 	maxParallel: number;
 	/**
@@ -46,17 +67,22 @@ export interface JobTypeConfig {
 	/** Per-type cooloff between job starts, via a shared MinIntervalGate. 0 = none. */
 	minIntervalMs: number;
 	/**
-	 * Collapses repeat enqueues that resolve to the same key (e.g. targetPath, videoId).
-	 * The backend decides the policy: file types skip the enqueue and return the
-	 * existing active job; memory types reject the duplicate. Empty string = no dedupe
-	 * (file) or "not enqueueable" (memory, which requires a key).
+	 * Collapses repeat enqueues that resolve to the same key (e.g. targetPath, videoId):
+	 * a repeat enqueue skips the insert and returns the existing active job (promoting
+	 * its lane/priority when the new request is more urgent). Empty string = no dedupe.
 	 */
 	dedupeKey?: (params: Record<string, unknown>) => string;
-	/** Memory types refill from this source when the queue drains empty. */
-	autoSource?: () => MemoryJobSeed[];
-	/** Display fields surfaced in the dashboard for a memory entry. */
-	display?: (params: Record<string, unknown>) => Record<string, unknown>;
-	/** Memory cleanup window for terminal (done/failed) entries; default 60_000. */
+	/**
+	 * How long a *settled* job suppresses its own auto-source re-seed; default 60_000.
+	 *
+	 * Only meaningful for a type that has an auto-source registered
+	 * (`Orchestrator.setAutoSource`). It is the durable replacement for
+	 * `MemoryJobQueue`'s terminal-retention window and exists for the same reason:
+	 * `refill` skipped any key already tracked in *any* state, so a cancelled entry kept
+	 * suppressing its own seed — without that, an enabled auto-source re-adds the item
+	 * on the very next refill and the user's Cancel looks ignored. The suppression is
+	 * not permanent; past this window the source may legitimately offer the item again.
+	 */
 	terminalRetentionMs?: number;
 	/** Per-type execution timeout override (ms). Falls back to the global setting; 0 disables. */
 	timeoutMs?: number;
@@ -81,37 +107,38 @@ export interface JobTypeConfig {
 // half-indexed row.
 const SEARCH_SERVICES: ServiceId[] = [SERVICE_SEARCH_COMPANION, SERVICE_SEARCH_EMBEDDER];
 
-// The common shape for single-worker, file-backed job types: they differ only in how repeat
+// The common shape for single-worker, durable job types: they differ only in how repeat
 // enqueues collapse, so each config below is just its dedupeKey.
-export function fileJobConfig(dedupeKey?: (params: Record<string, unknown>) => string): JobTypeConfig {
-	return { persistence: 'file', maxParallel: 1, minIntervalMs: 0, dedupeKey };
+export function durableJobConfig(dedupeKey?: (params: Record<string, unknown>) => string): JobTypeConfig {
+	return { persistence: 'db', maxParallel: 1, minIntervalMs: 0, dedupeKey };
 }
 
-export const DEFAULT_JOB_TYPE_CONFIG: JobTypeConfig = fileJobConfig();
+export const DEFAULT_JOB_TYPE_CONFIG: JobTypeConfig = durableJobConfig();
 
-// File-backed, but collapses repeat requests for the same transcript onto one active
-// job so rapid re-enqueues don't pile up duplicate runs on a note.
+// Collapses repeat requests for the same transcript onto one active job so rapid
+// re-enqueues don't pile up duplicate runs on a note.
 export function transcriptRefineJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => (typeof p.targetPath === 'string' ? p.targetPath : ''));
+	return durableJobConfig((p) => (typeof p.targetPath === 'string' ? p.targetPath : ''));
 }
 
 // One queue entry per NOTE, not per video: a per-note job (params.targetPath set)
 // keys on the note path so duplicate captures sharing a yt-video-id each get their
 // own job (each links its own note; only the first fetches — see ensureMetadataNote).
-// Standalone enrichment (no vault note yet) keys on the video id. Exported so the
-// EnrichmentQueueAdapter computes the exact same keys as the orchestrator path.
+// Standalone enrichment (no vault note yet) keys on the video id. Exported so every
+// enqueue path (dashboard buttons, the auto-source refill, the capture trigger)
+// computes the exact same key the backend dedupes on.
 export function youtubeMetadataDedupeKey(p: Record<string, unknown>): string {
 	if (typeof p.targetPath === 'string' && p.targetPath) return `note:${p.targetPath}`;
 	const videoId = coerceVideoId(p.videoId);
 	return videoId ? `video:${videoId}` : '';
 }
 
-// File-backed channel enrichment. Shares the YouTube metadata pacing settings
+// Channel enrichment. Shares the YouTube metadata pacing settings
 // (parallelism + rate limit) so channel fetches respect the same Data API budget,
 // and collapses repeat enqueues for a channel onto one active job.
 export function youtubeChannelEnrichJobConfig(plugin: CruciblePlugin): JobTypeConfig {
 	return {
-		persistence: 'file',
+		persistence: 'db',
 		get maxParallel() { return Math.max(1, plugin.settings.orchestrationYoutubeMetadataMaxParallel || 1); },
 		get minIntervalMs() { return Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000; },
 		dedupeKey: (p) => (typeof p.channelId === 'string' && p.channelId ? `channel:${p.channelId}` : ''),
@@ -124,19 +151,19 @@ export function youtubeChannelEnrichJobConfig(plugin: CruciblePlugin): JobTypeCo
 // seeds — a sweep that runs against a quota-exhausted API just re-enqueues work that
 // cannot run.
 export function youtubeChannelEnrichSweepJobConfig(): JobTypeConfig {
-	return { ...fileJobConfig(), services: [SERVICE_YOUTUBE_API] };
+	return { ...durableJobConfig(), services: [SERVICE_YOUTUBE_API] };
 }
 
 // The RSS tracker talks to YouTube's feed endpoints, NOT the Data API — a quota
 // exhaustion on one says nothing about the other, so they are separate service ids.
 export function youtubeTrackerJobConfig(): JobTypeConfig {
-	return { ...fileJobConfig(), services: [SERVICE_YOUTUBE_RSS] };
+	return { ...durableJobConfig(), services: [SERVICE_YOUTUBE_RSS] };
 }
 
-// File-backed so triggered command runs survive restarts. Dedupes on
+// Durable so triggered command runs survive restarts. Dedupes on
 // commandId+target so repeat trigger fires collapse onto one active job.
 export function commandRunJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => {
+	return durableJobConfig((p) => {
 		const commandId = typeof p.commandId === 'string' ? p.commandId.trim() : '';
 		if (!commandId) return '';
 		const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
@@ -144,10 +171,10 @@ export function commandRunJobConfig(): JobTypeConfig {
 	});
 }
 
-// File-backed so triggered chain runs survive restarts. Dedupes on chainName+target
+// Durable so triggered chain runs survive restarts. Dedupes on chainName+target
 // so repeat trigger fires (e.g. a metadata-changed burst) collapse onto one active job.
 export function chainRunJobConfig(): JobTypeConfig {
-	return fileJobConfig((p) => {
+	return durableJobConfig((p) => {
 		const chainName = typeof p.chainName === 'string' ? p.chainName.trim() : '';
 		if (!chainName) return '';
 		const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
@@ -208,7 +235,7 @@ const IMAGE_DESCRIBE_NOTE_TIMEOUT_MS = IMAGE_DESCRIBE_BATCH_TIMEOUT_MS * 5;
 // only enqueues batches and prunes the store; it never calls the provider itself.
 export function imageDescribeNoteJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig(imageDescribeNoteDedupeKey),
+		...durableJobConfig(imageDescribeNoteDedupeKey),
 		services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER],
 		timeoutMs: IMAGE_DESCRIBE_NOTE_TIMEOUT_MS,
 	};
@@ -219,7 +246,7 @@ export function imageDescribeNoteJobConfig(): JobTypeConfig {
 // batch count for exactly the same work.
 export function imageDescribeBackfillJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig(() => 'image-describe-backfill'),
+		...durableJobConfig(() => 'image-describe-backfill'),
 		maxParallelFixed: 'One backfill fan-out at a time: this job only enqueues batches, and two concurrent fan-outs '
 			+ 'would double the batch count for exactly the same work. The duplicate batches are idempotent and would '
 			+ 'drain as no-ops, but they would still be written to the queue as job files.',
@@ -234,7 +261,7 @@ export function imageDescribeBatchDedupeKey(p: Record<string, unknown>): string 
 
 export function imageDescribeBatchJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig(imageDescribeBatchDedupeKey),
+		...durableJobConfig(imageDescribeBatchDedupeKey),
 		services: [SERVICE_IMAGE_DESCRIPTION_PROVIDER],
 		timeoutMs: IMAGE_DESCRIBE_BATCH_TIMEOUT_MS,
 	};
@@ -242,7 +269,7 @@ export function imageDescribeBatchJobConfig(): JobTypeConfig {
 
 export function searchFileJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig((p) => {
+		...durableJobConfig((p) => {
 			const path = typeof p.path === 'string' ? p.path : '';
 			return path ? `search-file:${path}` : '';
 		}),
@@ -251,7 +278,7 @@ export function searchFileJobConfig(): JobTypeConfig {
 }
 
 export function searchRebuildJobConfig(): JobTypeConfig {
-	return { ...fileJobConfig(() => 'search-rebuild'), services: SEARCH_SERVICES };
+	return { ...durableJobConfig(() => 'search-rebuild'), services: SEARCH_SERVICES };
 }
 
 // One backfill fan-out at a time. Expressed as `maxParallelFixed` rather than only as a
@@ -259,7 +286,7 @@ export function searchRebuildJobConfig(): JobTypeConfig {
 // this reason as its tooltip) instead of silently ignoring a number the user typed.
 export function searchEmbedMissingJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig(() => 'search-embed-missing'),
+		...durableJobConfig(() => 'search-embed-missing'),
 		services: SEARCH_SERVICES,
 		maxParallelFixed: 'One backfill fan-out at a time: this job only enqueues batches, and two concurrent fan-outs '
 			+ 'would double the batch count for exactly the same work. The duplicate batches are idempotent and would '
@@ -269,7 +296,7 @@ export function searchEmbedMissingJobConfig(): JobTypeConfig {
 
 export function searchBatchJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig((p) => {
+		...durableJobConfig((p) => {
 			const rebuildId = typeof p.rebuildId === 'string' ? p.rebuildId : '';
 			const batchIndex = typeof p.batchIndex === 'number' ? p.batchIndex : -1;
 			return rebuildId && batchIndex >= 0 ? `search-batch:${rebuildId}:${batchIndex}` : '';
@@ -280,7 +307,7 @@ export function searchBatchJobConfig(): JobTypeConfig {
 
 export function searchSweepJobConfig(): JobTypeConfig {
 	return {
-		...fileJobConfig((p) => {
+		...durableJobConfig((p) => {
 			const description = typeof p.description === 'string' ? p.description.trim() : '';
 			return description ? `search-sweep:${description}` : '';
 		}),
@@ -288,20 +315,29 @@ export function searchSweepJobConfig(): JobTypeConfig {
 	};
 }
 
-// Memory-persistence config for the folded enrichment queue. maxParallel and the
-// cooloff are read live from settings (getters) so dashboard/settings changes take
-// effect without re-registering. Display fields feed the UI.
+// The enrichment queue. Durable since thq WP-8 (it was the last `memory` type), but
+// its two distinguishing behaviors survive the flip as explicit config rather than as
+// properties of a deleted backend: `drainsWithoutAutorun` keeps enrichment clicks
+// running with the auto-run toggle off, and `terminalRetentionMs` keeps a settled entry
+// from being re-offered by the Uncaptured Videos auto-source for a minute. maxParallel
+// and the cooloff are read live from settings (getters) so dashboard/settings changes
+// take effect without re-registering.
+/**
+ * The one job type the ingestion dashboard's enrichment surfaces talk about by name —
+ * the auto-source registration, the "queued / enriching…" badges, and the Enrich
+ * buttons. It used to live on the deleted `EnrichmentQueueAdapter`; it lives beside its
+ * config now so the several dashboard modules that need it share one literal instead of
+ * each spelling the type out.
+ */
+export const ENRICHMENT_JOB_TYPE: JobType = 'youtube_metadata_fetch';
+
 export function youtubeMetadataJobConfig(plugin: CruciblePlugin): JobTypeConfig {
 	return {
-		persistence: 'memory',
+		persistence: 'db',
+		drainsWithoutAutorun: true,
 		get maxParallel() { return Math.max(1, plugin.settings.orchestrationYoutubeMetadataMaxParallel || 1); },
 		get minIntervalMs() { return Math.max(0, plugin.settings.ingestionYoutubeEnrichRateLimitSeconds) * 1000; },
 		dedupeKey: youtubeMetadataDedupeKey,
-		display: (p) => ({
-			title: typeof p.title === 'string' ? p.title : '',
-			channelName: typeof p.channelName === 'string' ? p.channelName : '',
-			target: typeof p.targetPath === 'string' ? (p.targetPath.split('/').pop() ?? '').replace(/\.md$/, '') : '',
-		}),
 		terminalRetentionMs: 60_000,
 		services: [SERVICE_YOUTUBE_API],
 	};

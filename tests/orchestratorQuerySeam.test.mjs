@@ -7,12 +7,18 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import esbuild from 'esbuild';
 
-// thq WP-7: covers the backend-agnostic query seam (`JobBackend.ts`'s `JobQuerySeam` +
-// `Orchestrator.listJobs`/`countJobs`/`setJobProgress`) that the queue monitor, intake
-// buttons, and SearchJobProgress now go through instead of reaching around into
-// `JobStore`/`SqliteJobStore` directly. See tests/dbJobBackend.test.mjs's "9. the WP-7
-// seam" section for `DbJobBackend.list/count/setProgress` in isolation; this file
-// exercises the same seam through `Orchestrator`, across both backends at once.
+// thq WP-7/WP-8: covers the backend-agnostic query seam (`JobBackend.ts`'s
+// `JobQuerySeam` + `Orchestrator.listJobs`/`listTypeJobs`/`countJobs`/`setJobProgress`)
+// that the queue monitor, intake buttons, enrichment badges and SearchJobProgress go
+// through instead of reaching around into a storage layer directly. See
+// tests/dbJobBackend.test.mjs's "9. the WP-7 seam" section for
+// `DbJobBackend.list/count/setProgress` in isolation; this file exercises the same seam
+// through `Orchestrator`, across several registered types at once.
+//
+// WP-8 note: these used to assert a two-source MERGE (a markdown file store plus the
+// db). The file store is gone, so what is pinned now is the property that survived —
+// `listJobs` spans EVERY registered type in one claim-ordered pass, rather than being
+// scoped to whichever type a caller happens to hold.
 
 globalThis.require = createRequire(import.meta.url);
 
@@ -26,7 +32,6 @@ await esbuild.build({
 	stdin: {
 		contents: [
 			"export { Orchestrator } from './src/orchestration/Orchestrator';",
-			"export { FileJobBackend } from './src/orchestration/FileJobBackend';",
 			"export { SqliteJobStore } from './src/orchestration/db/SqliteJobStore';",
 			"export { openJobsDb } from './src/orchestration/db/sqlite';",
 		].join('\n'),
@@ -71,48 +76,6 @@ const { Orchestrator, SqliteJobStore, openJobsDb } = await import(pathToFileURL(
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
-// --- file-store fake, mirroring tests/queueControl.test.mjs's shape ---------------
-
-const STORE_FOLDERS = { queued: 'queue/inbox', running: 'queue/running', done: 'queue/done', failed: 'queue/failed', cancelled: 'queue/cancelled' };
-
-function makeFileStore(initial = {}) {
-	const folders = {
-		queued: [...(initial.queued ?? [])],
-		running: [...(initial.running ?? [])],
-		done: [], failed: [], cancelled: [],
-	};
-	const progress = [];
-	return {
-		folders,
-		progress,
-		ensureFolders: async () => {},
-		folderForStatus: status => STORE_FOLDERS[status],
-		// Real JobStore.listFolder returns lane/priority/created/id-sorted rows; this
-		// fake only needs the `created` tie-break (every entry below shares one lane
-		// and priority) for the merge-order tests to exercise something real rather
-		// than accidentally passing on insertion order.
-		listFolder: async status => [...(folders[status] ?? [])].sort((a, b) => a.job.created.localeCompare(b.job.created)),
-		setProgress: async (file, message) => { progress.push({ path: file.path, message }); },
-		move: async (file, job, toStatus) => {
-			for (const bucket of Object.values(folders)) {
-				const idx = bucket.findIndex(e => e.file === file);
-				if (idx >= 0) bucket.splice(idx, 1);
-			}
-			const moved = { file, job: { ...job, status: toStatus } };
-			folders[toStatus].push(moved);
-			return moved;
-		},
-	};
-}
-
-function fileEntry(id, type, status, created) {
-	// lane/priority default to what SqliteJobStore.insert would default a `normal`/
-	// unspecified-priority row to ('background') — every entry in this file shares
-	// them, so the merge tests below are exercising the `created` tie-break, same as
-	// the db side gets for free from `insert`'s own defaulting.
-	return { file: { path: `${STORE_FOLDERS[status]}/${id}.md` }, job: { id, type, status, created: created ?? '', priority: 'normal', lane: 'background', params: {} } };
-}
-
 function makeBus() {
 	const emitted = [];
 	return {
@@ -142,145 +105,144 @@ function makePlugin({ settings, ...overrides } = {}) {
 	};
 }
 
-const FILE_TYPE = 'command_run';
-const DB_TYPE = 'chain_run';
-const fileConfig = { persistence: 'file', minIntervalMs: 0, maxParallel: 1 };
-const dbConfig = { persistence: 'db', minIntervalMs: 0, maxParallel: 1 };
+const TYPE_A = 'command_run';
+const TYPE_B = 'chain_run';
+const config = { persistence: 'db', minIntervalMs: 0, maxParallel: 1 };
 const inertWorkflow = { async run() { return { status: 'done' }; } };
 
 function newDbStore() {
 	return new SqliteJobStore(openJobsDb(':memory:'));
 }
 
-// --- 1. listJobs merges file + db in claim order, honors limit --------------------
+// An Orchestrator with `types` registered against one `:memory:` store.
+function newOrchestrator({ plugin = makePlugin(), types = [TYPE_A, TYPE_B], store = newDbStore() } = {}) {
+	const orchestrator = new Orchestrator(plugin, { openDbStore: () => store });
+	for (const type of types) orchestrator.register(type, inertWorkflow, config);
+	return { orchestrator, store, plugin };
+}
 
-test('listJobs merges file-backed and db-backed jobs into one claim-ordered list', async () => {
-	const fileStore = makeFileStore({
-		queued: [
-			fileEntry('file-b', FILE_TYPE, 'queued', '2026-01-01T00:00:02.000Z'),
-			fileEntry('file-a', FILE_TYPE, 'queued', '2026-01-01T00:00:01.000Z'),
-		],
-	});
-	const dbStore = newDbStore();
-	const plugin = makePlugin();
-	const orchestrator = new Orchestrator(plugin, fileStore, { openDbStore: () => dbStore });
-	orchestrator.register(FILE_TYPE, inertWorkflow, fileConfig);
-	orchestrator.register(DB_TYPE, inertWorkflow, dbConfig);
+// --- 1. listJobs spans every registered type, in claim order, honoring limit --------
 
-	dbStore.insert({ id: 'db-b', type: DB_TYPE, created: '2026-01-01T00:00:03.000Z', params: {} });
-	dbStore.insert({ id: 'db-a', type: DB_TYPE, created: '2026-01-01T00:00:00.500Z', params: {} });
+test('listJobs returns jobs of ALL registered types in one claim-ordered list', async () => {
+	const { orchestrator, store } = newOrchestrator();
+
+	store.insert({ id: 'b-2', type: TYPE_B, created: '2026-01-01T00:00:03.000Z', params: {} });
+	store.insert({ id: 'a-2', type: TYPE_A, created: '2026-01-01T00:00:02.000Z', params: {} });
+	store.insert({ id: 'a-1', type: TYPE_A, created: '2026-01-01T00:00:01.000Z', params: {} });
+	store.insert({ id: 'b-1', type: TYPE_B, created: '2026-01-01T00:00:00.500Z', params: {} });
 
 	const queued = await orchestrator.listJobs('queued');
-	assert.deepEqual(queued.map(j => j.id), ['db-a', 'file-a', 'file-b', 'db-b'],
-		'file (in-JS-sorted) and db (SQL-sorted) rows interleave by created, not grouped by source');
+	assert.deepEqual(queued.map(j => j.id), ['b-1', 'a-1', 'a-2', 'b-2'],
+		'ordered by created across types, never grouped by type');
 
-	// A status that has nothing in one of the two stores still merges cleanly.
-	const running = await orchestrator.listJobs('running');
-	assert.deepEqual(running, []);
+	// A status with nothing in it answers cleanly rather than throwing.
+	assert.deepEqual(await orchestrator.listJobs('running'), []);
 });
 
-test('listJobs limit applies to the globally merged/ordered result, not per source', async () => {
-	const fileStore = makeFileStore({
-		queued: [
-			fileEntry('file-1', FILE_TYPE, 'queued', '2026-01-01T00:00:01.000Z'),
-			fileEntry('file-2', FILE_TYPE, 'queued', '2026-01-01T00:00:02.000Z'),
-		],
-	});
-	const dbStore = newDbStore();
-	const orchestrator = new Orchestrator(makePlugin(), fileStore, { openDbStore: () => dbStore });
-	orchestrator.register(FILE_TYPE, inertWorkflow, fileConfig);
-	orchestrator.register(DB_TYPE, inertWorkflow, dbConfig);
-	dbStore.insert({ id: 'db-1', type: DB_TYPE, created: '2026-01-01T00:00:00.100Z', params: {} });
-	dbStore.insert({ id: 'db-2', type: DB_TYPE, created: '2026-01-01T00:00:03.000Z', params: {} });
+test('listJobs limit is a real query-level cap over the globally ordered result', async () => {
+	const { orchestrator, store } = newOrchestrator();
+	store.insert({ id: 'a-1', type: TYPE_A, created: '2026-01-01T00:00:01.000Z', params: {} });
+	store.insert({ id: 'a-2', type: TYPE_A, created: '2026-01-01T00:00:02.000Z', params: {} });
+	store.insert({ id: 'b-1', type: TYPE_B, created: '2026-01-01T00:00:00.100Z', params: {} });
+	store.insert({ id: 'b-2', type: TYPE_B, created: '2026-01-01T00:00:03.000Z', params: {} });
 
 	const top2 = await orchestrator.listJobs('queued', { limit: 2 });
-	assert.deepEqual(top2.map(j => j.id), ['db-1', 'file-1'], 'earliest two across BOTH sources, not the first two of one');
+	assert.deepEqual(top2.map(j => j.id), ['b-1', 'a-1'], 'earliest two across ALL types, not the first two of one');
+
+	const page2 = await orchestrator.listJobs('queued', { limit: 2, offset: 2 });
+	assert.deepEqual(page2.map(j => j.id), ['a-2', 'b-2'], 'offset pages the same ordering');
 });
 
-test('listJobs works with no db store at all (today\'s reality — no db type registered)', async () => {
-	const fileStore = makeFileStore({ queued: [fileEntry('file-1', FILE_TYPE, 'queued', '2026-01-01T00:00:01.000Z')] });
-	const orchestrator = new Orchestrator(makePlugin(), fileStore);
-	orchestrator.register(FILE_TYPE, inertWorkflow, fileConfig);
-
-	const queued = await orchestrator.listJobs('queued');
-	assert.deepEqual(queued.map(j => j.id), ['file-1']);
+test('listJobs answers empty before any type has registered (no store exists yet)', async () => {
+	const orchestrator = new Orchestrator(makePlugin(), { openDbStore: () => { throw new Error('never opened'); } });
+	assert.deepEqual(await orchestrator.listJobs('queued'), []);
 });
 
-// --- 2. countJobs dispatches per type, scoped correctly ----------------------------
+test('listJobs carries the fields the queue monitor renders, including notes', async () => {
+	// The row → OrchestrationJob mapping the Details modal depends on. `notes` is the
+	// one field that only ever arrives on a db row (WP-7 left it undefined for file
+	// rows); post-cutover every row can carry it.
+	const { orchestrator, store } = newOrchestrator();
+	const row = store.insert({ id: 'a-1', type: TYPE_A, created: '2026-01-01T00:00:01.000Z', params: { targetPath: 'note.md' } });
+	store.appendNotes(row.id, 'Partial: 3 of 10 done');
+	store.setProgress(row.id, 'batch 3 / 10');
+
+	const [job] = await orchestrator.listJobs('queued');
+	assert.equal(job.type, TYPE_A);
+	assert.deepEqual(job.params, { targetPath: 'note.md' });
+	assert.equal(job.progress, 'batch 3 / 10');
+	assert.match(job.notes, /Partial: 3 of 10 done/);
+});
+
+// --- 2. listTypeJobs scopes to one type (the enrichment badges' read) --------------
+
+test('listTypeJobs returns only that type, across the statuses asked for', async () => {
+	const { orchestrator, store } = newOrchestrator();
+	store.insert({ id: 'a-queued', type: TYPE_A, created: '2026-01-01T00:00:01.000Z', params: {} });
+	const running = store.insert({ id: 'a-running', type: TYPE_A, created: '2026-01-01T00:00:02.000Z', params: {} });
+	store.claimById(running.id, Date.now());
+	store.insert({ id: 'b-queued', type: TYPE_B, created: '2026-01-01T00:00:03.000Z', params: {} });
+
+	const jobs = await orchestrator.listTypeJobs(TYPE_A, ['running', 'queued']);
+	assert.deepEqual(jobs.map(j => j.id).sort(), ['a-queued', 'a-running']);
+	assert.deepEqual(jobs.map(j => j.status), ['running', 'queued'], 'statuses come back in the order requested');
+
+	assert.deepEqual(await orchestrator.listTypeJobs(TYPE_A, []), [], 'no statuses asked for, nothing returned');
+});
+
+test('listTypeJobs answers empty for an unregistered type rather than throwing', async () => {
+	const { orchestrator } = newOrchestrator({ types: [TYPE_A] });
+	assert.deepEqual(await orchestrator.listTypeJobs('link_scan', ['queued']), []);
+});
+
+// --- 3. countJobs dispatches per type, scoped correctly ----------------------------
 
 test('countJobs answers per type, ignoring other types and other statuses', async () => {
-	const fileStore = makeFileStore({
-		queued: [fileEntry('a', FILE_TYPE, 'queued'), fileEntry('b', 'other_type', 'queued')],
-		running: [fileEntry('c', FILE_TYPE, 'running')],
-	});
-	const orchestrator = new Orchestrator(makePlugin(), fileStore);
-	orchestrator.register(FILE_TYPE, inertWorkflow, fileConfig);
+	const { orchestrator, store } = newOrchestrator();
+	store.insert({ id: 'a-1', type: TYPE_A, created: '2026-01-01T00:00:01.000Z', params: {} });
+	const running = store.insert({ id: 'a-2', type: TYPE_A, created: '2026-01-01T00:00:02.000Z', params: {} });
+	store.claimById(running.id, Date.now());
+	store.insert({ id: 'b-1', type: TYPE_B, created: '2026-01-01T00:00:03.000Z', params: {} });
 
-	assert.equal(await orchestrator.countJobs(FILE_TYPE, ['queued']), 1);
-	assert.equal(await orchestrator.countJobs(FILE_TYPE, ['running']), 1);
-	assert.equal(await orchestrator.countJobs(FILE_TYPE, ['queued', 'running']), 2);
-	assert.equal(await orchestrator.countJobs('other_type', ['queued']), 0, 'other_type has no registered backend');
+	assert.equal(await orchestrator.countJobs(TYPE_A, ['queued']), 1);
+	assert.equal(await orchestrator.countJobs(TYPE_A, ['running']), 1);
+	assert.equal(await orchestrator.countJobs(TYPE_A, ['queued', 'running']), 2);
+	assert.equal(await orchestrator.countJobs('link_scan', ['queued']), 0, 'link_scan has no registered backend');
 });
 
-test('countJobs answers 0 for a memory-persisted type (no query seam)', async () => {
-	const orchestrator = new Orchestrator(makePlugin(), makeFileStore());
-	orchestrator.register('youtube_metadata_fetch', inertWorkflow, {
-		persistence: 'memory', minIntervalMs: 0, maxParallel: 1, dedupeKey: p => String(p.key ?? ''),
-	});
-	await orchestrator.enqueue('youtube_metadata_fetch', { key: 'note:a.md' });
+// --- 4. setJobProgress dispatches to the job's own backend and emits coalesced -----
 
-	assert.equal(await orchestrator.countJobs('youtube_metadata_fetch', ['queued']), 0,
-		'memory types render through their own enrichmentQueue adapter, untouched by this seam');
-});
-
-// --- 3. setJobProgress dispatches to the job's own backend and emits coalesced ----
-
-test('setJobProgress writes the file row and emits orchestration-queue-updated', async () => {
-	const fileStore = makeFileStore({ running: [fileEntry('job-1', FILE_TYPE, 'running')] });
+test('setJobProgress writes the row and emits orchestration-queue-updated', async () => {
 	const bus = makeBus();
-	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), fileStore);
-	orchestrator.register(FILE_TYPE, inertWorkflow, fileConfig);
+	const { orchestrator, store } = newOrchestrator({ plugin: makePlugin({ ingestionEvents: bus }) });
+	const row = store.insert({ id: 'job-1', type: TYPE_A, created: '2026-01-01T00:00:00.000Z', params: {} });
+	store.claimById(row.id, Date.now());
 
-	await orchestrator.setJobProgress(FILE_TYPE, 'job-1', 'indexing 5/10');
+	await orchestrator.setJobProgress(TYPE_A, row.id, 'batch 3 / 10');
 	await flush();
 
-	assert.deepEqual(fileStore.progress, [{ path: 'queue/running/job-1.md', message: 'indexing 5/10' }]);
+	assert.equal(store.get(row.id).progress, 'batch 3 / 10');
 	assert.equal(bus.count('orchestration-queue-updated'), 1);
 });
 
-test('setJobProgress is a silent no-op for an id that is not running (file type)', async () => {
-	const fileStore = makeFileStore();
+test('setJobProgress writes nothing for an id that does not exist, and never throws', async () => {
 	const bus = makeBus();
-	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), fileStore);
-	orchestrator.register(FILE_TYPE, inertWorkflow, fileConfig);
+	const { orchestrator, store } = newOrchestrator({ plugin: makePlugin({ ingestionEvents: bus }) });
 
-	await orchestrator.setJobProgress(FILE_TYPE, 'ghost-job', 'should not throw');
+	await orchestrator.setJobProgress(TYPE_A, 'ghost-job', 'should not throw');
 	await flush();
 
-	assert.deepEqual(fileStore.progress, []);
-	assert.equal(bus.count('orchestration-queue-updated'), 0);
-});
-
-test('setJobProgress writes the db row and emits orchestration-queue-updated (coalesced)', async () => {
-	const dbStore = newDbStore();
-	const bus = makeBus();
-	const orchestrator = new Orchestrator(makePlugin({ ingestionEvents: bus }), makeFileStore(), { openDbStore: () => dbStore });
-	orchestrator.register(DB_TYPE, inertWorkflow, dbConfig);
-	const row = dbStore.insert({ id: 'db-job-1', type: DB_TYPE, created: '2026-01-01T00:00:00.000Z', params: {} });
-	dbStore.claimById(row.id, Date.now());
-
-	await orchestrator.setJobProgress(DB_TYPE, row.id, 'batch 3 / 10');
-	await flush();
-
-	assert.equal(dbStore.get(row.id).progress, 'batch 3 / 10');
+	assert.equal(store.get('ghost-job'), null, 'the guarded UPDATE matched no row');
+	// It DOES still emit (the backend emits after the write without checking the row
+	// count), unlike the markdown backend which returned early when it could not resolve
+	// the job's file. Pinned as-is rather than "fixed": the emit is coalesced, the
+	// payload is correct either way, and the only caller is a progress tick for a job it
+	// is actively running — a ghost id here means a bug upstream, not a hot path.
 	assert.equal(bus.count('orchestration-queue-updated'), 1);
 });
 
-test('setJobProgress is a no-op for a memory-persisted type', async () => {
-	const orchestrator = new Orchestrator(makePlugin(), makeFileStore());
-	orchestrator.register('youtube_metadata_fetch', inertWorkflow, {
-		persistence: 'memory', minIntervalMs: 0, maxParallel: 1, dedupeKey: p => String(p.key ?? ''),
-	});
-	// Must not throw even though MemoryJobBackend carries no JobQuerySeam.
-	await orchestrator.setJobProgress('youtube_metadata_fetch', 'whatever', 'no-op');
+test('setJobProgress is a no-op for an unregistered type', async () => {
+	const { orchestrator } = newOrchestrator({ types: [TYPE_A] });
+	// Must not throw even though no backend (and therefore no JobQuerySeam) exists.
+	await orchestrator.setJobProgress('link_scan', 'whatever', 'no-op');
 });
