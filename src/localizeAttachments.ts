@@ -170,6 +170,63 @@ export interface LocalAttachmentRepairResolution {
 	reason: 'missing' | 'ambiguous' | null;
 }
 
+// Per-scan lookup structure built once from a vault path snapshot (`buildAttachmentPathIndex`)
+// and consumed by `resolveLocalAttachmentRepair` in place of the naive per-row full-vault
+// `Array.includes`/`filter` passes. Three fields, one per repair tier:
+//   - `byPath`: exact-path membership (tier 1, the note's expected folder) — was `.includes`.
+//   - `byBasename`: exact-basename -> candidate paths (tier 2) — was `.filter` + `.split('/')`.
+//   - `managedByStem`: every managed (`..._MD5.ext`) path's hash "stem" (the portion before
+//     `_MD5.ext`), SORTED ascending by stem, for tier 3's prefix-recovery scan. Lexicographic
+//     sort makes every string sharing a given prefix occupy one contiguous run, so
+//     `stemPrefixMatches` below finds it with a binary-search lower bound + linear walk over
+//     just the matches, instead of a regex-per-path scan across the entire vault.
+// Building the index is itself O(n) in the path count — the win is amortizing that single pass
+// across every broken row in a scan, instead of re-scanning per row (O(rows) lookups afterward
+// instead of O(rows * n)).
+export interface AttachmentPathIndex {
+	byPath: Set<string>;
+	byBasename: Map<string, string[]>;
+	managedByStem: { stem: string; path: string }[];
+}
+
+const MANAGED_STEM_RE = /^(.*)_MD5\.[A-Za-z0-9]+$/;
+
+export function buildAttachmentPathIndex(vaultPaths: string[]): AttachmentPathIndex {
+	const byPath = new Set<string>(vaultPaths);
+	const byBasename = new Map<string, string[]>();
+	const managedByStem: { stem: string; path: string }[] = [];
+	for (const p of vaultPaths) {
+		const base = p.split('/').pop() ?? p;
+		const existing = byBasename.get(base);
+		if (existing) existing.push(p);
+		else byBasename.set(base, [p]);
+		const stemMatch = MANAGED_STEM_RE.exec(base);
+		if (stemMatch) managedByStem.push({ stem: stemMatch[1] ?? '', path: p });
+	}
+	managedByStem.sort((a, b) => (a.stem < b.stem ? -1 : a.stem > b.stem ? 1 : 0));
+	return { byPath, byBasename, managedByStem };
+}
+
+// Binary-search lower bound (first index whose stem is >= `prefix`), then walk forward while
+// the stem still starts with `prefix` — safe because sorted order groups every string sharing
+// a prefix into one contiguous run (see the comment on AttachmentPathIndex above).
+function stemPrefixMatches(index: AttachmentPathIndex, prefix: string): string[] {
+	const arr = index.managedByStem;
+	let lo = 0, hi = arr.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((arr[mid]?.stem ?? '') < prefix) lo = mid + 1;
+		else hi = mid;
+	}
+	const out: string[] = [];
+	for (let i = lo; i < arr.length; i++) {
+		const entry = arr[i];
+		if (!entry || !entry.stem.startsWith(prefix)) break;
+		out.push(entry.path);
+	}
+	return out;
+}
+
 // Among two or more candidate paths already established as byte-identical (same content
 // MD5), pick one deterministically rather than bailing to `ambiguous`: prefer a candidate
 // already sitting in the note's expected attachment folder, else the shortest path, else
@@ -198,31 +255,42 @@ function pickAmongIdenticalContent(candidates: string[], expectedFolder: string)
 // doesn't exist — pickAmongIdenticalContent resolves deterministically instead. A
 // non-managed duplicate basename (tier 2) or a same-prefix-but-different-basename set
 // (tier 3) still bails to `ambiguous`, because there identity is NOT guaranteed.
-export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): LocalAttachmentRepairResolution {
+// `index`, when supplied (`buildAttachmentPathIndex(vaultPaths)`, built ONCE per scan/repair
+// pass by the caller), replaces each tier's full-vault `Array.includes`/`filter` pass with a
+// Set/Map/binary-search lookup — same decisions, cheaper per row. Omitting it preserves the
+// original O(n)-per-row naive behavior byte-for-byte (existing callers that pass only 3 args
+// are unaffected); see tests/localizeAttachments.edge.test.mjs's index-vs-naive equivalence
+// coverage for the "byte-identical decisions" guarantee.
+export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[], index?: AttachmentPathIndex): LocalAttachmentRepairResolution {
 	let decoded = brokenLink.replace(/^<|>$/g, '');
 	try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is on malformed escapes */ }
 	const base = decoded.split('/').pop() ?? '';
 	if (!base) return { target: null, reason: 'missing' };
 
 	const expected = expectedFolder ? `${expectedFolder}/${base}` : base;
-	if (vaultPaths.includes(expected)) return { target: expected, reason: null };
+	const hasExpected = index ? index.byPath.has(expected) : vaultPaths.includes(expected);
+	if (hasExpected) return { target: expected, reason: null };
 
-	const exactMatches = vaultPaths.filter(p => (p.split('/').pop() ?? p) === base);
+	const exactMatches = index
+		? (index.byBasename.get(base) ?? [])
+		: vaultPaths.filter(p => (p.split('/').pop() ?? p) === base);
 	if (exactMatches.length === 1) return { target: exactMatches[0] ?? null, reason: null };
 	if (exactMatches.length > 1) {
 		if (MD5_NAME_RE.test(base)) return { target: pickAmongIdenticalContent(exactMatches, expectedFolder), reason: null };
 		return { target: null, reason: 'ambiguous' };
 	}
 
-	const stemMatch = /^(.*)_MD5\.[A-Za-z0-9]+$/.exec(base);
+	const stemMatch = MANAGED_STEM_RE.exec(base);
 	const stem = stemMatch ? (stemMatch[1] ?? '') : null;
 	if (stem !== null && stem.length >= PREFIX_REPAIR_MIN_STEM_LENGTH) {
-		const prefixMatches = vaultPaths.filter(p => {
-			const name = p.split('/').pop() ?? p;
-			const nameStemMatch = /^(.*)_MD5\.[A-Za-z0-9]+$/.exec(name);
-			const nameStem = nameStemMatch ? (nameStemMatch[1] ?? '') : null;
-			return nameStem !== null && nameStem.startsWith(stem);
-		});
+		const prefixMatches = index
+			? stemPrefixMatches(index, stem)
+			: vaultPaths.filter(p => {
+				const name = p.split('/').pop() ?? p;
+				const nameStemMatch = MANAGED_STEM_RE.exec(name);
+				const nameStem = nameStemMatch ? (nameStemMatch[1] ?? '') : null;
+				return nameStem !== null && nameStem.startsWith(stem);
+			});
 		if (prefixMatches.length === 1) return { target: prefixMatches[0] ?? null, reason: null };
 		if (prefixMatches.length > 1) {
 			const basenames = new Set(prefixMatches.map(p => p.split('/').pop() ?? p));
@@ -238,8 +306,8 @@ export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder:
 // that only need the target path (the scan's `repairable` computation, sourced from
 // data/missingAttachments.ts). `repairNote` calls resolveLocalAttachmentRepair directly so it
 // can report WHY a repair failed.
-export function planLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): string | null {
-	return resolveLocalAttachmentRepair(brokenLink, expectedFolder, vaultPaths).target;
+export function planLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[], index?: AttachmentPathIndex): string | null {
+	return resolveLocalAttachmentRepair(brokenLink, expectedFolder, vaultPaths, index).target;
 }
 
 // True when any note other than `excludeNotePath` still links to `attachmentPath`.
@@ -679,6 +747,10 @@ export class AttachmentLocalizer {
 				const matches = this.parseAttachmentRefs(original, file);
 				const expectedFolder = this.attachmentFolderForNote(file);
 				const vaultPaths = this.app.vault.getFiles().map(f => f.path);
+				// Built once per note from the same vault.getFiles() pass already required above
+				// (no extra full-vault read) — turns each broken ref's tier 2/3 resolution into
+				// hash/binary-search lookups instead of a fresh full-vault filter per ref.
+				const attachmentIndex = buildAttachmentPathIndex(vaultPaths);
 
 				const replacements: AttachmentReplacement[] = [];
 				// `resolvedCount` is how many broken refs got a repair TARGET computed —
@@ -698,7 +770,7 @@ export class AttachmentLocalizer {
 						newRef = await this.processRemote(match, file);
 						if (!newRef) reason = 'remote-download-failed';
 					} else {
-						const resolution = resolveLocalAttachmentRepair(match.link, expectedFolder, vaultPaths);
+						const resolution = resolveLocalAttachmentRepair(match.link, expectedFolder, vaultPaths, attachmentIndex);
 						if (resolution.target) newRef = formatRef(match, resolution.target);
 						else reason = resolution.reason ?? 'missing';
 					}
