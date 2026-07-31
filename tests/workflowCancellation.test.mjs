@@ -143,19 +143,71 @@ test('applyCancellation leaves a result alone when nothing was cancelled', () =>
 	assert.equal(applyCancellation(done, false), done);
 });
 
+// rem-R1: `WorkflowResult` is a discriminated union, and the cancelled variant carries
+// only `status` + the genuinely common `outputPaths`/`notes`. So these assert the
+// *absence of the key* rather than "the key is present holding undefined" — the old
+// spread-then-erase construction left `error: undefined` / `retryAfterMs: undefined`
+// sitting on the result as if they were part of the cancelled contract.
+const CANCELLED_ALLOWED_KEYS = ['status', 'outputPaths', 'notes'];
+
+function assertCleanCancelledShape(result, label) {
+	assert.equal(result.status, 'cancelled', label);
+	for (const key of Object.keys(result)) {
+		assert.ok(CANCELLED_ALLOWED_KEYS.includes(key),
+			`${label}: cancelled results must not carry "${key}" — it belongs to another variant`);
+	}
+	assert.ok(!('error' in result), `${label}: a cancellation is not a diagnostic error`);
+	assert.ok(!('failureReason' in result), `${label}: no failure cause on a cancellation`);
+	assert.ok(!('retryAfterMs' in result), `${label}: a cancellation is never retried by policy`);
+	assert.ok(!('serviceUnhealthy' in result), `${label}: service data is deferred-only`);
+}
+
 test('applyCancellation rewrites failed and deferred, but never done', () => {
 	assert.equal(applyCancellation({ status: 'done', notes: 'wrote the note' }, true).status, 'done',
 		'work that completed must not be reported as if it never happened');
 
 	const failed = applyCancellation({ status: 'failed', error: 'chain blew up', failureReason: 'no-api-key' }, true);
-	assert.equal(failed.status, 'cancelled');
-	assert.equal(failed.error, undefined, 'a cancellation is not a diagnostic error');
-	assert.equal(failed.failureReason, undefined);
+	assertCleanCancelledShape(failed, 'failed -> cancelled');
 	assert.match(failed.notes, /chain blew up/, 'the original message survives as a note');
 
 	const deferred_ = applyCancellation({ status: 'deferred', notes: 'companion down', retryAfterMs: 30_000 }, true);
-	assert.equal(deferred_.status, 'cancelled', 'a deferral would re-queue and resurrect cancelled work');
-	assert.equal(deferred_.retryAfterMs, undefined);
+	assertCleanCancelledShape(deferred_, 'deferred -> cancelled');
+	assert.match(deferred_.notes, /companion down/, 'the original message survives as a note');
+});
+
+test('applyCancellation drops variant-specific fields but keeps outputPaths', () => {
+	// `outputPaths` is a genuine common field and DbJobBackend records it off the
+	// POST-cancellation result, so a run that already wrote a note must not lose it.
+	const fromDeferred = applyCancellation({
+		status: 'deferred',
+		error: 'youtube-api down',
+		notes: 'all feeds failed',
+		outputPaths: ['_intake/2026-07-31.md'],
+		retryAfterMs: 3_600_000,
+		serviceUnhealthy: { service: 'youtube-api', kind: 'rate-limited', reason: 'quota' },
+	}, true);
+	assertCleanCancelledShape(fromDeferred, 'deferred with service data');
+	assert.deepEqual(fromDeferred.outputPaths, ['_intake/2026-07-31.md']);
+
+	const fromFailed = applyCancellation({
+		status: 'failed',
+		error: 'no key',
+		failureReason: 'no-api-key',
+		outputPaths: ['_intake/2026-07-31.md'],
+	}, true);
+	assertCleanCancelledShape(fromFailed, 'failed with a typed cause');
+	assert.deepEqual(fromFailed.outputPaths, ['_intake/2026-07-31.md']);
+
+	// No outputPaths in, no empty key out.
+	const bare = applyCancellation({ status: 'failed', error: 'boom' }, true);
+	assert.ok(!('outputPaths' in bare), 'an absent common field stays absent');
+});
+
+test('cancelledResultFor constructs the cancelled variant and nothing else', () => {
+	const aborted = new AbortController();
+	aborted.abort(new JobCancelledError('stopped'));
+	assertCleanCancelledShape(cancelledResultFor(new JobCancelledError('stopped'), aborted.signal), 'typed cancel');
+	assertCleanCancelledShape(cancelledResultFor(new Error('step blew up'), aborted.signal), 'post-signal failure');
 });
 
 test('cancelledResultFor claims a JobCancelledError, and any error raised after the signal fired', () => {

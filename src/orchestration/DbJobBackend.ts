@@ -3,7 +3,17 @@ import type CruciblePlugin from '../main';
 import type { SqliteJobStore } from './db/SqliteJobStore';
 import type { DbJobRow } from './db/types';
 import type { JobTypeConfig } from './jobTypeConfig';
-import type { JobPriority, JobType, OrchestrationEnqueueOptions, OrchestrationJob, WorkflowResult } from './types';
+import type {
+	JobPriority,
+	JobType,
+	OrchestrationEnqueueOptions,
+	OrchestrationJob,
+	WorkflowCancelledResult,
+	WorkflowDeferredResult,
+	WorkflowFailedResult,
+	WorkflowResult,
+} from './types';
+import { assertNever } from './types';
 import type { Workflow } from './workflows/Workflow';
 import {
 	JobBackend,
@@ -291,36 +301,56 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 			if (result.outputPaths && result.outputPaths.length > 0) {
 				this.store.setOutputPaths(job.id, result.outputPaths);
 			}
-			if (result.status === 'deferred') {
-				this.deferEntry(job, result);
-				return result.serviceUnhealthy ? 'blocked' : 'ran';
+			// One exhaustive switch over `WorkflowResult`, with `assertNever` as the
+			// backstop: adding a terminal variant becomes a compile error here rather than
+			// a job that silently never settles. The old if-ladder also needed a placeholder
+			// error string for a `failed` result that carried none — the union makes `error`
+			// required on that variant, so that dead defensiveness is gone rather than
+			// merely unreached.
+			//
+			// `deferred` deliberately does NOT append run notes: its message is written by
+			// `deferEntry` through `setDeferred`, not as narration on a settled job.
+			switch (result.status) {
+				case 'deferred':
+					this.deferEntry(job, result);
+					return result.serviceUnhealthy ? 'blocked' : 'ran';
+				case 'cancelled':
+					this.appendResultNotes(job, result);
+					settlement = 'cancelled';
+					this.cancelEntry(job, result);
+					return 'ran';
+				case 'failed':
+					this.appendResultNotes(job, result);
+					this.failEntry(job, result.error, result);
+					return 'ran';
+				case 'done':
+					this.appendResultNotes(job, result);
+					this.store.transition(job.id, 'done', Date.now());
+					// A completed job is the only honest evidence that its dependencies are alive,
+					// and it is evidence for ALL of them. This is the half-open probe's success path.
+					this.reportServicesHealthy();
+					this.emitQueueUpdate();
+					this.emitTrackerEvent(result, 'done');
+					routineJobNotice(this.plugin, this.type, `Orchestrate: ${job.id} → done`);
+					return 'ran';
+				default:
+					return assertNever(result);
 			}
-			if (result.notes) {
-				this.store.appendNotes(job.id, result.notes);
-				if (result.notes.startsWith('Partial:')) this.store.setPartial(job.id, true);
-			}
-			if (result.status === 'cancelled') {
-				settlement = 'cancelled';
-				this.cancelEntry(job, result);
-				return 'ran';
-			}
-			if (result.status === 'failed') {
-				this.failEntry(job, result.error ?? 'Workflow returned failed status', result);
-				return 'ran';
-			}
-			this.store.transition(job.id, 'done', Date.now());
-			// A completed job is the only honest evidence that its dependencies are alive,
-			// and it is evidence for ALL of them. This is the half-open probe's success path.
-			this.reportServicesHealthy();
-			this.emitQueueUpdate();
-			this.emitTrackerEvent(result, 'done');
-			routineJobNotice(this.plugin, this.type, `Orchestrate: ${job.id} → done`);
 		} catch (e) {
 			this.failEntry(job, e instanceof Error ? e.message : String(e));
 		} finally {
 			run.finish(settlement);
 		}
 		return 'ran';
+	}
+
+	// Run narration for a settled job. Extracted from the settlement ladder so each
+	// terminal branch names it explicitly and `deferred`'s deliberate omission reads as
+	// a decision rather than as fall-through ordering.
+	private appendResultNotes(job: OrchestrationJob, result: WorkflowResult): void {
+		if (!result.notes) return;
+		this.store.appendNotes(job.id, result.notes);
+		if (result.notes.startsWith('Partial:')) this.store.setPartial(job.id, true);
 	}
 
 	private reportServicesHealthy(): void {
@@ -333,7 +363,7 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 	// written (a cancellation is not a diagnostic), the job lands in `cancelled` rather
 	// than `failed` so no failure-retry policy can pick it up, and the notice follows
 	// the routine-notice gate rather than the unconditional failure Notice.
-	private cancelEntry(job: OrchestrationJob, result: WorkflowResult): void {
+	private cancelEntry(job: OrchestrationJob, result: WorkflowCancelledResult): void {
 		this.store.transition(job.id, 'cancelled', Date.now());
 		this.emitQueueUpdate();
 		routineJobNotice(
@@ -343,7 +373,7 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 		);
 	}
 
-	private deferEntry(job: OrchestrationJob, result: WorkflowResult): void {
+	private deferEntry(job: OrchestrationJob, result: WorkflowDeferredResult): void {
 		// Report BEFORE the store writes: the breaker must open even if settling the job
 		// then fails, because the whole point is to stop the next claim.
 		const unhealthy = result.serviceUnhealthy;
@@ -383,7 +413,7 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 	 * monitor renders it) and the stale-lease sweep bounces it back to `queued` once no
 	 * live run owns it, whereas an un-drained *type* is invisible.
 	 */
-	private failEntry(job: OrchestrationJob, error: string, result?: WorkflowResult): void {
+	private failEntry(job: OrchestrationJob, error: string, result?: WorkflowFailedResult): void {
 		try {
 			// Stamps how this failure classifies so a sweep can read the column instead of
 			// re-pattern-matching `error`. Same classifier the retroactive repair tool uses

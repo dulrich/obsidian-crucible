@@ -1,6 +1,6 @@
 import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
-import { OrchestrationJob, WorkflowResult } from '../types';
+import { OrchestrationJob, WorkflowDeferredResult, WorkflowResult } from '../types';
 import { isSearchIndexablePath } from '../../search/chunker';
 import {
 	SearchEmbeddingConfigError,
@@ -277,7 +277,7 @@ function searchDeferredResult(
 	plugin: WorkflowContext['plugin'],
 	kind: SearchServiceUnavailableErrorKind,
 	detail?: string,
-): WorkflowResult {
+): WorkflowDeferredResult {
 	const reason = plugin.searchManager.companionUnavailableReason();
 	const message = reason
 		?? `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)`;

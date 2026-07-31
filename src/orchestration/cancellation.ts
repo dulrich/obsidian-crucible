@@ -1,4 +1,4 @@
-import type { WorkflowResult } from './types';
+import { type WorkflowCancelledResult, type WorkflowResult, assertNever } from './types';
 
 /**
  * Cooperative cancellation for orchestration jobs.
@@ -193,6 +193,15 @@ export class RunningJobRegistry {
  * `done` is deliberately left alone: the work really did complete before the
  * checkpoint was reached, and reporting "cancelled" would tell the user nothing
  * happened when a note was in fact written.
+ *
+ * The rewrites **construct** a `WorkflowCancelledResult` rather than spreading the
+ * original and erasing its invalid fields back to `undefined`. A spread is the one
+ * way to smuggle deferred/failed fields into the cancelled variant past the compiler,
+ * and the erase-to-`undefined` shape left every cancelled result carrying dead keys
+ * that read as part of the contract. `outputPaths` is carried across on purpose: it
+ * is a genuine common field, and `DbJobBackend.execute` records it off the
+ * *post*-cancellation result — dropping it would lose the record of a note the run
+ * had already written.
  */
 export function applyCancellation(result: WorkflowResult, aborted: boolean): WorkflowResult {
 	if (!aborted) return result;
@@ -202,20 +211,18 @@ export function applyCancellation(result: WorkflowResult, aborted: boolean): Wor
 			return result;
 		case 'deferred':
 			return {
-				...result,
 				status: 'cancelled',
-				error: undefined,
-				retryAfterMs: undefined,
+				...(result.outputPaths ? { outputPaths: result.outputPaths } : {}),
 				notes: `Cancelled instead of deferring: ${result.notes ?? result.error ?? 'no detail'}`,
 			};
 		case 'failed':
 			return {
-				...result,
 				status: 'cancelled',
-				error: undefined,
-				failureReason: undefined,
+				...(result.outputPaths ? { outputPaths: result.outputPaths } : {}),
 				notes: `Cancelled; the workflow reported: ${result.error ?? result.notes ?? 'no detail'}`,
 			};
+		default:
+			return assertNever(result);
 	}
 }
 
@@ -223,7 +230,7 @@ export function applyCancellation(result: WorkflowResult, aborted: boolean): Wor
  * Translate a thrown error into a cancelled result, or `null` when the error has
  * nothing to do with cancellation and must keep propagating.
  */
-export function cancelledResultFor(error: unknown, signal: AbortSignal): WorkflowResult | null {
+export function cancelledResultFor(error: unknown, signal: AbortSignal): WorkflowCancelledResult | null {
 	if (isJobCancelledError(error)) return { status: 'cancelled', notes: error.message };
 	if (!signal.aborted) return null;
 	// Something else escaped after cancellation was requested — most often a step

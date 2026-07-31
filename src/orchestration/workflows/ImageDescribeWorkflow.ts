@@ -1,6 +1,6 @@
 import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
-import { OrchestrationJob, WorkflowResult } from '../types';
+import { OrchestrationJob, WorkflowDeferredResult, WorkflowResult } from '../types';
 import { SearchServiceUnavailableError } from '../../search/types';
 import { logWarn } from '../../log';
 import { localizedImageInfo, type LocalizedImageInfo } from '../utils/imageMetadata';
@@ -37,7 +37,7 @@ const IMAGE_DESCRIBE_RETRY_AFTER_MS = 30_000;
  * job with its original params — already-described/failed images are skipped via `has()` on
  * retry, so resuming naturally only attempts the images that were never reached.
  */
-function breakerDeferredResult(result: DescribeMd5ImagesResult, notes: string, outputPaths?: string[]): WorkflowResult {
+function breakerDeferredResult(result: DescribeMd5ImagesResult, notes: string, outputPaths?: string[]): WorkflowDeferredResult {
 	const reason = result.abortReason ?? 'image description provider unhealthy';
 	return {
 		status: 'deferred',

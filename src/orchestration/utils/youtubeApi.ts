@@ -4,7 +4,7 @@ import { ensureFolder, slugify } from '../../utils';
 import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontmatter';
 import { yamlString } from '../../frontmatterValues';
 import type { ServiceFailureKind } from '../serviceHealth';
-import type { WorkflowResult } from '../types';
+import type { WorkflowDeferredResult, WorkflowFailureReason } from '../types';
 import { RemoteVideo, VIDEO_ID_RE, parseChannelsTable } from './youtube';
 
 export const YOUTUBE_DATA_API_SECRET_KEY = 'crucible-youtube-data-api-key';
@@ -39,8 +39,30 @@ export class YoutubeApiUnavailableError extends Error {
  */
 export const YOUTUBE_QUOTA_RETRY_AFTER_MS = 60 * 60_000;
 
+/**
+ * The YouTube Data API key is missing or empty — a per-run **configuration gap**, not
+ * service unhealth, and deliberately NOT a `YoutubeApiUnavailableError`: retrying
+ * cannot help until the user sets the key, and opening the shared `youtube-api`
+ * breaker for it would stall metadata enrichment too.
+ *
+ * It is a distinct class rather than a plain `Error` because the consumer has to tell
+ * this case apart from every other rejection in order to fail *plainly* (no
+ * `serviceUnhealthy`) and to stamp `failureReason: 'no-api-key'`, which is what latches
+ * the type's auto-source off. That classification used to be a regex over the message
+ * text kept in sync across two files by hand — the typed carrier below is the fix.
+ */
+export class YoutubeApiKeyMissingError extends Error {
+	/** The typed cause a consumer copies onto its `failed` result. */
+	readonly failureReason: WorkflowFailureReason = 'no-api-key';
+
+	constructor(message = 'YouTube Data API key not configured — set it in Settings → Orchestrator.') {
+		super(message);
+		this.name = 'YoutubeApiKeyMissingError';
+	}
+}
+
 /** Builds the deferred WorkflowResult a consumer returns for a caught `YoutubeApiUnavailableError`. */
-export function youtubeApiDeferredResult(e: YoutubeApiUnavailableError): WorkflowResult {
+export function youtubeApiDeferredResult(e: YoutubeApiUnavailableError): WorkflowDeferredResult {
 	return {
 		status: 'deferred',
 		error: e.message,
@@ -276,14 +298,15 @@ export function playlistItemsToRemoteVideos(json: unknown): RemoteVideo[] {
  * Fetches a channel's recent uploads via the Data API. `maxResults=15` matches the
  * old RSS feed's page depth — no pagination, the seen-set absorbs any gap on the
  * next poll. A missing/empty API key is a per-run config problem, not service
- * unhealth, so it throws a plain `Error` rather than `YoutubeApiUnavailableError`
- * (the caller must not open the shared youtube-api breaker for a key that was never
- * configured).
+ * unhealth, so it throws `YoutubeApiKeyMissingError` rather than
+ * `YoutubeApiUnavailableError` (the caller must not open the shared youtube-api
+ * breaker for a key that was never configured). The caller classifies it by its
+ * **type**, never by its message text.
  */
 export async function fetchChannelUploads(plugin: CruciblePlugin, channelId: string): Promise<RemoteVideo[]> {
 	const apiKey = await loadYoutubeApiKey(plugin);
 	if (!apiKey) {
-		throw new Error('YouTube Data API key not configured — set it in Settings → Orchestrator.');
+		throw new YoutubeApiKeyMissingError();
 	}
 
 	const playlistId = uploadsPlaylistIdFor(channelId);
