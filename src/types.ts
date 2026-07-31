@@ -641,6 +641,8 @@ export interface CrucibleSettings {
 	orchestrationYoutubeTrackerDiffMode: boolean;
 	orchestrationYoutubeTrackerWriteEmptyRuns: boolean;
 	orchestrationYoutubeMetadataRoot: string;
+	// X (Twitter) post-metadata ingestion (oEmbed pipeline, WP-XM1)
+	orchestrationXMetadataRoot: string;
 	// Channel metadata enrichment (about.md per channel)
 	orchestrationYoutubeChannelEnrichEnabled: boolean;
 	orchestrationYoutubeChannelEnrichIntervalMinutes: number;
@@ -851,6 +853,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationYoutubeTrackerDiffMode: true,
 	orchestrationYoutubeTrackerWriteEmptyRuns: false,
 	orchestrationYoutubeMetadataRoot: '_yt_metadata',
+	orchestrationXMetadataRoot: '_x_metadata',
 	orchestrationYoutubeChannelEnrichEnabled: false,
 	orchestrationYoutubeChannelEnrichIntervalMinutes: 0,
 	orchestrationYoutubeChannelEnrichMaxAgeDays: 30,
