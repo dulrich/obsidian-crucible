@@ -1,2 +1,4 @@
 *
 !scripts/search-companion.mjs
+!scripts/search-companion/
+!scripts/search-companion/**

@@ -103,7 +103,7 @@ needs `--mmproj` alongside `-m`, and `gemma-4-12B-it-GGUF` does ship one
 ## Decision 2 — where the description text lives
 
 This is the load-bearing decision, and one fact settles most of it. From
-`scripts/search-companion.mjs`, in the `/v1/chunks/upsert` handler:
+`scripts/search-companion/endpoints/upsert.mjs` (the `/v1/chunks/upsert` handler):
 
 > The first chunk seen for a `(vaultId, path)` clears every existing row for that path: an
 > upsert is a full replace, not a merge.
