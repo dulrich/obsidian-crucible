@@ -1,4 +1,5 @@
 import { extractVideoIdFromUrl } from './youtube';
+import { canonicalXStatusUrl, extractXStatusFromUrl } from './xPost';
 
 export interface TrackedSourceHint {
 	type: 'youtube-channel';
@@ -11,6 +12,7 @@ export interface CanonicalizedUrl {
 	domain: string;
 	filename: string;
 	youtubeVideoId?: string;
+	xStatusId?: string;
 	trackedSource?: TrackedSourceHint;
 }
 
@@ -31,6 +33,14 @@ const TRACKING_PARAMS = new Set([
 const YT_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
 const YOUTU_BE_HOSTS = new Set(['youtu.be', 'www.youtu.be']);
 const ARXIV_HOSTS = new Set(['arxiv.org', 'www.arxiv.org']);
+const X_STATUS_HOSTS = new Set([
+	'x.com',
+	'www.x.com',
+	'mobile.x.com',
+	'twitter.com',
+	'www.twitter.com',
+	'mobile.twitter.com',
+]);
 
 export function canonicalizeUrl(raw: string): CanonicalizedUrl | null {
 	const trimmed = raw.trim();
@@ -51,6 +61,7 @@ export function canonicalizeUrl(raw: string): CanonicalizedUrl | null {
 
 	const host = parsed.hostname;
 	let youtubeVideoId: string | undefined;
+	let xStatusId: string | undefined;
 	let trackedSource: TrackedSourceHint | undefined;
 
 	if (YT_HOSTS.has(host)) {
@@ -81,6 +92,15 @@ export function canonicalizeUrl(raw: string): CanonicalizedUrl | null {
 			parsed.pathname = `/abs/${m[1]}`;
 			parsed.search = '';
 		}
+	} else if (X_STATUS_HOSTS.has(host)) {
+		const statusRef = extractXStatusFromUrl(parsed.toString());
+		if (statusRef) {
+			const canonicalX = new URL(canonicalXStatusUrl(statusRef.handle, statusRef.statusId));
+			parsed.hostname = canonicalX.hostname;
+			parsed.pathname = canonicalX.pathname;
+			parsed.search = canonicalX.search;
+			xStatusId = statusRef.statusId;
+		}
 	}
 
 	if (parsed.search && !youtubeVideoId) {
@@ -100,6 +120,7 @@ export function canonicalizeUrl(raw: string): CanonicalizedUrl | null {
 		domain: parsed.hostname,
 		filename,
 		youtubeVideoId,
+		xStatusId,
 		trackedSource,
 	};
 }
