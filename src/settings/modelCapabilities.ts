@@ -1,5 +1,6 @@
 import { Provider, ProviderCatalogModel, ProviderModel, ProviderModelCapability } from '../types';
 import { normalizePrecision } from '../providers/shared';
+import { deriveEmbeddingSpaceIdPrefill } from '../search/types';
 
 /**
  * Reading and writing a provider model's capability flags.
@@ -378,6 +379,36 @@ export function acceptCatalogSuggestion(model: ProviderModel, suggestion: Catalo
 		model.embeddingVariant = suggestion.embeddingVariant;
 		state.accepted.embeddingVariant = true;
 	}
+}
+
+/**
+ * WP-rem-R4 (F4): the type-ahead pick handler's full effect, factored out of
+ * `sections/aiProviderModels.ts`'s `ProviderModelSuggest` `onChoose` callback so it is one pure,
+ * directly-testable state transition instead of three inline statements sitting in a render
+ * closure. An explicit pick from the fetched catalog auto-applies the probed suggestion through
+ * the SAME `acceptCatalogSuggestion` path the Accept button uses (WP-8 D2 amendment) — the
+ * per-field "probe-accepted" badge + Reset button is therefore already the undo affordance.
+ *
+ * Three effects, in order, matching the pre-extraction inline sequence exactly:
+ *  1. Accept `suggestion` onto `model` (the caller derives `suggestion` via
+ *     `deriveCatalogSuggestion`, optionally with a describeModel-probed precision fallback).
+ *  2. Auto-alias the label (WP-3 item 2) — only when still empty; a value the user already typed
+ *     always wins, pick or no pick (see `fillModelLabelIfEmpty`'s own doc comment).
+ *  3. Portable space-key prefill (WP-5) — when the picked served id is path-shaped (a container
+ *     mount point), prefill the portable override rather than letting that path silently become
+ *     the vector-space key. Never overwrites a value already present
+ *     (`deriveEmbeddingSpaceIdPrefill`'s own guard).
+ */
+export function applyCatalogPick(
+	model: ProviderModel,
+	entry: ProviderCatalogModel,
+	suggestion: CatalogSuggestion,
+	state: ModelProbeState,
+): void {
+	acceptCatalogSuggestion(model, suggestion, state);
+	fillModelLabelIfEmpty(model, entry);
+	const spaceIdPrefill = deriveEmbeddingSpaceIdPrefill(entry.id, model.embeddingSpaceId);
+	if (spaceIdPrefill) model.embeddingSpaceId = spaceIdPrefill;
 }
 
 /**
