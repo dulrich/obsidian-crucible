@@ -649,3 +649,31 @@ test('repointAttachmentFolderPrefix: NEVER rewrites an ordinary note link even w
 
 	assert.equal(updated, content, 'neither ref targets a managed (_MD5) attachment, so the ordinary note links are left completely alone');
 });
+
+/* ---------------- resolver decode alignment with the scan probe (#fragment / |alias strip) */
+// The scan probe (normalizeRefTargetForResolve in src/ingestion/data/missingAttachments.ts)
+// strips a #fragment/|alias suffix before resolving; the repair resolver must normalize
+// identically, or a suffixed target fails the end-anchored MD5_NAME_RE/MANAGED_STEM_RE and
+// falls through to a spurious `missing` even when the file exists.
+
+test('resolveLocalAttachmentRepair: a #fragment-suffixed managed ref still resolves — the suffix never reaches basename matching', () => {
+	const expected = 'attachments/x';
+	const result = resolveLocalAttachmentRepair('_resources/old/uniq_MD5.png#page=2', expected, ['_resources/keep/uniq_MD5.png']);
+	assert.equal(result.target, '_resources/keep/uniq_MD5.png');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: a |alias-suffixed managed ref still resolves', () => {
+	const expected = 'attachments/x';
+	const result = resolveLocalAttachmentRepair('_resources/old/uniq_MD5.png|Open: pasted image', expected, ['_resources/keep/uniq_MD5.png']);
+	assert.equal(result.target, '_resources/keep/uniq_MD5.png');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: a #fragment-suffixed ref with tier-2 MD5 duplicates auto-resolves instead of bailing ambiguous', () => {
+	const expected = 'attachments/x';
+	const vaultPaths = ['b/dup_MD5.png', 'a/dup_MD5.png'];
+	const result = resolveLocalAttachmentRepair('_resources/old/dup_MD5.png#frag', expected, vaultPaths);
+	assert.equal(result.target, 'a/dup_MD5.png', 'suffix stripped -> basename is a managed name -> identical-content pick (equal length, lexicographic)');
+	assert.equal(result.reason, null);
+});

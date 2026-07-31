@@ -262,7 +262,13 @@ function pickAmongIdenticalContent(candidates: string[], expectedFolder: string)
 // are unaffected); see tests/localizeAttachments.edge.test.mjs's index-vs-naive equivalence
 // coverage for the "byte-identical decisions" guarantee.
 export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[], index?: AttachmentPathIndex): LocalAttachmentRepairResolution {
-	let decoded = brokenLink.replace(/^<|>$/g, '');
+	// Decode mirrors normalizeRefTargetForResolve (src/ingestion/data/missingAttachments.ts):
+	// strip a #fragment/|alias suffix FIRST, then the <...> wrapper, then %-decode. The scan
+	// probe and this resolver must normalize identically — a `#`-suffixed target that the
+	// probe strips but the resolver keeps fails the end-anchored MD5_NAME_RE/MANAGED_STEM_RE
+	// and falls through to a spurious `missing`.
+	let decoded = brokenLink.split('#')[0]?.split('|')[0] ?? '';
+	decoded = decoded.replace(/^<|>$/g, '');
 	try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is on malformed escapes */ }
 	const base = decoded.split('/').pop() ?? '';
 	if (!base) return { target: null, reason: 'missing' };

@@ -43,7 +43,7 @@ export function createMissingAttachmentsSection(host: DashboardHost): MissingAtt
 			columns: [
 				{ key: 'note', label: 'Note', sortable: true, sortKey: r => r.note.basename.toLowerCase(), render: (r, td) => renderFileLink(host.app, td, r.note, r.note.basename) },
 				{ key: 'link', label: 'Broken ref', sortable: true, sortKey: r => r.link.toLowerCase(), render: (r, td) => td.setText(r.link) },
-				{ key: 'repairable', label: 'Repairable', sortable: true, sortKey: r => r.repairable ? 1 : 0, render: (r, td) => renderRepairablePill(td, r.repairable) },
+				{ key: 'repairable', label: 'Repairable', sortable: true, sortKey: r => r.repairable ? 1 : 0, render: (r, td) => renderRepairablePill(td, r) },
 				{ key: 'repair', label: '', render: (r, td) => renderRepairButton(host, td, r, ctx) },
 			],
 		});
@@ -98,10 +98,14 @@ export function createMissingAttachmentsSection(host: DashboardHost): MissingAtt
 	return { render, renderRepairAllButton };
 }
 
-function renderRepairablePill(td: HTMLElement, repairable: boolean): void {
+function renderRepairablePill(td: HTMLElement, row: MissingRefRow): void {
 	// Neutral pill, never a status hue — repairability is a fact about the ref, not an
-	// ok/warn/error condition (the row itself carries the alarm).
-	td.createSpan({ cls: 'crucible-pill is-muted', text: repairable ? 'yes' : 'no' });
+	// ok/warn/error condition (the row itself carries the alarm). A non-repairable row
+	// names its resolver reason inline ("no · missing" / "no · ambiguous") so the pill is
+	// never an opaque "no" — the reason was previously visible only in the Localize debug
+	// log, and only on the repair path.
+	const text = row.repairable ? 'yes' : `no · ${row.reason ?? 'missing'}`;
+	td.createSpan({ cls: 'crucible-pill is-muted', text });
 }
 
 function renderRepairButton(host: DashboardHost, td: HTMLElement, row: MissingRefRow, ctx: SectionContext): void {
