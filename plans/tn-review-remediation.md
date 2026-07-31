@@ -148,3 +148,19 @@ semantics) are settled behavior that R1/R4 must preserve.
 
 **Total ≈ 8.3 kSLOC, ~780k raw tokens; ~788k Claude-path / ~730k Codex-path
 Opus/Sol-equivalent tokens.**
+
+---
+
+## Completed 2026-07-31
+
+All four WPs landed on master by the orchestrator (all subagent-produced, gates re-run
+verbatim per landing): `723cfbd` (rem-R2, binding contract), `ddcf4ff` (rem-R1,
+WorkflowResult union + typed no-api-key), `83d463e` (rem-R3, companion decomposition),
+`10e6bba` (rem-R4, settings decomposition). Test floor 1299/105 → **1351/107**. Quirk
+entries recorded in root `AGENTS.md` (contract leaf, settings split) and
+`src/orchestration/AGENTS.md` (construct-never-spread union).
+
+**Parked for the user:** `YoutubeChannelEnrichWorkflow.ts:38` fails on a missing API key
+*without* stamping `failureReason: 'no-api-key'`, while `YoutubeMetadataFetchWorkflow.ts:107`
+stamps it. Aligning them would make a missing key latch the channel-enrich auto-source
+off (the R1 semantics) — behavior change, user decides.
