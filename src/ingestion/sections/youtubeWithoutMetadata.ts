@@ -46,7 +46,7 @@ function renderEnqueueMetadataCell(host: DashboardHost, td: HTMLElement, row: Yo
 			btn.disabled = true;
 			// enqueueAndRun kicks the type's drain, so a manual enqueue runs
 			// regardless of the Auto-enrich gate.
-			const job = await host.plugin.orchestrationAutoRunner.enqueueAndRun('youtube_metadata_fetch', {
+			const job = await host.plugin.orchestrationAutoRunner?.enqueueAndRun('youtube_metadata_fetch', {
 				targetPath: row.file.path,
 				videoId: row.videoId,
 				title: row.title,
@@ -78,7 +78,7 @@ export function renderEnqueueAllMetadataButton(host: DashboardHost, heading: HTM
 				// drain is already in flight).
 				for (const row of rows) {
 					if (inFlight.has(row.file.path)) continue;
-					const job = await host.plugin.orchestrationAutoRunner.enqueueAndRun('youtube_metadata_fetch', {
+					const job = await host.plugin.orchestrationAutoRunner?.enqueueAndRun('youtube_metadata_fetch', {
 						targetPath: row.file.path,
 						videoId: row.videoId,
 						title: row.title,
