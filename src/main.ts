@@ -30,6 +30,8 @@ import { YoutubeChannelEnrichWorkflow } from './orchestration/workflows/YoutubeC
 import { YoutubeChannelEnrichSweepWorkflow } from './orchestration/workflows/YoutubeChannelEnrichSweepWorkflow';
 import { XMetadataFetchWorkflow } from './orchestration/workflows/XMetadataFetchWorkflow';
 import { XPostDiscoverWorkflow } from './orchestration/workflows/XPostDiscoverWorkflow';
+import { XBackfillWorkflow } from './orchestration/workflows/XBackfillWorkflow';
+import { shouldFireXDiscoverOnClip } from './orchestration/utils/xDiscoverTrigger';
 import { CrucibleSettingsView, CRUCIBLE_SETTINGS_VIEW_TYPE } from './settingsView';
 import { IngestionDashboardView, INGESTION_DASHBOARD_VIEW_TYPE } from './ingestionDashboardView';
 import { SourceEvalDashboardView, SOURCE_EVAL_DASHBOARD_VIEW_TYPE } from './sourceEvalDashboardView';
@@ -38,7 +40,7 @@ import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { migrateJobTypeControls, readTypeAutorun, setTypeControl } from './orchestration/autorunGate';
 import { maybeShowArchiveNotice } from './orchestration/archiveNotice';
-import { ENRICHMENT_JOB_TYPE, chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, xMetadataFetchJobConfig, xPostDiscoverJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
+import { ENRICHMENT_JOB_TYPE, chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, xMetadataBackfillJobConfig, xMetadataFetchJobConfig, xPostDiscoverJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
 import { ServiceHealthRegistry } from './orchestration/serviceHealth';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
@@ -495,6 +497,14 @@ export default class CruciblePlugin extends Plugin {
 			enabled: () => this.settings.orchestrationBlogsTrackerEnabled,
 			jobs: () => [{ type: 'blogs_tracker' }],
 		});
+		this.triggers.register({
+			id: 'x-discover-on-clip',
+			description: 'When a note in the clipper inbox is created or edited, enqueue an X post-link discovery pass.',
+			on: { events: ['create', 'modify'] },
+			enabled: () => true,
+			guard: (file) => shouldFireXDiscoverOnClip(file, this.settings),
+			jobs: (file) => file ? [{ type: 'x_post_discover', params: { targetPath: file.path } }] : [],
+		});
 	}
 
 	registerCrucibleCommand(opts: {
@@ -800,6 +810,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow(), youtubeChannelEnrichSweepJobConfig());
 		this.orchestrator.register('x_metadata_fetch', new XMetadataFetchWorkflow(), xMetadataFetchJobConfig());
 		this.orchestrator.register('x_post_discover', new XPostDiscoverWorkflow(), xPostDiscoverJobConfig());
+		this.orchestrator.register('x_metadata_backfill', new XBackfillWorkflow(), xMetadataBackfillJobConfig());
 		this.orchestrator.register('command_run', new CommandRunWorkflow(), commandRunJobConfig());
 		this.orchestrator.register('chain_run', new ChainRunWorkflow(), chainRunJobConfig());
 		this.orchestrator.register('image_describe_note', new ImageDescribeNoteWorkflow(), imageDescribeNoteJobConfig());

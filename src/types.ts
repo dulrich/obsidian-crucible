@@ -675,6 +675,10 @@ export interface CrucibleSettings {
 	// jobs — gates both the capture event trigger and the Uncaptured Videos
 	// auto-source. Orthogonal to draining (the per-type auto-run gate governs that).
 	ingestionYoutubeAutoEnqueueEnabled: boolean;
+	// Auto-DISCOVER X post links in the clipper inbox (source-enable axis, WP-XM3):
+	// gates the `x-discover-on-clip` founding trigger. Orthogonal to the
+	// x_metadata_fetch/x_post_discover per-type auto-run gates that govern draining.
+	ingestionXAutoDiscoverEnabled: boolean;
 	// Per-type worker count for the youtube_metadata_fetch memory queue.
 	orchestrationYoutubeMetadataMaxParallel: number;
 	ingestionReadingWpm: number;
@@ -876,6 +880,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	ingestionClipperInboxFolder: '_clippings/inbox',
 	ingestionYoutubeEnrichRateLimitSeconds: 2,
 	ingestionYoutubeAutoEnqueueEnabled: false,
+	ingestionXAutoDiscoverEnabled: false,
 	orchestrationYoutubeMetadataMaxParallel: 1,
 	ingestionReadingWpm: 250,
 	sourceEvalEnabled: true,

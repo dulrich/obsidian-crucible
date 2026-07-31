@@ -379,6 +379,30 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => plugin.orchestrator.enqueue('link_scan', {}, { priority: 'high', lane: 'user' }),
 	});
 
+	// Registry-only fan-out (see XBackfillWorkflow's doc comment): scans
+	// orchestrationLinkRegistryRoot for X statuses not yet materialized and
+	// enqueues one x_metadata_fetch per undiscovered status. Not mutating — it
+	// only reads the registry and enqueues.
+	plugin.registerCrucibleCommand({
+		id: 'orchestrator-enqueue-x-backfill',
+		name: 'Orchestrate: enqueue X post backfill from link registry',
+		group: 'Orchestrations',
+		mutating: false,
+		run: () => plugin.orchestrator.enqueue('x_metadata_backfill', {}, { priority: 'high', lane: 'user' }),
+	});
+
+	// Also registered as a chain-internal command (internalCommands.ts) so a
+	// note-related chain step routes through the awaited internal registry rather
+	// than fire-and-forget executeCommandById (root AGENTS.md's chain-step quirk).
+	// Enqueueing doesn't mutate the note itself, so mutating:false is correct.
+	plugin.registerCrucibleCommand({
+		id: 'x-discover-post-links',
+		name: 'X: discover post links in active note',
+		group: 'Orchestrations',
+		mutating: false,
+		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:x-discover-post-links`, {}),
+	});
+
 	// Retroactive repair for a service-outage cohort in failed/ (see
 	// failedJobRepair.ts). Not `mutating`: it moves queue job files, not the active
 	// note — same reasoning as every other Orchestrate command in this group.
