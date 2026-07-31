@@ -47,15 +47,29 @@ export function clampSearchBudgetMs(value) {
 // is the client's own clock at send time (sent alongside `budgetMs`, src/search/client.ts),
 // which does see it.
 //
-// Guarded against clock skew: `sentAt` must land inside `[receivedAt - budgetMs, receivedAt]` —
+// Guarded against clock skew: `sentAt` must land inside `[receivedAt - K*budgetMs, receivedAt]` —
 // a request cannot have been sent after it was received, and a `sentAt` claiming to be more
-// than a full budget's worth of clock disagreement into the past is not trustworthy queuing
-// evidence, just a skewed or malformed clock. Outside that window, absent, or non-numeric (an
-// older client that has never heard of `sentAt`) all fall back to `receivedAt` — the same
-// deadline shape this replaces, so a mixed-version fleet degrades cleanly in both directions.
+// than K budgets' worth of clock disagreement into the past is not trustworthy queuing evidence,
+// just a skewed or malformed clock. Outside that window, absent, or non-numeric (an older client
+// that has never heard of `sentAt`) all fall back to `receivedAt` — the same deadline shape this
+// replaces, so a mixed-version fleet degrades cleanly in both directions.
+//
+// WP-SS2: K was 1 (a queue delay larger than one budget made the guard distrust `sentAt` and
+// restart the deadline from `receivedAt`, which grants a full fresh budget to exactly the
+// requests that have been queued/abandoned longest — the inversion this constant fixes). The
+// one-budget bound was justified by the upsert flush loop's `INTERACTIVE_YIELD_MS` interactive
+// yield (search.mjs module comment above); no such yield exists between two queued searches, so
+// a superseded/abandoned interactive request can plausibly sit behind several budgets' worth of
+// queuing before this server-side supersede/disconnect check (see endpoints/search.mjs) ever
+// gets a chance to drop it. Widening to K=5 budgets means that request now correctly resolves
+// `sentAt` as trustworthy, reads as already over budget, and degrades in ~ms instead of being
+// treated as fresh. A `sentAt` older than K budgets, or in the future, still falls back to
+// `receivedAt` — genuine skew/garbage, not queuing evidence, is unaffected by this change.
+const SEARCH_DEADLINE_SKEW_TRUST_BUDGETS = 5;
+
 export function resolveSearchDeadlineStart(sentAt, receivedAt, budgetMs) {
 	const parsed = Number(sentAt);
 	if (!Number.isFinite(parsed)) return receivedAt;
-	if (parsed < receivedAt - budgetMs || parsed > receivedAt) return receivedAt;
+	if (parsed < receivedAt - SEARCH_DEADLINE_SKEW_TRUST_BUDGETS * budgetMs || parsed > receivedAt) return receivedAt;
 	return parsed;
 }

@@ -8,6 +8,7 @@ import { createResetEndpoint } from './endpoints/reset.mjs';
 import { createSearchEndpoint } from './endpoints/search.mjs';
 import { createUpsertEndpoint } from './endpoints/upsert.mjs';
 import { HttpError, json } from './http.mjs';
+import { createSearchClientTracker } from './searchClients.mjs';
 import { createStatements } from './statements.mjs';
 import { createVectorBackend } from './vectors.mjs';
 
@@ -49,7 +50,11 @@ export function createRequestHandler(db, options = {}) {
 	// in the single-file handler; a one-field holder is what carries that same sharing across a
 	// module boundary. Read/written only through `now`, so it participates in the same
 	// injected-clock determinism as the rest of the deadline math.
-	const state = { lastInteractiveSearchAt: -Infinity };
+	//
+	// WP-SS2: `searchClients` is the same handler-scoped-holder pattern for a different
+	// consumer — the search endpoint's own supersede check, not the upsert flush's yield gate —
+	// so it lives on the same `state` object rather than a second parallel holder.
+	const state = { lastInteractiveSearchAt: -Infinity, searchClients: createSearchClientTracker() };
 	// One prepare pass per handler instance, exactly as before. Injectable for the same reason
 	// `vectors` is: a test can hand in doubles without a real database.
 	const statements = options.statements ?? createStatements(db);

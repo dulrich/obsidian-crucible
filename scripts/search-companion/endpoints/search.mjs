@@ -4,11 +4,32 @@ import { DEFAULT_RANKING_MODE, parseRankingMode } from '../ranking.mjs';
 import { SCHEMA_VERSION } from '../schema.mjs';
 import { runSearch } from '../search.mjs';
 
+// A fast, well-formed response for a request abandoned before any SQL ran — same shape as the
+// deadline's own already-over-budget response (WP-5), plus `superseded: true` so a caller (or a
+// test) can tell the two apart. Both flags are additive/optional on the wire: an old client's
+// `normalizeSearchResponse` already tolerates an unrecognized key, and `degraded` alone still
+// reads as "well-formed, just partial" for anything that only checks that field.
+function supersededResponse() {
+	return {
+		mode: 'fts',
+		semanticAvailable: false,
+		schemaVersion: SCHEMA_VERSION,
+		match: null,
+		fallbackUsed: false,
+		total: 0,
+		hasMore: false,
+		results: [],
+		degraded: true,
+		superseded: true,
+	};
+}
+
 // POST /v1/search — the interactive route, and the only one that owns a deadline.
 //
 // Injected dependencies: the raw `db` (runSearch takes it, though every statement it runs is
 // passed in prepared), the two prepared statements plus the hydrator, the vector backend, the
-// clock, and the handler-scoped `state` holder it stamps `lastInteractiveSearchAt` on.
+// clock, and the handler-scoped `state` holder it stamps `lastInteractiveSearchAt` on and reads
+// the WP-SS2 `searchClients` supersede tracker from.
 //
 // **Deadline ownership stays on this route.** `receivedAt` is captured by the top-level
 // handler as its literal first statement — before the URL parse and before this route's own
@@ -20,9 +41,43 @@ import { runSearch } from '../search.mjs';
 export function createSearchEndpoint({ db, statements, vectors, now, state }) {
 	const { coverageStatement, hydrateChunk, searchStatement } = statements;
 	return async (req, res, request) => {
+		// WP-SS2: registered before `readJson` below (which yields to the event loop at least
+		// once, and potentially many times for a slow-arriving body), so an abort that lands
+		// mid-transmission is caught too, not only one after the body already finished. `res`
+		// (not `req`) 'close' is the standard Node signal for "the underlying connection was
+		// terminated before the response was ever sent" — exactly "can this request still be
+		// answered," independent of whether the request body itself finished streaming.
+		//
+		// Deliberately NOT `req.destroyed`: an ordinary `IncomingMessage` has `autoDestroy`
+		// semantics too — once its body finishes streaming ('end'), Node schedules the stream's
+		// own destroy shortly after, which flips `req.destroyed` to `true` for every request,
+		// disconnected or not. Checking it here would silently drop every real search behind a
+		// timing race (confirmed live: a plain POST /v1/search hung forever, no response ever
+		// sent, `fetch` waiting on a request this endpoint had silently abandoned). `res`'s own
+		// 'close' has no such false-positive: before `res.end()` has been called, it fires only
+		// when the underlying connection was actually torn down.
+		let clientDisconnected = false;
+		res.on('close', () => { clientDisconnected = true; });
+
 		const body = await readJson(req);
+		// WP-SS2: the fast-abandon checks, both before paying for the primary FTS scan.
+		//
+		// (1) Disconnect: SS1's client aborts a superseded/timed-out interactive search on the
+		// wire (AbortController); that reaches the companion as the request socket closing.
+		// Never write to a closed socket — there is nothing left to answer, and attempting the
+		// write would throw.
+		if (clientDisconnected) return;
 		const vaultId = requireString(body.vaultId, 'vaultId');
 		const query = requireString(body.query, 'query');
+		// (2) Supersede: same-`clientId`, newer-`seq` requests (src/search/client.ts — attached
+		// only when the caller supplied an AbortSignal, i.e. the interactive search modal, never
+		// the background SearchIndexWorkflow.sweep()). Missing/invalid clientId or seq (an older
+		// client, or a sweep) is inert here by construction — see
+		// `state.searchClients.isSuperseded` — so this never changes behavior for a request that
+		// never opted in.
+		if (state.searchClients.isSuperseded(body.clientId, body.seq)) {
+			return json(res, 200, supersededResponse());
+		}
 		// WP-5: the client's own cooperative-deadline hint (~80% of its own interactive
 		// timeout, per src/search/client.ts), clamped server-side so it stays a safety
 		// valve rather than something a malformed request can widen or disable. Absent

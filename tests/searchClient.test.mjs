@@ -101,13 +101,23 @@ function makeFetchStub() {
 
 globalThis.fetch = makeFetchStub();
 
-const { SearchServiceClient, SearchServiceUnavailableError, SearchAbortedError, __resetSearchFetchFallbackForTests } = await import(pathToFileURL(outfile));
+const {
+	SearchServiceClient,
+	SearchServiceUnavailableError,
+	SearchAbortedError,
+	__resetSearchFetchFallbackForTests,
+	__resetSearchClientIdentityForTests,
+} = await import(pathToFileURL(outfile));
 
 // Every test starts from the same clean slate: fetch is tried first (the CORS-fallback latch is
 // module-level/session-scoped in production for good reason — see client.ts — but that means a
-// test that trips it would otherwise poison every later test in this same file/process).
+// test that trips it would otherwise poison every later test in this same file/process). The
+// WP-SS2 clientId/seq identity is the same story — module-level so it survives
+// `SearchManager.client()` minting a fresh instance per call — so it needs the same per-test
+// reset.
 function resetGlobals() {
 	__resetSearchFetchFallbackForTests();
+	__resetSearchClientIdentityForTests();
 	globalThis.__searchClientThrow = undefined;
 	globalThis.__searchClientFetchThrow = undefined;
 	globalThis.__searchClientRequests = [];
@@ -515,6 +525,72 @@ test('an aborted search\'s error is not a SearchServiceUnavailableError of any k
 		assert.equal(err instanceof SearchServiceUnavailableError, false, 'an abort must not be classifiable as a companion outage');
 		return true;
 	});
+});
+
+/* -------------------------------------------------------- WP-SS2: client identity (clientId/seq) */
+
+// The pinned design decision (src/search/client.ts): clientId/seq are attached ONLY when the
+// caller supplies a `signal` — the interactive search modal always passes one, the background
+// SearchIndexWorkflow.sweep() never does. A signal-less call is exactly the sweep's shape, so
+// this is what proves a sweep search stays byte-identical to today's wire body.
+test('search() without a signal sends no clientId/seq at all', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	await client.search({ query: 'x', limit: 1 });
+
+	const body = JSON.parse(globalThis.__searchClientFetchRequests[0].body);
+	assert.equal('clientId' in body, false, 'a signal-less request (e.g. the background sweep) must carry no clientId at all — not even undefined, which JSON.stringify would already drop, but proven here on the actual wire body');
+	assert.equal('seq' in body, false);
+});
+
+// The core acceptance case: a signal-bearing caller (the interactive modal) gets a stable
+// per-session clientId and a strictly monotonic seq across calls, so the companion's supersede
+// tracker (scripts/search-companion/searchClients.mjs) can tell two requests from the same
+// session apart and order them.
+test('search() with a signal attaches a stable clientId and a monotonically increasing seq', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	const controller = new AbortController();
+
+	await client.search({ query: 'first', limit: 1 }, 5000, controller.signal);
+	await client.search({ query: 'second', limit: 1 }, 5000, controller.signal);
+	await client.search({ query: 'third', limit: 1 }, 5000, controller.signal);
+
+	const bodies = globalThis.__searchClientFetchRequests.map(r => JSON.parse(r.body));
+	assert.equal(bodies.length, 3);
+	const clientIds = bodies.map(b => b.clientId);
+	assert.equal(typeof clientIds[0], 'string');
+	assert.ok(clientIds[0].length > 0);
+	assert.deepEqual(clientIds, [clientIds[0], clientIds[0], clientIds[0]], 'the same session must reuse one stable clientId across searches, not mint a fresh one per call');
+
+	const seqs = bodies.map(b => b.seq);
+	assert.equal(typeof seqs[0], 'number');
+	assert.ok(seqs[1] > seqs[0], 'seq must strictly increase across calls');
+	assert.ok(seqs[2] > seqs[1]);
+});
+
+// `SearchManager.client()` mints a fresh `SearchServiceClient` per call (the pinned design
+// rationale for keeping this state module-level, not per-instance) — a second client instance in
+// the same session must still see the SAME clientId and a seq counter that keeps advancing
+// rather than resetting, or the companion's supersede tracker would see every new
+// `SearchServiceClient` as a brand-new, unrelated session.
+test('a fresh SearchServiceClient instance in the same session reuses the module-level clientId and keeps advancing the same seq counter', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const controller = new AbortController();
+
+	const clientA = new SearchServiceClient('http://search.local', 'vault');
+	await clientA.search({ query: 'first', limit: 1 }, 5000, controller.signal);
+
+	const clientB = new SearchServiceClient('http://search.local', 'vault');
+	await clientB.search({ query: 'second', limit: 1 }, 5000, controller.signal);
+
+	const bodies = globalThis.__searchClientFetchRequests.map(r => JSON.parse(r.body));
+	assert.equal(bodies[0].clientId, bodies[1].clientId, 'a fresh client instance is still the same session');
+	assert.ok(bodies[1].seq > bodies[0].seq, 'the counter must not reset for a new SearchServiceClient instance');
 });
 
 /* -------------------------------------------------------------- WP-SS1: CORS/network fallback */
