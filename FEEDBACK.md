@@ -20,7 +20,8 @@ tags: ""
 - [x] Queue Monitor: action buttons in single row, let Target take the wrapping
 - [x] how to view status/stats of the job queue db now?
 - [ ] image_describe_note queue refilled to ~100 on restart
-- [ ] Missing loacalized attachments -> remediation sprint follow-up
+- [ ] Missing localized attachments -> remediation sprint follow-up
+- [ ] YT Enrich needs a failure reason (detect -> configure notice/link like Search Modal rerank button)
 
 ---
 
