@@ -48,7 +48,13 @@ const {
 	stripDataUriImagePlaceholders,
 	repointAttachmentFolderPrefix,
 	planLocalAttachmentRepair,
+	resolveLocalAttachmentRepair,
+	PREFIX_REPAIR_MIN_STEM_LENGTH,
 	hasOtherAttachmentReferrer,
+	formatEmbed,
+	formatLink,
+	formatRef,
+	parseAttachmentRefsFromCache,
 } = await import(pathToFileURL(outfile));
 
 test('rewriteLocalizedAttachmentRefs only replaces full markdown image ranges', () => {
@@ -194,4 +200,140 @@ test('hasOtherAttachmentReferrer ignores zero-count entries and empty maps', () 
 	};
 	assert.equal(hasOtherAttachmentReferrer(links, '_resources/x_MD5.png', 'c.md'), false);
 	assert.equal(hasOtherAttachmentReferrer({}, '_resources/x_MD5.png', 'c.md'), false);
+});
+
+/* --------------------------------------------- resolveLocalAttachmentRepair: truncated-ref recovery (WP-VF-2d) */
+
+test('PREFIX_REPAIR_MIN_STEM_LENGTH is 8 (32 bits of the content hash — see the doc comment in localizeAttachments.ts)', () => {
+	assert.equal(PREFIX_REPAIR_MIN_STEM_LENGTH, 8);
+});
+
+test('resolveLocalAttachmentRepair: a unique prefix hit recovers a truncated (spliced) broken basename', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = ['_resources/elsewhere/abcdef1234567890_MD5.png'];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths);
+	assert.equal(result.target, '_resources/elsewhere/abcdef1234567890_MD5.png');
+	assert.equal(result.reason, null);
+	// planLocalAttachmentRepair (the pure wrapper the scan/repairable computation uses)
+	// exposes the same recovery through its narrower string|null contract.
+	assert.equal(
+		planLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths),
+		'_resources/elsewhere/abcdef1234567890_MD5.png',
+	);
+});
+
+test('resolveLocalAttachmentRepair: prefix ambiguity (two candidates share the truncated prefix) reports "ambiguous", not a guess', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = [
+		'_resources/elsewhere/abcdef1234567890_MD5.png',
+		'_resources/other/abcdef12ffffffffff_MD5.png',
+	];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths);
+	assert.equal(result.target, null);
+	assert.equal(result.reason, 'ambiguous');
+});
+
+test('resolveLocalAttachmentRepair: below PREFIX_REPAIR_MIN_STEM_LENGTH, prefix recovery is not attempted even if it would be unique', () => {
+	const expected = '_resources/notes/post';
+	// stem "abc" is 3 chars — below the 8-char floor — so this must NOT match even though
+	// it is the unique prefix of the one candidate below (short-garbage guard, WP-VF-2d).
+	const vaultPaths = ['_resources/elsewhere/abcdef1234567890_MD5.png'];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abc_MD5.pn', expected, vaultPaths);
+	assert.equal(result.target, null);
+	assert.equal(result.reason, 'missing');
+});
+
+test('resolveLocalAttachmentRepair: an exact-basename match wins over prefix recovery — the prefix tier never even runs', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = [
+		'_resources/exact/abcdef12_MD5.png', // exact basename match
+		'_resources/elsewhere/abcdef1234567890_MD5.png', // would ALSO prefix-match, if the exact tier didn't win first
+	];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.png', expected, vaultPaths);
+	assert.equal(result.target, '_resources/exact/abcdef12_MD5.png');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: prefix recovery ignores a same-prefix candidate that is not itself a managed (_MD5) name', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = ['_resources/elsewhere/abcdef1234567890.png']; // no _MD5 marker at all
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths);
+	assert.equal(result.target, null);
+	assert.equal(result.reason, 'missing');
+});
+
+/* --------------------------------------------------------- formatEmbed / formatLink / formatRef (WP-VF-2a) */
+
+test('formatEmbed produces a wiki or markdown embed with an empty alt (unchanged pre-existing behavior)', () => {
+	assert.equal(formatEmbed('wiki', 'folder/x_MD5.png'), '![[folder/x_MD5.png]]');
+	assert.equal(formatEmbed('md', 'folder/x_MD5.png'), '![](folder/x_MD5.png)');
+	assert.equal(formatEmbed('md', 'a folder/x_MD5.png'), '![](a%20folder/x_MD5.png)');
+});
+
+test('formatLink preserves display text and produces a LINK, not an embed', () => {
+	assert.equal(formatLink('wiki', 'folder/x_MD5.pdf'), '[[folder/x_MD5.pdf]]');
+	assert.equal(formatLink('wiki', 'folder/x_MD5.pdf', 'the source PDF'), '[[folder/x_MD5.pdf|the source PDF]]');
+	assert.equal(formatLink('md', 'folder/x_MD5.pdf', 'the source PDF'), '[the source PDF](folder/x_MD5.pdf)');
+	assert.equal(formatLink('md', 'a folder/x_MD5.pdf', 'doc'), '[doc](a%20folder/x_MD5.pdf)');
+});
+
+test('formatRef dispatches on isEmbed: an embed match stays an embed, a link match stays a link with its display text', () => {
+	assert.equal(formatRef({ syntax: 'wiki', isEmbed: true }, 'x_MD5.png'), '![[x_MD5.png]]');
+	assert.equal(
+		formatRef({ syntax: 'md', isEmbed: false, displayText: 'the report' }, 'x_MD5.pdf'),
+		'[the report](x_MD5.pdf)',
+	);
+});
+
+/* ----------------------------------------- parseAttachmentRefsFromCache: embeds/links symmetry (bug 1) */
+
+test('parseAttachmentRefsFromCache: collects embeds as before, tagged isEmbed', () => {
+	const cache = { embeds: [{ link: 'a_MD5.png', original: '![[a_MD5.png]]' }] };
+	const matches = parseAttachmentRefsFromCache(cache, '![[a_MD5.png]]');
+	assert.equal(matches.length, 1);
+	assert.equal(matches[0].isEmbed, true);
+	assert.equal(matches[0].syntax, 'wiki');
+});
+
+test('parseAttachmentRefsFromCache: collects a broken non-embed link ONLY when it looks like a managed (_MD5) attachment', () => {
+	const cache = {
+		links: [
+			{ link: 'attachments/a_MD5.pdf', original: '[[attachments/a_MD5.pdf|the report]]', displayText: 'the report' },
+			{ link: 'notes/other-note.md', original: '[[notes/other-note.md]]' }, // not managed -> ignored
+		],
+	};
+	const matches = parseAttachmentRefsFromCache(cache, '');
+	assert.equal(matches.length, 1, 'only the managed-attachment link is collected — an ordinary note link stays out of scope, same as before this fix');
+	assert.equal(matches[0].isEmbed, false);
+	assert.equal(matches[0].syntax, 'wiki');
+	assert.equal(matches[0].displayText, 'the report');
+	assert.equal(matches[0].link, 'attachments/a_MD5.pdf');
+});
+
+test('parseAttachmentRefsFromCache: a markdown-syntax managed-attachment link keeps its display text and syntax', () => {
+	const cache = {
+		links: [
+			{ link: 'attachments/a_MD5.pdf', original: '[the report](attachments/a_MD5.pdf)', displayText: 'the report' },
+		],
+	};
+	const matches = parseAttachmentRefsFromCache(cache, '');
+	assert.equal(matches.length, 1);
+	assert.equal(matches[0].isEmbed, false);
+	assert.equal(matches[0].syntax, 'md');
+	assert.equal(matches[0].displayText, 'the report');
+});
+
+test('parseAttachmentRefsFromCache: dedupes an identical `original` string seen via both embeds and links', () => {
+	const ref = { link: 'a_MD5.png', original: '![[a_MD5.png]]' };
+	const cache = { embeds: [ref], links: [ref] };
+	const matches = parseAttachmentRefsFromCache(cache, '');
+	assert.equal(matches.length, 1, 'the same (note, link) pair from embeds and links collapses to one match, mirroring the scan\'s own dedup key');
+});
+
+test('parseAttachmentRefsFromCache: still finds remote markdown image embeds via the content regex, unaffected by the links change', () => {
+	const content = '![alt](https://example.com/pic.png)';
+	const matches = parseAttachmentRefsFromCache(null, content);
+	assert.equal(matches.length, 1);
+	assert.equal(matches[0].isRemote, true);
+	assert.equal(matches[0].isEmbed, true);
 });
