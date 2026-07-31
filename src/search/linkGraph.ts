@@ -22,6 +22,13 @@ export const LINK_BOOST_MIN_ADJACENT_SEEDS = 2;
 export interface LinkGraph {
 	/** path -> set of adjacent paths. Undirected: an edge recorded A->B implies B->A. */
 	adjacency: Map<string, Set<string>>;
+	/**
+	 * Directed reverse index: cited path -> set of paths that link TO it (body or
+	 * frontmatter links). Built in the same walk as `adjacency` — cheapest structure that
+	 * answers `citersOf` without a second vault scan. Unlike `adjacency`, direction matters
+	 * here: A -> B records B as cited-by-A, never the reverse (see WP-PF4).
+	 */
+	citedBy: Map<string, Set<string>>;
 }
 
 function addDirectedEdge(adjacency: Map<string, Set<string>>, from: string, to: string): void {
@@ -43,15 +50,25 @@ function link(adjacency: Map<string, Set<string>>, a: string, b: string): void {
 	addDirectedEdge(adjacency, b, a);
 }
 
-// Extracts an undirected adjacency graph from Obsidian's own metadata cache — no new
-// storage, no re-index, no companion schema change. `resolvedLinks` covers embeds and body
-// links but NOT frontmatter property links; that is the same documented gap that lets the
-// Orphaned Attachments dashboard falsely flag an attachment referenced only from a YAML
+// Records the directed half `buildLinkGraph`'s undirected `link()` throws away: `citer`
+// links to `cited`, so `cited` gains `citer` as a citer. Self-links are dropped, matching
+// `addDirectedEdge`'s guard.
+function cite(citedBy: Map<string, Set<string>>, cited: string, citer: string): void {
+	if (cited === citer) return;
+	addDirectedEdge(citedBy, cited, citer);
+}
+
+// Extracts an undirected adjacency graph (for the link boost) plus a directed cited-by
+// index (for WP-PF4's reverse lookup) from Obsidian's own metadata cache in one walk — no
+// new storage, no re-index, no companion schema change. `resolvedLinks` covers embeds and
+// body links but NOT frontmatter property links; that is the same documented gap that lets
+// the Orphaned Attachments dashboard falsely flag an attachment referenced only from a YAML
 // property (`computeOrphanedAttachmentRows` in `src/ingestion/data/orphanedAttachments.ts`).
 // So `frontmatterLinks` is unioned in separately here, resolved through
 // `getFirstLinkpathDest` so a wikilink lands on a real vault path.
 export function buildLinkGraph(app: App): LinkGraph {
 	const adjacency = new Map<string, Set<string>>();
+	const citedBy = new Map<string, Set<string>>();
 
 	const resolved = app.metadataCache.resolvedLinks;
 	for (const source in resolved) {
@@ -59,6 +76,7 @@ export function buildLinkGraph(app: App): LinkGraph {
 		if (!targets) continue;
 		for (const target in targets) {
 			link(adjacency, source, target);
+			cite(citedBy, target, source);
 		}
 	}
 
@@ -67,11 +85,25 @@ export function buildLinkGraph(app: App): LinkGraph {
 		if (!frontmatterLinks || frontmatterLinks.length === 0) continue;
 		for (const fmLink of frontmatterLinks) {
 			const dest = app.metadataCache.getFirstLinkpathDest(fmLink.link, file.path);
-			if (dest) link(adjacency, file.path, dest.path);
+			if (dest) {
+				link(adjacency, file.path, dest.path);
+				cite(citedBy, dest.path, file.path);
+			}
 		}
 	}
 
-	return { adjacency };
+	return { adjacency, citedBy };
+}
+
+// Directed reverse lookup over the cached graph: every path that links TO `path` (body or
+// frontmatter links), sorted for deterministic display truncation ("cited by" shows the
+// first N). Pure and cheap — a Map read plus a sort over a typically-small set, never a
+// vault scan — so callers (the results renderer, once per rendered metadata-root result)
+// can call it directly off `SearchManager`'s already-cached graph.
+export function citersOf(graph: LinkGraph, path: string): string[] {
+	const citers = graph.citedBy.get(path);
+	if (!citers || citers.size === 0) return [];
+	return Array.from(citers).sort((a, b) => a.localeCompare(b));
 }
 
 export interface LinkBoostOptions {

@@ -1147,6 +1147,20 @@ If your plugin does not need CSS, delete this file.
   overflow-wrap: anywhere;
 }
 
+/* WP-PF4: "cited by" is a neutral fact about a metadata-note result, not an alert — muted
+   text, no pill, no status hue. The citer links inherit Obsidian's own internal-link colour
+   so they still read as clickable inside the muted line; "+N more" stays plain text. */
+.crucible-search-result-cited-by {
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.82em;
+  overflow-wrap: anywhere;
+}
+
+.crucible-search-result-cited-by-more {
+  color: var(--text-muted);
+}
+
 /* Same idiom as .crucible-search-result-score (its own full-width row, monospace for the
    numeric columns) — kept as a separate rule because it only renders after an explicit
    rerank, whereas the score line is always present. */

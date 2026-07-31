@@ -184,6 +184,14 @@ export class VaultSearchModal extends Modal {
 			this.resultsEl.createDiv({ cls: 'crucible-empty-state', text: 'No results.' });
 			return;
 		}
+		// WP-PF4: computed once per render, not per result — the metadata roots are settings
+		// reads, not a per-result cost, and read live (never hardcoded) so a user's renamed
+		// root is respected immediately.
+		const metadataRoots = [
+			this.plugin.settings.orchestrationXMetadataRoot,
+			this.plugin.settings.orchestrationYoutubeMetadataRoot,
+			this.plugin.settings.orchestrationBlogsMetadataRoot,
+		];
 		for (const result of results) {
 			const row = this.resultsEl.createDiv({ cls: 'crucible-search-result' });
 			const header = row.createDiv({ cls: 'crucible-search-result-header' });
@@ -217,6 +225,10 @@ export class VaultSearchModal extends Modal {
 				});
 			}
 			row.createDiv({ cls: 'crucible-search-result-snippet', text: result.snippet });
+			// WP-PF4: when the hit IS a metadata note, the user's next move is always "which of
+			// my notes cites this?" — the lookup runs once per rendered result off the already-
+			// cached link graph (SearchManager.citersOf), never a per-result vault scan.
+			this.renderCitedBy(row, result, metadataRoots);
 			// The explain line is deliberately verbose (see formatScore) and so gets its own
 			// full-width wrapping row; as a nowrap column beside the title it dictated the
 			// modal's width instead of fitting inside it.
@@ -284,6 +296,43 @@ export class VaultSearchModal extends Modal {
 		this.rerankButton.disabled = !this.rerankConfigured || this.currentResults.length === 0;
 	}
 
+	// WP-PF4: when `result.path` sits under a configured metadata root, renders a compact
+	// "cited by" line listing up to CITED_BY_MAX citing notes as clickable internal links,
+	// with a plain-text "+N more" when truncated — nothing at all when there are zero
+	// citers. Muted, neutral treatment (a fact, not an alert): no pill, no status hue.
+	private renderCitedBy(row: HTMLElement, result: SearchResult, metadataRoots: readonly string[]): void {
+		if (!isMetadataRootResult(result.path, metadataRoots)) return;
+		const citers = this.plugin.searchManager.citersOf(result.path);
+		if (citers.length === 0) return;
+
+		const { shown, moreCount } = buildCitedByDisplay(citers);
+		const citedByEl = row.createDiv({ cls: 'crucible-search-result-cited-by' });
+		citedByEl.createSpan({ text: 'cited by ' });
+		shown.forEach((citerPath, i) => {
+			const linkEl = citedByEl.createEl('a', { cls: 'internal-link', text: this.noteLabel(citerPath) });
+			linkEl.setAttr('href', '#');
+			// Stops the click from bubbling to the row's own "open the main result" listener —
+			// without it, clicking a citer would open `result`, not the citer.
+			linkEl.onclick = (evt) => {
+				evt.preventDefault();
+				evt.stopPropagation();
+				void this.openPath(citerPath);
+			};
+			if (i < shown.length - 1) citedByEl.createSpan({ text: ', ' });
+		});
+		if (moreCount > 0) {
+			citedByEl.createSpan({ cls: 'crucible-search-result-cited-by-more', text: ` +${moreCount} more` });
+		}
+	}
+
+	// Best-effort display name for a citer path: the note's real basename when it resolves to
+	// a live file, the raw path otherwise (e.g. the graph is a keystroke stale — harmless,
+	// since the boost/graph invalidation contract already tolerates that window).
+	private noteLabel(path: string): string {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		return file instanceof TFile ? file.basename : path;
+	}
+
 	private async openResult(result: SearchResult): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(result.path);
 		if (!(file instanceof TFile)) {
@@ -296,6 +345,22 @@ export class VaultSearchModal extends Modal {
 		if (this.queryLogEntryId) {
 			this.plugin.searchQueryLog.recordOpen(this.queryLogEntryId, result.path);
 		}
+		await this.openNote(file);
+	}
+
+	// WP-PF4: opens a "cited by" citer note by path. Deliberately does NOT touch the query
+	// log — recordOpen scores which *search result rank* the user picked, and a citer is not
+	// a member of the ranked result set on screen.
+	private async openPath(path: string): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) {
+			new Notice(`Note not found: ${path}`);
+			return;
+		}
+		await this.openNote(file);
+	}
+
+	private async openNote(file: TFile): Promise<void> {
 		await this.app.workspace.getLeaf(false).openFile(file);
 		this.close();
 	}
@@ -402,4 +467,35 @@ export function formatAttribution(attribution: SearchScoreAttribution | undefine
 	if (typeof attribution.pooledChunks === 'number' && attribution.pooledChunks > 1) parts.push(`${attribution.pooledChunks} chunks`);
 	for (const [name, value] of Object.entries(attribution.boosts ?? {})) parts.push(`${name} +${value.toFixed(2)}`);
 	return parts;
+}
+
+// WP-PF4: how many citing notes the "cited by" line shows before collapsing the rest into a
+// plain "+N more" — small enough to stay a one-line fact on the card, not a second list.
+export const CITED_BY_MAX = 3;
+
+// True when `path` sits at or under `root`, with a `/` boundary — a bare `startsWith` would
+// wrongly treat `_x_metadata_other/1.md` as inside root `_x_metadata`. Exported so tests can
+// pin the boundary case directly, without instantiating a Modal.
+export function isUnderMetadataRoot(path: string, root: string): boolean {
+	const normalizedRoot = root.trim().replace(/^\/+|\/+$/g, '');
+	if (!normalizedRoot) return false;
+	return path === normalizedRoot || path.startsWith(`${normalizedRoot}/`);
+}
+
+// True when `path` sits under any of the configured metadata roots (`_x_metadata` /
+// `_yt_metadata` / `_blog_metadata` by default, read live from settings by the caller — never
+// hardcoded here).
+export function isMetadataRootResult(path: string, roots: readonly string[]): boolean {
+	return roots.some(root => isUnderMetadataRoot(path, root));
+}
+
+export interface CitedByDisplay {
+	shown: string[];
+	moreCount: number;
+}
+
+// Truncates an already-sorted citer list to the first `max` entries plus a remainder count —
+// pure so the truncation math is testable without a live Modal or link graph.
+export function buildCitedByDisplay(citers: readonly string[], max = CITED_BY_MAX): CitedByDisplay {
+	return { shown: citers.slice(0, max), moreCount: Math.max(0, citers.length - max) };
 }
