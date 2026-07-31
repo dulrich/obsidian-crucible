@@ -15,7 +15,7 @@ import type { ImageDescriptionStore } from './imageDescriptionStore';
 import { localizedImageInfo } from '../orchestration/utils/imageMetadata';
 import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient, SearchServiceUnavailableError } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
-import { applyLinkBoost, buildLinkGraph, LinkGraph } from './linkGraph';
+import { applyLinkBoost, buildLinkGraph, citersOf as citersOfLinkGraph, LinkGraph } from './linkGraph';
 import {
 	embeddingSpaceId,
 	resolveEmbeddingSpaceModelId,
@@ -884,6 +884,17 @@ export class SearchManager {
 	/** Drops the cached link graph; the next boosted search rebuilds it. */
 	invalidateLinkGraph(): void {
 		this.linkGraphCache = null;
+	}
+
+	/**
+	 * WP-PF4: the note paths that link TO `path` (body or frontmatter links) — powers the
+	 * "cited by" hop the results renderer shows on metadata-root hits. Reuses the same
+	 * cached graph the link boost builds (see `linkGraph()` above), so this never triggers a
+	 * per-result vault scan: the graph is built at most once per search/invalidation, and
+	 * this is a Map read plus a small sort on top of it.
+	 */
+	citersOf(path: string): string[] {
+		return citersOfLinkGraph(this.linkGraph(), path);
 	}
 
 	async sweep(description: string, limit?: number): Promise<SearchResponse> {
