@@ -1,4 +1,3 @@
-import { requestUrl } from 'obsidian';
 import { parseTable } from './markdownTable';
 
 export interface ChannelEntry {
@@ -16,7 +15,10 @@ export interface RemoteVideo {
 	url: string;
 }
 
-const VIDEO_ID_RE = /([A-Za-z0-9_-]{11})/;
+// Shared 11-char id shape check — used both for URL extraction below and to validate
+// ids read straight off a Data API response (playlistItems, frontmatter) where there's
+// no URL to parse. Deliberately unanchored: callers pass an already-isolated id string.
+export const VIDEO_ID_RE = /([A-Za-z0-9_-]{11})/;
 const URL_PATTERNS: RegExp[] = [
 	/(?:youtube\.com\/watch\?[^"\s]*\bv=)([A-Za-z0-9_-]{11})/,
 	/(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
@@ -70,46 +72,3 @@ export const EXAMPLE_CHANNELS_TABLE = [
 	'',
 ].join('\n');
 
-export async function fetchChannelFeed(channelId: string): Promise<RemoteVideo[]> {
-	const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channelId)}`;
-	const res = await requestUrl({ url, method: 'GET', throw: false });
-	if (res.status !== 200) {
-		throw new Error(`YouTube RSS ${channelId}: HTTP ${res.status}`);
-	}
-	return parseRssFeed(res.text);
-}
-
-export function parseRssFeed(xml: string): RemoteVideo[] {
-	const parser = new DOMParser();
-	const doc = parser.parseFromString(xml, 'text/xml');
-	const parserError = doc.getElementsByTagName('parsererror');
-	if (parserError.length > 0) {
-		throw new Error('Failed to parse RSS XML');
-	}
-	const out: RemoteVideo[] = [];
-	const entries = doc.getElementsByTagName('entry');
-	for (let i = 0; i < entries.length; i++) {
-		const entry = entries[i];
-		if (!entry) continue;
-		const videoId = textOf(entry, 'yt:videoId') ?? textOf(entry, 'videoId');
-		if (!videoId || !VIDEO_ID_RE.test(videoId)) continue;
-		const title = textOf(entry, 'title') ?? '(untitled)';
-		const publishedAt = textOf(entry, 'published') ?? '';
-		const author = entry.getElementsByTagName('author')[0];
-		const channelName = author ? (textOf(author, 'name') ?? '') : '';
-		out.push({
-			videoId,
-			title: title.trim(),
-			publishedAt,
-			channelName: channelName.trim(),
-			url: `https://www.youtube.com/watch?v=${videoId}`,
-		});
-	}
-	return out;
-}
-
-function textOf(parent: Element, tagName: string): string | null {
-	const el = parent.getElementsByTagName(tagName)[0];
-	if (!el) return null;
-	return el.textContent;
-}

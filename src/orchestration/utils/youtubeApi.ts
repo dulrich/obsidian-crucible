@@ -5,7 +5,7 @@ import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontma
 import { yamlString } from '../../frontmatterValues';
 import type { ServiceFailureKind } from '../serviceHealth';
 import type { WorkflowResult } from '../types';
-import { parseChannelsTable } from './youtube';
+import { RemoteVideo, VIDEO_ID_RE, parseChannelsTable } from './youtube';
 
 export const YOUTUBE_DATA_API_SECRET_KEY = 'crucible-youtube-data-api-key';
 
@@ -211,6 +211,99 @@ export async function fetchYoutubeVideo(apiKey: string, videoId: string): Promis
 		commentCount: toNumberOrNull(item.statistics?.commentCount),
 		url: `https://www.youtube.com/watch?v=${item.id || videoId}`,
 	};
+}
+
+// --- Channel tracker: uploads playlist (playlistItems.list) ----------------
+//
+// The RSS-era tracker polled `feeds/videos.xml?channel_id=…`, which now 404s for
+// every channel (dead since ~May 2026 — see the orchestration AGENTS.md tracker
+// entry). This is its Data API replacement: every channel's uploads live in a
+// synthetic playlist whose id is the channel id with its `UC` prefix swapped for
+// `UU` — no `channels.list` resolution call needed, so the tracker still costs 1
+// quota unit per channel per poll, same as before.
+
+/** Every registry channel id is guaranteed `UC…` (`parseChannelsTable` drops anything
+ * else), so this is a pure string swap — never call `channels.list` to resolve it. */
+export function uploadsPlaylistIdFor(channelId: string): string {
+	return 'UU' + channelId.slice(2);
+}
+
+interface PlaylistItemsResponseItem {
+	snippet?: {
+		title?: string;
+		publishedAt?: string;
+		channelTitle?: string;
+		resourceId?: {
+			videoId?: string;
+		};
+	};
+	contentDetails?: {
+		videoId?: string;
+		videoPublishedAt?: string;
+	};
+}
+
+/**
+ * Pure mapper from a raw `playlistItems.list` JSON body to the plugin's existing
+ * `RemoteVideo` contract — kept separate from `fetchChannelUploads` so it's testable
+ * without a network stub. Items with no id, or an id that fails the shared 11-char
+ * shape check, are silently skipped (matches the old RSS parser's behavior on a
+ * malformed entry).
+ */
+export function playlistItemsToRemoteVideos(json: unknown): RemoteVideo[] {
+	const items = (json as { items?: unknown } | null | undefined)?.items;
+	const list: unknown[] = Array.isArray(items) ? items : [];
+	const out: RemoteVideo[] = [];
+	for (const raw of list) {
+		const item = raw as PlaylistItemsResponseItem;
+		const videoId = item.contentDetails?.videoId ?? item.snippet?.resourceId?.videoId;
+		if (!videoId || !VIDEO_ID_RE.test(videoId)) continue;
+		const rawTitle = item.snippet?.title?.trim();
+		const publishedAt = item.contentDetails?.videoPublishedAt ?? item.snippet?.publishedAt ?? '';
+		const channelName = (item.snippet?.channelTitle ?? '').trim();
+		out.push({
+			videoId,
+			title: rawTitle ? rawTitle : '(untitled)',
+			publishedAt,
+			channelName,
+			url: `https://www.youtube.com/watch?v=${videoId}`,
+		});
+	}
+	return out;
+}
+
+/**
+ * Fetches a channel's recent uploads via the Data API. `maxResults=15` matches the
+ * old RSS feed's page depth — no pagination, the seen-set absorbs any gap on the
+ * next poll. A missing/empty API key is a per-run config problem, not service
+ * unhealth, so it throws a plain `Error` rather than `YoutubeApiUnavailableError`
+ * (the caller must not open the shared youtube-api breaker for a key that was never
+ * configured).
+ */
+export async function fetchChannelUploads(plugin: CruciblePlugin, channelId: string): Promise<RemoteVideo[]> {
+	const apiKey = await loadYoutubeApiKey(plugin);
+	if (!apiKey) {
+		throw new Error('YouTube Data API key not configured — set it in Settings → Orchestrator.');
+	}
+
+	const playlistId = uploadsPlaylistIdFor(channelId);
+	const params = new URLSearchParams({
+		part: 'snippet,contentDetails',
+		playlistId,
+		maxResults: '15',
+		key: apiKey,
+	});
+	const url = `https://www.googleapis.com/youtube/v3/playlistItems?${params.toString()}`;
+	const res = await requestYoutubeApi(url, `YouTube Data API: channel ${channelId} uploads not found`);
+
+	let payload: unknown;
+	try {
+		payload = JSON.parse(res.text || '{}');
+	} catch {
+		throw new Error(`YouTube Data API: malformed JSON response`);
+	}
+
+	return playlistItemsToRemoteVideos(payload);
 }
 
 export function youtubeMetadataNotePath(root: string, channelFolder: string, videoId: string): string {
