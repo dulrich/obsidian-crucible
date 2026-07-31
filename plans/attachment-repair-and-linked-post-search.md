@@ -221,3 +221,33 @@ results renderer, tests.
 
 **Total ≈ 1.7 kSLOC, ~910k raw tokens; ~586k Claude-path / ~475k Codex-path
 Opus/Sol-equivalent tokens.**
+
+## Completion (2026-07-31)
+
+Implemented and landed on master, one commit per WP, PF1–PF4 subagent-executed (Sonnet),
+PF5 orchestrator-direct:
+
+- **PF3** `096a1ea` — linked-post chunks (ordinary chunks on the citing note via the
+  existing `extraHashFacets` seam — a cleaner fold than planned; no schema/companion
+  change). Tests 1539/122. 178k vs 250k est.
+- **PF1** `2aae251` — links-aware ref-rewrite chokepoint (`isManagedAttachmentLink` gate),
+  honest repair counts (`appliedFrom`), MD5-ambiguity auto-resolve, probe decode, orphan
+  frontmatterLinks union. Rebased onto PF3; combined 1563/123. 201k vs 280k est.
+- **PF4** `32b444d` — directed `citedBy` index in the same graph walk, `citersOf`
+  accessor, muted result-card line; boost regression-pinned; citer clicks bypass the
+  query log. Tests 1586/124. 163k vs 150k est.
+- **PF2** `86d930a` — `AttachmentPathIndex` (measured 205ms → 5ms on the synthetic vault;
+  cadence relief correctly skipped per the <30ms bar), layout-ready gating of the
+  dashboard's vault listeners with an `unmounted` guard. Rebased onto PF4; combined
+  **1600/125**. 173k vs 200k est.
+- **PF5** — this note + quirk updates (root `AGENTS.md`: rewrite chokepoint, MD5
+  auto-resolve, orphan gap closed, dashboard joins the layout-ready defenses;
+  `src/search/AGENTS.md`: linked-post chunks + cited-by entry); `pending-plans`
+  deregistered.
+
+Wave actuals ~716k worker tokens vs ~880k padded estimate (81%). Both wave-2 second
+landers rebased cleanly (disjoint scopes held); gates re-run post-rebase in every case.
+
+Deferred/notes: cadence relief (PF2 item 3) intentionally not needed after the index;
+frontmatter-only-referenced attachments no longer false-orphan; the metadataCacheReady
+startup latch is unchanged (correct behavior, documented as such).
