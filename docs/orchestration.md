@@ -15,6 +15,10 @@ on the next startup scan.
   (days)** setting (default 30; blank or 0 keeps them forever).
 - The queue monitor's per-row **Details** button shows a job's params, error, progress
   and notes, with copy-to-clipboard — the replacement for opening a job note.
+- The queue monitor's **stats row** shows whole-database bucket counts
+  (queued / running / done / failed / cancelled, across every job type), updated live
+  with the queue. The **Orchestrate: Scan queue** command reports the same counts plus
+  recovered/pruned totals as a notice.
 
 Global concurrency, per-job timeout, per-type pacing, and autorun settings apply
 through the orchestrator instead of separate queue loops.
