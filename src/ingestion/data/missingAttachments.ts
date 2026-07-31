@@ -31,6 +31,24 @@ export function managedAttachmentBasename(rawLink: string): string | null {
 	return base;
 }
 
+// Normalizes a raw metadataCache ref `link` string down to the plain target Obsidian's own
+// resolver expects, mirroring managedAttachmentBasename's decode handling (strip a
+// #fragment/|alias suffix, %-decode) plus stripping a `<...>` angle-bracket wrapper
+// (valid markdown-link-target syntax for a target containing spaces/special characters).
+// `getFirstLinkpathDest` must be probed with this normalized form, not the raw `ref.link` —
+// otherwise a ref Obsidian renders and resolves fine can be flagged missing purely because
+// of its encoding.
+function normalizeRefTargetForResolve(rawLink: string): string {
+	let target = rawLink.split('#')[0]?.split('|')[0] ?? '';
+	target = target.replace(/^<|>$/g, '');
+	try {
+		target = decodeURIComponent(target);
+	} catch {
+		// Malformed escape (e.g. a lone `%`) — fall back to the raw text rather than throw.
+	}
+	return target;
+}
+
 // Inverse of computeOrphanedAttachmentRows (../data/orphanedAttachments.ts): one row per
 // note ref whose managed (…_MD5.ext) target no longer resolves, instead of one row per
 // unreferenced managed file. Walks every markdown note's embeds + links (frontmatter-only
@@ -51,7 +69,8 @@ export function computeMissingAttachmentRows(app: App, localizer: AttachmentFold
 		let expectedFolder: string | null = null;
 		for (const ref of refs) {
 			if (managedAttachmentBasename(ref.link) === null) continue;
-			if (app.metadataCache.getFirstLinkpathDest(ref.link, note.path) instanceof TFile) continue;
+			const probeTarget = normalizeRefTargetForResolve(ref.link);
+			if (app.metadataCache.getFirstLinkpathDest(probeTarget, note.path) instanceof TFile) continue;
 
 			const key = `${note.path}→${ref.link}`;
 			if (seen.has(key)) continue;
