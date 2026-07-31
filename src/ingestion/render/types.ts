@@ -19,7 +19,8 @@ export type SectionId =
 	| 'ignoredVideos'
 	| 'youtubeWithoutMetadata'
 	| 'channelControl'
-	| 'orphanedAttachments';
+	| 'orphanedAttachments'
+	| 'missingAttachments';
 
 export interface SortState {
 	column: string;
@@ -181,4 +182,13 @@ export interface OrphanRow {
 	type: LocalizeMediaType;
 	size: number;
 	mtime: number;
+}
+
+// Inverse of OrphanRow: a note ref pointing at a managed (…_MD5.ext) attachment that no
+// longer resolves. `repairable` mirrors what `planLocalAttachmentRepair` would find for
+// this exact ref — see src/ingestion/data/missingAttachments.ts.
+export interface MissingRefRow {
+	note: TFile;
+	link: string;
+	repairable: boolean;
 }
