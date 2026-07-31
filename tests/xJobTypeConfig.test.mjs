@@ -43,7 +43,7 @@ export const moment = () => {};
 	logLevel: 'silent',
 });
 
-const { xMetadataFetchDedupeKey, xMetadataFetchJobConfig, xPostDiscoverJobConfig } =
+const { xMetadataFetchDedupeKey, xMetadataFetchJobConfig, xPostDiscoverJobConfig, xMetadataBackfillJobConfig } =
 	await import(pathToFileURL(outfile).href);
 
 // ── xMetadataFetchDedupeKey ──────────────────────────────────────────────────────
@@ -92,4 +92,25 @@ test('xPostDiscoverJobConfig dedupes on note:<targetPath>, empty when absent', (
 test('xPostDiscoverJobConfig declares no services — discovery never reaches the oEmbed endpoint', () => {
 	const config = xPostDiscoverJobConfig();
 	assert.equal(config.services, undefined);
+});
+
+// ── xMetadataBackfillJobConfig ───────────────────────────────────────────────────
+
+test('xMetadataBackfillJobConfig has a fixed dedupe key regardless of params — one backfill sweep in flight', () => {
+	const config = xMetadataBackfillJobConfig();
+	assert.equal(config.persistence, 'db');
+	assert.equal(config.dedupeKey({}), 'x-metadata-backfill');
+	assert.equal(config.dedupeKey({ anything: 'ignored' }), 'x-metadata-backfill');
+});
+
+test('xMetadataBackfillJobConfig declares no services — it must always be runnable even while x-oembed is unhealthy', () => {
+	const config = xMetadataBackfillJobConfig();
+	assert.equal(config.services, undefined);
+});
+
+test('xMetadataBackfillJobConfig pins concurrency via maxParallelFixed (the image-describe-backfill shape), not a plain maxParallel override', () => {
+	const config = xMetadataBackfillJobConfig();
+	assert.equal(typeof config.maxParallelFixed, 'string');
+	assert.ok(config.maxParallelFixed.length > 0);
+	assert.equal(config.maxParallel, 1);
 });
