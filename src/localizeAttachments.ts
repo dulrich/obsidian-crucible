@@ -100,6 +100,27 @@ export function planLocalAttachmentRepair(brokenLink: string, expectedFolder: st
 	return byName.length === 1 ? (byName[0] ?? null) : null;
 }
 
+// True when any note other than `excludeNotePath` still links to `attachmentPath`.
+// Content-MD5 naming plus repair-by-basename makes shared references normal (the same
+// article clipped as both a blog-metadata note and a daily ingest note yields
+// byte-identical attachments under one basename), so a re-localize that re-homes a file
+// into the current note's expected folder must COPY, not steal: trashing a source another
+// note still references breaks that note's ref, and the missing-attachments list just
+// trades one broken row for another. Known gap (shared with the Orphaned Attachments
+// scan): `resolvedLinks` covers embeds and body links but not frontmatter property links,
+// so a frontmatter-only referrer is not seen.
+export function hasOtherAttachmentReferrer(
+	resolvedLinks: Record<string, Record<string, number>>,
+	attachmentPath: string,
+	excludeNotePath: string,
+): boolean {
+	for (const [sourcePath, targets] of Object.entries(resolvedLinks)) {
+		if (sourcePath === excludeNotePath) continue;
+		if ((targets[attachmentPath] ?? 0) > 0) return true;
+	}
+	return false;
+}
+
 export function stripDataUriImagePlaceholders(content: string): { content: string; count: number } {
 	DATA_URI_IMAGE_RE.lastIndex = 0;
 	let count = 0;
@@ -604,9 +625,14 @@ export class AttachmentLocalizer {
 		}
 
 		const newPath = await this.writeAttachment(note, bytes, outExt, resolved.basename);
-		// Delete the old file if it moved to a different path
+		// Delete the old file if it moved to a different path — unless another note still
+		// references it (copy semantics for shared attachments; see hasOtherAttachmentReferrer).
 		if (resolved.path !== newPath) {
-			try { await this.app.fileManager.trashFile(resolved); } catch (e) { logWarn('localize: could not delete old', resolved.path, e); }
+			if (hasOtherAttachmentReferrer(this.app.metadataCache.resolvedLinks, resolved.path, note.path)) {
+				await this.debug(note, `local ${match.link}: kept ${resolved.path} (still referenced by another note)`);
+			} else {
+				try { await this.app.fileManager.trashFile(resolved); } catch (e) { logWarn('localize: could not delete old', resolved.path, e); }
+			}
 		}
 		if (isImage) this.enqueueImageMetadata?.(newPath, note.path);
 		await this.debug(note, `local ${match.link}: resolved=${resolved.path} -> ${newPath}`);
