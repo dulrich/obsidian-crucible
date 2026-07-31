@@ -64,16 +64,17 @@ test('rewriteLocalizedAttachmentRefs only replaces full markdown image ranges', 
 		'Plain numeric filename text stays intact: photos/1.png',
 	].join('\n');
 
-	const updated = rewriteLocalizedAttachmentRefs(content, [
+	const result = rewriteLocalizedAttachmentRefs(content, [
 		{ from: '![1](photos/1.png)', to: '![](Notes/_attachments/post/abc123_MD5.png)' },
 		{ from: 'photos/1.png', to: 'BROKEN' },
 	]);
 
-	assert.equal(updated, [
+	assert.equal(result.content, [
 		'Numeric alt stays intact: ![2024-01-15](photos/2024-01-15.png)',
 		'Numeric filename localizes: ![](Notes/_attachments/post/abc123_MD5.png)',
 		'Plain numeric filename text stays intact: photos/1.png',
 	].join('\n'));
+	assert.deepEqual(result.appliedFrom, ['![1](photos/1.png)'], 'only the embed replacement was actually present in content and applied');
 });
 
 test('rewriteLocalizedAttachmentRefs keeps numeric-heavy sibling filenames separate', () => {
@@ -82,11 +83,11 @@ test('rewriteLocalizedAttachmentRefs keeps numeric-heavy sibling filenames separ
 		'![shot 10](assets/2024-01-15-10.png)',
 	].join('\n');
 
-	const updated = rewriteLocalizedAttachmentRefs(content, [
+	const result = rewriteLocalizedAttachmentRefs(content, [
 		{ from: '![shot 1](assets/2024-01-15-1.png)', to: '![](assets/hash1_MD5.png)' },
 	]);
 
-	assert.equal(updated, [
+	assert.equal(result.content, [
 		'![](assets/hash1_MD5.png)',
 		'![shot 10](assets/2024-01-15-10.png)',
 	].join('\n'));
@@ -157,9 +158,9 @@ test('planLocalAttachmentRepair prefers the expected folder, then a unique name 
 		planLocalAttachmentRepair('_resources/Clippings/x/uniq_MD5.png', expected, ['_resources/wherever/uniq_MD5.png']),
 		'_resources/wherever/uniq_MD5.png',
 	);
-	// Ambiguous (multiple same-named, none in expected folder) -> null.
+	// Non-MD5 duplicate basenames still bail ambiguous — no content-identity guarantee.
 	assert.equal(
-		planLocalAttachmentRepair('_resources/Clippings/x/dup_MD5.png', expected, ['a/dup_MD5.png', 'b/dup_MD5.png']),
+		planLocalAttachmentRepair('_resources/Clippings/x/dup.png', expected, ['a/dup.png', 'b/dup.png']),
 		null,
 	);
 	// Missing entirely -> null.
@@ -262,6 +263,72 @@ test('resolveLocalAttachmentRepair: prefix recovery ignores a same-prefix candid
 	assert.equal(result.reason, 'missing');
 });
 
+/* --------------------------------------------------- resolveLocalAttachmentRepair: MD5-ambiguity auto-resolve (WP-PF1) */
+
+test('resolveLocalAttachmentRepair: tier-2 exact-basename ambiguity auto-resolves to a candidate under the expected folder when one exists', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = [
+		// Nested under `expected` but NOT at the literal `expected/base` path tier 1 checks
+		// (a subfolder, not the folder itself) — so tier 1 does NOT short-circuit here;
+		// this exercises tier 2's own expected-folder preference in pickAmongIdenticalContent.
+		'_resources/notes/post/sub/dup_MD5.png',
+		'_resources/other/dup_MD5.png',
+		'_resources/third/dup_MD5.png',
+	];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/dup_MD5.png', expected, vaultPaths);
+	assert.equal(result.target, '_resources/notes/post/sub/dup_MD5.png', 'byte-identical candidates -> the one under the expected folder wins, not a bail to ambiguous');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: tier-2 exact-basename ambiguity auto-resolves to the shortest path when none is in the expected folder', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = [
+		'_resources/a/much/deeper/nested/folder/dup_MD5.png',
+		'_resources/b/dup_MD5.png',
+	];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/dup_MD5.png', expected, vaultPaths);
+	assert.equal(result.target, '_resources/b/dup_MD5.png', 'shortest path wins the tie-break');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: tier-2 exact-basename ambiguity, equal-length paths, auto-resolves lexicographically first', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = ['_resources/bbb/dup_MD5.png', '_resources/aaa/dup_MD5.png'];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/dup_MD5.png', expected, vaultPaths);
+	assert.equal(result.target, '_resources/aaa/dup_MD5.png');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: tier-2 non-MD5 duplicate basenames still bail ambiguous — no content-identity guarantee', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = ['a/dup.png', 'b/dup.png'];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/dup.png', expected, vaultPaths);
+	assert.equal(result.target, null);
+	assert.equal(result.reason, 'ambiguous');
+});
+
+test('resolveLocalAttachmentRepair: tier-3 prefix ambiguity auto-resolves when every candidate shares the exact same full basename', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = [
+		'_resources/notes/post/abcdef1234567890_MD5.png',
+		'_resources/elsewhere/abcdef1234567890_MD5.png',
+	];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths);
+	assert.equal(result.target, '_resources/notes/post/abcdef1234567890_MD5.png', 'identical full basenames -> byte-identical -> expected folder wins');
+	assert.equal(result.reason, null);
+});
+
+test('resolveLocalAttachmentRepair: tier-3 prefix ambiguity with DIFFERING full basenames still bails ambiguous (unchanged)', () => {
+	const expected = '_resources/notes/post';
+	const vaultPaths = [
+		'_resources/elsewhere/abcdef1234567890_MD5.png',
+		'_resources/other/abcdef12ffffffffff_MD5.png',
+	];
+	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths);
+	assert.equal(result.target, null);
+	assert.equal(result.reason, 'ambiguous');
+});
+
 /* --------------------------------------------------------- formatEmbed / formatLink / formatRef (WP-VF-2a) */
 
 test('formatEmbed produces a wiki or markdown embed with an empty alt (unchanged pre-existing behavior)', () => {
@@ -336,4 +403,107 @@ test('parseAttachmentRefsFromCache: still finds remote markdown image embeds via
 	assert.equal(matches.length, 1);
 	assert.equal(matches[0].isRemote, true);
 	assert.equal(matches[0].isEmbed, true);
+});
+
+/* ------------------------------------------------- rewriteLocalizedAttachmentRefs: link coverage (WP-PF1) */
+//
+// vf-2 shipped parseAttachmentRefsFromCache seeing broken non-embed managed-attachment
+// links, but the rewrite chokepoint that actually WRITES the fix stayed embeds-only —
+// repairNote would compute a link replacement, report "Repaired 1", and silently write
+// nothing, because the old MARKDOWN_ATTACHMENT_REF_RE never matched a bare `[[...]]` /
+// `[...](...)` span. This section round-trips all four ref shapes (embed/link x wiki/md)
+// through the actual rewrite chokepoint and asserts the write LANDS.
+
+test('rewriteLocalizedAttachmentRefs: a wiki LINK (not embed) to a managed attachment is rewritten and reported as applied', () => {
+	const content = 'See [[attachments/old/a_MD5.pdf|the report]] for details.';
+	const result = rewriteLocalizedAttachmentRefs(content, [
+		{ from: '[[attachments/old/a_MD5.pdf|the report]]', to: '[[attachments/new/a_MD5.pdf|the report]]' },
+	]);
+	assert.equal(result.content, 'See [[attachments/new/a_MD5.pdf|the report]] for details.');
+	assert.deepEqual(result.appliedFrom, ['[[attachments/old/a_MD5.pdf|the report]]']);
+});
+
+test('rewriteLocalizedAttachmentRefs: a %20-encoded markdown LINK to a managed attachment is rewritten and reported as applied', () => {
+	const content = 'The [source PDF](attachments/old%20folder/a_MD5.pdf) is here.';
+	const result = rewriteLocalizedAttachmentRefs(content, [
+		{ from: '[source PDF](attachments/old%20folder/a_MD5.pdf)', to: '[source PDF](attachments/new%20folder/a_MD5.pdf)' },
+	]);
+	assert.equal(result.content, 'The [source PDF](attachments/new%20folder/a_MD5.pdf) is here.');
+	assert.deepEqual(result.appliedFrom, ['[source PDF](attachments/old%20folder/a_MD5.pdf)']);
+});
+
+test('rewriteLocalizedAttachmentRefs: mixed note (embed + link + ordinary note link) — only the managed refs move, the ordinary link is untouched', () => {
+	const content = [
+		'![[attachments/old/img_MD5.png]]',
+		'[[attachments/old/doc_MD5.pdf|the doc]]',
+		'See also [[Some Other Note]] and [more](Other%20Note.md).',
+	].join('\n');
+	const result = rewriteLocalizedAttachmentRefs(content, [
+		{ from: '![[attachments/old/img_MD5.png]]', to: '![[attachments/new/img_MD5.png]]' },
+		{ from: '[[attachments/old/doc_MD5.pdf|the doc]]', to: '[[attachments/new/doc_MD5.pdf|the doc]]' },
+	]);
+	assert.equal(result.content, [
+		'![[attachments/new/img_MD5.png]]',
+		'[[attachments/new/doc_MD5.pdf|the doc]]',
+		'See also [[Some Other Note]] and [more](Other%20Note.md).',
+	].join('\n'));
+	assert.equal(result.appliedFrom.length, 2);
+});
+
+test('rewriteLocalizedAttachmentRefs: NEVER rewrites an ordinary note link even if it happens to be passed as a "from" (defense in depth)', () => {
+	const content = 'Check [[Some Other Note]] and [the text](Other%20Note.md) for more.';
+	const result = rewriteLocalizedAttachmentRefs(content, [
+		{ from: '[[Some Other Note]]', to: '[[Renamed Note]]' },
+		{ from: '[the text](Other%20Note.md)', to: '[the text](Renamed.md)' },
+	]);
+	assert.equal(result.content, content, 'neither ordinary link matches the managed-attachment gate, so both replacements are refused');
+	assert.deepEqual(result.appliedFrom, []);
+});
+
+test('rewriteLocalizedAttachmentRefs: idempotent — re-running on already-rewritten content with the same replacement list is a no-op', () => {
+	const content = 'See [[attachments/new/a_MD5.pdf|the report]] for details.';
+	const replacements = [{ from: '[[attachments/old/a_MD5.pdf|the report]]', to: '[[attachments/new/a_MD5.pdf|the report]]' }];
+	const result = rewriteLocalizedAttachmentRefs(content, replacements);
+	assert.equal(result.content, content, 'the old `from` text is no longer present, so nothing changes');
+	assert.deepEqual(result.appliedFrom, []);
+});
+
+/* ------------------------------------------------ repointAttachmentFolderPrefix: link coverage (WP-PF1) */
+
+test('repointAttachmentFolderPrefix: repoints a wiki LINK to a managed attachment alongside embeds, in the same note', () => {
+	const oldFolder = '_resources/Clippings/elon-musk';
+	const newFolder = '_resources/daily/day/2026-06-13/elon-musk';
+	const content = [
+		'![](_resources/Clippings/elon-musk/3ff_MD5.webp)',
+		'[[_resources/Clippings/elon-musk/doc_MD5.pdf|Open: the source PDF]]',
+	].join('\n');
+
+	const updated = repointAttachmentFolderPrefix(content, oldFolder, newFolder);
+
+	assert.equal(updated, [
+		'![](_resources/daily/day/2026-06-13/elon-musk/3ff_MD5.webp)',
+		'[[_resources/daily/day/2026-06-13/elon-musk/doc_MD5.pdf|Open: the source PDF]]',
+	].join('\n'));
+});
+
+test('repointAttachmentFolderPrefix: a %20-encoded markdown LINK to a managed attachment is repointed and stays idempotent', () => {
+	const oldFolder = '_resources/My Clips/post';
+	const newFolder = '_resources/daily/post';
+	const md = '[the source](attachments/_resources/My%20Clips/post/x_MD5.pdf)';
+	const once = repointAttachmentFolderPrefix(md, oldFolder, newFolder);
+	assert.equal(once, '[the source](attachments/_resources/daily/post/x_MD5.pdf)');
+	assert.equal(repointAttachmentFolderPrefix(once, oldFolder, newFolder), once, 'already-updated content has no old prefix left -> no-op');
+});
+
+test('repointAttachmentFolderPrefix: NEVER rewrites an ordinary note link even when its path text contains the moved folder prefix', () => {
+	const oldFolder = '_resources/Clippings/elon-musk';
+	const newFolder = '_resources/daily/day/2026-06-13/elon-musk';
+	const content = [
+		'[[_resources/Clippings/elon-musk/Some Note]]',
+		'[a note](_resources/Clippings/elon-musk/Some%20Note.md)',
+	].join('\n');
+
+	const updated = repointAttachmentFolderPrefix(content, oldFolder, newFolder);
+
+	assert.equal(updated, content, 'neither ref targets a managed (_MD5) attachment, so the ordinary note links are left completely alone');
 });

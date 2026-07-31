@@ -66,6 +66,10 @@ await esbuild.build({
 const { TFile } = await import(pathToFileURL(obsidianEntry).href);
 const { managedAttachmentBasename, computeMissingAttachmentRows } = await import(pathToFileURL(outfile).href);
 
+// makeApp's getFirstLinkpathDest below is intentionally strict (exact string key match) so
+// these decode tests fail loudly if computeMissingAttachmentRows ever probes with the raw,
+// undecoded ref.link again instead of the normalized target.
+
 /* ------------------------------------------------------------- managedAttachmentBasename */
 
 test('managedAttachmentBasename: matches a plain managed attachment name', () => {
@@ -215,4 +219,45 @@ test('computeMissingAttachmentRows: repairable stays false when a truncated ref 
 	const rows = computeMissingAttachmentRows(app, localizer);
 	assert.equal(rows.length, 1);
 	assert.equal(rows[0].repairable, false);
+});
+
+/* --------------------------------------------- WP-PF1: decode before the getFirstLinkpathDest probe */
+
+test('computeMissingAttachmentRows: a %20-encoded markdown ref that Obsidian resolves is NOT flagged missing', () => {
+	const noteF = new FakeFile('notes/f.md');
+	const notes = new Map([
+		['notes/f.md', { file: noteF, cache: { embeds: [], links: [{ link: 'attachments/my%20folder/a_MD5.pdf', original: '[doc](attachments/my%20folder/a_MD5.pdf)' }] } }],
+	]);
+	// The mock's getFirstLinkpathDest is keyed on the exact decoded target — resolving only
+	// when the probe passes the DECODED form, not the raw %20 text.
+	const resolvedDests = new Map([['attachments/my folder/a_MD5.pdf', 'attachments/my folder/a_MD5.pdf']]);
+	const app = makeApp({ notes, resolvedDests, files: ['attachments/my folder/a_MD5.pdf'] });
+	const localizer = { attachmentFolderForNote: () => 'attachments/f' };
+
+	assert.deepEqual(computeMissingAttachmentRows(app, localizer), [], 'the ref resolves once decoded, so it must not appear as a missing row');
+});
+
+test('computeMissingAttachmentRows: an angle-bracket-wrapped ref target that Obsidian resolves is NOT flagged missing', () => {
+	const noteG = new FakeFile('notes/g.md');
+	const notes = new Map([
+		['notes/g.md', { file: noteG, cache: { embeds: [], links: [{ link: '<attachments/a_MD5.pdf>', original: '[doc](<attachments/a_MD5.pdf>)' }] } }],
+	]);
+	const resolvedDests = new Map([['attachments/a_MD5.pdf', 'attachments/a_MD5.pdf']]);
+	const app = makeApp({ notes, resolvedDests, files: ['attachments/a_MD5.pdf'] });
+	const localizer = { attachmentFolderForNote: () => 'attachments/g' };
+
+	assert.deepEqual(computeMissingAttachmentRows(app, localizer), [], 'the angle-bracket wrapper must be stripped before the resolve probe');
+});
+
+test('computeMissingAttachmentRows: a genuinely broken encoded ref is still flagged missing (the decode fix is not a false-negative machine)', () => {
+	const noteH = new FakeFile('notes/h.md');
+	const notes = new Map([
+		['notes/h.md', { file: noteH, cache: { embeds: [], links: [{ link: 'attachments/my%20folder/gone_MD5.pdf', original: '' }] } }],
+	]);
+	const app = makeApp({ notes, resolvedDests: new Map(), files: [] });
+	const localizer = { attachmentFolderForNote: () => 'attachments/h' };
+
+	const rows = computeMissingAttachmentRows(app, localizer);
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].link, 'attachments/my%20folder/gone_MD5.pdf', 'the row keeps the RAW ref.link for display — only the resolve probe is normalized');
 });

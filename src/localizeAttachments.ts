@@ -44,7 +44,17 @@ export interface AttachmentReplacement {
 	to: string;
 }
 
-const MARKDOWN_ATTACHMENT_REF_RE = /!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\n]+\)/g;
+// Alternation order is load-bearing (regex-alternation trap): the two embed forms are
+// listed first so an embed is always consumed as an embed, never left for a later
+// non-embed alternative to double-match a suffix of it. In practice this never actually
+// collides — an embed's leading `!` means only the embed alternatives can match at that
+// start index, and a global exec/replace pass never revisits a position already consumed
+// by an earlier match — but keeping embeds first documents the invariant instead of
+// relying on it silently. Embeds stay unfiltered (unchanged prior behavior, byte-for-byte);
+// the two non-embed (link) alternatives are new and MUST be gated by
+// isManagedAttachmentLink() before either function acts on them, so an ordinary note link
+// (`[[Some Note]]`, `[text](Other Note.md)`) can never be touched.
+const MARKDOWN_ATTACHMENT_REF_RE = /!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\n]+\)|\[\[[^\]\n]+\]\]|\[[^\]\n]*\]\([^)\n]+\)/g;
 const DEFAULT_IMAGE_QUALITY = 85;
 const MAX_MD5_WORDS = 0x3fffffff;
 
@@ -53,8 +63,45 @@ export function clampImageQuality(quality: number | undefined): number {
 	return Math.min(100, Math.max(30, value)) / 100;
 }
 
-export function rewriteLocalizedAttachmentRefs(content: string, replacements: AttachmentReplacement[]): string {
-	if (replacements.length === 0) return content;
+// Pulls the raw link/href token out of a matched ref span — works for embed and link,
+// wiki and markdown forms alike. Returns null for anything that doesn't parse as one of
+// the four MARKDOWN_ATTACHMENT_REF_RE shapes (shouldn't happen for a real match, but keeps
+// this total rather than throwing on a future regex change).
+function extractRefLinkTarget(ref: string): string | null {
+	const wiki = /^!?\[\[([^\]|]+)/.exec(ref);
+	if (wiki) return wiki[1] ?? null;
+	const md = /^!?\[[^\]]*\]\(([^)]+)\)$/.exec(ref);
+	if (md) return md[1] ?? null;
+	return null;
+}
+
+// The gate that lets rewriteLocalizedAttachmentRefs/repointAttachmentFolderPrefix safely
+// widen from embeds-only to embeds+links: true only when a matched (non-embed) ref's
+// target decodes (strip #fragment/|alias, %-decode, strip <angle-bracket> wrapping) to a
+// managed (`..._MD5.ext`) attachment basename. An ordinary note link's target never has
+// that shape, so it always evaluates false and is left untouched.
+function isManagedAttachmentLink(ref: string): boolean {
+	const target = extractRefLinkTarget(ref);
+	if (!target) return false;
+	let decoded = target.replace(/^<|>$/g, '');
+	try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is on malformed escapes */ }
+	const base = decoded.split('#')[0]?.split('/').pop() ?? '';
+	return MD5_NAME_RE.test(base);
+}
+
+export interface RewriteAttachmentRefsResult {
+	content: string;
+	// The `from` values whose replacement actually landed in `content` — a subset of the
+	// requested replacements. A `from` that never appears verbatim in the scanned content
+	// (concurrent edit, or a non-embed link the old embeds-only regex used to silently
+	// ignore) is planned but not applied, and is therefore absent here. Callers must derive
+	// any "N repaired/localized" count from this list, not from how many replacements were
+	// merely requested.
+	appliedFrom: string[];
+}
+
+export function rewriteLocalizedAttachmentRefs(content: string, replacements: AttachmentReplacement[]): RewriteAttachmentRefsResult {
+	if (replacements.length === 0) return { content, appliedFrom: [] };
 	const byOriginal = new Map<string, string>();
 	for (const replacement of replacements) {
 		if (!byOriginal.has(replacement.from)) byOriginal.set(replacement.from, replacement.to);
@@ -63,25 +110,31 @@ export function rewriteLocalizedAttachmentRefs(content: string, replacements: At
 	MARKDOWN_ATTACHMENT_REF_RE.lastIndex = 0;
 	let updated = '';
 	let cursor = 0;
+	const appliedFrom: string[] = [];
 	let match: RegExpExecArray | null;
 	while ((match = MARKDOWN_ATTACHMENT_REF_RE.exec(content)) !== null) {
 		const original = match[0];
+		const isEmbed = original.startsWith('!');
+		if (!isEmbed && !isManagedAttachmentLink(original)) continue;
 		const replacement = byOriginal.get(original);
 		if (!replacement) continue;
 		updated += content.slice(cursor, match.index);
 		updated += replacement;
 		cursor = match.index + original.length;
+		appliedFrom.push(original);
 	}
 
-	if (cursor === 0) return content;
-	return updated + content.slice(cursor);
+	if (cursor === 0) return { content, appliedFrom: [] };
+	return { content: updated + content.slice(cursor), appliedFrom };
 }
 
-// Swap an attachment folder's path prefix inside embed refs only (never touching prose that
-// happens to mention the path). Used when a note moves and its attachment folder moves with it:
-// Obsidian's automatic link rewrite on the folder rename misses the moving note (its cache entry
-// hasn't reindexed at the new path yet), so we repoint its embeds deterministically. Handles both
-// raw (wiki) and %20-encoded (markdown) forms of the prefix; idempotent on already-updated refs.
+// Swap an attachment folder's path prefix inside embed refs, and non-embed links that
+// target a managed attachment (gated via isManagedAttachmentLink — never ordinary note
+// links/prose that happens to mention the path). Used when a note moves and its attachment
+// folder moves with it: Obsidian's automatic link rewrite on the folder rename misses the
+// moving note (its cache entry hasn't reindexed at the new path yet), so we repoint its
+// refs deterministically. Handles both raw (wiki) and %20-encoded (markdown) forms of the
+// prefix; idempotent on already-updated refs.
 export function repointAttachmentFolderPrefix(content: string, oldFolder: string, newFolder: string): string {
 	if (!oldFolder || oldFolder === newFolder) return content;
 	const rawOld = `${oldFolder}/`;
@@ -90,6 +143,8 @@ export function repointAttachmentFolderPrefix(content: string, oldFolder: string
 	const encNew = rawNew.replace(/ /g, '%20');
 	MARKDOWN_ATTACHMENT_REF_RE.lastIndex = 0;
 	return content.replace(MARKDOWN_ATTACHMENT_REF_RE, (ref) => {
+		const isEmbed = ref.startsWith('!');
+		if (!isEmbed && !isManagedAttachmentLink(ref)) return ref;
 		let out = ref;
 		if (out.includes(rawOld)) out = out.split(rawOld).join(rawNew);
 		if (encOld !== rawOld && out.includes(encOld)) out = out.split(encOld).join(encNew);
@@ -115,6 +170,20 @@ export interface LocalAttachmentRepairResolution {
 	reason: 'missing' | 'ambiguous' | null;
 }
 
+// Among two or more candidate paths already established as byte-identical (same content
+// MD5), pick one deterministically rather than bailing to `ambiguous`: prefer a candidate
+// already sitting in the note's expected attachment folder, else the shortest path, else
+// the lexicographically first (stable, not "arbitrary array order").
+function pickAmongIdenticalContent(candidates: string[], expectedFolder: string): string {
+	if (expectedFolder) {
+		const atExpected = candidates.find(p => p.startsWith(`${expectedFolder}/`));
+		if (atExpected) return atExpected;
+	}
+	const sorted = [...candidates].sort((a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0));
+	// candidates is always non-empty when this is called.
+	return sorted[0] as string;
+}
+
 // Decide where a broken local attachment ref should now point. `brokenLink` is the ref's
 // (possibly %20-encoded) target that no longer resolves; we recover the file by basename —
 // the `<contenthash>_MD5.ext` name is content-derived. Resolution proceeds in three tiers,
@@ -123,7 +192,12 @@ export interface LocalAttachmentRepairResolution {
 // in the vault, (3) a unique PREFIX match against other managed (`..._MD5.ext`) basenames,
 // recovering refs truncated by a splice bug (see PREFIX_REPAIR_MIN_STEM_LENGTH). Pure and
 // side-effect-free; ambiguity at any tier falls through to the next, and exhausting all three
-// reports `missing` or `ambiguous` rather than guessing.
+// reports `missing` or `ambiguous` rather than guessing — EXCEPT: when every candidate at
+// tier 2 or tier 3 is itself a managed (`_MD5`) name, the content-MD5 naming convention
+// guarantees they are byte-identical, so "ambiguous" would be reporting a distinction that
+// doesn't exist — pickAmongIdenticalContent resolves deterministically instead. A
+// non-managed duplicate basename (tier 2) or a same-prefix-but-different-basename set
+// (tier 3) still bails to `ambiguous`, because there identity is NOT guaranteed.
 export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): LocalAttachmentRepairResolution {
 	let decoded = brokenLink.replace(/^<|>$/g, '');
 	try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is on malformed escapes */ }
@@ -135,7 +209,10 @@ export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder:
 
 	const exactMatches = vaultPaths.filter(p => (p.split('/').pop() ?? p) === base);
 	if (exactMatches.length === 1) return { target: exactMatches[0] ?? null, reason: null };
-	if (exactMatches.length > 1) return { target: null, reason: 'ambiguous' };
+	if (exactMatches.length > 1) {
+		if (MD5_NAME_RE.test(base)) return { target: pickAmongIdenticalContent(exactMatches, expectedFolder), reason: null };
+		return { target: null, reason: 'ambiguous' };
+	}
 
 	const stemMatch = /^(.*)_MD5\.[A-Za-z0-9]+$/.exec(base);
 	const stem = stemMatch ? (stemMatch[1] ?? '') : null;
@@ -147,7 +224,11 @@ export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder:
 			return nameStem !== null && nameStem.startsWith(stem);
 		});
 		if (prefixMatches.length === 1) return { target: prefixMatches[0] ?? null, reason: null };
-		if (prefixMatches.length > 1) return { target: null, reason: 'ambiguous' };
+		if (prefixMatches.length > 1) {
+			const basenames = new Set(prefixMatches.map(p => p.split('/').pop() ?? p));
+			if (basenames.size === 1) return { target: pickAmongIdenticalContent(prefixMatches, expectedFolder), reason: null };
+			return { target: null, reason: 'ambiguous' };
+		}
 	}
 
 	return { target: null, reason: 'missing' };
@@ -511,7 +592,9 @@ export class AttachmentLocalizer {
 
 				if (replacements.length > 0 || placeholderCount > 0) {
 					const fresh = await this.app.vault.read(file);
-					let updated = rewriteLocalizedAttachmentRefs(fresh, replacements);
+					let updated = replacements.length > 0
+						? rewriteLocalizedAttachmentRefs(fresh, replacements).content
+						: fresh;
 					if (placeholderCount > 0) updated = stripDataUriImagePlaceholders(updated).content;
 					if (updated !== fresh) {
 						await this.app.vault.modify(file, updated);
@@ -598,7 +681,14 @@ export class AttachmentLocalizer {
 				const vaultPaths = this.app.vault.getFiles().map(f => f.path);
 
 				const replacements: AttachmentReplacement[] = [];
-				let repaired = 0;
+				// `resolvedCount` is how many broken refs got a repair TARGET computed —
+				// not yet how many actually landed on disk. `repaired` (below) is derived
+				// from the rewrite pass's own applied set, because a planned replacement
+				// whose `from` text doesn't verbatim-match anything in the freshly re-read
+				// content is not a success (this is exactly the "Repaired 1" no-op bug: the
+				// old embeds-only rewrite regex never found a non-embed link's `from` text,
+				// so the write silently did nothing while `repaired` still incremented).
+				let resolvedCount = 0;
 				let unrepairable = 0;
 				for (const match of matches) {
 					if (this.app.metadataCache.getFirstLinkpathDest(match.link, file.path) instanceof TFile) continue;
@@ -613,19 +703,32 @@ export class AttachmentLocalizer {
 						else reason = resolution.reason ?? 'missing';
 					}
 					if (newRef) {
+						resolvedCount++;
 						if (newRef !== match.original) replacements.push({ from: match.original, to: newRef });
-						repaired++;
 					} else {
 						unrepairable++;
 						await this.debug(file, `repair: ${match.original} -> UNREPAIRABLE (${reason})`);
 					}
 				}
 
+				let appliedFrom: string[] = [];
 				if (replacements.length > 0) {
 					const fresh = await this.app.vault.read(file);
-					const updated = rewriteLocalizedAttachmentRefs(fresh, replacements);
-					if (updated !== fresh) await this.app.vault.modify(file, updated);
+					const result = rewriteLocalizedAttachmentRefs(fresh, replacements);
+					if (result.content !== fresh) await this.app.vault.modify(file, result.content);
+					appliedFrom = result.appliedFrom;
 				}
+
+				// A replacement that was planned but did not land is surfaced (debug line)
+				// and folded into `unrepairable` rather than silently vanishing from both
+				// totals — the note is still broken from the user's point of view.
+				const appliedSet = new Set(appliedFrom);
+				for (const r of replacements) {
+					if (appliedSet.has(r.from)) continue;
+					unrepairable++;
+					await this.debug(file, `repair: ${r.from} -> UNREPAIRABLE (planned-not-landed)`);
+				}
+				const repaired = resolvedCount - (replacements.length - appliedFrom.length);
 
 				spinner?.hide();
 				if (!silent) new Notice(`Repaired ${repaired} attachment link${repaired === 1 ? '' : 's'}${unrepairable ? `, ${unrepairable} unrepairable` : ''}`);
