@@ -701,3 +701,25 @@ test('draining a burst of jobs coalesces the per-job emits instead of one pair p
 	assert.ok(emits < 20, `20 emits (claim + settle per job) is the bug; got ${emits}`);
 	assert.ok(emits <= 4, `a burst inside one 250ms window collapses to a couple of emits; got ${emits}`);
 });
+
+// --- 10. whole-queue stats ---------------------------------------------------
+//
+// `Orchestrator.queueStats` backs the queue monitor's stats row — the in-app answer
+// to "what's in jobs.sqlite". It must span every type (the store is shared) and
+// every bucket, straight off the store's indexed counts.
+
+test('queueStats reports whole-queue bucket counts across every type', () => {
+	const { orchestrator, store } = newOrchestrator();
+	seedQueued(store, ['qs-a', 'qs-b']);
+	store.insert({ id: 'qs-c', type: 'another_type', created: '2026-01-01T00:01:00.000Z', params: {} });
+
+	assert.deepEqual(orchestrator.queueStats(), { queued: 3, running: 0, done: 0, failed: 0, cancelled: 0 });
+
+	store.clearQueued(Date.now());
+	assert.deepEqual(orchestrator.queueStats(), { queued: 0, running: 0, done: 0, failed: 0, cancelled: 3 });
+});
+
+test('queueStats answers null before any registration opens the store', () => {
+	const orchestrator = new Orchestrator(makePlugin(), { openDbStore: () => newStore() });
+	assert.equal(orchestrator.queueStats(), null, 'no type registered yet — no store, no counts');
+});

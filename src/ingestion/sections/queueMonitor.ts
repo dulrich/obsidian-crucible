@@ -87,6 +87,22 @@ function renderServiceHealthPills(host: DashboardHost, container: HTMLElement): 
 	}
 }
 
+// Whole-DB bucket counts (all five statuses, every type) — the in-dashboard answer
+// to "what's in the job queue database" that used to require the Scan-queue notice
+// or the sqlite3 CLI. Counts-at-rest are neutral pills per the fleet taxonomy;
+// `failed` alone borrows the error status hue, and only while non-zero — a real
+// ok/warn/error fact, not a count spent on the reader's alarm budget.
+function renderQueueStats(host: DashboardHost, container: HTMLElement): void {
+	container.empty();
+	const stats = host.plugin.orchestrator?.queueStats();
+	if (!stats) return;
+	for (const bucket of ['queued', 'running', 'done', 'failed', 'cancelled'] as const) {
+		const n = stats[bucket];
+		const cls = bucket === 'failed' && n > 0 ? 'crucible-pill is-error' : 'crucible-pill is-muted';
+		container.createSpan({ cls, text: `${bucket} ${n}` });
+	}
+}
+
 function jobTargetPath(job: OrchestrationJob): string | undefined {
 	const path = job.params?.targetPath ?? job.params?.path;
 	return typeof path === 'string' ? path : undefined;
@@ -247,6 +263,13 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	const unsubscribeHealth = host.plugin.serviceHealth?.onTransition(() => renderServiceHealthPills(host, healthRow));
 	if (unsubscribeHealth) host.registerDisposer(unsubscribeHealth);
 
+	// Whole-queue stats pills. Built once here (like the health row) and re-rendered
+	// by every renderQueueMonitor pass — the section is marked dirty by the same
+	// coalesced 'orchestration-queue-updated' events that change these counts, so the
+	// row tracks claims/settles/prunes without its own subscription.
+	const statsRow = card.createDiv({ cls: 'crucible-queue-stats-row' });
+	renderQueueStats(host, statsRow);
+
 	// Deliberately just a panic switch here: one motion stops ALL auto-draining
 	// while preserving the Autorun/Auto-enrich/per-type configuration underneath,
 	// so re-enabling restores exactly the prior behavior. Manual Run/enqueue
@@ -339,12 +362,15 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 		// (see AGENTS.md #5 / render/refresh.ts) so every call site — the header
 		// Refresh button, sort-header clicks, and this section's own Cancel/Run/
 		// Clear/panic-toggle handlers below — gets scroll preservation for free.
-		refresh: () => refreshWithScrollPreserved(body, () => renderQueueMonitor(host, body, ctx)),
+		refresh: () => refreshWithScrollPreserved(body, () => renderQueueMonitor(host, body, ctx, statsRow)),
 	};
 	host.registerSection(ctx);
 }
 
-export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement, ctx: SectionContext): Promise<void> {
+export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement, ctx: SectionContext, statsEl?: HTMLElement): Promise<void> {
+	// Stats first: synchronous store counts, so the bucket row is current even while
+	// the row queries below are still in flight (and even when they fail).
+	if (statsEl) renderQueueStats(host, statsEl);
 	// Body is intentionally NOT emptied here: `orchestrator.listJobs` below awaits two
 	// full queries, and clearing the body first left it visibly blank for that whole
 	// window on every queue event. Every branch below empties body itself, immediately
