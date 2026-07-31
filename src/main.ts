@@ -1,6 +1,7 @@
 import { Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, TFolder, Editor } from 'obsidian';
 import { CrucibleSettingTab, CrucibleSettingsTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Provider } from "./types";
+import { normalizeAgentBinding } from "./providerModelContract";
 import { Materializer } from "./materialize";
 import { Linter } from "./lint";
 import { AttachmentLocalizer } from "./localizeAttachments";
@@ -595,6 +596,16 @@ export default class CruciblePlugin extends Plugin {
 			}
 			if (agent.requireNormalFinishReason === undefined) {
 				agent.requireNormalFinishReason = true;
+				dirty = true;
+			}
+			// The one place a persisted `modelBinding` crosses into the typed
+			// `AgentModelBinding` union. Legacy JSON can hold a mode tag with no payload, or
+			// stale pinned data left behind by the old in-place mode mutation; normalizing here
+			// means nothing downstream has to defend against either. Total and conservative —
+			// see `normalizeAgentBinding`'s doc comment.
+			const normalizedBinding = normalizeAgentBinding(agent.modelBinding);
+			if (JSON.stringify(normalizedBinding) !== JSON.stringify(agent.modelBinding)) {
+				agent.modelBinding = normalizedBinding;
 				dirty = true;
 			}
 		}

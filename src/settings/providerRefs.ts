@@ -1,4 +1,5 @@
-import type { Agent, CrucibleSettings, Provider, ProviderModelRef } from '../types';
+import type { CrucibleSettings, Provider, ProviderModelRef } from '../types';
+import { bindingModelRefs, normalizeAgentBinding, parseModelRef } from '../providerModelContract';
 
 /**
  * idh-WP-2: everything a provider is currently used by, collected as short human-readable labels
@@ -17,12 +18,10 @@ import type { Agent, CrucibleSettings, Provider, ProviderModelRef } from '../typ
  * `modelBinding` (both `pinned` and `constrained`/`allow`), and chain steps' `args.model` override
  * string (`"providerId:modelId"`).
  *
- * Chain steps deliberately re-implement the tiny parse `agents.ts`'s (unexported) `parseModelRef`
- * also does, rather than importing it: that function exists for `AgentRunner`'s own execution-time
- * caller, and importing it here would drag this leaf module through `agents.ts`'s full
- * `ChainManager`/`ProviderManager`/`ModelPickerModal` dependency graph (and every Obsidian class
- * those touch) just for an 8-line string split. Keep `parseChainStepModelRef` in sync with
- * `agents.ts`'s `parseModelRef` if the `"providerId:modelId"` format ever changes.
+ * The ref parser and the binding shape both come from `../providerModelContract`, which is a leaf
+ * for exactly this reason — this file used to carry its own `parseChainStepModelRef` copy with a
+ * keep-in-sync note attached, because the canonical parser was private to `agents.ts` and importing
+ * it dragged the whole `ChainManager`/`ProviderManager`/`ModelPickerModal` graph along.
  */
 export function providerRefsPointingAt(settings: CrucibleSettings, provider: Provider): string[] {
 	const labels: string[] = [];
@@ -32,39 +31,23 @@ export function providerRefsPointingAt(settings: CrucibleSettings, provider: Pro
 	if (pointsHere(settings.searchRerankModel)) labels.push('search reranker');
 	if (pointsHere(settings.imageMetadataExtractionModel)) labels.push('image description model');
 
-	const agentCount = (settings.agents ?? []).filter(agent => agentReferencesProvider(agent, provider.id)).length;
+	// Normalized on read rather than trusted: this function is also reachable from tests and from
+	// settings data that predates the migration pass in `main.ts`, and `bindingModelRefs` is total
+	// only over the normalized union.
+	const agentCount = (settings.agents ?? [])
+		.filter(agent => bindingModelRefs(normalizeAgentBinding(agent.modelBinding))
+			.some(ref => ref.providerId === provider.id))
+		.length;
 	if (agentCount > 0) labels.push(`${agentCount} agent${agentCount === 1 ? '' : 's'}`);
 
 	let chainStepCount = 0;
 	for (const chain of settings.chains ?? []) {
 		for (const step of chain.steps ?? []) {
-			const ref = parseChainStepModelRef(step.args?.model);
+			const ref = parseModelRef(step.args?.model);
 			if (ref && ref.providerId === provider.id) chainStepCount++;
 		}
 	}
 	if (chainStepCount > 0) labels.push(`${chainStepCount} chain step${chainStepCount === 1 ? '' : 's'}`);
 
 	return labels;
-}
-
-function agentReferencesProvider(agent: Agent, providerId: string): boolean {
-	const binding = agent.modelBinding;
-	if (!binding) return false;
-	if (binding.mode === 'pinned') return binding.pinned?.providerId === providerId;
-	if (binding.mode === 'constrained') return (binding.allow ?? []).some(ref => ref.providerId === providerId);
-	return false;
-}
-
-// Mirrors agents.ts's (unexported) parseModelRef — see this file's header comment for why it's a
-// separate copy rather than an import.
-function parseChainStepModelRef(raw: string | undefined): ProviderModelRef | null {
-	if (!raw) return null;
-	const trimmed = raw.trim();
-	if (!trimmed) return null;
-	const sep = trimmed.indexOf(':');
-	if (sep === -1) return null;
-	const providerId = trimmed.slice(0, sep).trim();
-	const modelId = trimmed.slice(sep + 1).trim();
-	if (!providerId || !modelId) return null;
-	return { providerId, modelId };
 }

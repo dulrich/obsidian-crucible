@@ -1,5 +1,6 @@
 import { App, Notice, TFile, moment } from 'obsidian';
 import { Agent, AgentResult, CrucibleSettings, Provider, ProviderCompletionResult, ProviderModelRef, CommandArgSchema, providerModality } from './types';
+import { isCompleteModelRef, modelRefEquals, parseModelRef } from './providerModelContract';
 import { ChainManager } from './chains';
 import { CLI_DEFAULT_TIMEOUT_SECONDS, ProviderManager } from './providers';
 import { applyTemplateString } from './utils';
@@ -142,7 +143,9 @@ export class AgentManager {
 		}
 
 		if (binding.mode === 'pinned') {
-			if (!binding.pinned || !binding.pinned.providerId || !binding.pinned.modelId) {
+			// The union guarantees the payload exists; what it deliberately does not guarantee is
+			// that the user finished filling it in (see providerModelContract.ts's header).
+			if (!isCompleteModelRef(binding.pinned)) {
 				throw new Error(`Agent "${agent.name || agent.id}" has no pinned model configured.`);
 			}
 			if (!this.refExists(binding.pinned)) {
@@ -177,8 +180,7 @@ export class AgentManager {
 
 	private isAllowed(binding: Agent['modelBinding'], ref: ProviderModelRef): boolean {
 		if (binding.mode !== 'constrained') return true;
-		const allow = binding.allow ?? [];
-		return allow.some(a => a.providerId === ref.providerId && a.modelId === ref.modelId);
+		return binding.allow.some(a => modelRefEquals(a, ref));
 	}
 
 	private refExists(ref: ProviderModelRef): boolean {
@@ -201,18 +203,6 @@ export class AgentManager {
 		}
 		return (kind === 'system' ? agent.systemPromptText : agent.userPromptText) || '';
 	}
-}
-
-function parseModelRef(raw: string | undefined): ProviderModelRef | null {
-	if (!raw) return null;
-	const trimmed = raw.trim();
-	if (!trimmed) return null;
-	const sep = trimmed.indexOf(':');
-	if (sep === -1) return null;
-	const providerId = trimmed.slice(0, sep).trim();
-	const modelId = trimmed.slice(sep + 1).trim();
-	if (!providerId || !modelId) return null;
-	return { providerId, modelId };
 }
 
 function parseTimeoutSeconds(raw: string | undefined): number | undefined {

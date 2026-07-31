@@ -2,6 +2,7 @@
 import { Notice, Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { Agent, AgentBindingMode, AgentExecutionMode, AgentPromptSource, Provider, ProviderCatalogModel, ProviderKind, ProviderModel, ProviderModelRef, providerModality } from "../../types";
+import { bindingForMode, formatModelRef, parseModelRef } from "../../providerModelContract";
 import { agentCommandId } from "../../agents";
 import { CLI_DEFAULT_TIMEOUT_SECONDS, providerSecretKey, resolveProviderConcurrencyLimit } from "../../providers";
 import { FileSuggest, FolderSuggest, ProviderModelSuggest } from "../../suggesters";
@@ -934,21 +935,19 @@ function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTMLElemen
 
 function describeAgent(tab: CrucibleSettingTab, agent: Agent): string {
 	const binding = agent.modelBinding;
-	if (binding?.mode === 'pinned' && binding.pinned) {
-		const provider = tab.plugin.settings.providers.find(p => p.id === binding.pinned!.providerId);
-		const model = provider?.models?.find(m => m.id === binding.pinned!.modelId);
-		const providerName = provider ? provider.name || `(unnamed ${provider.kind})` : 'unknown provider';
-		const modelName = model ? model.label || model.id : binding.pinned.modelId || '(no model)';
-		return `${providerName} · ${modelName} — ${agentCommandId(agent.id)}`;
+	switch (binding.mode) {
+		case 'pinned': {
+			const provider = tab.plugin.settings.providers.find(p => p.id === binding.pinned.providerId);
+			const model = provider?.models?.find(m => m.id === binding.pinned.modelId);
+			const providerName = provider ? provider.name || `(unnamed ${provider.kind})` : 'unknown provider';
+			const modelName = model ? model.label || model.id : binding.pinned.modelId || '(no model)';
+			return `${providerName} · ${modelName} — ${agentCommandId(agent.id)}`;
+		}
+		case 'constrained':
+			return `Constrained (${binding.allow.length} allowed) — ${agentCommandId(agent.id)}`;
+		case 'runtime':
+			return `Runtime pick — ${agentCommandId(agent.id)}`;
 	}
-	if (binding?.mode === 'constrained') {
-		const count = binding.allow?.length ?? 0;
-		return `Constrained (${count} allowed) — ${agentCommandId(agent.id)}`;
-	}
-	if (binding?.mode === 'runtime') {
-		return `Runtime pick — ${agentCommandId(agent.id)}`;
-	}
-	return `Unconfigured — ${agentCommandId(agent.id)}`;
 }
 
 async function deleteAgent(tab: CrucibleSettingTab, index: number) {
@@ -1109,7 +1108,7 @@ function renderEditAgent(tab: CrucibleSettingTab, containerEl: HTMLElement, agen
 function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElement, agent: Agent) {
 	containerEl.createEl('hr', { cls: 'crucible-row-divider' });
 
-	const binding = agent.modelBinding ?? (agent.modelBinding = { mode: 'runtime' });
+	const binding = agent.modelBinding;
 
 	new Setting(containerEl)
 		.setName('Model selection')
@@ -1120,7 +1119,9 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 			 .addOption('runtime', 'Runtime: pick from all configured models at run time')
 			 .setValue(binding.mode)
 			 .onChange(async (v: AgentBindingMode) => {
-				 binding.mode = v;
+				 // Whole-variant replacement, not a mode-tag mutation: switching away from Pinned
+				 // must not leave the old pinned ref persisted under a mode that never reads it.
+				 agent.modelBinding = bindingForMode(v);
 				 await tab.plugin.saveSettings();
 				 tab.display();
 			 });
@@ -1138,7 +1139,7 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 			return;
 		}
 
-		const pinned = binding.pinned ?? (binding.pinned = { providerId: '', modelId: '' });
+		const pinned = binding.pinned;
 
 		// idh-WP-2: an agent binds to a model it will chat-complete against, so both dropdowns below
 		// are filtered to chat-capable providers/models (modelHasCapability, never a raw
@@ -1219,7 +1220,7 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 			return;
 		}
 
-		const allow = binding.allow ?? (binding.allow = []);
+		const allow = binding.allow;
 
 		new Setting(containerEl)
 			.setName('Allowed models')
@@ -1272,13 +1273,12 @@ function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: HTMLElem
 						const label = provider && model
 							? `${provider.name || provider.kind} · ${model.label || model.id}`
 							: `${ref.providerId}:${ref.modelId}`;
-						d.addOption(`${ref.providerId}:${ref.modelId}`, label);
+						d.addOption(formatModelRef(ref), label);
 					});
 					d.onChange((v) => {
-						const sep = v.indexOf(':');
-						if (sep === -1) { pendingProvider = ''; pendingModel = ''; return; }
-						pendingProvider = v.slice(0, sep);
-						pendingModel = v.slice(sep + 1);
+						const picked = parseModelRef(v);
+						pendingProvider = picked?.providerId ?? '';
+						pendingModel = picked?.modelId ?? '';
 					});
 					d.selectEl.addClass('pi-width-wide');
 				})

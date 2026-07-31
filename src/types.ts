@@ -1,3 +1,5 @@
+import type { AgentModelBinding, ProviderModelRef } from './providerModelContract';
+
 export interface FolderTemplate {
 	folder: string;
 	template: string;
@@ -457,20 +459,15 @@ export interface GeocodeCacheEntry {
 
 export type AgentPromptSource = 'text' | 'file';
 
-export type AgentBindingMode = 'pinned' | 'constrained' | 'runtime';
-
 export type AgentExecutionMode = 'read-only' | 'edit' | 'unrestricted';
 
-export interface ProviderModelRef {
-	providerId: string;
-	modelId: string;
-}
-
-export interface AgentModelBinding {
-	mode: AgentBindingMode;
-	pinned?: ProviderModelRef;
-	allow?: ProviderModelRef[];
-}
+// The provider/model binding contract lives in its own dependency-free leaf module
+// (`src/providerModelContract.ts`) so leaf and test code can import the parser, the discriminated
+// `AgentModelBinding` union and the `normalizeAgentBinding` persistence boundary without dragging
+// a dependency graph — see that file's header for why three copies of the parser existed before it.
+// Re-exported here because a dozen call sites already say `from '../types'`; new code should import
+// from the contract module directly.
+export type { ProviderModelRef, AgentBindingMode, AgentModelBinding } from './providerModelContract';
 
 export interface Agent {
 	id: string;
