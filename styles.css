@@ -644,13 +644,21 @@ If your plugin does not need CSS, delete this file.
 
 /* Queue Monitor row actions. Buttons appended straight into the cell sit flush
    against one another; here that puts a destructive Cancel hard against Run, which
-   is a misclick waiting to happen rather than merely untidy. Wrapping is allowed so
-   a narrow pane stacks the pair instead of overflowing the column. */
+   is a misclick waiting to happen rather than merely untidy. The row does NOT wrap:
+   nowrap keeps the action column at its min-content width (all buttons on one line)
+   and the Target column absorbs the squeeze instead (live-validation feedback,
+   2026-07-30). */
 .crucible-queue-action-cell {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.35rem;
   align-items: center;
+}
+
+/* The Target column is the wrap sink for the queue monitor: long note paths break
+   anywhere rather than forcing the table wide or stacking the action buttons. */
+.crucible-queue-target-cell {
+  overflow-wrap: anywhere;
 }
 
 .crucible-ingestion-enqueue-intake:disabled,

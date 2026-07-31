@@ -406,6 +406,9 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			sortable: true,
 			sortKey: r => r.targetPath ?? r.title ?? r.key,
 			render: (r, td) => {
+				// The wrap sink for the row: long paths break here so the action
+				// buttons keep a single line (see .crucible-queue-target-cell).
+				td.addClass('crucible-queue-target-cell');
 				if (r.targetPath) {
 					// Resolve the note TFile and render a clickable vault link.
 					const file = host.app.vault.getAbstractFileByPath(r.targetPath);
