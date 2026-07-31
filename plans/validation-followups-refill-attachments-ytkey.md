@@ -197,3 +197,33 @@ WP-VF-4.
 
 **Total ≈ 0.85 kSLOC, ~490k raw tokens; ~498k Claude-path / ~335k Codex-path
 Opus/Sol-equivalent tokens.**
+
+---
+
+## Completion note (2026-07-31)
+
+All four WPs landed on master; plan closed and deregistered from `pending-plans`.
+
+- **WP-VF-1** → `59aeb56` — auto-localize create listener registered inside
+  `onLayoutReady` (mirrors the `triggers.start()` replay defense);
+  `isImageAlreadyDescribed` enqueue gate + `ensureLoaded()` warm-up kick.
+- **WP-VF-3** → `dd3e43c` — no-api-key auto-source latch removed;
+  `YoutubeChannelEnrichWorkflow` stamps `failureReason: 'no-api-key'`; shared
+  `src/ingestion/render/apiKeyAffordance.ts` applied at the channel control center,
+  Uncaptured videos, and the auto-enqueue settings toggle.
+- **WP-VF-2** → `16647f1` — links-aware `parseAttachmentRefsFromCache` + shape-preserving
+  `formatRef`; outcome surfacing (excluded-note Notice, per-ref failure reasons,
+  scope-honest row Notice); Repair-all heading button (per-note dedupe, failure
+  tolerance, aggregate Notice); `resolveLocalAttachmentRepair` unique-prefix tier
+  (`PREFIX_REPAIR_MIN_STEM_LENGTH = 8`, ~32 bits of hash entropy).
+- **WP-VF-4** → docs close (this commit) — stale latch language corrected in
+  `src/orchestration/AGENTS.md`; create-replay quirk + repair-tier amendments in root
+  `AGENTS.md`.
+
+Test baseline moved 1351/107 → **1390/109** (+39 tests, +2 files); every WP's gates
+green first pass; all three workers Sonnet on fresh worktrees, clean rebases, ff-merges.
+
+**Note:** the "Pinned facts" / Context sections above describe the *pre-change* tree
+(including the now-removed `DbJobBackend.failEntry` latch) — they are the historical
+grounding record, not current documentation. Current contracts live in the AGENTS.md
+files.

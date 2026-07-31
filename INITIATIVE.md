@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[validation-followups-refill-attachments-ytkey]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 20
