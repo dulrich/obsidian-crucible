@@ -31,6 +31,9 @@ await esbuild.build({
 	stdin: {
 		contents: [
 			"export { FeedTrackerWorkflow, YoutubeTrackerWorkflow, BlogsTrackerWorkflow } from './src/orchestration/workflows/FeedTrackerWorkflow';",
+			// rem-R1: the missing-key branch classifies by ERROR TYPE, not message text, so the
+			// test has to throw the real class the production fetch throws.
+			"export { YoutubeApiKeyMissingError } from './src/orchestration/utils/youtubeApi';",
 			"export { TFile } from 'obsidian';",
 		].join('\n'),
 		resolveDir: '.',
@@ -68,7 +71,13 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { FeedTrackerWorkflow, YoutubeTrackerWorkflow, BlogsTrackerWorkflow, TFile } = await import(pathToFileURL(outfile).href);
+const {
+	FeedTrackerWorkflow,
+	YoutubeTrackerWorkflow,
+	BlogsTrackerWorkflow,
+	YoutubeApiKeyMissingError,
+	TFile,
+} = await import(pathToFileURL(outfile).href);
 
 // ── Structural: the production classes really do carry the kind this test exercises ────────
 
@@ -174,17 +183,40 @@ test('YouTube all-feeds-failed defers with serviceUnhealthy naming youtube-api',
 test('YouTube all-feeds-failed with only missing-key errors fails plainly, no serviceUnhealthy', async () => {
 	const app = makeApp(REGISTRY_PATH);
 	const plugin = makePlugin(app);
-	const configError = 'YouTube Data API key not configured — set it in Settings → Orchestrator.';
-	const source = makeSource('youtube', async () => { throw new Error(configError); });
+	// rem-R1: the branch classifies on the thrown error's TYPE. It used to regex the
+	// message against a literal duplicated in `fetchChannelUploads`; throwing the real
+	// class here is what keeps the two sides in step without a shared string.
+	const keyError = new YoutubeApiKeyMissingError();
+	const source = makeSource('youtube', async () => { throw keyError; });
 	const workflow = new FeedTrackerWorkflow(source);
 
 	const result = await workflow.run({ id: 'job-3', params: {} }, makeCtx(plugin));
 
 	assert.equal(result.status, 'failed');
-	assert.equal(result.error, configError);
+	assert.equal(result.error, keyError.message);
+	// The typed cause, not a message substring: DbJobBackend.failEntry gates the
+	// auto-source latch on exactly this field.
+	assert.equal(result.failureReason, 'no-api-key');
 	assert.equal(result.serviceUnhealthy, undefined);
 	assert.equal(result.retryAfterMs, undefined);
 	assert.equal(result.outputPaths.length, 1);
+});
+
+// A config gap is now identified structurally, so an ordinary failure that merely *reads*
+// like one no longer escapes the deferral path. This is the coupling the rider deleted:
+// before, any Error whose text happened to match the literal classified as missing-key.
+test('an untyped error whose text mentions the API key is NOT treated as a config gap', async () => {
+	const app = makeApp(REGISTRY_PATH);
+	const plugin = makePlugin(app);
+	const source = makeSource('youtube', async () => {
+		throw new Error('YouTube Data API key not configured — set it in Settings → Orchestrator.');
+	});
+	const workflow = new FeedTrackerWorkflow(source);
+
+	const result = await workflow.run({ id: 'job-4', params: {} }, makeCtx(plugin));
+
+	assert.equal(result.status, 'deferred', 'an unclassified rejection stays a service deferral');
+	assert.equal(result.failureReason, undefined);
 });
 
 // ── Blogs: the identical branch stays a plain job-level failure — explicitly out of scope ──

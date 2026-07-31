@@ -7,7 +7,7 @@ import { insertFrontmatterPropertyAfter, updateFrontmatter } from '../../frontma
 import { rateLimitedAllSettled } from '../utils/rateLimit';
 import type { BlogRowError, RemotePost } from '../utils/blogs';
 import type { RemoteVideo } from '../utils/youtube';
-import { YoutubeApiUnavailableError } from '../utils/youtubeApi';
+import { YoutubeApiKeyMissingError, YoutubeApiUnavailableError } from '../utils/youtubeApi';
 import {
 	BLOGS_FEED_SOURCE,
 	FeedSource,
@@ -151,17 +151,21 @@ export class FeedTrackerWorkflow<Entry, Item> implements Workflow {
 				const apiErrors = rejectedReasons.filter(
 					(r): r is YoutubeApiUnavailableError => r instanceof YoutubeApiUnavailableError,
 				);
-				// A missing/empty API key is a per-run config gap, not service unhealth —
-				// every rejection reads the same actionable message in that case, and it
-				// must never open the shared youtube-api breaker (retrying won't help
-				// until the user sets the key).
+				// A missing/empty API key is a per-run config gap, not service unhealth, and
+				// it must never open the shared youtube-api breaker (retrying won't help
+				// until the user sets the key). Classified by the thrown error's *type* —
+				// this used to match the message text against a literal that had to be kept
+				// in sync with `fetchChannelUploads` by hand.
 				const missingKeyReasons = rejectedReasons.filter(
-					(r): r is Error => r instanceof Error && /YouTube Data API key not configured/.test(r.message),
+					(r): r is YoutubeApiKeyMissingError => r instanceof YoutubeApiKeyMissingError,
 				);
 				if (apiErrors.length === 0 && missingKeyReasons.length === rejectedReasons.length && rejectedReasons.length > 0) {
 					return {
 						status: 'failed',
 						error: missingKeyReasons[0]?.message ?? error,
+						// Typed cause, carried from the error itself: `DbJobBackend.failEntry`
+						// reads it to stop the auto-source re-offering work that cannot run.
+						failureReason: missingKeyReasons[0]?.failureReason ?? 'no-api-key',
 						outputPaths: [intakePath],
 					};
 				}
