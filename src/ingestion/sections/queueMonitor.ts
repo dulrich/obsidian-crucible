@@ -45,14 +45,26 @@ const CLEAR_QUEUED_CONFIRM =
 	+ 'their row. One caveat: while auto-enqueue is on, cleared enrichment jobs can be re-added by their source '
 	+ 'about a minute later, so turn the source off as well if you want them to stay gone.';
 
-// Service-health pills: the fleet taxonomy split by breaker state. `open` and
-// `half-open` are genuine status (something is or might be wrong), so they use the
-// status-pill family; a `closed` service is only rendered at all once it has failed
-// before (a stale `lastKind` is the tell — see ServiceHealthRegistry.reportSuccess,
-// which resets state but deliberately leaves lastKind/lastReason in place), and even
-// then it is a neutral pill: recovered is not a status to alarm on. A service the
-// registry has never heard from has no entry in `snapshot()` at all, so it renders
-// nothing — no special-casing needed here.
+// Service-health pills: the fleet taxonomy split by breaker state, gated on whether
+// the service has any reason to matter right now. `open` and `half-open` are genuine
+// status (something is or might be wrong), so they use the status-pill family; a
+// `closed` service is only rendered at all once it has failed before (a stale
+// `lastKind` is the tell — see ServiceHealthRegistry.reportSuccess, which resets
+// state but deliberately leaves lastKind/lastReason in place), and even then it is a
+// neutral pill: recovered is not a status to alarm on. A service the registry has
+// never heard from has no entry in `snapshot()` at all, so it renders nothing — no
+// special-casing needed here.
+//
+// hide-when-idle (r2f WP-3): a breaker with no queued/running job of a type that
+// declares it can never see another probe outcome — cancelling the only job of the
+// one type that declared a service leaves the pill stuck open/half-open forever,
+// since the registry is in-memory and reload is the only reset. `shouldRenderServicePill`
+// hides the pill whenever no such job exists (`hasActiveWork` false), regardless of
+// breaker state; breaker state itself is untouched, so the pill reappears on its own
+// if work returns while still open. Two triggers keep the row honest as that
+// changes: the existing `onTransition` repaint (breaker state changes) and a second
+// `'orchestration-queue-updated'` bus subscription below (queue membership changes —
+// the last relevant job settling or being cancelled).
 function serviceHealthPill(snapshot: ServiceHealthSnapshot): { cls: string; text: string } | null {
 	switch (snapshot.state) {
 		case 'open': {
@@ -64,6 +76,14 @@ function serviceHealthPill(snapshot: ServiceHealthSnapshot): { cls: string; text
 		case 'closed':
 			return snapshot.lastKind ? { cls: 'crucible-pill is-muted', text: `${snapshot.service} closed` } : null;
 	}
+}
+
+// Pure gate: false whenever there is no active work for the service, regardless of
+// breaker state; otherwise defers entirely to `serviceHealthPill`'s existing
+// state→pill mapping (including its own `closed`+no-`lastKind` ⇒ null case).
+export function shouldRenderServicePill(snapshot: ServiceHealthSnapshot, hasActiveWork: boolean): boolean {
+	if (!hasActiveWork) return false;
+	return serviceHealthPill(snapshot) !== null;
 }
 
 function retryCountdownText(retryAt: number): string {
@@ -80,7 +100,12 @@ function renderServiceHealthPills(host: DashboardHost, container: HTMLElement): 
 	container.empty();
 	const registry = host.plugin.serviceHealth;
 	if (!registry) return;
+	const orch = host.plugin.orchestrator;
 	for (const snapshot of registry.snapshot()) {
+		const hasActiveWork = orch
+			? orch.typesDependingOn(snapshot.service).some(t => orch.hasPending(t))
+			: false;
+		if (!shouldRenderServicePill(snapshot, hasActiveWork)) continue;
 		const pill = serviceHealthPill(snapshot);
 		if (!pill) continue;
 		container.createSpan({ cls: pill.cls, text: pill.text });
@@ -255,13 +280,17 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	);
 
 	// Service-health pills, near the top so a dependency outage reads before any one
-	// row that's deferred because of it. Live: re-rendered on every breaker
-	// transition, and the subscription is released on dashboard teardown since this
-	// section is built once in mount() rather than per-refresh.
+	// row that's deferred because of it. Live, on two triggers: every breaker
+	// transition, and every queue-membership change (a pill's `hasActiveWork` gate can
+	// flip when the last relevant job settles or is cancelled, with no breaker
+	// transition involved). Both subscriptions are released on dashboard teardown
+	// since this section is built once in mount() rather than per-refresh.
 	const healthRow = card.createDiv({ cls: 'crucible-service-health-row' });
 	renderServiceHealthPills(host, healthRow);
 	const unsubscribeHealth = host.plugin.serviceHealth?.onTransition(() => renderServiceHealthPills(host, healthRow));
 	if (unsubscribeHealth) host.registerDisposer(unsubscribeHealth);
+	const unsubscribeHealthQueue = host.plugin.ingestionEvents?.on('orchestration-queue-updated', () => renderServiceHealthPills(host, healthRow));
+	if (unsubscribeHealthQueue) host.registerDisposer(unsubscribeHealthQueue);
 
 	// Whole-queue stats pills. Built once here (like the health row) and re-rendered
 	// by every renderQueueMonitor pass — the section is marked dirty by the same
