@@ -49,6 +49,7 @@ const {
 	repointAttachmentFolderPrefix,
 	planLocalAttachmentRepair,
 	resolveLocalAttachmentRepair,
+	buildAttachmentPathIndex,
 	PREFIX_REPAIR_MIN_STEM_LENGTH,
 	hasOtherAttachmentReferrer,
 	formatEmbed,
@@ -327,6 +328,147 @@ test('resolveLocalAttachmentRepair: tier-3 prefix ambiguity with DIFFERING full 
 	const result = resolveLocalAttachmentRepair('_resources/Clippings/x/abcdef12_MD5.pn', expected, vaultPaths);
 	assert.equal(result.target, null);
 	assert.equal(result.reason, 'ambiguous');
+});
+
+/* ------------------------------------------- AttachmentPathIndex: index-vs-naive equivalence (WP-PF2) */
+// buildAttachmentPathIndex/resolveLocalAttachmentRepair's optional 4th param must produce
+// byte-identical decisions to the naive (no-index) path — including PF1's MD5-ambiguity
+// auto-resolve ordering (expected-folder / shortest / lexicographic). Re-running every scenario
+// above WITH an index built from the same vaultPaths is the targeted half of that guarantee;
+// the randomized sweep below is the general half.
+
+function bothResolve(brokenLink, expectedFolder, vaultPaths) {
+	const naive = resolveLocalAttachmentRepair(brokenLink, expectedFolder, vaultPaths);
+	const index = buildAttachmentPathIndex(vaultPaths);
+	const indexed = resolveLocalAttachmentRepair(brokenLink, expectedFolder, vaultPaths, index);
+	assert.deepEqual(indexed, naive, `indexed result must match naive result for ${brokenLink} / expected=${expectedFolder}`);
+	return naive;
+}
+
+test('AttachmentPathIndex: tier 1 (expected folder) is index-equivalent', () => {
+	const expected = '_resources/Clippings/elon-musk';
+	const vaultPaths = ['_resources/Clippings/elon-musk/3ff_MD5.webp', '_resources/wherever/3ff_MD5.webp'];
+	const result = bothResolve('_resources/Clippings/x/3ff_MD5.webp', expected, vaultPaths);
+	assert.equal(result.target, '_resources/Clippings/elon-musk/3ff_MD5.webp');
+});
+
+test('AttachmentPathIndex: tier 2 (unique exact basename) is index-equivalent', () => {
+	const result = bothResolve('_resources/Clippings/x/uniq_MD5.png', 'expected/folder', ['_resources/wherever/uniq_MD5.png']);
+	assert.equal(result.target, '_resources/wherever/uniq_MD5.png');
+});
+
+test('AttachmentPathIndex: tier 2 non-MD5 duplicate ambiguity is index-equivalent', () => {
+	const result = bothResolve('_resources/Clippings/x/dup.png', 'expected/folder', ['a/dup.png', 'b/dup.png']);
+	assert.equal(result.reason, 'ambiguous');
+});
+
+test('AttachmentPathIndex: tier 2 MD5-ambiguity auto-resolve (expected folder / shortest / lexicographic) is index-equivalent', () => {
+	const expected = '_resources/notes/post';
+	bothResolve('_resources/Clippings/x/dup_MD5.png', expected, [
+		'_resources/notes/post/sub/dup_MD5.png',
+		'_resources/other/dup_MD5.png',
+		'_resources/third/dup_MD5.png',
+	]);
+	bothResolve('_resources/Clippings/x/dup_MD5.png', expected, [
+		'_resources/a/much/deeper/nested/folder/dup_MD5.png',
+		'_resources/b/dup_MD5.png',
+	]);
+	bothResolve('_resources/Clippings/x/dup_MD5.png', expected, ['_resources/bbb/dup_MD5.png', '_resources/aaa/dup_MD5.png']);
+});
+
+test('AttachmentPathIndex: tier 3 (unique prefix recovery of a truncated ref) is index-equivalent', () => {
+	const expected = '_resources/notes/post';
+	const result = bothResolve('_resources/Clippings/x/abcdef12_MD5.pn', expected, ['_resources/elsewhere/abcdef1234567890_MD5.png']);
+	assert.equal(result.target, '_resources/elsewhere/abcdef1234567890_MD5.png');
+});
+
+test('AttachmentPathIndex: tier 3 prefix ambiguity (differing full basenames) is index-equivalent', () => {
+	const expected = '_resources/notes/post';
+	const result = bothResolve('_resources/Clippings/x/abcdef12_MD5.pn', expected, [
+		'_resources/elsewhere/abcdef1234567890_MD5.png',
+		'_resources/other/abcdef12ffffffffff_MD5.png',
+	]);
+	assert.equal(result.reason, 'ambiguous');
+});
+
+test('AttachmentPathIndex: tier 3 prefix ambiguity (identical full basenames -> auto-resolve) is index-equivalent', () => {
+	const expected = '_resources/notes/post';
+	bothResolve('_resources/Clippings/x/abcdef12_MD5.pn', expected, [
+		'_resources/notes/post/abcdef1234567890_MD5.png',
+		'_resources/elsewhere/abcdef1234567890_MD5.png',
+	]);
+});
+
+test('AttachmentPathIndex: below PREFIX_REPAIR_MIN_STEM_LENGTH (no prefix attempt) is index-equivalent', () => {
+	const expected = '_resources/notes/post';
+	const result = bothResolve('_resources/Clippings/x/abc_MD5.pn', expected, ['_resources/elsewhere/abcdef1234567890_MD5.png']);
+	assert.equal(result.reason, 'missing');
+});
+
+test('AttachmentPathIndex: a plain missing ref (no match at any tier) is index-equivalent', () => {
+	const result = bothResolve('_resources/Clippings/x/gone_MD5.png', 'expected/folder', ['a/other_MD5.png', 'b/thing.png']);
+	assert.equal(result.reason, 'missing');
+});
+
+// Randomized sweep: a synthetic path set (managed + non-managed, some duplicated basenames,
+// some duplicated stems) and a batch of broken-link probes (exact, truncated-prefix, and
+// pure-miss), asserting indexed === naive for every one. Seeded (mulberry32) so a failure is
+// reproducible.
+function mulberry32(seed) {
+	let a = seed;
+	return () => {
+		a |= 0; a = (a + 0x6D2B79F5) | 0;
+		let t = Math.imul(a ^ (a >>> 15), 1 | a);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+function hexFrom(rng, n) {
+	let s = '';
+	for (let i = 0; i < n; i++) s += Math.floor(rng() * 16).toString(16);
+	return s;
+}
+
+test('AttachmentPathIndex: randomized equivalence sweep over a synthetic path set', () => {
+	const rng = mulberry32(0xC0FFEE);
+	const folders = ['_resources/a', '_resources/b/nested', '_resources/c', 'attachments/x', 'attachments/y/z'];
+	const vaultPaths = [];
+	// Deliberately duplicate some basenames/stems (both managed and not) to exercise the
+	// ambiguity branches, not just the unique-hit ones.
+	const sharedHexes = Array.from({ length: 15 }, () => hexFrom(rng, 32));
+	for (let i = 0; i < 400; i++) {
+		const folder = folders[Math.floor(rng() * folders.length)];
+		if (rng() < 0.7) {
+			// Managed attachment — reuse a shared hex ~30% of the time to create duplicates.
+			const h = rng() < 0.3 ? sharedHexes[Math.floor(rng() * sharedHexes.length)] : hexFrom(rng, 32);
+			vaultPaths.push(`${folder}/${h}_MD5.png`);
+		} else {
+			vaultPaths.push(`${folder}/plain-${Math.floor(rng() * 50)}.md`);
+		}
+	}
+
+	const expectedFolders = [...folders, ''];
+	for (let i = 0; i < 300; i++) {
+		const expected = expectedFolders[Math.floor(rng() * expectedFolders.length)] ?? '';
+		let brokenLink;
+		const mode = rng();
+		if (mode < 0.34) {
+			// Exact-basename probe against a real managed or plain file.
+			const src = vaultPaths[Math.floor(rng() * vaultPaths.length)] ?? '';
+			const base = src.split('/').pop() ?? '';
+			brokenLink = `some/other/folder/${base}`;
+		} else if (mode < 0.67) {
+			// Truncated-prefix probe against a real managed hex.
+			const h = sharedHexes[Math.floor(rng() * sharedHexes.length)] ?? '';
+			const stemLen = 8 + Math.floor(rng() * 10);
+			brokenLink = `some/other/folder/${h.slice(0, stemLen)}_MD5.pn`;
+		} else {
+			// Pure miss.
+			brokenLink = `some/other/folder/${hexFrom(rng, 20)}_MD5.png`;
+		}
+		bothResolve(brokenLink, expected, vaultPaths);
+	}
 });
 
 /* --------------------------------------------------------- formatEmbed / formatLink / formatRef (WP-VF-2a) */

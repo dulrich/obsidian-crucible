@@ -1,5 +1,5 @@
 import { App, TFile } from 'obsidian';
-import { MD5_NAME_RE, planLocalAttachmentRepair } from '../../localizeAttachments';
+import { buildAttachmentPathIndex, MD5_NAME_RE, planLocalAttachmentRepair } from '../../localizeAttachments';
 import type { MissingRefRow } from '../render/types';
 
 // A caller-supplied narrowing of AttachmentLocalizer's public surface — kept a plain
@@ -58,6 +58,11 @@ function normalizeRefTargetForResolve(rawLink: string): string {
 // (src/localizeAttachments.ts:427).
 export function computeMissingAttachmentRows(app: App, localizer: AttachmentFolderResolver): MissingRefRow[] {
 	const vaultPaths = app.vault.getFiles().map(f => f.path);
+	// Built once per scan pass (not once per broken row) — collapses planLocalAttachmentRepair's
+	// per-row full-vault filter passes (see src/localizeAttachments.ts's AttachmentPathIndex doc
+	// comment) down to O(1)/O(log n) lookups. Byte-identical decisions to the naive path; see
+	// tests/localizeAttachments.edge.test.mjs's index-vs-naive equivalence coverage.
+	const attachmentIndex = buildAttachmentPathIndex(vaultPaths);
 	const seen = new Set<string>();
 	const rows: MissingRefRow[] = [];
 
@@ -77,7 +82,7 @@ export function computeMissingAttachmentRows(app: App, localizer: AttachmentFold
 			seen.add(key);
 
 			if (expectedFolder === null) expectedFolder = localizer.attachmentFolderForNote(note);
-			const repairable = planLocalAttachmentRepair(ref.link, expectedFolder, vaultPaths) !== null;
+			const repairable = planLocalAttachmentRepair(ref.link, expectedFolder, vaultPaths, attachmentIndex) !== null;
 			rows.push({ note, link: ref.link, repairable });
 		}
 	}

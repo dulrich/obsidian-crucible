@@ -90,6 +90,12 @@ export class IngestionDashboardUI {
 		SCAN_DEBOUNCE_MS,
 	);
 
+	// vf-1 class (root AGENTS.md quirk): true once unmount() has run. registerListeners()
+	// defers its vault/metadataCache subscriptions to onLayoutReady (see there); if the leaf
+	// closes before that callback fires, the guard keeps it from pushing refs into an
+	// eventRefs array unmount() has already drained.
+	private unmounted = false;
+
 	private readonly host: DashboardHost;
 	private readonly intake: IntakeSection;
 	private readonly uncapturedVideosSection: UncapturedVideosSection;
@@ -189,6 +195,7 @@ export class IngestionDashboardUI {
 	}
 
 	unmount(): void {
+		this.unmounted = true;
 		for (const off of this.disposers) {
 			try { off(); } catch { /* swallow */ }
 		}
@@ -365,25 +372,40 @@ export class IngestionDashboardUI {
 			}
 		};
 
-		// The orphan scan renders a waiting state until the plugin's
-		// metadataCacheReady latch flips (main.ts — resolvedLinks is still
-		// rebuilding before that, which false-flagged thousands of orphans after a
-		// restart). missingAttachments reads the same getFirstLinkpathDest-backed
-		// cache state and is exposed to the identical partial-index window, so it
-		// shares the latch. If this dashboard mounted before the flip, re-render
-		// both sections the moment the first 'resolved' lands; local latch because
-		// 'resolved' also fires after every later change batch.
-		let orphanScanUnblocked = this.plugin.metadataCacheReady;
-		this.eventRefs.push(this.app.metadataCache.on('resolved', () => {
-			if (orphanScanUnblocked) return;
-			orphanScanUnblocked = true;
-			this.markDirty('orphanedAttachments');
-			this.markDirty('missingAttachments');
-		}));
-		this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path, 'meta')));
-		this.eventRefs.push(this.app.vault.on('create', file => route(file.path, 'structural')));
-		this.eventRefs.push(this.app.vault.on('delete', file => route(file.path, 'structural')));
-		this.eventRefs.push(this.app.vault.on('rename', (file, oldPath) => { route(file.path, 'structural'); route(oldPath, 'structural'); }));
+		// vf-1 class (root AGENTS.md quirk): Obsidian replays vault.on('create') for every
+		// pre-existing file during startup vault indexing. If this dashboard is part of the
+		// restored workspace layout, mount() (and therefore registerListeners()) can run
+		// before that replay has settled — and every replayed create used to hit the
+		// unconditional 'structural' branch above, marking both heavy scan sections dirty
+		// repeatedly through the whole storm. Deferring these vault/metadataCache
+		// subscriptions to onLayoutReady mirrors triggers.start() and the auto-localize
+		// create listener in main.ts: for the common case (dashboard opened well after
+		// boot) onLayoutReady has already fired, so the callback below runs immediately and
+		// behavior is unchanged; for a dashboard open at boot, registration now waits until
+		// after the replay. The metadataCacheReady latch below is untouched — separate
+		// concern (partial-index window vs. create-replay volume).
+		this.app.workspace.onLayoutReady(() => {
+			if (this.unmounted) return;
+			// The orphan scan renders a waiting state until the plugin's
+			// metadataCacheReady latch flips (main.ts — resolvedLinks is still
+			// rebuilding before that, which false-flagged thousands of orphans after a
+			// restart). missingAttachments reads the same getFirstLinkpathDest-backed
+			// cache state and is exposed to the identical partial-index window, so it
+			// shares the latch. If this dashboard mounted before the flip, re-render
+			// both sections the moment the first 'resolved' lands; local latch because
+			// 'resolved' also fires after every later change batch.
+			let orphanScanUnblocked = this.plugin.metadataCacheReady;
+			this.eventRefs.push(this.app.metadataCache.on('resolved', () => {
+				if (orphanScanUnblocked) return;
+				orphanScanUnblocked = true;
+				this.markDirty('orphanedAttachments');
+				this.markDirty('missingAttachments');
+			}));
+			this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path, 'meta')));
+			this.eventRefs.push(this.app.vault.on('create', file => route(file.path, 'structural')));
+			this.eventRefs.push(this.app.vault.on('delete', file => route(file.path, 'structural')));
+			this.eventRefs.push(this.app.vault.on('rename', (file, oldPath) => { route(file.path, 'structural'); route(oldPath, 'structural'); }));
+		});
 
 		const bus = this.plugin.ingestionEvents;
 		if (bus) {
