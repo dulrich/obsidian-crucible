@@ -1,5 +1,6 @@
 import { App, FuzzyMatch, FuzzySuggestModal } from 'obsidian';
 import { Provider, ProviderModel, ProviderModelRef } from './types';
+import { formatModelRef } from './providerModelContract';
 
 export interface ModelPickerOption {
 	provider: Provider;
@@ -55,12 +56,12 @@ export function buildModelPickerOptions(
 ): ModelPickerOption[] {
 	const options: ModelPickerOption[] = [];
 	const allowSet = allow && allow.length > 0
-		? new Set(allow.map(r => `${r.providerId}:${r.modelId}`))
+		? new Set(allow.map(formatModelRef))
 		: null;
 
 	for (const provider of providers) {
 		for (const model of provider.models ?? []) {
-			if (allowSet && !allowSet.has(`${provider.id}:${model.id}`)) continue;
+			if (allowSet && !allowSet.has(formatModelRef({ providerId: provider.id, modelId: model.id }))) continue;
 			options.push({ provider, model });
 		}
 	}
