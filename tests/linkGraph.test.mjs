@@ -31,6 +31,7 @@ const {
 	LINK_BOOST_RRF_K,
 	applyLinkBoost,
 	buildLinkGraph,
+	citersOf,
 } = await import(pathToFileURL(outfile));
 
 function result(resultPath, score) {
@@ -39,17 +40,25 @@ function result(resultPath, score) {
 
 // Build a `LinkGraph` directly from an edge list — bypasses `buildLinkGraph`/`App` entirely,
 // matching what a caller of the pure core (e.g. a future non-Obsidian consumer) would do.
+// `citedBy` is populated alongside `adjacency` so this one helper serves both the boost
+// tests (which only ever read `adjacency`) and the WP-PF4 `citersOf` tests below.
 function graphFromEdges(edges) {
 	const adjacency = new Map();
+	const citedBy = new Map();
 	const add = (a, b) => {
 		if (!adjacency.has(a)) adjacency.set(a, new Set());
 		adjacency.get(a).add(b);
 	};
+	const cite = (cited, citer) => {
+		if (!citedBy.has(cited)) citedBy.set(cited, new Set());
+		citedBy.get(cited).add(citer);
+	};
 	for (const [a, b] of edges) {
 		add(a, b);
 		add(b, a);
+		cite(b, a); // directed: a cites b
 	}
-	return { adjacency };
+	return { adjacency, citedBy };
 }
 
 test('buildLinkGraph includes a frontmatter-only link that resolvedLinks alone misses', () => {
@@ -237,4 +246,121 @@ test('pre-existing attribution fields survive the boost being layered on', () =>
 	assert.equal(row.attribution.textRank, 4);
 	assert.equal(row.attribution.boosts.titleBoost, 0.01);
 	assert.ok(row.attribution.boosts.link > 0);
+});
+
+// WP-PF4: `citersOf` is the directed reverse lookup that powers the "cited by" hop on
+// metadata-note search results — the set of notes that link TO a given path.
+
+test('citersOf: a body-link citer is found', () => {
+	const app = {
+		metadataCache: {
+			resolvedLinks: { 'thread.md': { '_x_metadata/handle/1.md': 1 } },
+			getFileCache: () => ({ frontmatterLinks: [] }),
+			getFirstLinkpathDest: () => null,
+		},
+		vault: {
+			getFiles: () => [{ path: 'thread.md' }, { path: '_x_metadata/handle/1.md' }],
+		},
+	};
+	const graph = buildLinkGraph(app);
+	assert.deepEqual(citersOf(graph, '_x_metadata/handle/1.md'), ['thread.md']);
+});
+
+test('citersOf: a frontmatter-link citer is found (x-metadata list entry)', () => {
+	const app = {
+		metadataCache: {
+			resolvedLinks: {},
+			getFileCache: (file) => ({ frontmatterLinks: file.frontmatterLinks ?? [] }),
+			getFirstLinkpathDest: (link) => (link === 'post' ? { path: '_x_metadata/handle/1.md' } : null),
+		},
+		vault: {
+			getFiles: () => [
+				{ path: 'thread.md', frontmatterLinks: [{ link: 'post', key: 'x-metadata.0', original: '[[post]]' }] },
+				{ path: '_x_metadata/handle/1.md', frontmatterLinks: [] },
+			],
+		},
+	};
+	const graph = buildLinkGraph(app);
+	assert.deepEqual(citersOf(graph, '_x_metadata/handle/1.md'), ['thread.md']);
+});
+
+test('citersOf: a path with no citers returns an empty array', () => {
+	const graph = graphFromEdges([['a.md', 'b.md']]);
+	assert.deepEqual(citersOf(graph, 'unrelated.md'), []);
+});
+
+test('citersOf: direction correctness — A links to B does not make B a citer of A, nor does it make A a citer of A\'s own citers', () => {
+	// a.md -> b.md -> c.md (chain, each link one-directional in the source data).
+	const app = {
+		metadataCache: {
+			resolvedLinks: {
+				'a.md': { 'b.md': 1 },
+				'b.md': { 'c.md': 1 },
+			},
+			getFileCache: () => ({ frontmatterLinks: [] }),
+			getFirstLinkpathDest: () => null,
+		},
+		vault: { getFiles: () => [{ path: 'a.md' }, { path: 'b.md' }, { path: 'c.md' }] },
+	};
+	const graph = buildLinkGraph(app);
+	// b is cited by a; a has no citers (nothing links to a).
+	assert.deepEqual(citersOf(graph, 'b.md'), ['a.md']);
+	assert.deepEqual(citersOf(graph, 'a.md'), []);
+	// c is cited by b only — a is two hops away and must not appear as a citer of c.
+	assert.deepEqual(citersOf(graph, 'c.md'), ['b.md']);
+});
+
+test('citersOf: multiple citers sort deterministically for display truncation', () => {
+	const app = {
+		metadataCache: {
+			resolvedLinks: {
+				'zeta.md': { 'target.md': 1 },
+				'alpha.md': { 'target.md': 1 },
+				'mu.md': { 'target.md': 1 },
+			},
+			getFileCache: () => ({ frontmatterLinks: [] }),
+			getFirstLinkpathDest: () => null,
+		},
+		vault: { getFiles: () => [{ path: 'zeta.md' }, { path: 'alpha.md' }, { path: 'mu.md' }, { path: 'target.md' }] },
+	};
+	const graph = buildLinkGraph(app);
+	assert.deepEqual(citersOf(graph, 'target.md'), ['alpha.md', 'mu.md', 'zeta.md']);
+});
+
+// WP-PF4 boost regression: `buildLinkGraph` changed shape (added `citedBy` alongside
+// `adjacency`) to support `citersOf`. `applyLinkBoost` must still read only `adjacency`
+// and produce byte-identical output on a fixture graph built through the real
+// `buildLinkGraph`/App path — not just the hand-built `graphFromEdges` helper the tests
+// above already exercise.
+test('boost regression: applyLinkBoost output through buildLinkGraph is unchanged by the citedBy addition', () => {
+	const app = {
+		metadataCache: {
+			resolvedLinks: {
+				'two.md': { 's1.md': 1, 's2.md': 1 },
+				'one.md': { 's1.md': 1 },
+			},
+			getFileCache: () => ({ frontmatterLinks: [] }),
+			getFirstLinkpathDest: () => null,
+		},
+		vault: {
+			getFiles: () => [{ path: 'two.md' }, { path: 'one.md' }, { path: 's1.md' }, { path: 's2.md' }, { path: 's3.md' }],
+		},
+	};
+	const graph = buildLinkGraph(app);
+	assert.ok(graph.citedBy instanceof Map, 'the new field is present');
+
+	const results = [
+		result('s1.md', 1),
+		result('s2.md', 0.99),
+		result('s3.md', 0.98),
+		result('two.md', 0.5),
+		result('one.md', 0.49),
+	];
+	const boosted = applyLinkBoost(results, graph, { weight: 0.05, seedCount: 3 });
+	const two = boosted.find(r => r.path === 'two.md');
+	const one = boosted.find(r => r.path === 'one.md');
+
+	assert.ok(two.attribution?.boosts?.link > 0, 'two.md (adjacent to two seeds) is still boosted');
+	assert.equal(one.attribution, undefined, 'one.md (adjacent to only one seed) still carries no attribution');
+	assert.equal(two.attribution.boosts.link, 0.05 / (LINK_BOOST_RRF_K + 1), 'exact boost value is unchanged');
 });
