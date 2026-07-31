@@ -1,6 +1,6 @@
 # Tracked Sources
 
-Crucible tracks YouTube channels and blog feeds from markdown registry notes. The tracker commands read those tables, fetch RSS feeds, compare items against vault metadata, and write intake notes under `_crucible/orchestration/...`.
+Crucible tracks YouTube channels and blog feeds from markdown registry notes. The tracker commands read those tables, fetch each source's recent items (YouTube channels via the Data API's uploads playlist — an API key is required; blogs via their RSS/Atom feeds), compare items against vault metadata, and write intake notes under `_crucible/orchestration/...`.
 
 ## YouTube Channels
 
