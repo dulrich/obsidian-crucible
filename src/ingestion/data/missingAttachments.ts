@@ -1,5 +1,5 @@
 import { App, TFile } from 'obsidian';
-import { buildAttachmentPathIndex, MD5_NAME_RE, planLocalAttachmentRepair } from '../../localizeAttachments';
+import { buildAttachmentPathIndex, MD5_NAME_RE, resolveLocalAttachmentRepair } from '../../localizeAttachments';
 import type { MissingRefRow } from '../render/types';
 
 // A caller-supplied narrowing of AttachmentLocalizer's public surface — kept a plain
@@ -82,8 +82,10 @@ export function computeMissingAttachmentRows(app: App, localizer: AttachmentFold
 			seen.add(key);
 
 			if (expectedFolder === null) expectedFolder = localizer.attachmentFolderForNote(note);
-			const repairable = planLocalAttachmentRepair(ref.link, expectedFolder, vaultPaths, attachmentIndex) !== null;
-			rows.push({ note, link: ref.link, repairable });
+			// Full resolution (not the null-on-failure plan wrapper) so the row can carry WHY
+			// a ref is non-repairable — the pill renders `no · missing` / `no · ambiguous`.
+			const resolution = resolveLocalAttachmentRepair(ref.link, expectedFolder, vaultPaths, attachmentIndex);
+			rows.push({ note, link: ref.link, repairable: resolution.target !== null, reason: resolution.reason });
 		}
 	}
 	return rows;

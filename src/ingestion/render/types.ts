@@ -186,12 +186,14 @@ export interface OrphanRow {
 }
 
 // Inverse of OrphanRow: a note ref pointing at a managed (…_MD5.ext) attachment that no
-// longer resolves. `repairable` mirrors what `planLocalAttachmentRepair` would find for
-// this exact ref — see src/ingestion/data/missingAttachments.ts.
+// longer resolves. `repairable`/`reason` mirror what `resolveLocalAttachmentRepair` would
+// find for this exact ref — see src/ingestion/data/missingAttachments.ts. `reason` is
+// non-null exactly when `repairable` is false, so the dashboard never shows an opaque "no".
 export interface MissingRefRow {
 	note: TFile;
 	link: string;
 	repairable: boolean;
+	reason: 'missing' | 'ambiguous' | null;
 }
 
 // One row per X status, merged from the link registry (pending/candidate set) and
