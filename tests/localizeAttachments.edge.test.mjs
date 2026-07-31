@@ -48,6 +48,7 @@ const {
 	stripDataUriImagePlaceholders,
 	repointAttachmentFolderPrefix,
 	planLocalAttachmentRepair,
+	hasOtherAttachmentReferrer,
 } = await import(pathToFileURL(outfile));
 
 test('rewriteLocalizedAttachmentRefs only replaces full markdown image ranges', () => {
@@ -162,4 +163,35 @@ test('planLocalAttachmentRepair prefers the expected folder, then a unique name 
 		planLocalAttachmentRepair('_resources/Clippings/x/a%20b_MD5.png', expected, ['_resources/keep/a b_MD5.png']),
 		'_resources/keep/a b_MD5.png',
 	);
+});
+
+// Repair-bounce regression (round-3 feedback, 2026-07-31): re-localizing a note whose ref
+// was repaired to point into ANOTHER note's attachment folder must not trash the source
+// while that other note still references it — copy semantics for shared attachments.
+test('hasOtherAttachmentReferrer detects a second referencing note', () => {
+	const links = {
+		'daily/day/2026-05-23/Sync.md': { '_resources/_blog_metadata/k/300b_MD5.png': 1 },
+		'_blog_metadata/k/2022-06-05-sync.md': { '_resources/_blog_metadata/k/300b_MD5.png': 1 },
+	};
+	assert.equal(
+		hasOtherAttachmentReferrer(links, '_resources/_blog_metadata/k/300b_MD5.png', 'daily/day/2026-05-23/Sync.md'),
+		true,
+	);
+});
+
+test('hasOtherAttachmentReferrer is false when only the excluded note references the file', () => {
+	const links = {
+		'daily/day/2026-05-23/Sync.md': { '_resources/old/300b_MD5.png': 2 },
+		'unrelated/note.md': { '_resources/other/aaa_MD5.png': 1 },
+	};
+	assert.equal(hasOtherAttachmentReferrer(links, '_resources/old/300b_MD5.png', 'daily/day/2026-05-23/Sync.md'), false);
+});
+
+test('hasOtherAttachmentReferrer ignores zero-count entries and empty maps', () => {
+	const links = {
+		'a.md': { '_resources/x_MD5.png': 0 },
+		'b.md': {},
+	};
+	assert.equal(hasOtherAttachmentReferrer(links, '_resources/x_MD5.png', 'c.md'), false);
+	assert.equal(hasOtherAttachmentReferrer({}, '_resources/x_MD5.png', 'c.md'), false);
 });
