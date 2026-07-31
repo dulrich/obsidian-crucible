@@ -18,6 +18,20 @@ export function createOrphanedAttachmentsSection(host: DashboardHost): OrphanedA
 	let orphanedAttachmentsCache: OrphanRow[] = [];
 
 	function render(body: HTMLElement, ctx: SectionContext): void {
+		// The scan trusts metadataCache.resolvedLinks, which is still rebuilding
+		// for a while after startup — computing against the partial map reported
+		// 3,323 of 5,284 localized attachments as orphaned (all false). Render a
+		// waiting state until the plugin's first-resolve latch flips; the
+		// dashboard's own one-shot 'resolved' listener re-renders this section
+		// the moment it does. The cache stays empty so "Cleanup all" answers
+		// "nothing to clean up" rather than trashing a false cohort.
+		if (!host.plugin.metadataCacheReady) {
+			orphanedAttachmentsCache = [];
+			body.empty();
+			body.createDiv({ cls: 'crucible-empty-state', text: 'Waiting for the metadata cache to finish indexing…' });
+			host.setSectionCount('orphanedAttachments', 0);
+			return;
+		}
 		const rows = computeOrphanedAttachmentRows(host.app);
 		orphanedAttachmentsCache = rows;
 		// P5: skip the rebuild on an unchanged row set during an event-driven pass.
