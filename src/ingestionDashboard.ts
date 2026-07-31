@@ -332,6 +332,18 @@ export class IngestionDashboardUI {
 			}
 		};
 
+		// The orphan scan renders a waiting state until the plugin's
+		// metadataCacheReady latch flips (main.ts — resolvedLinks is still
+		// rebuilding before that, which false-flagged thousands of orphans after a
+		// restart). If this dashboard mounted before the flip, re-render the
+		// section the moment the first 'resolved' lands; local latch because
+		// 'resolved' also fires after every later change batch.
+		let orphanScanUnblocked = this.plugin.metadataCacheReady;
+		this.eventRefs.push(this.app.metadataCache.on('resolved', () => {
+			if (orphanScanUnblocked) return;
+			orphanScanUnblocked = true;
+			this.markDirty('orphanedAttachments');
+		}));
 		this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path, 'meta')));
 		this.eventRefs.push(this.app.vault.on('create', file => route(file.path, 'structural')));
 		this.eventRefs.push(this.app.vault.on('delete', file => route(file.path, 'structural')));
