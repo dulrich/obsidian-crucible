@@ -63,24 +63,58 @@ test('clampSearchBudgetMs falls back to the default for a non-finite value and c
 // WP-3: resolveSearchDeadlineStart is the pure skew-guard helper behind the /v1/search request
 // handler's deadline computation — see the module comment above its definition in
 // scripts/search-companion.mjs for the full rationale.
+//
+// WP-SS2 widened the past-direction trust window from one budget to K=5 budgets (see the
+// module comment above resolveSearchDeadlineStart) — a queue delay larger than one budget used
+// to make the guard distrust sentAt and restart the deadline from receivedAt, which granted a
+// full fresh budget to exactly the requests that had been queued/abandoned longest. These tests
+// pin the K=5 boundary in both directions.
 test('resolveSearchDeadlineStart honors a sentAt within [receivedAt - budget, receivedAt]', () => {
 	const receivedAt = 10_000;
 	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(receivedAt - 500, receivedAt, budgetMs), receivedAt - 500, 'a sentAt comfortably inside the window is used as-is, starting the deadline earlier than receipt');
-	assert.equal(resolveSearchDeadlineStart(receivedAt - budgetMs, receivedAt, budgetMs), receivedAt - budgetMs, 'the lower boundary is inclusive');
+	assert.equal(resolveSearchDeadlineStart(receivedAt - budgetMs, receivedAt, budgetMs), receivedAt - budgetMs, 'the lower boundary of a single budget is inclusive');
 	assert.equal(resolveSearchDeadlineStart(receivedAt, receivedAt, budgetMs), receivedAt, 'the upper boundary (no delay at all) is inclusive');
 });
 
-test('resolveSearchDeadlineStart falls back to receivedAt for skew outside the window', () => {
+// WP-SS2 (a): a sentAt reporting 2 budgets' worth of queuing delay is now trusted (K=5), where
+// before this change it would have fallen back to receivedAt and granted a fresh budget.
+test('resolveSearchDeadlineStart (WP-SS2): a sentAt several budgets old but within K=5 is still trusted', () => {
 	const receivedAt = 10_000;
 	const budgetMs = 3200;
-	assert.equal(resolveSearchDeadlineStart(receivedAt - budgetMs - 1, receivedAt, budgetMs), receivedAt, 'more than a full budget into the past is untrustworthy skew, not queuing evidence');
+	assert.equal(resolveSearchDeadlineStart(receivedAt - 2 * budgetMs, receivedAt, budgetMs), receivedAt - 2 * budgetMs, 'two budgets of queuing delay is plausible queuing evidence, not skew, and must be honored');
+	assert.equal(resolveSearchDeadlineStart(receivedAt - 5 * budgetMs, receivedAt, budgetMs), receivedAt - 5 * budgetMs, 'the K=5 lower boundary is inclusive, same as the single-budget boundary above');
+});
+
+// WP-SS2 (b): older than K budgets is still untrustworthy skew, not queuing evidence — the
+// widening has a floor, it did not remove the guard.
+test('resolveSearchDeadlineStart falls back to receivedAt for skew outside the K=5-budget window', () => {
+	const receivedAt = 10_000;
+	const budgetMs = 3200;
+	assert.equal(resolveSearchDeadlineStart(receivedAt - 5 * budgetMs - 1, receivedAt, budgetMs), receivedAt, 'more than K=5 budgets into the past is untrustworthy skew, not queuing evidence');
+	assert.equal(resolveSearchDeadlineStart(receivedAt - budgetMs - 1, receivedAt, budgetMs), receivedAt - budgetMs - 1, 'sanity check: this same instant used to fall back under the old K=1 window — it must now be honored');
+});
+
+// WP-SS2 (c): the future direction is unaffected by widening K — a sentAt claiming to be after
+// receivedAt is impossible regardless of how the past-direction bound moved.
+test('resolveSearchDeadlineStart falls back to receivedAt for a future sentAt (unchanged by the K widening)', () => {
+	const receivedAt = 10_000;
+	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(receivedAt + 1, receivedAt, budgetMs), receivedAt, 'a sentAt claiming to be AFTER receivedAt is impossible and falls back');
 	assert.equal(resolveSearchDeadlineStart(receivedAt + 50_000, receivedAt, budgetMs), receivedAt, 'an absurd future sentAt falls back the same way');
 });
 
 test('resolveSearchDeadlineStart falls back to receivedAt when sentAt is absent or non-numeric', () => {
-	const receivedAt = 10_000;
+	// WP-SS2 note: `receivedAt` here is deliberately a realistic epoch-scale magnitude (as every
+	// other real-clock test in this file already uses, e.g. the `receivedAt = 1_000_000` wire
+	// tests below), not the tiny `10_000` this test used pre-widening. `Number(null)` coerces to
+	// `0`, and `0` fell outside the OLD K=1 window at `receivedAt = 10_000` purely by coincidence
+	// of that small fixture magnitude — widening to K=5 budgets (max budget 20_000, so at most
+	// 100_000ms of trusted past-window) pulled `0` inside that window at `10_000` and made this
+	// assertion fail for a reason with zero bearing on real behavior: production `receivedAt` is
+	// always `Date.now()`-scale (~1.7e12), so `0` is never within even a K=5 window of it. Keep
+	// this fixture at a magnitude where that stays true.
+	const receivedAt = 10_000_000;
 	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(undefined, receivedAt, budgetMs), receivedAt, 'an older client that never sends sentAt degrades cleanly to receivedAt');
 	assert.equal(resolveSearchDeadlineStart(null, receivedAt, budgetMs), receivedAt);
@@ -287,6 +321,22 @@ test('POST /v1/search: skew clamp — an absurd future or past sentAt falls back
 		const response = await post({ vaultId: VAULT, query: 'alpha', limit: 10, sentAt: receivedAt + 100_000 });
 		assert.equal(response.status, 200);
 		assert.equal('degraded' in response.json, false, 'a sentAt claiming to be after receivedAt is impossible and must not be honored');
+	}, { now: sequentialClock([receivedAt, receivedAt + 50, receivedAt + 50]) });
+});
+
+// WP-SS2 wire-level acceptance case: a sentAt reporting 2 budgets' worth of queuing delay used
+// to fall outside the old K=1 window (fresh budget granted, no degrade) — exactly the inversion
+// this WP fixes, since that's precisely a request that has been queued/abandoned the longest.
+// Under K=5 it is now trusted, correctly reads as already over budget, and degrades in ~ms.
+test('POST /v1/search (WP-SS2): a sentAt 2 budgets old is trusted under K=5 and degrades', async () => {
+	const db = makeDb([{ path: 'Alpha.md', title: 'Alpha', text: 'alpha content here' }]);
+	const receivedAt = 1_000_000;
+
+	await withSearchServer(db, async post => {
+		const response = await post({ vaultId: VAULT, query: 'alpha', limit: 10, sentAt: receivedAt - 2 * 3200 });
+		assert.equal(response.status, 200);
+		assert.equal(response.json.degraded, true, 'a 2-budget-old sentAt is within the K=5 trust window and must be honored as already over budget');
+		assert.deepEqual(response.json.results, []);
 	}, { now: sequentialClock([receivedAt, receivedAt + 50, receivedAt + 50]) });
 });
 

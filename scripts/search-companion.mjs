@@ -41,6 +41,7 @@ export * from './search-companion/http.mjs';
 export * from './search-companion/ranking.mjs';
 export * from './search-companion/schema.mjs';
 export * from './search-companion/search.mjs';
+export * from './search-companion/searchClients.mjs';
 export * from './search-companion/server.mjs';
 export * from './search-companion/statements.mjs';
 export * from './search-companion/vectors.mjs';
