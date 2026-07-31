@@ -67,7 +67,9 @@ export const SERVICE_OUTAGE_PATTERNS: FailurePattern[] = [
 		name: 'all-channel-feeds-failed',
 		re: /^All \d+ channel feeds failed/,
 		rationale: 'feedSources.ts\'s allFeedsFailedError for the YouTube tracker — every configured channel\'s '
-			+ 'RSS feed failed in the same run, which reads as a network/DNS-level outage, not a per-video problem.',
+			+ 'Data API playlistItems.list fetch failed in the same run, which reads as an upstream outage, not a '
+			+ 'per-video problem. (A missing/unconfigured API key is excluded from this shape entirely — it fails '
+			+ 'the job plainly, without the shared \'youtube-api\' breaker or this pattern\'s all-failed text.)',
 	},
 ];
 

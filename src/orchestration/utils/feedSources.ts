@@ -5,9 +5,9 @@ import {
 	EXAMPLE_CHANNELS_TABLE,
 	RemoteVideo,
 	extractVideoIdFromUrl,
-	fetchChannelFeed,
 	parseChannelsTable,
 } from './youtube';
+import { fetchChannelUploads } from './youtubeApi';
 import {
 	BlogEntry,
 	CanonMethod,
@@ -46,7 +46,7 @@ export interface FeedSource<Entry, Item> {
 	exampleTable: string;
 	registryPath(plugin: CruciblePlugin): string;
 	parseRegistry(content: string): ParsedFeedRegistry<Entry>;
-	fetchFeed(entry: Entry): Promise<Item[]>;
+	fetchFeed(entry: Entry, plugin: CruciblePlugin): Promise<Item[]>;
 	entryKey(entry: Entry): string;
 	entryName(entry: Entry): string;
 	entryPriority(entry: Entry): FeedPriority;
@@ -105,7 +105,7 @@ export const YOUTUBE_FEED_SOURCE: FeedSource<ChannelEntry, RemoteVideo> = {
 	exampleTable: EXAMPLE_CHANNELS_TABLE,
 	registryPath: plugin => plugin.settings.orchestrationYoutubeChannelsNote,
 	parseRegistry: content => ({ entries: parseChannelsTable(content), rowErrors: [] }),
-	fetchFeed: entry => fetchChannelFeed(entry.channelId),
+	fetchFeed: (entry, plugin) => fetchChannelUploads(plugin, entry.channelId),
 	entryKey: entry => entry.channelId,
 	entryName: entry => entry.name,
 	entryPriority: entry => entry.priority,
