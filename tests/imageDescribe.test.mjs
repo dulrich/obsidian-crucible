@@ -53,6 +53,7 @@ const {
 	describeMd5Images,
 	IMAGE_DESCRIBE_MAX_LONG_EDGE_PX,
 	importLegacyImageMetadataSidecars,
+	isImageAlreadyDescribed,
 	referencingNotePaths,
 	resolveNoteImages,
 	shouldEnqueueImageDescribe,
@@ -597,6 +598,34 @@ test('shouldEnqueueImageDescribe: a CLI-modality provider -> false (no image end
 		providers: [{ id: 'p1', kind: 'claude-cli', models: [{ id: 'm1', capabilities: ['image-extraction'] }] }],
 	});
 	assert.equal(shouldEnqueueImageDescribe(settings, md5Path), false);
+});
+
+// ── isImageAlreadyDescribed (vf-1 enqueue-time gate) ─────────────────────────
+
+test('isImageAlreadyDescribed: has() returns true for the image md5 -> true (skip enqueue)', () => {
+	const hasDescription = (md5) => md5 === '0123456789abcdef0123456789abcdef';
+	assert.equal(isImageAlreadyDescribed(hasDescription, md5Path), true);
+});
+
+test('isImageAlreadyDescribed: has() returns false -> false (enqueue proceeds)', () => {
+	const hasDescription = () => false;
+	assert.equal(isImageAlreadyDescribed(hasDescription, md5Path), false);
+});
+
+test('isImageAlreadyDescribed: durable kind:failed poison-skip records also count as "has" -> true', () => {
+	// The store's `has()` is `index.has(md5)` regardless of record kind — a `kind: 'failed'`
+	// record is indexed exactly like a successful one (see imageDescriptionStore.ts). This test
+	// documents that the gate inherits that semantics rather than re-deriving it: any predicate
+	// that returns true for the md5 (successful OR failed-poison) blocks enqueue.
+	const hasDescription = (md5) => md5 === '0123456789abcdef0123456789abcdef';
+	assert.equal(isImageAlreadyDescribed(hasDescription, md5Path), true);
+});
+
+test('isImageAlreadyDescribed: a non-MD5-named path -> false, has() never consulted', () => {
+	let called = false;
+	const hasDescription = () => { called = true; return true; };
+	assert.equal(isImageAlreadyDescribed(hasDescription, 'a/plain-image.png'), false);
+	assert.equal(called, false, 'has() should not be called for a path with no derivable md5');
 });
 
 // ── legacy sidecar import round-trip ─────────────────────────────────────────
