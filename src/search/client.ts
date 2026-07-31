@@ -74,6 +74,33 @@ export function __resetSearchFetchFallbackForTests(): void {
 	searchFetchFallbackActive = false;
 }
 
+/**
+ * WP-SS2: session-scoped client identity for the companion's supersede tracking
+ * (`scripts/search-companion/endpoints/search.mjs`), mirroring the fallback-latch pattern above
+ * — module-level, not per-instance, because `SearchManager.client()` mints a fresh
+ * `SearchServiceClient` per call, so a per-instance UUID would be a fresh identity every search
+ * and never let the companion see "this is the same session, superseding its own earlier
+ * request." One UUID per plugin session and one monotonic counter alongside it; the companion
+ * only needs `clientId` + a strictly-increasing `seq` to know which of two same-client requests
+ * is newer.
+ */
+let searchClientId: string | null = null;
+let searchClientSeq = 0;
+
+function currentSearchClientId(): string {
+	if (searchClientId) return searchClientId;
+	searchClientId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+		? crypto.randomUUID()
+		: `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	return searchClientId;
+}
+
+/** Test-only: resets the session-scoped clientId/seq between test cases. */
+export function __resetSearchClientIdentityForTests(): void {
+	searchClientId = null;
+	searchClientSeq = 0;
+}
+
 export class SearchServiceClient {
 	constructor(private readonly baseUrl: string, private readonly vaultId: string) {}
 
@@ -138,6 +165,15 @@ export class SearchServiceClient {
 	// endpoint (upsert/backfill/status/reset) stays on `requestUrl` via `post()`/`request()`,
 	// unaffected by anything below.
 	async search(options: SearchQueryOptions, timeoutMs: number = SEARCH_SERVICE_TIMEOUT_MS, signal?: AbortSignal): Promise<SearchResponse> {
+		// WP-SS2: `clientId`/`seq` are attached ONLY when the caller supplied a `signal` — the
+		// modal always passes one (it holds one live AbortController per session and aborts the
+		// previous request on every supersede), the background `SearchIndexWorkflow.sweep()`
+		// never does. That's the pinned design decision: a workflow sweep must never be
+		// superseded by, or supersede, an interactive typing session, and gating on `signal`
+		// (rather than a separate flag) keys the identity to exactly the callers that already
+		// have per-request supersede semantics on the client side. Additive/optional on the wire
+		// — a companion that has never heard of these fields behaves exactly as today.
+		const identity = signal ? { clientId: currentSearchClientId(), seq: ++searchClientSeq } : undefined;
 		const body = {
 			vaultId: this.vaultId,
 			query: options.query,
@@ -158,6 +194,7 @@ export class SearchServiceClient {
 			// back-compatible both directions, same as budgetMs: an older companion that has
 			// never heard of `sentAt` simply ignores the extra field.
 			sentAt: Date.now(),
+			...identity,
 		};
 		const json = await this.postSearch(body, timeoutMs, signal);
 		const response = normalizeSearchResponse(json);
