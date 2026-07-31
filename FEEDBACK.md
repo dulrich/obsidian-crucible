@@ -19,9 +19,10 @@ tags: ""
 - [x] orphaned attachments (3323) -> is this true because something updated, or a bug?
 - [x] Queue Monitor: action buttons in single row, let Target take the wrapping
 - [x] how to view status/stats of the job queue db now?
-- [ ] image_describe_note queue refilled to ~100 on restart
-- [ ] Missing localized attachments -> remediation sprint follow-up
-- [ ] YT Enrich needs a failure reason (detect -> configure notice/link like Search Modal rerank button)
+- [x] image_describe_note queue refilled to ~100 on restart
+- [x] Missing localized attachments -> remediation sprint follow-up
+	- [ ] metadata cache materialization is slow?
+- [x] YT Enrich needs a failure reason (detect -> configure notice/link like Search Modal rerank button)
 
 ---
 
