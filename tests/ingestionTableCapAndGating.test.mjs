@@ -262,7 +262,7 @@ test('STRUCTURAL (rsp-wp5 P6): FAST_SECTIONS / SCAN_SECTIONS partition every aut
 	for (const id of ['unprocessedClippings', 'unrefinedTranscripts', 'blogIntake', 'youtubeIntake', 'ignoredPosts', 'ignoredVideos']) {
 		assert.ok(fast.includes(id), `${id} must be in the fast (~150ms) cadence class`);
 	}
-	for (const id of ['uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments', 'youtubeWithoutMetadata', 'queueMonitor']) {
+	for (const id of ['uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments', 'missingAttachments', 'youtubeWithoutMetadata', 'queueMonitor']) {
 		assert.ok(scan.includes(id), `${id} must be in the scan (~1000ms) cadence class — youtubeWithoutMetadata and queueMonitor kept their pre-P6 1000ms floor by living here`);
 	}
 	const overlap = fast.filter(id => scan.includes(id));
