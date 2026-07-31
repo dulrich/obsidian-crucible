@@ -52,7 +52,7 @@ import { ImageDescriptionStorage, ImageDescriptionStore } from './search/imageDe
 import { FileOpenIndex } from './fileOpenIndex';
 import { SearchDeletePathWorkflow, SearchEmbedMissingWorkflow, SearchRebuildWorkflow, SearchSweepWorkflow, SearchUpsertBatchWorkflow, SearchUpsertFileWorkflow } from './orchestration/workflows/SearchIndexWorkflow';
 import { migrateExcludedFolders } from './exclusions';
-import { shouldEnqueueImageDescribe } from './orchestration/utils/imageDescribe';
+import { isImageAlreadyDescribed, shouldEnqueueImageDescribe } from './orchestration/utils/imageDescribe';
 import { logError, logWarn } from './log';
 import { AutoLocalizeScheduler } from './autoLocalizeScheduler';
 import { registerInternalCommands } from './internalCommands';
@@ -223,6 +223,13 @@ export default class CruciblePlugin extends Plugin {
 		// setter. Without this call the image-description facet is silently inert — prepareFile
 		// folds no facet and emits no image chunks.
 		this.searchManager.setImageDescriptionStore(this.imageDescriptions);
+		// vf-1: kick off the store's directory listing as early as possible (fire-and-forget;
+		// `load()` never throws — see imageDescriptionStore.ts). `enqueueImageDescribeForNote`
+		// below consults `has()` synchronously off the in-memory index to skip already-described
+		// images, and the earliest an auto-localize create schedule can fire is 2500ms after
+		// onLayoutReady — starting the load here, at onload, gives it the whole plugin
+		// construction + layout-ready window to finish first.
+		void this.imageDescriptions.ensureLoaded();
 		this.searchIndexCoordinator = new SearchIndexCoordinator(this, () => this.isMaterializing);
 		this.fileOpenIndex = new FileOpenIndex(this);
 		this.agentManager = new AgentManager(this.app, this.settings, this.chainManager, this.providerManager);
@@ -294,6 +301,20 @@ export default class CruciblePlugin extends Plugin {
 			// still wins the race; user-trigger schedule anchoring in setUserTriggers
 			// (called from registerTriggers() above) is unaffected either way.
 			this.triggers.start();
+			// vf-1: the same create-replay storm above also drove auto-localize, whose
+			// already-localized branch (localizeAttachments.ts) still enqueues an
+			// image_describe_note job per note — every restart re-minted ~50-105 duplicate
+			// describe jobs (verified against the live jobs.sqlite). Registering the
+			// auto-localize create listener here, after the replay has settled, skips the
+			// storm the same way triggers.start() does. This listener is separate from the
+			// one at onload time (which still drives search indexing and the file-open
+			// index on every create, including the replay — both already gate on their own
+			// readiness); the modify/edit auto-localize trigger is registered eagerly and is
+			// unaffected — only the create source was ever subject to the replay.
+			this.registerEvent(this.app.vault.on('create', (file) => {
+				if (this.isMaterializing || !(file instanceof TFile) || file.extension !== 'md') return;
+				this.autoLocalizeScheduler.schedule(file, 'create');
+			}));
 		});
 
 		this.addRibbonIcon('anvil', 'Crucible settings', () => {
@@ -305,6 +326,11 @@ export default class CruciblePlugin extends Plugin {
 		registerStaticCommands(this);
 
 		// --- Events ---
+		// vf-1: this listener no longer drives auto-localize scheduling — that moved to a
+		// second `vault.on('create')` listener registered inside onLayoutReady (see the
+		// comment there). handleFileCreate still runs here for materialize (it self-guards
+		// on non-empty files), and search indexing / file-open indexing stay here too since
+		// both already gate on their own readiness state during the startup replay.
 		this.registerEvent(this.app.vault.on('create', (file) => {
 			void this.handleFileCreate(file);
 			this.searchIndexCoordinator.handleCreate(file);
@@ -418,6 +444,10 @@ export default class CruciblePlugin extends Plugin {
 	enqueueImageDescribeForNote(imagePath: string, sourceNotePath?: string): void {
 		if (!sourceNotePath) return;
 		if (!shouldEnqueueImageDescribe(this.settings, imagePath)) return;
+		// vf-1: skip minting a job for an image that already has a description record — see
+		// `isImageAlreadyDescribed`'s doc comment. Execution-time `has()` in `describeOneImage`
+		// stays as the second layer for whatever does get enqueued.
+		if (isImageAlreadyDescribed(md5 => this.imageDescriptions.has(md5), imagePath)) return;
 		this.orchestrator.enqueue('image_describe_note', {
 			targetPath: sourceNotePath,
 		}, { priority: 'low', lane: 'background', inputPaths: [sourceNotePath, imagePath] })
@@ -969,7 +999,10 @@ export default class CruciblePlugin extends Plugin {
 	async handleFileCreate(file: TAbstractFile) {
 		if (this.isMaterializing || !(file instanceof TFile) || file.extension !== 'md') return;
 
-		this.autoLocalizeScheduler.schedule(file, 'create');
+		// vf-1: auto-localize scheduling on create moved to a listener registered inside
+		// onLayoutReady (see the comment there) so Obsidian's startup create-replay never
+		// reaches it. Don't re-add a `this.autoLocalizeScheduler.schedule(file, 'create')`
+		// call here — that's exactly the regression this fix removed.
 
 		// CRITICAL: Only proceed if the file is truly empty to avoid overwriting existing notes on startup
 		if (file.stat.size > 0) return;
