@@ -645,14 +645,23 @@ If your plugin does not need CSS, delete this file.
 /* Queue Monitor row actions. Buttons appended straight into the cell sit flush
    against one another; here that puts a destructive Cancel hard against Run, which
    is a misclick waiting to happen rather than merely untidy. The row does NOT wrap:
-   nowrap keeps the action column at its min-content width (all buttons on one line)
-   and the Target column absorbs the squeeze instead (live-validation feedback,
-   2026-07-30). */
+   white-space nowrap keeps all buttons on one line and the Target column absorbs
+   the squeeze instead (live-validation feedback, 2026-07-30).
+
+   Deliberately NOT `display: flex`: this class sits on a <td>, and any display
+   other than table-cell drops the cell out of table layout — the browser wraps it
+   in an anonymous cell, the box stops stretching to the row height, and its
+   border-bottom is drawn at the button strip's own height. With the two-line
+   Created cell making rows taller, that painted the Action column's row borders
+   mid-row, so the buttons appeared to straddle rows (live-validation round 2,
+   2026-07-30). Inline layout + margins gives the same gap without leaving table
+   layout. */
 .crucible-queue-action-cell {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 0.35rem;
-  align-items: center;
+  white-space: nowrap;
+}
+
+.crucible-queue-action-cell > button + button {
+  margin-left: 0.35rem;
 }
 
 /* The Target column is the wrap sink for the queue monitor: long note paths break
