@@ -186,6 +186,30 @@ export function shouldEnqueueImageDescribe(settings: CrucibleSettings, imagePath
 	return model?.capabilities?.includes('image-extraction') === true;
 }
 
+/**
+ * vf-1: the enqueue-time mirror of `describeOneImage`'s execution-time `has()` skip
+ * (`plugin.imageDescriptions.has(image.md5)`, above in this file) — an image that already
+ * carries a description record (successful, OR a durable `kind: 'failed'` poison-skip record;
+ * both count as "has" on purpose, matching execution-time semantics) should never mint a second
+ * `image_describe_note` job. Without this, every restart's create-replay re-schedules a localize
+ * pass over every already-localized note, and the localizer's already-localized branch still
+ * calls the enqueue hook — minting a real, redundant queue row every time, because queue dedupe
+ * is active-jobs-only and a settled prior job doesn't suppress a new one.
+ *
+ * Deliberately **not** folded into `shouldEnqueueImageDescribe` above: that function is a cheap
+ * settings/model-shape check called on every localize match, while this one needs a real store
+ * lookup — keeping them separate keeps `shouldEnqueueImageDescribe`'s existing callers and
+ * contract text unchanged. Takes a bare `has` predicate (not the whole `ImageDescriptionStore`)
+ * so it stays a pure function testable without constructing a store or a `CruciblePlugin`; a
+ * path that doesn't resolve to a `_MD5`-named image is not "already described" (`false`) — that
+ * case is already excluded upstream by `shouldEnqueueImageDescribe`'s own `localizedImageInfo`
+ * check, so callers should run this gate second, not instead.
+ */
+export function isImageAlreadyDescribed(hasDescription: (md5: string) => boolean, imagePath: string): boolean {
+	const info = localizedImageInfo(imagePath);
+	return info !== null && hasDescription(info.md5);
+}
+
 export interface ImageDescribeTiming {
 	md5: string;
 	path: string;
