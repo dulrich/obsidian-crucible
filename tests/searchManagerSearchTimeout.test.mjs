@@ -106,6 +106,47 @@ test('SearchManager.search() threads the configured searchQueryTimeoutMs through
 	assert.equal(calls[0].timeoutMs, 7500, 'the configured setting, not client.ts\'s own 5000ms default');
 });
 
+// WP-SS1: SearchModal passes its per-request AbortController's signal as search()'s third
+// argument, all the way through to SearchServiceClient.search()'s third argument — this pins
+// that plumbing so a future refactor of either signature can't silently drop it.
+test('SearchManager.search() threads an optional AbortSignal through to the client as the third argument', async () => {
+	const manager = makeManager();
+	const calls = [];
+	manager.client = () => ({
+		search: async (options, timeoutMs, signal) => {
+			calls.push({ timeoutMs, signal });
+			return { results: [] };
+		},
+	});
+	const controller = new AbortController();
+
+	await manager.search('needle', undefined, controller.signal);
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].signal, controller.signal, 'the exact signal instance must reach the client, not a copy or a stub');
+});
+
+// sweep() delegates to search() — SearchIndexWorkflow's sweep call site never passes a signal
+// (it has no modal/generation concept), so this pins that the parameter threads through sweep()
+// too without breaking that existing no-signal call.
+test('SearchManager.sweep() threads an optional AbortSignal through to search(), and omitting it is still valid', async () => {
+	const manager = makeManager();
+	const calls = [];
+	manager.client = () => ({
+		search: async (options, timeoutMs, signal) => {
+			calls.push({ signal });
+			return { results: [] };
+		},
+	});
+	const controller = new AbortController();
+
+	await manager.sweep('a project brief', undefined, controller.signal);
+	assert.equal(calls[0].signal, controller.signal);
+
+	await manager.sweep('another brief');
+	assert.equal(calls[1].signal, undefined, 'omitting the signal (the workflow call site) must still work');
+});
+
 test('SearchManager.search() logs a breadcrumb (elapsed + term count) via logWarn when the search times out, and still rethrows', async () => {
 	globalThis.__CRUCIBLE_DEBUG__ = true;
 	const warnings = [];

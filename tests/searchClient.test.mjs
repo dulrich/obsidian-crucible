@@ -29,6 +29,9 @@ await esbuild.build({
 					// is not what the real API does — a client that forgot throw:false would still
 					// pass every test here even though every real 4xx/5xx would have thrown before
 					// the client's own status branches ever ran.
+					//
+					// WP-SS1: this remains the transport for every non-search endpoint, PLUS the
+					// interactive search endpoint's CORS-fallback path (see the fetch stub below).
 					export async function requestUrl(options) {
 						globalThis.__searchClientRequests.push(options);
 						if (globalThis.__searchClientThrow) throw globalThis.__searchClientThrow;
@@ -48,11 +51,71 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { SearchServiceClient, SearchServiceUnavailableError } = await import(pathToFileURL(outfile));
+// WP-SS1: `SearchServiceClient.search()` now goes through the platform `fetch`, not
+// `requestUrl` — every pre-existing test below that calls `.search(...)` needs a working global
+// `fetch` stub to keep exercising the real client code (rather than silently making a real
+// network call to `http://search.local`, which is what the native Node `fetch` would otherwise
+// attempt). The stub deliberately reads the SAME `__searchClientResponse`/`__searchClientThrow`
+// control globals the requestUrl stub above uses, so none of the pre-existing test bodies below
+// need to change what they configure — only the new tests need their own dedicated
+// `__searchClientFetchThrow` global (to force the CORS-fallback path specifically, which must
+// NOT also make ordinary requestUrl-only endpoints fail).
+//
+// `init.signal` is honored: aborting it (either the caller's own `AbortSignal`, forwarded by the
+// client's internal controller, or the client's own timeout firing) rejects this promise, the
+// same as real `fetch`. A `__searchClientResponse` that is itself a pending Promise (used by the
+// existing mock-timer tests to simulate "never answers") is never resolved except by that abort
+// path — matching the requestUrl stub's identical convention for the same fixtures.
+function makeFetchStub() {
+	return function fetchStub(url, init = {}) {
+		return new Promise((resolveFetch, rejectFetch) => {
+			globalThis.__searchClientFetchRequests?.push({ url, method: init.method, headers: init.headers, body: init.body, signal: init.signal });
+			let settled = false;
+			const onAbort = () => {
+				if (settled) return;
+				settled = true;
+				const err = new Error('The operation was aborted.');
+				err.name = 'AbortError';
+				rejectFetch(err);
+			};
+			const signal = init.signal;
+			if (signal) {
+				if (signal.aborted) { onAbort(); return; }
+				signal.addEventListener('abort', onAbort);
+			}
+			if (globalThis.__searchClientFetchThrow) {
+				settled = true;
+				rejectFetch(globalThis.__searchClientFetchThrow);
+				return;
+			}
+			const response = globalThis.__searchClientResponse;
+			if (response && typeof response.then === 'function') return;
+			settled = true;
+			resolveFetch({
+				status: response?.status,
+				text: async () => (typeof response?.text === 'string' ? response.text : JSON.stringify(response?.json ?? {})),
+			});
+		});
+	};
+}
+
+globalThis.fetch = makeFetchStub();
+
+const { SearchServiceClient, SearchServiceUnavailableError, SearchAbortedError, __resetSearchFetchFallbackForTests } = await import(pathToFileURL(outfile));
+
+// Every test starts from the same clean slate: fetch is tried first (the CORS-fallback latch is
+// module-level/session-scoped in production for good reason — see client.ts — but that means a
+// test that trips it would otherwise poison every later test in this same file/process).
+function resetGlobals() {
+	__resetSearchFetchFallbackForTests();
+	globalThis.__searchClientThrow = undefined;
+	globalThis.__searchClientFetchThrow = undefined;
+	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientFetchRequests = [];
+}
 
 test('SearchServiceClient parses total and hasMore', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = {
 		status: 200,
 		json: {
@@ -76,7 +139,7 @@ test('SearchServiceClient parses total and hasMore', async () => {
 	assert.equal(response.total, 47);
 	assert.equal(response.hasMore, true);
 	assert.equal(response.results.length, 1);
-	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).limit, 12);
+	assert.equal(JSON.parse(globalThis.__searchClientFetchRequests[0].body).limit, 12);
 });
 
 // `mode`/`semanticAvailable` must be whatever the client derived from the payload, not a
@@ -84,7 +147,7 @@ test('SearchServiceClient parses total and hasMore', async () => {
 // instead of hardcoding, and a test that never reads them back can't catch a regression to
 // hardcoded values on either side.
 test('SearchServiceClient reads mode and semanticAvailable from the payload, not a fixed literal', async () => {
-	globalThis.__searchClientThrow = undefined;
+	resetGlobals();
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
 	globalThis.__searchClientResponse = { status: 200, json: { mode: 'fts', semanticAvailable: false, results: [] } };
@@ -111,7 +174,7 @@ test('SearchServiceClient reads mode and semanticAvailable from the payload, not
 // the companion but `normalizeSearchResponse`'s trailing `.filter(row => row.path && row.snippet)`
 // could drop it with no error anywhere if either field went missing on the way through.
 test('a vector-only result survives normalization intact', async () => {
-	globalThis.__searchClientThrow = undefined;
+	resetGlobals();
 	globalThis.__searchClientResponse = {
 		status: 200,
 		json: {
@@ -150,8 +213,7 @@ test('a vector-only result survives normalization intact', async () => {
 });
 
 test('SearchServiceClient parses file states by path', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = {
 		status: 200,
 		json: {
@@ -169,12 +231,13 @@ test('SearchServiceClient parses file states by path', async () => {
 
 	assert.equal(states.get('note.md')?.contentHash, 'abcd1234');
 	assert.equal(states.get('note.md')?.chunkCount, 3);
+	// fileStates is an indexing-path endpoint (untouched by WP-SS1) and still goes through
+	// requestUrl.
 	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).paths[0], 'note.md');
 });
 
 test('SearchServiceClient throws SearchServiceUnavailableError on a 5xx', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = { status: 503, text: 'overloaded', json: {} };
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -187,8 +250,7 @@ test('SearchServiceClient throws SearchServiceUnavailableError on a 5xx', async 
 // 5s budget declared a healthy companion unreachable mid-rebuild and latched the queue.
 test('SearchServiceClient times out a search fast but gives a bulk upsert a long budget', async (t) => {
 	t.mock.timers.enable({ apis: ['setTimeout'] });
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	// Never resolves: the only thing that can settle these calls is the timeout.
 	globalThis.__searchClientResponse = new Promise(() => {});
 	const client = new SearchServiceClient('http://search.local', 'vault');
@@ -216,7 +278,7 @@ test('SearchServiceClient times out a search fast but gives a bulk upsert a long
 });
 
 test('SearchServiceClient throws SearchServiceUnavailableError when the request fails', async () => {
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientThrow = new Error('ECONNREFUSED');
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -225,8 +287,7 @@ test('SearchServiceClient throws SearchServiceUnavailableError when the request 
 });
 
 test('SearchServiceClient keeps a 4xx as a plain (non-retryable) Error', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = { status: 400, text: 'bad request', json: {} };
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -237,16 +298,19 @@ test('SearchServiceClient keeps a 4xx as a plain (non-retryable) Error', async (
 	});
 });
 
-// F1 regression: Obsidian's requestUrl throws on any status >= 400 by default (RequestUrlParam
-// `throw` defaults to true). Without an explicit `throw: false`, that default fires BEFORE the
-// client's own status branches ever run, so every companion 4xx — including the deliberate
-// width/space-conflict 400s — would land in the generic catch block and get misclassified as
-// SearchServiceUnavailableError ("companion not reachable"), which the caller then defers and
-// retries forever instead of surfacing as the non-retryable request bug it is. The test stub
-// above now mirrors that real throw-on-4xx+ behavior, so this test would fail without the fix.
-test('SearchServiceClient passes throw:false to requestUrl, so a 4xx surfaces via the client\'s own status branch', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+// F1 regression, WP-SS1 rescoped: Obsidian's requestUrl throws on any status >= 400 by default
+// (RequestUrlParam `throw` defaults to true), so every requestUrl call site must pass
+// `throw: false` explicitly or a companion 4xx gets misclassified as
+// SearchServiceUnavailableError ("companion not reachable") before the client's own status
+// branch ever runs. `search()` itself no longer goes through requestUrl in its normal path (see
+// the plain fetch-based 4xx test above, which needs no throw:false at all — fetch never throws
+// on an HTTP status by construction), but it still falls back to requestUrl when fetch is
+// structurally unusable (the CORS-fallback path), and that fallback call must carry the same
+// safety property or a companion 4xx reached only after a CORS failure would silently become an
+// infinite retry loop instead of the non-retryable request bug it is.
+test('SearchServiceClient\'s requestUrl fallback still passes throw:false, so a 4xx surfaces via the client\'s own status branch', async () => {
+	resetGlobals();
+	globalThis.__searchClientFetchThrow = new TypeError('Failed to fetch');
 	globalThis.__searchClientResponse = { status: 400, text: 'bad request', json: {} };
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -256,12 +320,11 @@ test('SearchServiceClient passes throw:false to requestUrl, so a 4xx surfaces vi
 		assert.match(err.message, /bad request/, 'the response body\'s message must survive, not just the status code');
 		return true;
 	});
-	assert.equal(globalThis.__searchClientRequests[0].throw, false, 'requestUrl must be called with throw:false');
+	assert.equal(globalThis.__searchClientRequests[0].throw, false, 'the requestUrl fallback must be called with throw:false');
 });
 
 test('SearchServiceClient throws SearchServiceUnavailableError with kind "server-error" on a 5xx', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = { status: 503, text: 'overloaded', json: {} };
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -273,7 +336,7 @@ test('SearchServiceClient throws SearchServiceUnavailableError with kind "server
 });
 
 test('SearchServiceClient throws SearchServiceUnavailableError with kind "refused" when the request fails below the HTTP layer', async () => {
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientThrow = new Error('ECONNREFUSED');
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -291,17 +354,16 @@ test('SearchServiceClient throws SearchServiceUnavailableError with kind "refuse
 // two constants documented in client.ts (SEARCH_QUERY_BUDGET_FRACTION, 0.8) stay in the
 // documented relationship (companion budget strictly below the client timeout) automatically.
 test('SearchServiceClient.search() sends budgetMs derived from the timeout actually passed in', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
 	await client.search({ query: 'x', limit: 1 });
-	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).budgetMs, 4000, 'default timeout (5000) * 0.8');
+	assert.equal(JSON.parse(globalThis.__searchClientFetchRequests[0].body).budgetMs, 4000, 'default timeout (5000) * 0.8');
 
-	globalThis.__searchClientRequests = [];
+	globalThis.__searchClientFetchRequests = [];
 	await client.search({ query: 'x', limit: 1 }, 10_000);
-	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).budgetMs, 8000, 'a caller-supplied timeout (10000) * 0.8');
+	assert.equal(JSON.parse(globalThis.__searchClientFetchRequests[0].body).budgetMs, 8000, 'a caller-supplied timeout (10000) * 0.8');
 });
 
 // Settings threading (WP-5): SearchManager passes a configured `searchQueryTimeoutMs` as the
@@ -309,8 +371,7 @@ test('SearchServiceClient.search() sends budgetMs derived from the timeout actua
 // wait — not just what it tells the companion.
 test('SearchServiceClient.search() respects a caller-supplied timeout, not just the 5s default', async (t) => {
 	t.mock.timers.enable({ apis: ['setTimeout'] });
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = new Promise(() => {});
 	const client = new SearchServiceClient('http://search.local', 'vault');
 	const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
@@ -332,7 +393,7 @@ test('SearchServiceClient.search() respects a caller-supplied timeout, not just 
 // deadline carries `degraded: true`; the client must surface it, and its absence — every
 // existing/older companion response — must normalize to undefined, never a coerced false.
 test('SearchServiceClient.search() surfaces a companion degraded flag, and tolerates its absence', async () => {
-	globalThis.__searchClientThrow = undefined;
+	resetGlobals();
 
 	globalThis.__searchClientResponse = { status: 200, json: { results: [], degraded: true } };
 	const degraded = await new SearchServiceClient('http://search.local', 'vault').search({ query: 'x', limit: 1 });
@@ -348,8 +409,7 @@ test('SearchServiceClient.search() surfaces a companion degraded flag, and toler
 // handler-dispatch clock (see resolveSearchDeadlineStart in scripts/search-companion.mjs).
 // Additive and back-compatible both directions, same as `budgetMs` itself.
 test('SearchServiceClient.search() sends sentAt as the current time', async () => {
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -357,15 +417,14 @@ test('SearchServiceClient.search() sends sentAt as the current time', async () =
 	await client.search({ query: 'x', limit: 1 });
 	const after = Date.now();
 
-	const sentAt = JSON.parse(globalThis.__searchClientRequests[0].body).sentAt;
+	const sentAt = JSON.parse(globalThis.__searchClientFetchRequests[0].body).sentAt;
 	assert.equal(typeof sentAt, 'number');
 	assert.ok(sentAt >= before && sentAt <= after, 'sentAt must be the client\'s own clock at send time');
 });
 
 test('SearchServiceClient throws SearchServiceUnavailableError with kind "timeout" when the request times out', async (t) => {
 	t.mock.timers.enable({ apis: ['setTimeout'] });
-	globalThis.__searchClientThrow = undefined;
-	globalThis.__searchClientRequests = [];
+	resetGlobals();
 	globalThis.__searchClientResponse = new Promise(() => {});
 	const client = new SearchServiceClient('http://search.local', 'vault');
 
@@ -378,4 +437,163 @@ test('SearchServiceClient throws SearchServiceUnavailableError with kind "timeou
 	t.mock.timers.tick(5_001);
 	await assertion;
 	globalThis.__searchClientResponse = undefined;
+});
+
+/* ------------------------------------------------------------------------- WP-SS1: abort */
+
+// The core acceptance case: SearchModal aborts its previous controller when a newer search
+// supersedes it. This pins the mechanism one layer down — the client actually cancels the
+// in-flight fetch and rejects with SearchAbortedError, rather than merely letting the caller
+// discard a response that keeps computing on the wire.
+test('SearchServiceClient.search() aborts the underlying fetch when the caller\'s AbortSignal fires, and rejects with SearchAbortedError', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = new Promise(() => {}); // never resolves on its own
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	const controller = new AbortController();
+
+	const search = client.search({ query: 'x', limit: 1 }, 5000, controller.signal);
+	// Give the fetch stub a microtask to register its abort listener before firing.
+	await Promise.resolve();
+	assert.equal(globalThis.__searchClientFetchRequests.length, 1, 'the request must actually have been sent (this is a supersede, not a debounce skip)');
+	assert.equal(globalThis.__searchClientFetchRequests[0].signal.aborted, false, 'not aborted yet');
+
+	controller.abort();
+
+	await assert.rejects(search, SearchAbortedError);
+	assert.equal(globalThis.__searchClientFetchRequests[0].signal.aborted, true, 'the request-scoped signal fired — the fetch was actually cancelled, not just abandoned');
+});
+
+test('SearchServiceClient.search() rejects immediately with SearchAbortedError when handed an already-aborted signal', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	const controller = new AbortController();
+	controller.abort();
+
+	await assert.rejects(client.search({ query: 'x', limit: 1 }, 5000, controller.signal), SearchAbortedError);
+});
+
+// The client timeout must actually cancel the request now, not just race a timer against a
+// promise it then abandons (the pre-WP-SS1 `withTimeout` behavior every other endpoint still
+// uses) — a superseded/timed-out search used to keep running to completion on the companion
+// regardless of what the client did locally.
+test('SearchServiceClient.search()\'s own timeout aborts the fetch (not just abandons it), with kind "timeout" not treated as a supersede-abort', async (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	resetGlobals();
+	globalThis.__searchClientResponse = new Promise(() => {});
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const search = client.search({ query: 'x', limit: 1 });
+	const assertion = assert.rejects(search, (err) => {
+		assert.ok(err instanceof SearchServiceUnavailableError, 'a genuine timeout is still the existing SearchServiceUnavailableError kind, not SearchAbortedError');
+		assert.equal(err.kind, 'timeout');
+		return true;
+	});
+	t.mock.timers.tick(5_001);
+	await assertion;
+	assert.equal(globalThis.__searchClientFetchRequests[0].signal.aborted, true, 'the timeout must actually cancel the fetch, not merely abandon it');
+	globalThis.__searchClientResponse = undefined;
+});
+
+// Abort must never be misclassified as a companion failure — every caller that gates the
+// availability latch / failure counters keys specifically on `instanceof
+// SearchServiceUnavailableError` (CompanionAvailabilityGate.probe, SearchIndexWorkflow's
+// runSearchWorkflow catch), so SearchAbortedError deliberately failing that check IS the
+// contract that keeps an abort from ever tripping either.
+test('an aborted search\'s error is not a SearchServiceUnavailableError of any kind (never trips the availability latch)', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = new Promise(() => {});
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	const controller = new AbortController();
+
+	const search = client.search({ query: 'x', limit: 1 }, 5000, controller.signal);
+	await Promise.resolve();
+	controller.abort();
+
+	await assert.rejects(search, (err) => {
+		assert.equal(err instanceof SearchAbortedError, true);
+		assert.equal(err instanceof SearchServiceUnavailableError, false, 'an abort must not be classifiable as a companion outage');
+		return true;
+	});
+});
+
+/* -------------------------------------------------------------- WP-SS1: CORS/network fallback */
+
+// `fetch` is not verifiable headlessly against Electron's real CORS behavior (see the SS1
+// brief), so the client must degrade instead of breaking: a `TypeError` thrown by `fetch` itself
+// — the shape both a CORS rejection and a plain "can't reach the host" failure share, with no
+// reliable way to tell them apart from the caller's side of the Fetch API — permanently falls
+// back to the always-worked `requestUrl` transport for the rest of the session, retrying the
+// SAME request rather than losing it.
+test('a CORS/network-shaped fetch TypeError falls back to requestUrl for that request, and logs exactly one warning', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (...args) => { warnings.push(args); };
+
+	try {
+		resetGlobals();
+		globalThis.__searchClientFetchThrow = new TypeError('Failed to fetch');
+		globalThis.__searchClientResponse = { status: 200, json: { results: [], mode: 'fts' } };
+		const client = new SearchServiceClient('http://search.local', 'vault');
+
+		const response = await client.search({ query: 'x', limit: 1 });
+
+		assert.equal(response.mode, 'fts', 'the fallback request still returns a real, usable response');
+		assert.equal(globalThis.__searchClientFetchRequests.length, 1, 'fetch was attempted once');
+		assert.equal(globalThis.__searchClientRequests.length, 1, 'and retried exactly once via requestUrl, not dropped');
+		assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).query, 'x', 'the SAME request body, not a re-derived one');
+		assert.equal(warnings.length, 1, 'exactly one logWarn for the fallback transition');
+		assert.match(warnings[0].join(' '), /falling back to requestUrl/);
+	} finally {
+		console.warn = originalWarn;
+		globalThis.__CRUCIBLE_DEBUG__ = false;
+	}
+});
+
+test('the CORS-fallback latch stays on for the rest of the session: a second search skips fetch entirely and logs no further warning', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (...args) => { warnings.push(args); };
+
+	try {
+		resetGlobals();
+		globalThis.__searchClientFetchThrow = new TypeError('Failed to fetch');
+		globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+		const client = new SearchServiceClient('http://search.local', 'vault');
+
+		await client.search({ query: 'first', limit: 1 });
+		assert.equal(warnings.length, 1);
+		assert.equal(globalThis.__searchClientFetchRequests.length, 1);
+
+		// Even though __searchClientFetchThrow is still set, a second search must not attempt
+		// fetch at all now that the session-scoped latch is on — it should go straight to
+		// requestUrl and succeed without ever touching the fetch stub again.
+		globalThis.__searchClientResponse = { status: 200, json: { results: [], mode: 'hybrid' } };
+		const response = await client.search({ query: 'second', limit: 1 });
+
+		assert.equal(response.mode, 'hybrid');
+		assert.equal(globalThis.__searchClientFetchRequests.length, 1, 'fetch must not be attempted again once the fallback latch is on');
+		assert.equal(globalThis.__searchClientRequests.length, 2, 'both requests landed via requestUrl');
+		assert.equal(warnings.length, 1, 'no repeat warning for a latch that is already on');
+	} finally {
+		console.warn = originalWarn;
+		globalThis.__CRUCIBLE_DEBUG__ = false;
+	}
+});
+
+// The fallback is scoped to the interactive search endpoint specifically — an unrelated fetch
+// failure must never make a non-search endpoint's requestUrl call somehow route through fetch
+// (there is no such path) or otherwise misbehave.
+test('a fetch TypeError does not affect non-search endpoints, which were never routed through fetch to begin with', async () => {
+	resetGlobals();
+	globalThis.__searchClientFetchThrow = new TypeError('Failed to fetch');
+	globalThis.__searchClientResponse = { status: 200, json: { files: [] } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const states = await client.fileStates(['note.md']);
+	assert.equal(states.size, 0);
+	assert.equal(globalThis.__searchClientFetchRequests.length, 0, 'fileStates never touches fetch');
+	assert.equal(globalThis.__searchClientRequests.length, 1);
 });

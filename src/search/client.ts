@@ -1,6 +1,8 @@
 import { RequestUrlResponse, requestUrl } from 'obsidian';
+import { logWarn } from '../log';
 import {
 	SEARCH_REQUIRED_SCHEMA_VERSION,
+	SearchAbortedError,
 	SearchChunk,
 	SearchFileState,
 	SearchHealth,
@@ -10,7 +12,7 @@ import {
 	SearchServiceUnavailableError,
 } from './types';
 
-export { SearchServiceUnavailableError } from './types';
+export { SearchServiceUnavailableError, SearchAbortedError } from './types';
 export { SEARCH_REQUIRED_SCHEMA_VERSION } from './types';
 
 // Health probes and searches are interactive: a companion that has not answered in 5s is
@@ -55,6 +57,22 @@ export const SEARCH_BACKGROUND_PROBE_TIMEOUT_MS = 15_000;
  * (`/v1/files/state`) scale with batch size for the same reason.
  */
 const SEARCH_SERVICE_INDEX_TIMEOUT_MS = 60_000;
+
+/**
+ * WP-SS1: session-scoped (module-level, not per-instance — `SearchManager.client()` mints a
+ * fresh `SearchServiceClient` per call) latch for the interactive-search transport. `false`
+ * (the default) means `search()` tries `fetch` first; once a CORS/network-shaped `fetch`
+ * failure is observed, this flips permanently for the rest of the session and every later
+ * search falls back straight to `requestUrl` — the un-abortable behavior this plan set out to
+ * fix, but strictly better than repeatedly eating a failed `fetch` attempt first. Exported only
+ * for tests to reset between cases; production code never reads or writes it directly.
+ */
+let searchFetchFallbackActive = false;
+
+/** Test-only: resets the session-scoped CORS-fallback latch between test cases. */
+export function __resetSearchFetchFallbackForTests(): void {
+	searchFetchFallbackActive = false;
+}
 
 export class SearchServiceClient {
 	constructor(private readonly baseUrl: string, private readonly vaultId: string) {}
@@ -113,8 +131,14 @@ export class SearchServiceClient {
 	// whichever timeout is actually in effect here, at SEARCH_QUERY_BUDGET_FRACTION of it, so the
 	// two stay in the documented relationship (companion budget strictly under client timeout)
 	// automatically rather than needing to be kept in sync by every caller.
-	async search(options: SearchQueryOptions, timeoutMs: number = SEARCH_SERVICE_TIMEOUT_MS): Promise<SearchResponse> {
-		const json = await this.post('/v1/search', {
+	//
+	// WP-SS1: `signal`, when supplied, aborts this ONE request — SearchModal holds one live
+	// AbortController and aborts the previous request every time it supersedes it (a new search,
+	// the below-gate clear, onClose). This is the interactive search endpoint only; every other
+	// endpoint (upsert/backfill/status/reset) stays on `requestUrl` via `post()`/`request()`,
+	// unaffected by anything below.
+	async search(options: SearchQueryOptions, timeoutMs: number = SEARCH_SERVICE_TIMEOUT_MS, signal?: AbortSignal): Promise<SearchResponse> {
+		const body = {
 			vaultId: this.vaultId,
 			query: options.query,
 			limit: options.limit,
@@ -134,11 +158,105 @@ export class SearchServiceClient {
 			// back-compatible both directions, same as budgetMs: an older companion that has
 			// never heard of `sentAt` simply ignores the extra field.
 			sentAt: Date.now(),
-		}, timeoutMs);
+		};
+		const json = await this.postSearch(body, timeoutMs, signal);
 		const response = normalizeSearchResponse(json);
 		const outdated = schemaOutdatedMessage(response.schemaVersion);
 		if (!outdated) return response;
 		return { ...response, rebuildRequired: true, message: response.message || outdated };
+	}
+
+	// WP-SS1: the interactive search transport. `requestUrl` (Obsidian's own fetch wrapper) is
+	// not abortable — a superseded or client-timed-out request used to keep running to
+	// completion on the companion regardless. This tries the platform `fetch` first (abortable
+	// via `AbortController`) and permanently falls back to the old `requestUrl` transport for the
+	// rest of the session the first time `fetch` fails in a CORS/network shape — see
+	// `fetchSearch` for exactly what "CORS/network shape" means and why the two can't be told
+	// apart from here.
+	private async postSearch(body: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+		if (searchFetchFallbackActive) {
+			return await this.post('/v1/search', body, timeoutMs);
+		}
+		try {
+			return await this.fetchSearch(body, timeoutMs, signal);
+		} catch (e) {
+			if (!(e instanceof TypeError)) throw e;
+			// A `TypeError` thrown by `fetch` itself (not a caught HTTP status, not our own
+			// abort handling below) is what both a CORS rejection and a plain "can't reach the
+			// host" failure look like from here — there is no reliable way to tell them apart
+			// from the caller's side of the Fetch API. Either way `fetch` is structurally
+			// unusable against this companion for the rest of the session: latch the fallback so
+			// every later search stops paying for a doomed `fetch` attempt first, and retry only
+			// THIS request via the always-worked `requestUrl` path so the caller still gets an
+			// answer instead of a broken feature.
+			searchFetchFallbackActive = true;
+			logWarn('search', `interactive search fetch transport unavailable (${e.message}); falling back to requestUrl for the rest of this session`);
+			return await this.post('/v1/search', body, timeoutMs);
+		}
+	}
+
+	// The abortable half of postSearch. Composes the caller's `externalSignal` (SearchModal's
+	// per-modal controller — fires on supersede/close) with our own timeout-driven abort, so
+	// a timeout now actually cancels the in-flight request instead of merely racing and
+	// abandoning it (the old `withTimeout` behavior every other endpoint still uses).
+	private async fetchSearch(body: Record<string, unknown>, timeoutMs: number, externalSignal?: AbortSignal): Promise<unknown> {
+		const controller = new AbortController();
+		let timedOut = false;
+		const onExternalAbort = () => controller.abort();
+		if (externalSignal) {
+			if (externalSignal.aborted) controller.abort();
+			else externalSignal.addEventListener('abort', onExternalAbort);
+		}
+		const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+		let response: Response;
+		try {
+			// WP-SS1: `requestUrl` (the lint rule's suggested replacement, disabled just below)
+			// has no AbortController equivalent, and being able to cancel
+			// a superseded/timed-out interactive search is this work package's entire point (see
+			// src/search/AGENTS.md and plans/search-typeahead-supersede.md). Scoped to exactly
+			// this one call site — every other endpoint in this file stays on `requestUrl`
+			// unchanged, and this call permanently falls back to `requestUrl` for the rest of the
+			// session the first time it hits a CORS/network-shaped failure (see `postSearch`).
+			// eslint-disable-next-line no-restricted-globals
+			response = await fetch(`${this.root()}/v1/search`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+				signal: controller.signal,
+			});
+		} catch (e) {
+			if (controller.signal.aborted) {
+				if (timedOut) {
+					throw new SearchServiceUnavailableError(`Search service /v1/search timed out after ${timeoutMs}ms`, 'timeout');
+				}
+				// Superseded (a newer search/onClose bumped the modal's generation) or the
+				// caller's own signal fired for some other reason — never a companion failure.
+				throw new SearchAbortedError('Search service /v1/search request aborted');
+			}
+			// Neither our timeout nor the caller's signal fired: whatever `fetch` threw is a
+			// genuine transport failure (CORS-shaped or otherwise) — let postSearch decide.
+			throw e;
+		} finally {
+			clearTimeout(timer);
+			if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+		}
+		const text = await response.text();
+		if (response.status >= 500) {
+			throw new SearchServiceUnavailableError(`Search service /v1/search returned ${response.status}: ${text}`, 'server-error');
+		}
+		if (response.status < 200 || response.status >= 300) {
+			throw new Error(`Search service /v1/search returned ${response.status}: ${text}`);
+		}
+		if (!text) return undefined;
+		try {
+			return JSON.parse(text);
+		} catch {
+			// A 2xx with an unparseable body is not something a retry can fix — surface it the
+			// same shape `normalizeSearchResponse` already tolerates (an empty/malformed value
+			// degrades to `{ results: [] }`), rather than throwing a raw SyntaxError up through
+			// `search()`.
+			return undefined;
+		}
 	}
 
 	private async post(path: string, body: Record<string, unknown>, timeoutMs = SEARCH_SERVICE_TIMEOUT_MS): Promise<unknown> {

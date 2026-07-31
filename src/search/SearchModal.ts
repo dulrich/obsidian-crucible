@@ -3,7 +3,7 @@ import type CruciblePlugin from '../main';
 import { isImageChunkHeading } from './chunker';
 import { SEARCH_TYPEAHEAD_DEBOUNCE_MS, SEARCH_TYPEAHEAD_MIN_QUERY_LENGTH, shouldAutoSearch } from './debounce';
 import type { SearchRerankOutcome } from './SearchManager';
-import { SearchResult, SearchScoreAttribution } from './types';
+import { SearchAbortedError, SearchResult, SearchScoreAttribution } from './types';
 
 export class VaultSearchModal extends Modal {
 	private inputEl: HTMLInputElement;
@@ -19,6 +19,16 @@ export class VaultSearchModal extends Modal {
 	 * rendered. Without this guard the slow, less-specific results would land last and win.
 	 */
 	private searchGeneration = 0;
+
+	/**
+	 * WP-SS1: the controller for whichever interactive search is currently in flight, or `null`
+	 * when nothing is. Exactly one lives at a time — every place that bumps `searchGeneration`
+	 * (a new search, the below-gate clear, `onClose`) aborts this first, so a superseded request
+	 * actually cancels on the wire instead of just having its (still-running) response discarded
+	 * by the generation check below. `abortActiveSearch` is idempotent and safe to call with
+	 * nothing in flight.
+	 */
+	private activeSearchController: AbortController | null = null;
 
 	// Rerank state. WP-9: the row and button always render — a hidden affordance is
 	// undiscoverable, so an unconfigured reranker instead renders a disabled button plus an
@@ -81,7 +91,9 @@ export class VaultSearchModal extends Modal {
 			this.inputEl.addEventListener('input', () => {
 				const query = this.inputEl.value.trim();
 				if (!shouldAutoSearch(query)) {
-					// Abandon whatever is in flight so a stale render cannot land over the hint.
+					// Abandon whatever is in flight so a stale render cannot land over the hint —
+					// and actually abort it (WP-SS1), not just discard its eventual response.
+					this.abortActiveSearch();
 					this.searchGeneration++;
 					this.resultsEl.empty();
 					this.statusEl.setText(query ? `Type ${SEARCH_TYPEAHEAD_MIN_QUERY_LENGTH} or more characters, or press Enter to search anyway` : '');
@@ -119,22 +131,42 @@ export class VaultSearchModal extends Modal {
 	}
 
 	onClose(): void {
-		// Any response still in flight belongs to a modal that no longer exists.
+		// Any response still in flight belongs to a modal that no longer exists — abort it
+		// (WP-SS1), not just bump the generation and let it run to completion unread.
+		this.abortActiveSearch();
 		this.searchGeneration++;
 		this.contentEl.empty();
+	}
+
+	// WP-SS1: idempotent — safe to call with nothing in flight, and safe to call repeatedly.
+	// Aborting an already-settled or already-aborted controller is a documented no-op per the
+	// AbortController spec.
+	private abortActiveSearch(): void {
+		this.activeSearchController?.abort();
+		this.activeSearchController = null;
 	}
 
 	private async runSearch(): Promise<void> {
 		const query = this.inputEl.value.trim();
 		if (!query) return;
+		// A new search supersedes whatever the previous one was — abort it before issuing this
+		// one, then hold this request's own controller as the one live in-flight search.
+		this.abortActiveSearch();
 		const generation = ++this.searchGeneration;
+		const controller = new AbortController();
+		this.activeSearchController = controller;
 		this.queryLogEntryId = null;
 		this.statusEl.setText('Searching...');
 		this.statusEl.toggleClass('is-degraded', false);
 		try {
 			const response = this.sweepMode
-				? await this.plugin.searchManager.sweep(query)
-				: await this.plugin.searchManager.search(query);
+				? await this.plugin.searchManager.sweep(query, undefined, controller.signal)
+				: await this.plugin.searchManager.search(query, undefined, controller.signal);
+			// This request is no longer in flight — clear the reference, but only if a *newer*
+			// search hasn't already replaced it (which would mean this response arrived after
+			// having been superseded and is about to be discarded by the generation check below
+			// anyway; clearing here would wrongly null out the newer controller).
+			if (this.activeSearchController === controller) this.activeSearchController = null;
 			if (generation !== this.searchGeneration) return;
 			// WP-3: a `degraded: true` response is a well-formed partial (the companion's own
 			// cooperative deadline gave up on the rescue/vector/coverage legs, most likely
@@ -170,6 +202,13 @@ export class VaultSearchModal extends Modal {
 				results: response.results,
 			});
 		} catch (e) {
+			if (this.activeSearchController === controller) this.activeSearchController = null;
+			// WP-SS1: an aborted request is not a failure — it was superseded by a newer search
+			// or the modal closed. It must never show "Search failed" or a Notice; the generation
+			// check right below is the second line of defense for the same case (and the only
+			// defense for any other stale-response path), so this check is explicit rather than
+			// relying on it alone.
+			if (e instanceof SearchAbortedError) return;
 			if (generation !== this.searchGeneration) return;
 			const message = e instanceof Error ? e.message : String(e);
 			this.statusEl.setText('Search failed');

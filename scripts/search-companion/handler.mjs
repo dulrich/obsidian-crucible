@@ -11,6 +11,18 @@ import { HttpError, json } from './http.mjs';
 import { createStatements } from './statements.mjs';
 import { createVectorBackend } from './vectors.mjs';
 
+// WP-SS1: every response — success, 4xx, 5xx, and the OPTIONS preflight itself — carries the
+// same CORS headers, so a browser/Electron-renderer `fetch` never treats an error response as a
+// second, separate CORS failure on top of whatever status it already carries. `*` is acceptable
+// specifically because this server binds loopback-only (src/search/AGENTS.md) and has no
+// cookie/credential surface to leak — it is not a general CORS policy, just an unblock for our
+// own renderer talking to our own loopback process.
+function applyCorsHeaders(res) {
+	res.setHeader('Access-Control-Allow-Origin', '*');
+	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
 // The request handler: dependency wiring, the route table, the `receivedAt` stamp, and the
 // one catch-all that maps a throw to a status. Split out of the single-file companion
 // (WP-rem-R3) — everything an individual endpoint owns (its transaction, its body read, its
@@ -62,6 +74,25 @@ export function createRequestHandler(db, options = {}) {
 		// to even start running, on top of whatever `sentAt` the client itself reports. It is
 		// handed to the route as `request.receivedAt`; only /v1/search reads it.
 		const receivedAt = now();
+		// WP-SS1: the companion is loopback-only and answers only this plugin's own renderer, so
+		// a permissive `Access-Control-Allow-Origin: *` costs nothing and is what lets
+		// `src/search/client.ts` move the interactive search request onto an abortable `fetch` —
+		// `requestUrl` (Obsidian's own transport, still used for every other endpoint) has no
+		// AbortController and cannot be told to give up on a superseded request. Set via
+		// `setHeader` (not `writeHead`) so it survives whichever status code a route eventually
+		// answers with — `json()` in http.mjs calls `writeHead(status, {...})` afterwards, and
+		// Node merges a `writeHead` header set with anything already set via `setHeader` rather
+		// than replacing it.
+		applyCorsHeaders(res);
+		// A CORS preflight never reaches the route table — it carries no body and answers only
+		// "is this method/these headers allowed", so it is handled here, before dispatch, rather
+		// than as a seventh row in the strict ROUTE_IDS table (which asserts an exact match on
+		// every table it wires and would need a real endpoint module for no real work).
+		if (req.method === 'OPTIONS') {
+			res.writeHead(204);
+			res.end();
+			return;
+		}
 		try {
 			const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
 			const route = dispatch.lookup(req.method, url.pathname);

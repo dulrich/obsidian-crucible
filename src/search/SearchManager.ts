@@ -794,7 +794,12 @@ export class SearchManager {
 		await this.withFlushInFlight(() => this.client().deletePath(path));
 	}
 
-	async search(query: string, limit?: number): Promise<SearchResponse> {
+	// WP-SS1: `signal`, when supplied, threads straight through to
+	// `SearchServiceClient.search()` so a superseded/closed SearchModal search actually aborts
+	// the in-flight request instead of merely discarding its (still-running) response — see
+	// client.ts's `fetchSearch`. Every existing call site (the workflow's `sweep()`, tests) omits
+	// it, which is exactly today's un-abortable behavior; only SearchModal passes one.
+	async search(query: string, limit?: number, signal?: AbortSignal): Promise<SearchResponse> {
 		// WP-3: wall time of the query embed, measured here and folded into the timeout
 		// breadcrumb below — NOT into the timed window itself. The embed stays outside
 		// `startedAt`/the client timer on purpose (src/search/AGENTS.md, and the WP-3
@@ -819,7 +824,7 @@ export class SearchManager {
 				limit: limit ?? this.settings.searchResultLimit,
 				queryEmbedding,
 				embeddingSpace,
-			}, this.settings.searchQueryTimeoutMs);
+			}, this.settings.searchQueryTimeoutMs, signal);
 		} catch (e) {
 			// WP-5 breadcrumb: a timed-out interactive search is otherwise invisible — the modal
 			// just shows "Search failed" and the companion-side cause (queued behind its own
@@ -897,12 +902,12 @@ export class SearchManager {
 		return citersOfLinkGraph(this.linkGraph(), path);
 	}
 
-	async sweep(description: string, limit?: number): Promise<SearchResponse> {
+	async sweep(description: string, limit?: number, signal?: AbortSignal): Promise<SearchResponse> {
 		const query = [
 			description.trim(),
 			SEARCH_SWEEP_QUERY_EXPANSION,
 		].filter(Boolean).join('\n');
-		return await this.search(query, limit ?? Math.max(this.settings.searchResultLimit, 24));
+		return await this.search(query, limit ?? Math.max(this.settings.searchResultLimit, 24), signal);
 	}
 
 	/**
