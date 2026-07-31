@@ -154,12 +154,13 @@ export interface UseCatalogEntryResult {
  * otherwise no-op (no save, no re-render), per the brief.
  *
  * WP-3: `label` is auto-filled via `deriveModelDisplayLabel` (always onto an empty label here,
- * since the row is brand new — the "only when empty" rule the pick path in `ai.ts` also follows is
- * trivially satisfied by construction). `resolveDescribedPrecision`, when given, is the same
- * best-effort `describeModel()` fallback the re-rendered Accept row in `ai.ts` uses
- * (`describedPrecisionFor`) — passed in rather than called directly so this function stays free of
- * any Obsidian/`CrucibleSettingTab` dependency; only used when the catalog entry itself has no
- * quantization signal, same gating as `deriveCatalogSuggestion` already applies internally.
+ * since the row is brand new — the "only when empty" rule the pick path in `aiProviderModels.ts`
+ * also follows is trivially satisfied by construction). `resolveDescribedPrecision`, when given, is
+ * the same best-effort `describeModel()` fallback the re-rendered Accept row in
+ * `aiProviderModels.ts` uses (`describedPrecisionFor`) — passed in rather than called directly so
+ * this function stays free of any Obsidian/`CrucibleSettingTab` dependency; only used when the
+ * catalog entry itself has no quantization signal, same gating as `deriveCatalogSuggestion` already
+ * applies internally.
  */
 export function useCatalogEntry(
 	provider: Provider,
@@ -187,7 +188,8 @@ export interface ModelCatalogBrowserDeps {
 	catalogModels: ProviderCatalogModel[];
 	// WP-3: threaded through to `useCatalogEntry` for the Use button — see that function's doc
 	// comment for why this is a plain injected callback rather than an import cycle back to
-	// `sections/ai.ts` (the only place `describedPrecisionFor`'s WeakMap-backed cache lives).
+	// `sections/aiProviderModels.ts` (which wires the real describeModel probe; the cache itself
+	// lives in the dependency-free `providerModelProbe.ts`).
 	resolveDescribedPrecision: (model: ProviderModel) => string | undefined;
 }
 
