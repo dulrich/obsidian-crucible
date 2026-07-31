@@ -22,6 +22,7 @@ import { createUncapturedVideosSection, type UncapturedVideosSection } from './i
 import { renderEnqueueAllMetadataButton, renderYoutubeNoMetadata } from './ingestion/sections/youtubeWithoutMetadata';
 import { createControlCentersSection, type ControlCentersSection } from './ingestion/sections/controlCenters';
 import { createOrphanedAttachmentsSection, type OrphanedAttachmentsSection } from './ingestion/sections/orphanedAttachments';
+import { renderMissingAttachments } from './ingestion/sections/missingAttachments';
 import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ignored';
 import { consumeSelfRefreshedEcho } from './ingestion/render/echoSuppress';
 import { minIntervalGate, refreshWithScrollPreserved } from './ingestion/render/refresh';
@@ -66,7 +67,7 @@ export class IngestionDashboardUI {
 	]);
 	private static readonly SCAN_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
 		'uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments',
-		'youtubeWithoutMetadata', 'queueMonitor',
+		'missingAttachments', 'youtubeWithoutMetadata', 'queueMonitor',
 	]);
 	// Two cadence-classed gates, reusing the same tested minIntervalGate
 	// primitive the pre-P6 code already relied on for youtubeWithoutMetadata
@@ -161,6 +162,11 @@ export class IngestionDashboardUI {
 			'Orphaned attachments',
 			'Localized attachments (…_MD5.ext) with no back-reference from any note.',
 			(heading) => this.orphanedAttachments.renderCleanupAllButton(heading),
+		);
+		this.buildSection(
+			'missingAttachments',
+			'Missing localized attachments',
+			'Notes whose …_MD5.ext embeds or links point at a file that no longer exists.',
 		);
 
 		this.registerListeners();
@@ -302,6 +308,7 @@ export class IngestionDashboardUI {
 				this.markDirty('blogControl');
 				this.markDirty('youtubeWithoutMetadata');
 				this.markDirty('orphanedAttachments');
+				this.markDirty('missingAttachments');
 				return;
 			}
 
@@ -327,22 +334,28 @@ export class IngestionDashboardUI {
 				this.markDirty('youtubeWithoutMetadata');
 			}
 			if (prev && prev.links !== next.links) {
-				// The set of referenced attachments drives orphan status.
+				// The set of referenced attachments drives orphan status, in both
+				// directions: an unreferenced file (orphan) and a ref pointing at
+				// nothing (missing).
 				this.markDirty('orphanedAttachments');
+				this.markDirty('missingAttachments');
 			}
 		};
 
 		// The orphan scan renders a waiting state until the plugin's
 		// metadataCacheReady latch flips (main.ts — resolvedLinks is still
 		// rebuilding before that, which false-flagged thousands of orphans after a
-		// restart). If this dashboard mounted before the flip, re-render the
-		// section the moment the first 'resolved' lands; local latch because
+		// restart). missingAttachments reads the same getFirstLinkpathDest-backed
+		// cache state and is exposed to the identical partial-index window, so it
+		// shares the latch. If this dashboard mounted before the flip, re-render
+		// both sections the moment the first 'resolved' lands; local latch because
 		// 'resolved' also fires after every later change batch.
 		let orphanScanUnblocked = this.plugin.metadataCacheReady;
 		this.eventRefs.push(this.app.metadataCache.on('resolved', () => {
 			if (orphanScanUnblocked) return;
 			orphanScanUnblocked = true;
 			this.markDirty('orphanedAttachments');
+			this.markDirty('missingAttachments');
 		}));
 		this.eventRefs.push(this.app.metadataCache.on('changed', file => route(file.path, 'meta')));
 		this.eventRefs.push(this.app.vault.on('create', file => route(file.path, 'structural')));
@@ -484,6 +497,7 @@ export class IngestionDashboardUI {
 			'youtubeWithoutMetadata',
 			'channelControl',
 			'orphanedAttachments',
+			'missingAttachments',
 		];
 		for (const id of ids) await this.refresh(id);
 	}
@@ -512,6 +526,7 @@ export class IngestionDashboardUI {
 			case 'youtubeWithoutMetadata': return renderYoutubeNoMetadata(this.host, body, ctx);
 			case 'channelControl': return this.controlCenters.renderChannelControl(body, ctx);
 			case 'orphanedAttachments': return this.orphanedAttachments.render(body, ctx);
+			case 'missingAttachments': return renderMissingAttachments(this.host, body, ctx);
 		}
 	}
 }
