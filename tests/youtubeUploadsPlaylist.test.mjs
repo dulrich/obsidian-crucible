@@ -54,6 +54,7 @@ const {
 	playlistItemsToRemoteVideos,
 	fetchChannelUploads,
 	YoutubeApiUnavailableError,
+	YoutubeApiKeyMissingError,
 } = await import(pathToFileURL(outfile).href);
 
 function makePlugin(apiKey) {
@@ -136,13 +137,17 @@ test('an empty/malformed items shape maps to an empty array rather than throwing
 
 // ── fetchChannelUploads: missing key is a config gap, not service unhealth ────────────────
 
-test('fetchChannelUploads with no configured key throws a plain actionable Error', async () => {
+test('fetchChannelUploads with no configured key throws a typed, actionable config error', async () => {
 	const plugin = makePlugin('');
 	await assert.rejects(
 		() => fetchChannelUploads(plugin, 'UCxxxxxxxxxxxxxxxxxxxxxx'),
 		(err) => {
 			assert.ok(!(err instanceof YoutubeApiUnavailableError), 'a config gap must not be YoutubeApiUnavailableError');
-			assert.match(err.message, /YouTube Data API key not configured/);
+			// rem-R1: the consumer classifies on the TYPE. Before, FeedTrackerWorkflow
+			// matched this message against a literal it had to keep in sync by hand.
+			assert.ok(err instanceof YoutubeApiKeyMissingError, 'the config gap is its own error class');
+			assert.equal(err.failureReason, 'no-api-key', 'it carries the typed cause the failed result stamps');
+			assert.match(err.message, /YouTube Data API key not configured/, 'and the copy stays actionable');
 			return true;
 		},
 	);

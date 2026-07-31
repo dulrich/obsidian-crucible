@@ -82,37 +82,110 @@ export interface OrchestrationJob {
 // so the enrichment queue can stop auto-refilling on it and only it.
 export type WorkflowFailureReason = 'no-api-key';
 
-export interface WorkflowResult {
-	/**
-	 * `cancelled` means the run observed a cancellation request and stopped — a
-	 * terminal state distinct from `failed` on purpose (see `JobStatus`). Workflows
-	 * rarely return it directly; it is normally produced by `runWorkflowWithTimeout`
-	 * from a thrown `JobCancelledError` or by `applyCancellation` reconciling a
-	 * result that arrived after the signal fired.
-	 */
-	status: 'done' | 'failed' | 'deferred' | 'cancelled';
+/**
+ * What every workflow outcome may carry, whatever its status. Deliberately tiny:
+ * a field belongs here only when it is meaningful for *all four* terminal states.
+ */
+interface WorkflowResultBase {
+	/** Vault paths this run wrote. Recorded on the job row by the backend. */
 	outputPaths?: string[];
-	error?: string;
-	/** Typed cause for `status: 'failed'`, when the workflow can name one. */
-	failureReason?: WorkflowFailureReason;
+	/** Free-text run narration, appended to the job's notes. A `Partial:` prefix
+	 * additionally flags the job row as partial. */
 	notes?: string;
+}
+
+/** The work completed. */
+export interface WorkflowDoneResult extends WorkflowResultBase {
+	status: 'done';
+}
+
+/**
+ * The run failed on its own merits — a job-level problem no retry of the *service*
+ * will fix. `error` is **required**: a failure with nothing to say is not a state the
+ * queue can render, diagnose or classify, and the backend used to paper over the gap
+ * with a placeholder string of its own.
+ *
+ * A dependency being down is NOT this — it is `deferred` (see `WorkflowDeferredResult`).
+ */
+export interface WorkflowFailedResult extends WorkflowResultBase {
+	status: 'failed';
+	error: string;
+	/** Typed cause, when the workflow can name one. Read by `DbJobBackend.failEntry`
+	 * to latch a type's auto-source off — never inferred from `error`'s text. */
+	failureReason?: WorkflowFailureReason;
+}
+
+/**
+ * A *dependency* is unavailable, so the job goes back to `queued` and runs again
+ * later. The retry/service fields live here and nowhere else, which is what makes the
+ * contract structural rather than a comment: a service-level problem coming back as
+ * `'failed'` is exactly the mis-classification that turned one companion outage into
+ * 2,022 failure files.
+ */
+export interface WorkflowDeferredResult extends WorkflowResultBase {
+	status: 'deferred';
+	/** Why the deferral happened, when the caller has a message distinct from `notes`. */
+	error?: string;
+	/** How long to wait before the job becomes claimable again. */
 	retryAfterMs?: number;
 	/**
 	 * Names the *dependency* whose outage caused this deferral, so the backend can
 	 * report it to `ServiceHealthRegistry` and the drain can stop claiming jobs of
 	 * every type that needs the same service.
 	 *
-	 * Only ever set alongside `status: 'deferred'`. A service-level problem must never
-	 * come back as `'failed'` — that is exactly the mis-classification that turned one
-	 * companion outage into 2,022 failure files. Workflows themselves never touch the
-	 * registry: they describe what they saw and the backend does the reporting, which
-	 * keeps workflow tests registry-free.
+	 * Workflows themselves never touch the registry: they describe what they saw and
+	 * the backend does the reporting, which keeps workflow tests registry-free.
 	 */
 	serviceUnhealthy?: {
 		service: ServiceId;
 		kind: ServiceFailureKind;
 		reason: string;
 	};
+}
+
+/**
+ * The run observed a cancellation request and stopped — a terminal state distinct
+ * from `failed` on purpose (see `JobStatus`). Workflows rarely return it directly; it
+ * is normally produced by `runWorkflowWithTimeout` from a thrown `JobCancelledError`
+ * or by `applyCancellation` reconciling a result that arrived after the signal fired.
+ *
+ * It carries no `error` and no retry/service data by construction: a cancellation is
+ * not a diagnostic, and it must not be eligible for any retry policy. Anything the
+ * underlying result said survives in `notes`.
+ */
+export interface WorkflowCancelledResult extends WorkflowResultBase {
+	status: 'cancelled';
+}
+
+/**
+ * How a workflow run ended.
+ *
+ * A discriminated union rather than one optional-field bag, so the state model the
+ * comments used to describe is enforced by the compiler: a `failed` result cannot
+ * omit its `error`, a `done` result cannot carry one, and only a `deferred` result can
+ * name an unhealthy service. Backends settle it with an exhaustive `switch` +
+ * `assertNever`, so adding a variant is a compile error at every settlement point.
+ *
+ * The one hole TypeScript leaves open is a *spread* of one variant into another
+ * (`{ ...deferredResult, status: 'cancelled' }` type-checks and smuggles the deferred
+ * fields across). Construct each variant explicitly — `applyCancellation` does.
+ */
+export type WorkflowResult =
+	| WorkflowDoneResult
+	| WorkflowFailedResult
+	| WorkflowDeferredResult
+	| WorkflowCancelledResult;
+
+/**
+ * Exhaustiveness backstop for a `switch` over a closed union — the `default` branch
+ * only type-checks while every variant has its own `case`. Lives beside
+ * `WorkflowResult` because that is the union whose settlement it guards; the throw is
+ * unreachable in a well-typed build and exists only so a JS-side caller (the test
+ * suites import the compiled bundle) fails loudly instead of silently returning
+ * `undefined`.
+ */
+export function assertNever(value: never): never {
+	throw new Error(`Unhandled union member: ${JSON.stringify(value)}`);
 }
 
 export interface ScanReport {
