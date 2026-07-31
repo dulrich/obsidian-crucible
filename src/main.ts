@@ -226,6 +226,15 @@ export default class CruciblePlugin extends Plugin {
 			logError('orchestration is unavailable: the jobs database could not be opened', e);
 		}
 		void this.migrateGlobalAutorun();
+		// The drain loop. Constructed unconditionally (it tolerates an orchestrator
+		// with no registered types): its constructor kicks an immediate drain,
+		// subscribes to queue events, starts the 60s service-health backstop, and
+		// arms the 5s post-layout-ready drain. This line was accidentally deleted
+		// in the WP-8 queue cutover (0c342e2) — with it gone, esbuild tree-shakes
+		// the entire class out of main.js and every `?.` call site silently
+		// no-ops, so NOTHING ever drains. A structural test now pins it
+		// (tests/autoRunnerWiring.test.mjs).
+		this.orchestrationAutoRunner = new OrchestrationAutoRunner(this, this.orchestrator);
 		this.triggers = new TriggerRegistry(this, () => this.isMaterializing);
 		this.registerFoundingTriggers();
 		// Migrate a held note-lock when its note is moved/renamed mid-operation, so
