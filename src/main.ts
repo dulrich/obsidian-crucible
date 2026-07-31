@@ -136,6 +136,14 @@ export default class CruciblePlugin extends Plugin {
 	fileOpenIndex: FileOpenIndex;
 	orchestrationAutoRunner: OrchestrationAutoRunner;
 	triggers: TriggerRegistry;
+	// Latched true on the metadata cache's first full 'resolved' after load, never
+	// reset. The orphaned-attachments scan trusts `metadataCache.resolvedLinks`;
+	// computing it before this latch flips reported 3,323 false orphans of 5,284
+	// localized attachments after a restart (live validation 2026-07-30 — a raw
+	// text scan showed 0 truly unreferenced files). Consumers render a waiting
+	// state while false; the dashboard re-renders on the flip via its own
+	// one-shot 'resolved' listener.
+	metadataCacheReady = false;
 	// The single native-settings-modal instance (registered via addSettingTab in onload).
 	// Kept as a field — rather than only living inside the anonymous addSettingTab(new ...)
 	// call — so openSettingsToTab() can deep-link it even while the modal isn't open.
@@ -156,6 +164,14 @@ export default class CruciblePlugin extends Plugin {
 
 		this.ingestionEvents = new IngestionEventBus();
 		this.noteLocks = new NoteLockManager(this.ingestionEvents);
+		// One-shot latch: 'resolved' fires when the cache finishes resolving every
+		// file (first during startup indexing, then again after each change batch);
+		// only the first firing matters here, so the listener removes itself.
+		const resolvedRef = this.app.metadataCache.on('resolved', () => {
+			this.metadataCacheReady = true;
+			this.app.metadataCache.offref(resolvedRef);
+		});
+		this.registerEvent(resolvedRef);
 		this.materializer = new Materializer(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
 		this.linter = new Linter(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; }, this.noteLocks);
 		this.attachmentLocalizer = new AttachmentLocalizer(
