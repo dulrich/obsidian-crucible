@@ -261,3 +261,39 @@ test('computeMissingAttachmentRows: a genuinely broken encoded ref is still flag
 	assert.equal(rows.length, 1);
 	assert.equal(rows[0].link, 'attachments/my%20folder/gone_MD5.pdf', 'the row keeps the RAW ref.link for display — only the resolve probe is normalized');
 });
+
+/* ------------------------------------------------------ reason surfacing on non-repairable rows */
+
+test('computeMissingAttachmentRows: rows carry the resolver reason — null when repairable, missing/ambiguous otherwise', () => {
+	const noteR = new FakeFile('notes/r.md');
+	const noteM = new FakeFile('notes/m.md');
+	const noteA2 = new FakeFile('notes/amb.md');
+	const notes = new Map([
+		// Repairable: the file sits at the expected folder.
+		['notes/r.md', { file: noteR, cache: { embeds: [{ link: 'old/deadbeef_MD5.png', original: '' }], links: [] } }],
+		// Missing: nothing in the vault matches the basename at all.
+		['notes/m.md', { file: noteM, cache: { embeds: [{ link: 'old/cafebabe_MD5.jpg', original: '' }], links: [] } }],
+		// Ambiguous: a truncated prefix matches two DIFFERENT managed basenames.
+		['notes/amb.md', { file: noteA2, cache: { embeds: [{ link: 'old/abcdef12_MD5.pn', original: '' }], links: [] } }],
+	]);
+	const app = makeApp({
+		notes,
+		resolvedDests: new Map(),
+		files: [
+			'attachments/r/deadbeef_MD5.png',
+			'attachments/z/abcdef1234567890_MD5.png',
+			'attachments/z2/abcdef12ffffffffff_MD5.png',
+		],
+	});
+	const localizer = { attachmentFolderForNote: note => `attachments/${note.basename}` };
+
+	const rows = computeMissingAttachmentRows(app, localizer);
+	const byNote = new Map(rows.map(r => [r.note.path, r]));
+	assert.equal(rows.length, 3);
+	assert.equal(byNote.get('notes/r.md').repairable, true);
+	assert.equal(byNote.get('notes/r.md').reason, null, 'a repairable row carries no reason');
+	assert.equal(byNote.get('notes/m.md').repairable, false);
+	assert.equal(byNote.get('notes/m.md').reason, 'missing');
+	assert.equal(byNote.get('notes/amb.md').repairable, false);
+	assert.equal(byNote.get('notes/amb.md').reason, 'ambiguous');
+});
