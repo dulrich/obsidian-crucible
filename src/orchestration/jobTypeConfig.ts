@@ -4,6 +4,7 @@ import {
 	SERVICE_IMAGE_DESCRIPTION_PROVIDER,
 	SERVICE_SEARCH_COMPANION,
 	SERVICE_SEARCH_EMBEDDER,
+	SERVICE_X_OEMBED,
 	SERVICE_YOUTUBE_API,
 	type ServiceId,
 } from './serviceHealth';
@@ -342,4 +343,35 @@ export function youtubeMetadataJobConfig(plugin: CruciblePlugin): JobTypeConfig 
 		terminalRetentionMs: 60_000,
 		services: [SERVICE_YOUTUBE_API],
 	};
+}
+
+// One queue entry per status id — mirrors youtubeMetadataDedupeKey's coercion
+// discipline (trim, empty string when absent) so several notes/discover runs
+// citing the same status collapse onto one active fetch. Exported so every
+// enqueue path (discover, a future backfill/dashboard button) computes the
+// exact same key the backend dedupes on.
+export function xMetadataFetchDedupeKey(p: Record<string, unknown>): string {
+	const statusId = typeof p.statusId === 'string' ? p.statusId.trim() : '';
+	return statusId ? `status:${statusId}` : '';
+}
+
+export function xMetadataFetchJobConfig(): JobTypeConfig {
+	return {
+		persistence: 'db',
+		maxParallel: 1,
+		// Politeness on an unauthenticated, keyless endpoint (publish.x.com/oembed) —
+		// deliberately a literal, not a setting: there is no quota relationship with
+		// this endpoint to tune against, only a "don't hammer it" courtesy.
+		minIntervalMs: 1000,
+		dedupeKey: xMetadataFetchDedupeKey,
+		terminalRetentionMs: 60_000,
+		services: [SERVICE_X_OEMBED],
+	};
+}
+
+// The fan-out that scans one note's links and enqueues x_metadata_fetch per
+// undiscovered status. No `services` entry: discovery only reads the note and
+// the local vault probe, never the oEmbed endpoint itself.
+export function xPostDiscoverJobConfig(): JobTypeConfig {
+	return durableJobConfig((p) => (typeof p.targetPath === 'string' && p.targetPath ? `note:${p.targetPath}` : ''));
 }

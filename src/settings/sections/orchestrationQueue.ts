@@ -22,6 +22,8 @@ const ROUTINE_NOTICE_JOB_TYPES: JobType[] = [
 	'transcript_refine',
 	'link_scan',
 	'youtube_metadata_fetch',
+	'x_metadata_fetch',
+	'x_post_discover',
 	'command_run',
 	'image_describe_note',
 	'image_describe_backfill',

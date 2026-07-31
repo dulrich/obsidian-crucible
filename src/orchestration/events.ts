@@ -6,6 +6,7 @@ export type IngestionEventName =
 	| 'transcript-refined'
 	| 'tracker-run'
 	| 'metadata-enriched'
+	| 'x-metadata-enriched'
 	| 'orchestration-queue-updated'
 	| 'note-lock-changed'
 	| 'image-described';
@@ -15,6 +16,11 @@ export interface IngestionEventPayloads {
 	'transcript-refined': { file: TFile; model?: string };
 	'tracker-run': { kind: 'blog' | 'youtube'; runFile: TFile | null; status: 'done' | 'failed' };
 	'metadata-enriched': { videoId: string; metadataFile: TFile; sourceFile?: TFile };
+	/** Fired by XMetadataFetchWorkflow on a `done` result (created/exists/tombstoned
+	 * all count — a durable record, dead or alive, is a successful materialization)
+	 * once `outputPaths[0]` resolves to a real `TFile`. `sourceFiles` covers every
+	 * clip note the job stamped with an `x-metadata` link, when any were given. */
+	'x-metadata-enriched': { statusId: string; metadataFile: TFile; sourceFiles?: TFile[] };
 	'orchestration-queue-updated': { queued: number; running: number };
 	'note-lock-changed': { path: string; locked: boolean; label: string };
 	/** Fired once per image_describe_note/batch run (after the describe pass, whether or not
