@@ -78,4 +78,22 @@ export function renderIngestionDashboardSettings(tab: CrucibleSettingTab, contai
 		set: (v) => { const n = Number(v.trim()); s.orchestrationYoutubeMetadataMaxParallel = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1; },
 		min: 1,
 	}, save);
+
+	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindSearch(ingestionGroup, {
+		name: 'X metadata folder',
+		desc: 'Materialized X posts (fetched via oEmbed — author, date, post HTML) land here, one note per status id. See the "X posts" dashboard section.',
+		placeholder: '_x_metadata',
+		get: () => s.orchestrationXMetadataRoot,
+		set: (v) => { s.orchestrationXMetadataRoot = v.trim() || '_x_metadata'; },
+		suggest: (el) => { new FolderSuggest(tab.app, el); },
+	}, save);
+
+	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(ingestionGroup, {
+		name: 'Auto-discover X links in clipper inbox',
+		desc: 'When on, clipping or editing a note under the clipper inbox enqueues an x_post_discover job for it, which fetches metadata for any X links it finds. This only covers new clips — for notes already in the vault, run "Orchestrator: link scan" first, then use the X posts section\'s "Backfill from registry" button (backfill only covers link-registry records the scan has already found).',
+		get: () => s.ingestionXAutoDiscoverEnabled === true,
+		set: (v) => { s.ingestionXAutoDiscoverEnabled = v; },
+	}, save);
 }

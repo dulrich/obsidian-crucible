@@ -20,7 +20,8 @@ export type SectionId =
 	| 'youtubeWithoutMetadata'
 	| 'channelControl'
 	| 'orphanedAttachments'
-	| 'missingAttachments';
+	| 'missingAttachments'
+	| 'xPosts';
 
 export interface SortState {
 	column: string;
@@ -191,4 +192,18 @@ export interface MissingRefRow {
 	note: TFile;
 	link: string;
 	repairable: boolean;
+}
+
+// One row per X status, merged from the link registry (pending/candidate set) and
+// materialized `_x_metadata` notes (both live posts and tombstones) — see
+// computeXPostRows (../data/xPosts.ts) for the merge rules.
+export interface XPostRow {
+	statusId: string;
+	url: string;
+	author: string | null;
+	state: 'materialized' | 'unavailable' | 'pending';
+	sourceCount: number;
+	// The materialized/tombstone note's TFile, when one exists — null for a
+	// `pending` row (registry record with nothing fetched yet).
+	metadataFile: TFile | null;
 }
