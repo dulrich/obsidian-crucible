@@ -22,6 +22,7 @@ const TRIGGER_WORKFLOW_LABELS: Partial<Record<JobType, string>> = {
 	youtube_metadata_fetch: 'Fetch YouTube metadata',
 	x_metadata_fetch: 'Fetch X post metadata',
 	x_post_discover: 'Discover X post links',
+	x_metadata_backfill: 'Backfill X posts from link registry',
 };
 
 const TRIGGER_EVENT_LABELS: Record<TriggerEvent, string> = {

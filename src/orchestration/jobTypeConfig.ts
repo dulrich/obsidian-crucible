@@ -375,3 +375,16 @@ export function xMetadataFetchJobConfig(): JobTypeConfig {
 export function xPostDiscoverJobConfig(): JobTypeConfig {
 	return durableJobConfig((p) => (typeof p.targetPath === 'string' && p.targetPath ? `note:${p.targetPath}` : ''));
 }
+
+// Registry-backfill fan-out: walks the link registry and enqueues x_metadata_fetch
+// per not-yet-materialized status. Fixed dedupe key (there's only ever one backfill
+// sweep in flight) and no `services` — like image-describe-backfill, it only reads
+// the vault and enqueues; it never talks to the oEmbed endpoint itself, so it must
+// always be runnable even while that service is unhealthy.
+export function xMetadataBackfillJobConfig(): JobTypeConfig {
+	return {
+		...durableJobConfig(() => 'x-metadata-backfill'),
+		maxParallelFixed: 'One backfill fan-out at a time: this job only enqueues x_metadata_fetch jobs, and two '
+			+ 'concurrent fan-outs would double the enqueue count for exactly the same work.',
+	};
+}

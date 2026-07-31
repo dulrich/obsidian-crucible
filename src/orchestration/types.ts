@@ -20,6 +20,7 @@ export type JobType =
 	| 'youtube_channel_enrich_sweep'
 	| 'x_metadata_fetch'
 	| 'x_post_discover'
+	| 'x_metadata_backfill'
 	| 'command_run'
 	| 'chain_run'
 	| 'image_describe_note'

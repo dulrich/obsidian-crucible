@@ -71,6 +71,7 @@ export function registerInternalCommands(plugin: CruciblePlugin): void {
 		return true;
 	}, { mutating: false, lockTarget: 'none' });
 	register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await fetchYoutubeMetadataForActiveNote(plugin, tf));
+	register('x-discover-post-links', async (_a, _p, _e, tf) => await discoverXPostLinksForActiveNote(plugin, tf), { mutating: false, lockTarget: 'none' });
 	register('youtube-ignore-video', async (args, _p, _e, tf) => await ignoreYoutubeVideoCommand(plugin, args, tf), {
 		lockTarget: 'none',
 		schema: [
@@ -323,6 +324,23 @@ export async function fetchYoutubeMetadataForActiveNote(plugin: CruciblePlugin, 
 		new Notice(`YouTube fetch failed: ${message}`);
 		return false;
 	}
+}
+
+// Enqueues an `x_post_discover` pass for `targetFile` (defaults to the active
+// note). High/user priority: an explicit command invocation, unlike the
+// `x-discover-on-clip` founding trigger's background lane, is the user asking
+// for it now. Returns whether a note was found and the job was enqueued —
+// doesn't itself mutate the note (the discover workflow does its own reads and
+// enqueues asynchronously), so this is safe to run without the note lock.
+export async function discoverXPostLinksForActiveNote(plugin: CruciblePlugin, targetFile?: TFile): Promise<boolean> {
+	const file = targetFile ?? plugin.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+	if (!file) {
+		new Notice('No active note');
+		return false;
+	}
+	await plugin.orchestrator.enqueue('x_post_discover', { targetPath: file.path }, { priority: 'high', lane: 'user' });
+	new Notice(`Queued X post-link discovery for ${file.basename}`);
+	return true;
 }
 
 function emitMetadataEnriched(plugin: CruciblePlugin, videoId: string, metadataPath: string, sourceFile?: TFile): void {
