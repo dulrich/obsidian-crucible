@@ -53,6 +53,14 @@ export const SERVICE_YOUTUBE_API = 'youtube-api';
  * second dependency.
  */
 export const SERVICE_IMAGE_DESCRIPTION_PROVIDER = 'image-description-provider';
+/**
+ * xm-1: the unauthenticated X/Twitter oEmbed endpoint (`publish.x.com/oembed`) used
+ * to materialize X post metadata notes. Only a transport/service-level failure
+ * (rate-limited, server-error, refused) reports into this breaker — a single dead
+ * post (404/403, `XPostUnavailableError`) is a per-post outcome, not an outage, and
+ * must never open it (mirror of the no-api-key rule above; see `utils/xApi.ts`).
+ */
+export const SERVICE_X_OEMBED: ServiceId = 'x-oembed';
 
 /**
  * `closed` = healthy, claim freely. `open` = do not claim. `half-open` = the open

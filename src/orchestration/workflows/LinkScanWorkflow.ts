@@ -110,6 +110,10 @@ export class LinkScanWorkflow implements Workflow {
 					const current = fm['yt-video-id'];
 					if (typeof current !== 'string' || !current) fm['yt-video-id'] = entry.canon.youtubeVideoId;
 				}
+				if (entry.canon.xStatusId) {
+					const current = fm['x-status-id'];
+					if (typeof current !== 'string' || !current) fm['x-status-id'] = entry.canon.xStatusId;
+				}
 				if (entry.canon.trackedSource) {
 					if (fm['tracked_source'] === false || fm['tracked_source'] === undefined || fm['tracked_source'] === null) {
 						fm['tracked_source'] = 'candidate';
@@ -140,6 +144,7 @@ export class LinkScanWorkflow implements Workflow {
 			fm['referred_material'] = null;
 			fm['decision_reason'] = null;
 			fm['yt-video-id'] = entry.canon.youtubeVideoId ?? null;
+			fm['x-status-id'] = entry.canon.xStatusId ?? null;
 			if (entry.canon.trackedSource) {
 				fm['tracked_source'] = 'candidate';
 				fm['tracked_source_type'] = entry.canon.trackedSource.type;
@@ -222,4 +227,5 @@ function ensureNullableKeys(fm: Record<string, unknown>): void {
 	if (!('tracked_source' in fm)) fm['tracked_source'] = false;
 	if (!('tracked_source_type' in fm)) fm['tracked_source_type'] = null;
 	if (!('yt-video-id' in fm)) fm['yt-video-id'] = null;
+	if (!('x-status-id' in fm)) fm['x-status-id'] = null;
 }
