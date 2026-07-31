@@ -181,3 +181,38 @@ test('computeMissingAttachmentRows: repairable is false when no safe repair targ
 	assert.equal(rows.length, 1);
 	assert.equal(rows[0].repairable, false);
 });
+
+// WP-VF-2d: `repairable` is computed via planLocalAttachmentRepair, which now recovers a
+// truncated (spliced) broken basename via a unique prefix match — this row's repairable
+// flag must follow that automatically, with no changes needed in this scan module itself.
+test('computeMissingAttachmentRows: repairable is true for a truncated ref that uniquely prefix-matches a real managed attachment', () => {
+	const noteD = new FakeFile('notes/d.md');
+	const notes = new Map([
+		['notes/d.md', { file: noteD, cache: { embeds: [{ link: 'somewhere/abcdef12_MD5.pn', original: '' }], links: [] } }],
+	]);
+	const app = makeApp({ notes, resolvedDests: new Map(), files: ['attachments/d/abcdef1234567890_MD5.png'] });
+	const localizer = { attachmentFolderForNote: () => 'attachments/d' };
+
+	const rows = computeMissingAttachmentRows(app, localizer);
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].repairable, true, 'the 8-char hash prefix uniquely identifies the real (untruncated) attachment');
+});
+
+// A ref that also carries `_MD5.ext` shape but shares its short prefix with two vault
+// candidates must still report unrepairable — ambiguity does not become a guess.
+test('computeMissingAttachmentRows: repairable stays false when a truncated ref prefix-matches more than one candidate', () => {
+	const noteE = new FakeFile('notes/e.md');
+	const notes = new Map([
+		['notes/e.md', { file: noteE, cache: { embeds: [{ link: 'somewhere/abcdef12_MD5.pn', original: '' }], links: [] } }],
+	]);
+	const app = makeApp({
+		notes,
+		resolvedDests: new Map(),
+		files: ['attachments/e/abcdef1234567890_MD5.png', 'attachments/e2/abcdef12ffffffffff_MD5.png'],
+	});
+	const localizer = { attachmentFolderForNote: () => 'attachments/e' };
+
+	const rows = computeMissingAttachmentRows(app, localizer);
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0].repairable, false);
+});
