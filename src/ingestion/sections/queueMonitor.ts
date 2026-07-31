@@ -139,6 +139,9 @@ function jobTitle(job: OrchestrationJob): string {
 		// the memory queue used to carry `display` fields for exactly this, and the row
 		// would otherwise read as a bare job id where it used to read as a video title.
 		case 'youtube_metadata_fetch': return youtubeMetadataTitle(job);
+		case 'x_metadata_fetch': return xMetadataTitle(job);
+		case 'x_post_discover': return typeof job.params?.targetPath === 'string' ? `X link discovery: ${job.params.targetPath.split('/').pop()}` : 'X link discovery';
+		case 'x_metadata_backfill': return 'X metadata backfill';
 		case 'image_describe_note': return typeof job.params?.targetPath === 'string' ? `Image descriptions: ${job.params.targetPath.split('/').pop()}` : 'Image descriptions';
 		case 'image_describe_backfill': return 'Image description backfill';
 		case 'image_describe_batch': return imageDescribeBatchTitle(job);
@@ -155,6 +158,11 @@ function youtubeMetadataTitle(job: OrchestrationJob): string {
 	if (title) return title;
 	const videoId = typeof job.params?.videoId === 'string' ? job.params.videoId : '';
 	return videoId || job.id;
+}
+
+function xMetadataTitle(job: OrchestrationJob): string {
+	const statusId = typeof job.params?.statusId === 'string' ? job.params.statusId : '';
+	return statusId ? `X post ${statusId}` : job.id;
 }
 
 function imageDescribeBatchTitle(job: OrchestrationJob): string {

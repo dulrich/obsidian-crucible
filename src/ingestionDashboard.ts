@@ -23,6 +23,8 @@ import { renderEnqueueAllMetadataButton, renderYoutubeNoMetadata } from './inges
 import { createControlCentersSection, type ControlCentersSection } from './ingestion/sections/controlCenters';
 import { createOrphanedAttachmentsSection, type OrphanedAttachmentsSection } from './ingestion/sections/orphanedAttachments';
 import { createMissingAttachmentsSection, type MissingAttachmentsSection } from './ingestion/sections/missingAttachments';
+import { createXPostsSection, type XPostsSection } from './ingestion/sections/xPosts';
+import { xMetadataRoot } from './orchestration/utils/xApi';
 import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ignored';
 import { consumeSelfRefreshedEcho } from './ingestion/render/echoSuppress';
 import { minIntervalGate, refreshWithScrollPreserved } from './ingestion/render/refresh';
@@ -67,7 +69,7 @@ export class IngestionDashboardUI {
 	]);
 	private static readonly SCAN_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
 		'uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments',
-		'missingAttachments', 'youtubeWithoutMetadata', 'queueMonitor',
+		'missingAttachments', 'youtubeWithoutMetadata', 'queueMonitor', 'xPosts',
 	]);
 	// Two cadence-classed gates, reusing the same tested minIntervalGate
 	// primitive the pre-P6 code already relied on for youtubeWithoutMetadata
@@ -94,6 +96,7 @@ export class IngestionDashboardUI {
 	private readonly controlCenters: ControlCentersSection;
 	private readonly orphanedAttachments: OrphanedAttachmentsSection;
 	private readonly missingAttachments: MissingAttachmentsSection;
+	private readonly xPosts: XPostsSection;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly container: HTMLElement) {
 		this.app = plugin.app;
@@ -117,6 +120,7 @@ export class IngestionDashboardUI {
 		this.controlCenters = createControlCentersSection(this.host);
 		this.orphanedAttachments = createOrphanedAttachmentsSection(this.host);
 		this.missingAttachments = createMissingAttachmentsSection(this.host);
+		this.xPosts = createXPostsSection(this.host);
 	}
 
 	mount(): void {
@@ -170,6 +174,12 @@ export class IngestionDashboardUI {
 			'Missing localized attachments',
 			'Notes whose …_MD5.ext embeds or links point at a file that no longer exists.',
 			(heading) => this.missingAttachments.renderRepairAllButton(heading),
+		);
+		this.buildSection(
+			'xPosts',
+			'X posts',
+			'X statuses seen in the link registry or already materialized as _x_metadata notes.',
+			(heading) => this.xPosts.renderBackfillButton(heading),
 		);
 
 		this.registerListeners();
@@ -301,6 +311,8 @@ export class IngestionDashboardUI {
 			if (ytRoot && path.startsWith(`${ytRoot}/`)) this.markDirty('uncapturedVideos');
 			const blogRoot = blogMetadataRoot(this.plugin);
 			if (blogRoot && path.startsWith(`${blogRoot}/`)) this.markDirty('blogControl');
+			const xRoot = xMetadataRoot(this.plugin);
+			if (xRoot && path.startsWith(`${xRoot}/`)) this.markDirty('xPosts');
 
 			if (reason === 'structural') {
 				// A note/attachment appeared, vanished, or moved — recompute the
@@ -312,6 +324,11 @@ export class IngestionDashboardUI {
 				this.markDirty('youtubeWithoutMetadata');
 				this.markDirty('orphanedAttachments');
 				this.markDirty('missingAttachments');
+				// Registry paths (under _crucible/link_registry) have no dedicated
+				// path-prefix branch above — a new link-record note fans out through
+				// this unconditional structural branch instead, same as every other
+				// scan section here.
+				this.markDirty('xPosts');
 				return;
 			}
 
@@ -330,11 +347,14 @@ export class IngestionDashboardUI {
 			const prev = this.relevantSignatures.get(path);
 			this.relevantSignatures.set(path, next);
 			if (prev && prev.fm !== next.fm) {
-				// source/post-id/yt-video-id/yt-metadata drive the uncaptured + no-metadata lists.
+				// source/post-id/yt-video-id/yt-metadata drive the uncaptured + no-metadata lists;
+				// x-metadata/x-status-id drive the X posts list (a link record gaining/losing its
+				// x-status-id, or a source note gaining its x-metadata stamp).
 				this.markDirty('uncapturedPosts');
 				this.markDirty('uncapturedVideos');
 				this.markDirty('blogControl');
 				this.markDirty('youtubeWithoutMetadata');
+				this.markDirty('xPosts');
 			}
 			if (prev && prev.links !== next.links) {
 				// The set of referenced attachments drives orphan status, in both
@@ -372,6 +392,7 @@ export class IngestionDashboardUI {
 				else { this.markDirty('youtubeIntake'); this.markDirty('uncapturedVideos'); }
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => this.markDirty('uncapturedVideos')));
+			this.disposers.push(bus.on('x-metadata-enriched', () => this.markDirty('xPosts')));
 			// thq WP-8: the separate 'enrichment-queue-updated' listener is gone with the
 			// memory queue that emitted it. Nothing is lost — metadata fetches are ordinary
 			// jobs now, so they emit 'orchestration-queue-updated', and that listener
@@ -394,7 +415,7 @@ export class IngestionDashboardUI {
 		if (!(file instanceof TFile)) return { fm: '', links: '' };
 		const cache = this.app.metadataCache.getFileCache(file);
 		const fm = cache?.frontmatter ?? {};
-		const fmSig = JSON.stringify([fm.source, fm.blog, fm['post-id'], fm['yt-video-id'], fm['yt-metadata']]);
+		const fmSig = JSON.stringify([fm.source, fm.blog, fm['post-id'], fm['yt-video-id'], fm['yt-metadata'], fm['x-metadata'], fm['x-status-id']]);
 		const links = [
 			...(cache?.embeds ?? []).map(e => e.link),
 			...(cache?.links ?? []).map(l => l.link),
@@ -501,6 +522,7 @@ export class IngestionDashboardUI {
 			'channelControl',
 			'orphanedAttachments',
 			'missingAttachments',
+			'xPosts',
 		];
 		for (const id of ids) await this.refresh(id);
 	}
@@ -530,6 +552,7 @@ export class IngestionDashboardUI {
 			case 'channelControl': return this.controlCenters.renderChannelControl(body, ctx);
 			case 'orphanedAttachments': return this.orphanedAttachments.render(body, ctx);
 			case 'missingAttachments': return this.missingAttachments.render(body, ctx);
+			case 'xPosts': return this.xPosts.render(body, ctx);
 		}
 	}
 }
