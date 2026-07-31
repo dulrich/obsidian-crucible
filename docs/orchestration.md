@@ -34,7 +34,7 @@ Configured workflows include:
 
 - Daily Brief Lite: fetches FX rates and weather and injects them into today's daily note.
 - Transcript Refine: runs an AI chain against a transcript note.
-- YouTube Tracker: polls configured YouTube RSS feeds and writes intake notes.
+- YouTube Tracker: polls each configured channel's uploads via the YouTube Data API (requires the API key; 1 quota unit per channel per poll) and writes intake notes.
 - YouTube Tracker Consolidation: rebuilds missing-video intake from prior tracker runs.
 - Blogs Tracker: polls configured RSS feeds and writes intake notes.
 - Blogs Tracker Consolidation: rebuilds missing-post intake from prior tracker runs.

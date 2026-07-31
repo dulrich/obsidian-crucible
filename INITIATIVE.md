@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[youtube-data-api-swap-and-round2-followups]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 20
