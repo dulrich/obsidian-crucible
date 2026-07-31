@@ -639,7 +639,8 @@ If your plugin does not need CSS, delete this file.
 .crucible-ingestion-refresh,
 .crucible-ingestion-enqueue-intake,
 .crucible-ingestion-cleanup-all,
-.crucible-ingestion-repair-all {
+.crucible-ingestion-repair-all,
+.crucible-ingestion-backfill-x {
   flex: 0 0 auto;
 }
 
