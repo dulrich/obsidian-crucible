@@ -46,6 +46,25 @@ export class SearchEmbeddingUnavailableError extends Error {
 }
 
 /**
+ * WP-SS1: thrown by `SearchServiceClient.search()` when the request was aborted — either an
+ * externally-supplied `AbortSignal` fired (the caller superseded or closed it) or the client's
+ * own interactive timeout fired and chose to abort rather than merely abandon the request.
+ *
+ * Deliberately NOT a `SearchServiceUnavailableError` subclass or kind: every caller that reads
+ * `instanceof SearchServiceUnavailableError` (`CompanionAvailabilityGate`,
+ * `SearchIndexWorkflow.runSearchWorkflow`) does so specifically to treat the companion as
+ * unreachable and defer/retry — an abort is not evidence of that, and must never latch the
+ * availability gate or count toward any failure/unhealthy counter. `SearchModal` also relies on
+ * this being a distinct type so a superseded search never surfaces a "Search failed" Notice.
+ */
+export class SearchAbortedError extends Error {
+	constructor(message = 'Search request aborted') {
+		super(message);
+		this.name = 'SearchAbortedError';
+	}
+}
+
+/**
  * The embedder answered, but with the wrong vector width — either disagreeing with the model's
  * configured `embeddingDimensions`, or drifting between sub-batches of one operation.
  *
