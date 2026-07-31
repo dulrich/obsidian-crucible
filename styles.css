@@ -913,6 +913,20 @@ If your plugin does not need CSS, delete this file.
   display: none;
 }
 
+/* Queue monitor's whole-queue stats pills: same gapped-row shape as the
+   service-health row above it, hidden while orchestration is unavailable
+   (queueStats answers null and the row stays empty). */
+.crucible-queue-stats-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0 0.75rem 0.5rem;
+}
+
+.crucible-queue-stats-row:empty {
+  display: none;
+}
+
 /* The pinned-concurrency pill states its reason in a tooltip, so it takes the help
    cursor rather than looking inert. */
 .crucible-queue-type-cell .crucible-pill {

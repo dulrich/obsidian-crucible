@@ -337,7 +337,7 @@ test('STRUCTURAL: SectionContext.refresh is built as the scroll-preserving wrapp
 	const queueMonitorSrc = readFileSync('src/ingestion/sections/queueMonitor.ts', 'utf8');
 	assert.match(
 		queueMonitorSrc,
-		/refresh: \(\) => refreshWithScrollPreserved\(body, \(\) => renderQueueMonitor\(host, body, ctx\)\),/,
+		/refresh: \(\) => refreshWithScrollPreserved\(body, \(\) => renderQueueMonitor\(host, body, ctx, statsRow\)\),/,
 		'queueMonitor.ts must wrap its ctx.refresh the same way',
 	);
 	const queueControlsSrc = readFileSync('src/ingestion/sections/queueControls.ts', 'utf8');

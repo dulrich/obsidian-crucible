@@ -216,6 +216,25 @@ export class Orchestrator {
 	}
 
 	/**
+	 * Whole-queue bucket counts — every status, every type — the queue monitor's
+	 * stats row and the in-app answer to "what's in jobs.sqlite" that used to
+	 * require the sqlite3 CLI or the Scan-queue notice. Five indexed COUNTs on the
+	 * shared store (cheap: `count` hits the (status) index). Null while
+	 * orchestration is unavailable (no type registered / DB unopenable), which the
+	 * caller renders as nothing rather than a row of zeros.
+	 */
+	queueStats(): Record<JobStatus, number> | null {
+		if (!this.dbStore) return null;
+		return {
+			queued: this.dbStore.count('queued'),
+			running: this.dbStore.count('running'),
+			done: this.dbStore.count('done'),
+			failed: this.dbStore.count('failed'),
+			cancelled: this.dbStore.count('cancelled'),
+		};
+	}
+
+	/**
 	 * Progress line for one running job — replaces `SearchJobProgress`'s own scan of
 	 * `running/` for its TFile (`SearchIndexWorkflow.ts`). Dispatches to the job's own
 	 * type's backend, which writes its own row (one indexed UPDATE) and emits its own
