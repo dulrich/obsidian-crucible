@@ -35,7 +35,12 @@ export class YoutubeChannelEnrichWorkflow implements Workflow {
 			case 'no-channel-id':
 				return { status: 'failed', error: `No channel id for ${channelId}` };
 			case 'no-api-key':
-				return { status: 'failed', error: 'YouTube Data API key not configured.' };
+				// Typed signal for callers, mirroring YoutubeMetadataFetchWorkflow's shape.
+				// No behavior attaches to `failureReason` on the settle path anymore (the
+				// DbJobBackend auto-source latch that used to key off it was removed in
+				// WP-VF-3) — this exists so UI affordances and any future consumer can
+				// detect the config gap by type rather than parsing `error`.
+				return { status: 'failed', error: 'YouTube Data API key not configured.', failureReason: 'no-api-key' };
 		}
 	}
 }

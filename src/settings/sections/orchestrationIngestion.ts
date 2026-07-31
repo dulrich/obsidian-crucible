@@ -3,6 +3,8 @@ import { Setting } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { FolderSuggest } from "../../suggesters";
 import { bindToggle, bindSearch, bindNumber } from "../bind";
+import { addWarningIcon } from "../shared";
+import { isYoutubeApiKeyRegistered, YOUTUBE_API_KEY_MISSING_HINT } from "../../ingestion/render/apiKeyAffordance";
 
 /**
  * WP-rem-R4 (F4) — the "Ingestion dashboard" settings panel, split out of `orchestration.ts`.
@@ -35,7 +37,7 @@ export function renderIngestionDashboardSettings(tab: CrucibleSettingTab, contai
 	}, save);
 
 	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
-	bindToggle(ingestionGroup, {
+	const autoEnqueueSetting = bindToggle(ingestionGroup, {
 		name: 'Auto-enqueue YouTube metadata',
 		desc: 'When on, uncaptured videos (and captures that gain a yt-video-id) are automatically enqueued for metadata enrichment. This only ENQUEUES — whether those jobs execute is governed by the youtube_metadata_fetch auto-run in the dashboard Queue Configuration. Requires a configured API key.',
 		get: () => s.ingestionYoutubeAutoEnqueueEnabled === true,
@@ -47,6 +49,16 @@ export function renderIngestionDashboardSettings(tab: CrucibleSettingTab, contai
 			await tab.plugin.setEnrichmentAutoEnqueue(s.ingestionYoutubeAutoEnqueueEnabled === true);
 		},
 	}, save);
+	// WP-VF-3: the toggle stays operable when the key is missing — it's a
+	// preference, not the key — this only explains why auto-enqueue isn't
+	// actually enqueueing anything yet. Re-evaluated on every settings display(),
+	// so it clears the moment the key is configured.
+	if (!isYoutubeApiKeyRegistered(tab.plugin)) {
+		addWarningIcon(autoEnqueueSetting.nameEl, YOUTUBE_API_KEY_MISSING_HINT);
+		autoEnqueueSetting.addButton(btn => btn
+			.setButtonText('Configure…')
+			.onClick(() => tab.openToTab('orchestrator')));
+	}
 
 	ingestionGroup.createEl('hr', { cls: 'crucible-row-divider' });
 	bindNumber(ingestionGroup, {

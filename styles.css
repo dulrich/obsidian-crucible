@@ -830,6 +830,28 @@ If your plugin does not need CSS, delete this file.
   font-weight: normal;
 }
 
+/* WP-VF-3: the "Missing API key" affordance — a config gap, not an error
+   state, so muted hint copy rather than a status pill. Mirrors the search
+   rerank row's geometry (.crucible-search-rerank-hint/-configure): a muted
+   hint span plus a SEPARATE Configure… button, since a disabled action button
+   swallows clicks and can't carry the click affordance itself. This slot sits
+   inside a section heading (a flex row that already wraps), so it's an
+   inline-flex child rather than its own block row. */
+.crucible-apikey-affordance-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.crucible-apikey-hint {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.crucible-apikey-configure {
+  width: auto;
+}
+
 .crucible-queue-type-name {
   font-family: var(--font-monospace);
   overflow-wrap: anywhere;

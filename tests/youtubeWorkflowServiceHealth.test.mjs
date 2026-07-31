@@ -200,3 +200,19 @@ test('channel enrichment with no channelId stays job-level failed', async () => 
 	assert.equal(result.status, 'failed');
 	assert.equal(result.serviceUnhealthy, undefined);
 });
+
+// WP-VF-3: the channel workflow now stamps the same typed failureReason the
+// metadata-fetch workflow already did — no behavior attaches to it on the
+// settle path anymore (the DbJobBackend auto-source latch that read it was
+// removed), but it's the single detectable signal UI affordances key off.
+test('channel enrichment with no API key stays a job-level failed, stamped no-api-key', async () => {
+	const plugin = makePlugin({ apiKey: '' });
+	const result = await new YoutubeChannelEnrichWorkflow().run(
+		{ id: 'job-8', params: { channelId: 'chan1' } },
+		makeCtx(plugin),
+	);
+
+	assert.equal(result.status, 'failed');
+	assert.equal(result.failureReason, 'no-api-key');
+	assert.equal(result.serviceUnhealthy, undefined);
+});
