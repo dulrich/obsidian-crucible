@@ -6,12 +6,13 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import esbuild from 'esbuild';
 
-// SE WP-4: FeedTrackerWorkflow's all-feeds-failed branch (shared by YoutubeTrackerWorkflow
-// and BlogsTrackerWorkflow — see the class hierarchy at the bottom of
-// src/orchestration/workflows/FeedTrackerWorkflow.ts) must defer with
-// `serviceUnhealthy: { service: 'youtube-rss', ... }` for the YouTube tracker, but leave the
-// blogs tracker's identical branch as a plain job-level `failed` — blogs feeds span arbitrary
-// hosts with no single service identity to name (explicitly out of scope per the plan).
+// SE WP-4 (updated r2f-WP1 for the RSS->Data-API tracker swap): FeedTrackerWorkflow's
+// all-feeds-failed branch (shared by YoutubeTrackerWorkflow and BlogsTrackerWorkflow — see
+// the class hierarchy at the bottom of src/orchestration/workflows/FeedTrackerWorkflow.ts)
+// must defer with `serviceUnhealthy: { service: 'youtube-api', ... }` for the YouTube
+// tracker, but leave the blogs tracker's identical branch as a plain job-level `failed` —
+// blogs feeds span arbitrary hosts with no single service identity to name (explicitly out
+// of scope per the plan).
 //
 // This bundles the REAL FeedTrackerWorkflow/YoutubeTrackerWorkflow/BlogsTrackerWorkflow
 // classes (not a stand-in), and drives FeedTrackerWorkflow directly with a minimal custom
@@ -145,12 +146,12 @@ function makeSource(kind, fetchFeed) {
 	};
 }
 
-// ── YouTube: all-feeds-failed defers and names youtube-rss ─────────────────────────────────
+// ── YouTube: all-feeds-failed defers and names youtube-api ─────────────────────────────────
 
-test('YouTube all-feeds-failed defers with serviceUnhealthy naming youtube-rss', async () => {
+test('YouTube all-feeds-failed defers with serviceUnhealthy naming youtube-api', async () => {
 	const app = makeApp(REGISTRY_PATH);
 	const plugin = makePlugin(app);
-	const source = makeSource('youtube', async () => { throw new Error('getaddrinfo ENOTFOUND www.youtube.com'); });
+	const source = makeSource('youtube', async () => { throw new Error('getaddrinfo ENOTFOUND www.googleapis.com'); });
 	const workflow = new FeedTrackerWorkflow(source);
 
 	const result = await workflow.run({ id: 'job-1', params: {} }, makeCtx(plugin));
@@ -159,12 +160,30 @@ test('YouTube all-feeds-failed defers with serviceUnhealthy naming youtube-rss',
 	assert.equal(result.error, 'All 1 feeds failed to fetch.');
 	assert.equal(result.retryAfterMs, 30_000);
 	assert.deepEqual(result.serviceUnhealthy, {
-		service: 'youtube-rss',
+		service: 'youtube-api',
 		kind: 'server-error',
 		reason: 'All 1 feeds failed to fetch.',
 	});
 	// The intake note recording the failure still gets written — deferring the JOB must not
 	// mean losing the record of what was attempted.
+	assert.equal(result.outputPaths.length, 1);
+});
+
+// ── YouTube: an all-missing-key run fails plainly and never opens the breaker ───────────────
+
+test('YouTube all-feeds-failed with only missing-key errors fails plainly, no serviceUnhealthy', async () => {
+	const app = makeApp(REGISTRY_PATH);
+	const plugin = makePlugin(app);
+	const configError = 'YouTube Data API key not configured — set it in Settings → Orchestrator.';
+	const source = makeSource('youtube', async () => { throw new Error(configError); });
+	const workflow = new FeedTrackerWorkflow(source);
+
+	const result = await workflow.run({ id: 'job-3', params: {} }, makeCtx(plugin));
+
+	assert.equal(result.status, 'failed');
+	assert.equal(result.error, configError);
+	assert.equal(result.serviceUnhealthy, undefined);
+	assert.equal(result.retryAfterMs, undefined);
 	assert.equal(result.outputPaths.length, 1);
 });
 

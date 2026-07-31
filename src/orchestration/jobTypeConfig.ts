@@ -5,7 +5,6 @@ import {
 	SERVICE_SEARCH_COMPANION,
 	SERVICE_SEARCH_EMBEDDER,
 	SERVICE_YOUTUBE_API,
-	SERVICE_YOUTUBE_RSS,
 	type ServiceId,
 } from './serviceHealth';
 import { coerceVideoId } from './utils/youtubeApi';
@@ -154,10 +153,12 @@ export function youtubeChannelEnrichSweepJobConfig(): JobTypeConfig {
 	return { ...durableJobConfig(), services: [SERVICE_YOUTUBE_API] };
 }
 
-// The RSS tracker talks to YouTube's feed endpoints, NOT the Data API — a quota
-// exhaustion on one says nothing about the other, so they are separate service ids.
+// The tracker fetches each channel's uploads playlist via the Data API's
+// playlistItems.list (RSS is dead — see the orchestration AGENTS.md tracker entry),
+// the same upstream as metadata enrichment, so it deliberately shares the
+// 'youtube-api' service breaker: one upstream, one breaker.
 export function youtubeTrackerJobConfig(): JobTypeConfig {
-	return { ...durableJobConfig(), services: [SERVICE_YOUTUBE_RSS] };
+	return { ...durableJobConfig(), services: [SERVICE_YOUTUBE_API] };
 }
 
 // Durable so triggered command runs survive restarts. Dedupes on

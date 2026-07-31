@@ -40,8 +40,10 @@ export type ServiceId = string;
 
 export const SERVICE_SEARCH_COMPANION = 'search-companion';
 export const SERVICE_SEARCH_EMBEDDER = 'search-embedder';
+// Shared by both the metadata-enrichment fetch (videos.list/channels.list) and the
+// channel tracker (playlistItems.list, since the RSS->Data-API swap) — one upstream
+// (googleapis.com/youtube/v3), one breaker.
 export const SERVICE_YOUTUBE_API = 'youtube-api';
-export const SERVICE_YOUTUBE_RSS = 'youtube-rss';
 /**
  * idh-WP-2: the configured image-description vision model's inference endpoint (local router
  * or remote openai-compatible provider). Reported unhealthy by the image-describe infra breaker
