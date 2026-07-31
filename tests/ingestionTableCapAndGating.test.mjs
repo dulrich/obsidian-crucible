@@ -597,3 +597,131 @@ test('BEHAVIORAL: the button-state cache pattern skips the rebuild when state is
 	setIntakeButtonState(btn, 'running');
 	assert.equal(rebuilds, 3);
 });
+
+/* ---------------------------------------------- WP-VF-2c: STRUCTURAL "Repair all" wiring */
+//
+// missingAttachments.ts follows the Orphaned Attachments shape (createXSection factory
+// returning {render, renderXAllButton}, a row cache populated by render() and read by the
+// heading button) — same reasons as the rest of this file's STRUCTURAL block: it pulls in
+// the real 'obsidian' Notice plus render/section.ts + render/cells.ts, disproportionate to
+// stand up just for this wiring check. The aggregation ALGORITHM itself (dedupe by note,
+// per-note failure tolerance, totals) is covered BEHAVIORALLY below via a lifted-shape
+// reimplementation driven with fake repairNote outcomes.
+
+const missingAttachmentsSrc = readFileSync('src/ingestion/sections/missingAttachments.ts', 'utf8');
+
+test('STRUCTURAL: renderRepairAllButton repairs once per DISTINCT note (not once per row), silently, tolerating a per-note failure', () => {
+	const fnStart = missingAttachmentsSrc.indexOf('function renderRepairAllButton(heading: HTMLElement): void {');
+	assert.ok(fnStart >= 0, 'renderRepairAllButton not found');
+	const fnEnd = missingAttachmentsSrc.indexOf('\n\t}\n', fnStart);
+	const body = missingAttachmentsSrc.slice(fnStart, fnEnd);
+
+	assert.ok(body.includes('r.repairable'), 'must filter to only repairable rows before doing any work');
+	assert.match(body, /new Map\(rows\.map\(r => \[r\.note\.path, r\.note\]\)\)/, 'must dedupe rows down to one entry per distinct note.path — repairNote already repairs every broken ref in a note, so calling it once per ROW would redundantly re-run the same note-wide pass');
+	assert.match(body, /repairNote\(note, true\)/, 'the bulk sweep must call repairNote with silent=true — a per-note Notice for every one of dozens of notes would spam');
+	assert.match(body, /try \{[\s\S]*?repairNote\(note, true\)[\s\S]*?\} catch \(e\) \{[\s\S]*?logWarn\(/, 'a throw from one note\'s repairNote must be caught (not propagate) so the sweep continues to the remaining notes');
+	assert.ok(body.includes("host.refresh('missingAttachments')"), 'must refresh the section after the sweep so repaired rows drop out of the table');
+});
+
+test('STRUCTURAL: createMissingAttachmentsSection is wired into ingestionDashboard.ts the same way createOrphanedAttachmentsSection is', () => {
+	assert.match(
+		dashboardSrc,
+		/this\.missingAttachments = createMissingAttachmentsSection\(this\.host\);/,
+		'the missingAttachments field must be built via the factory, mirroring orphanedAttachments',
+	);
+	assert.match(
+		dashboardSrc,
+		/\(heading\) => this\.missingAttachments\.renderRepairAllButton\(heading\)/,
+		'the missingAttachments buildSection() call must wire the Repair-all heading button, mirroring Cleanup all',
+	);
+	assert.match(
+		dashboardSrc,
+		/case 'missingAttachments': return this\.missingAttachments\.render\(body, ctx\);/,
+		'the renderSection switch must delegate to the section object\'s render(), not a bare function import',
+	);
+});
+
+test('BEHAVIORAL: the Repair-all aggregation (lifted shape) dedupes by note, sums outcomes, and tolerates a per-note failure', async () => {
+	// Mirrors renderRepairAllButton's actual shape: filter repairable -> dedupe to distinct
+	// notes -> repairNote(note, true) per note inside try/catch -> aggregate.
+	async function repairAll(rows, repairNote) {
+		const repairableRows = rows.filter(r => r.repairable);
+		const notes = Array.from(new Map(repairableRows.map(r => [r.note.path, r.note])).values());
+		let totalRepaired = 0;
+		let totalUnrepairable = 0;
+		let failedNotes = 0;
+		const calledFor = [];
+		for (const note of notes) {
+			calledFor.push(note.path);
+			try {
+				const result = await repairNote(note, true);
+				if (!result) { failedNotes++; continue; }
+				totalRepaired += result.repaired;
+				totalUnrepairable += result.unrepairable;
+			} catch {
+				failedNotes++;
+			}
+		}
+		return { totalRepaired, totalUnrepairable, failedNotes, notesTouched: notes.length, calledFor };
+	}
+
+	const noteA = { path: 'a.md' };
+	const noteB = { path: 'b.md' };
+	const noteC = { path: 'c.md' };
+	const rows = [
+		{ note: noteA, link: 'x_MD5.png', repairable: true },
+		{ note: noteA, link: 'y_MD5.png', repairable: true }, // second broken ref, SAME note as row 1
+		{ note: noteB, link: 'z_MD5.png', repairable: true },
+		{ note: noteC, link: 'w_MD5.png', repairable: false }, // not repairable -> excluded entirely
+	];
+
+	const outcomes = {
+		'a.md': { repaired: 2, unrepairable: 0 },
+		'b.md': null, // simulates repairNote returning null (internal failure)
+	};
+	const repairNote = async (note) => {
+		if (note.path === 'b.md') return outcomes['b.md'];
+		return outcomes[note.path];
+	};
+
+	const result = await repairAll(rows, repairNote);
+	assert.deepEqual(result.calledFor, ['a.md', 'b.md'], 'exactly one call per distinct repairable note — note A is called ONCE despite carrying two broken refs, and note C (unrepairable) is never called');
+	assert.equal(result.notesTouched, 2);
+	assert.equal(result.totalRepaired, 2);
+	assert.equal(result.totalUnrepairable, 0);
+	assert.equal(result.failedNotes, 1, 'note B\'s null return counts as one failed note');
+});
+
+test('BEHAVIORAL: a thrown repairNote does not abort the sweep — the remaining notes still get their turn', async () => {
+	async function repairAll(rows, repairNote) {
+		const notes = Array.from(new Map(rows.map(r => [r.note.path, r.note])).values());
+		let totalRepaired = 0;
+		let failedNotes = 0;
+		const calledFor = [];
+		for (const note of notes) {
+			calledFor.push(note.path);
+			try {
+				const result = await repairNote(note);
+				totalRepaired += result.repaired;
+			} catch {
+				failedNotes++;
+			}
+		}
+		return { totalRepaired, failedNotes, calledFor };
+	}
+
+	const rows = [
+		{ note: { path: 'a.md' } },
+		{ note: { path: 'b.md' } },
+		{ note: { path: 'c.md' } },
+	];
+	const repairNote = async (note) => {
+		if (note.path === 'b.md') throw new Error('boom');
+		return { repaired: 1, unrepairable: 0 };
+	};
+
+	const result = await repairAll(rows, repairNote);
+	assert.deepEqual(result.calledFor, ['a.md', 'b.md', 'c.md'], 'note C must still be attempted after note B throws');
+	assert.equal(result.totalRepaired, 2, 'the two notes that succeeded (a, c) both still contributed');
+	assert.equal(result.failedNotes, 1);
+});

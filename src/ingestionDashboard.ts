@@ -22,7 +22,7 @@ import { createUncapturedVideosSection, type UncapturedVideosSection } from './i
 import { renderEnqueueAllMetadataButton, renderYoutubeNoMetadata } from './ingestion/sections/youtubeWithoutMetadata';
 import { createControlCentersSection, type ControlCentersSection } from './ingestion/sections/controlCenters';
 import { createOrphanedAttachmentsSection, type OrphanedAttachmentsSection } from './ingestion/sections/orphanedAttachments';
-import { renderMissingAttachments } from './ingestion/sections/missingAttachments';
+import { createMissingAttachmentsSection, type MissingAttachmentsSection } from './ingestion/sections/missingAttachments';
 import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ignored';
 import { consumeSelfRefreshedEcho } from './ingestion/render/echoSuppress';
 import { minIntervalGate, refreshWithScrollPreserved } from './ingestion/render/refresh';
@@ -93,6 +93,7 @@ export class IngestionDashboardUI {
 	private readonly uncapturedVideosSection: UncapturedVideosSection;
 	private readonly controlCenters: ControlCentersSection;
 	private readonly orphanedAttachments: OrphanedAttachmentsSection;
+	private readonly missingAttachments: MissingAttachmentsSection;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly container: HTMLElement) {
 		this.app = plugin.app;
@@ -115,6 +116,7 @@ export class IngestionDashboardUI {
 		this.uncapturedVideosSection = createUncapturedVideosSection(this.host);
 		this.controlCenters = createControlCentersSection(this.host);
 		this.orphanedAttachments = createOrphanedAttachmentsSection(this.host);
+		this.missingAttachments = createMissingAttachmentsSection(this.host);
 	}
 
 	mount(): void {
@@ -167,6 +169,7 @@ export class IngestionDashboardUI {
 			'missingAttachments',
 			'Missing localized attachments',
 			'Notes whose …_MD5.ext embeds or links point at a file that no longer exists.',
+			(heading) => this.missingAttachments.renderRepairAllButton(heading),
 		);
 
 		this.registerListeners();
@@ -526,7 +529,7 @@ export class IngestionDashboardUI {
 			case 'youtubeWithoutMetadata': return renderYoutubeNoMetadata(this.host, body, ctx);
 			case 'channelControl': return this.controlCenters.renderChannelControl(body, ctx);
 			case 'orphanedAttachments': return this.orphanedAttachments.render(body, ctx);
-			case 'missingAttachments': return renderMissingAttachments(this.host, body, ctx);
+			case 'missingAttachments': return this.missingAttachments.render(body, ctx);
 		}
 	}
 }

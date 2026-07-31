@@ -19,12 +19,25 @@ const REMOTE_MD_IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
 // from rendering that embed. Strip them (plus any trailing inline whitespace) on localize.
 const DATA_URI_IMAGE_RE = /!\[[^\]]*\]\(\s*data:image\/[^)]*\)[ \t]*/g;
 
-interface AttachmentMatch {
+export interface AttachmentMatch {
 	original: string;
 	link: string;
 	syntax: 'wiki' | 'md';
 	isRemote: boolean;
+	// True for `!`-prefixed embeds; false for plain links (`[[x]]` / `[text](x)`). Repair
+	// must preserve this — converting a broken link into an embed (or vice versa) changes
+	// how the note renders, not just where the ref points.
+	isEmbed: boolean;
+	// Only meaningful when !isEmbed: the link's alias/display text, so a repaired link
+	// keeps its original visible text instead of collapsing to the raw path.
+	displayText?: string;
 }
+
+// Reason a broken ref could not be repaired, surfaced to the debug log and (for the
+// bulk/remote cases) to callers deciding how to report outcomes. `remote-download-failed`
+// covers both "the download itself failed" and "the downloaded type isn't eligible" —
+// repairNote's remote branch only ever returns null for those two causes.
+export type AttachmentRepairFailureReason = 'missing' | 'ambiguous' | 'remote-download-failed';
 
 export interface AttachmentReplacement {
 	from: string;
@@ -84,20 +97,68 @@ export function repointAttachmentFolderPrefix(content: string, oldFolder: string
 	});
 }
 
-// Decide where a broken local attachment embed should now point. `brokenLink` is the embed's
-// (possibly %20-encoded) target that no longer resolves; we recover the file by basename — the
-// `<contenthash>_MD5.ext` name is content-derived. Prefer the note's expected attachment folder
-// (the exact inverse of the move-without-rewrite bug); otherwise accept a unique vault-wide match.
-// Returns the new vault path, or null when nothing safe can be chosen.
-export function planLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): string | null {
+// Minimum length of the portion of a broken basename BEFORE its `_MD5.<ext>` marker
+// ("the stem") required before prefix-recovery will even attempt a match. Default managed
+// names are `{{md5}}_MD5.{{ext}}` — a 32-hex-char content hash — so a splice that truncates
+// the ref (observed: half-copied names like `abc_MD5.web`) can still leave a recognizable
+// fragment of that hash. 8 hex characters is 32 bits of the hash (1-in-4-billion odds of
+// two unrelated attachments colliding on an 8-char prefix in any realistic vault), which is
+// enough to trust a *unique* prefix hit as the real file; below that, a broken ref carries
+// too little of the hash to distinguish "the truncated original" from "some other file that
+// happens to start the same way" — so it is left unrepairable (`missing`) rather than risk a
+// wrong match. This guard applies to the BROKEN ref's own stem, not the candidate's.
+export const PREFIX_REPAIR_MIN_STEM_LENGTH = 8;
+
+export interface LocalAttachmentRepairResolution {
+	target: string | null;
+	// null exactly when target is non-null ("ok" needs no explanation).
+	reason: 'missing' | 'ambiguous' | null;
+}
+
+// Decide where a broken local attachment ref should now point. `brokenLink` is the ref's
+// (possibly %20-encoded) target that no longer resolves; we recover the file by basename —
+// the `<contenthash>_MD5.ext` name is content-derived. Resolution proceeds in three tiers,
+// each accepting only an unambiguous result: (1) the note's expected attachment folder (the
+// exact inverse of the move-without-rewrite bug), (2) a unique exact-basename match anywhere
+// in the vault, (3) a unique PREFIX match against other managed (`..._MD5.ext`) basenames,
+// recovering refs truncated by a splice bug (see PREFIX_REPAIR_MIN_STEM_LENGTH). Pure and
+// side-effect-free; ambiguity at any tier falls through to the next, and exhausting all three
+// reports `missing` or `ambiguous` rather than guessing.
+export function resolveLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): LocalAttachmentRepairResolution {
 	let decoded = brokenLink.replace(/^<|>$/g, '');
 	try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is on malformed escapes */ }
 	const base = decoded.split('/').pop() ?? '';
-	if (!base) return null;
+	if (!base) return { target: null, reason: 'missing' };
+
 	const expected = expectedFolder ? `${expectedFolder}/${base}` : base;
-	if (vaultPaths.includes(expected)) return expected;
-	const byName = vaultPaths.filter(p => (p.split('/').pop() ?? p) === base);
-	return byName.length === 1 ? (byName[0] ?? null) : null;
+	if (vaultPaths.includes(expected)) return { target: expected, reason: null };
+
+	const exactMatches = vaultPaths.filter(p => (p.split('/').pop() ?? p) === base);
+	if (exactMatches.length === 1) return { target: exactMatches[0] ?? null, reason: null };
+	if (exactMatches.length > 1) return { target: null, reason: 'ambiguous' };
+
+	const stemMatch = /^(.*)_MD5\.[A-Za-z0-9]+$/.exec(base);
+	const stem = stemMatch ? (stemMatch[1] ?? '') : null;
+	if (stem !== null && stem.length >= PREFIX_REPAIR_MIN_STEM_LENGTH) {
+		const prefixMatches = vaultPaths.filter(p => {
+			const name = p.split('/').pop() ?? p;
+			const nameStemMatch = /^(.*)_MD5\.[A-Za-z0-9]+$/.exec(name);
+			const nameStem = nameStemMatch ? (nameStemMatch[1] ?? '') : null;
+			return nameStem !== null && nameStem.startsWith(stem);
+		});
+		if (prefixMatches.length === 1) return { target: prefixMatches[0] ?? null, reason: null };
+		if (prefixMatches.length > 1) return { target: null, reason: 'ambiguous' };
+	}
+
+	return { target: null, reason: 'missing' };
+}
+
+// Thin wrapper preserving the original pure, null-on-ambiguity contract for existing callers
+// that only need the target path (the scan's `repairable` computation, sourced from
+// data/missingAttachments.ts). `repairNote` calls resolveLocalAttachmentRepair directly so it
+// can report WHY a repair failed.
+export function planLocalAttachmentRepair(brokenLink: string, expectedFolder: string, vaultPaths: string[]): string | null {
+	return resolveLocalAttachmentRepair(brokenLink, expectedFolder, vaultPaths).target;
 }
 
 // True when any note other than `excludeNotePath` still links to `attachmentPath`.
@@ -129,6 +190,97 @@ export function stripDataUriImagePlaceholders(content: string): { content: strin
 		return '';
 	});
 	return { content: stripped, count };
+}
+
+// Format a newly-localized/repaired embed. Empty alt is deliberate: Obsidian interprets a
+// markdown image's alt text as a display size when it parses as a number (e.g. `![1](img.png)`
+// renders at 1px wide, effectively invisible). The localize "alt" is only a guessed filename
+// anyway, so dropping it avoids accidentally collapsing the image. Wiki embeds never carried alt.
+export function formatEmbed(syntax: 'wiki' | 'md', targetPath: string): string {
+	if (syntax === 'wiki') return `![[${targetPath}]]`;
+	return `![](${targetPath.replace(/ /g, '%20')})`;
+}
+
+// Format a non-embed link so a repair keeps it a link (not an embed) and keeps its original
+// visible text, unlike an embed's alt: a plain link's display text is user-authored prose
+// (e.g. "the source PDF"), not a guessed filename, so unlike formatEmbed it must be preserved.
+export function formatLink(syntax: 'wiki' | 'md', targetPath: string, displayText?: string): string {
+	if (syntax === 'wiki') return displayText ? `[[${targetPath}|${displayText}]]` : `[[${targetPath}]]`;
+	const text = displayText ?? (targetPath.split('/').pop() ?? targetPath);
+	return `[${text}](${targetPath.replace(/ /g, '%20')})`;
+}
+
+// Dispatch on the match's original ref kind so a repair/localize write never converts a link
+// into an embed or vice versa — only the target path (and, for links, nothing else) changes.
+export function formatRef(match: Pick<AttachmentMatch, 'syntax' | 'isEmbed' | 'displayText'>, targetPath: string): string {
+	return match.isEmbed ? formatEmbed(match.syntax, targetPath) : formatLink(match.syntax, targetPath, match.displayText);
+}
+
+// Duck-typed subset of Obsidian's CachedMetadata.embeds/links entries (Reference: link,
+// original, displayText?) — kept minimal so this can be driven directly in tests without an
+// 'obsidian' import.
+export interface AttachmentRefCacheEntry {
+	link?: string;
+	original?: string;
+	displayText?: string;
+}
+
+export interface AttachmentRefCache {
+	embeds?: AttachmentRefCacheEntry[];
+	links?: AttachmentRefCacheEntry[];
+}
+
+// Pure core of AttachmentLocalizer.parseAttachmentRefs: collects every embed AND every
+// managed-attachment link from a note's metadata cache. Embeds are always collected (an
+// attachment displayed inline is always something localize/repair should track). Links are
+// collected only when their decoded basename already looks like a managed (`..._MD5.ext`)
+// attachment — a broken NON-embed link to a managed attachment is exactly bug 1 (the
+// embeds/links repair asymmetry): the missing-attachments scan already counts these
+// (data/missingAttachments.ts), so repair must be able to see and fix them too. Links to
+// ordinary (not-yet-localized) files are deliberately left alone here, same as before this
+// fix — that's a different, unrelated localize decision this function has no opinion on.
+export function parseAttachmentRefsFromCache(cache: AttachmentRefCache | null | undefined, content: string): AttachmentMatch[] {
+	const results: AttachmentMatch[] = [];
+	const seen = new Set<string>();
+
+	if (cache?.embeds) {
+		for (const e of cache.embeds) {
+			if (!e.original || seen.has(e.original)) continue;
+			const link = e.link ?? '';
+			const isRemote = /^https?:\/\//i.test(link);
+			const syntax: 'wiki' | 'md' = e.original.startsWith('![[') ? 'wiki' : 'md';
+			results.push({ original: e.original, link, syntax, isRemote, isEmbed: true, displayText: e.displayText });
+			seen.add(e.original);
+		}
+	}
+
+	if (cache?.links) {
+		for (const l of cache.links) {
+			if (!l.original || seen.has(l.original)) continue;
+			const link = l.link ?? '';
+			const base = link.split('#')[0]?.split('|')[0] ?? '';
+			let decodedBase = base;
+			try { decodedBase = decodeURIComponent(base); } catch { /* leave as-is on malformed escapes */ }
+			const basename = decodedBase.split('/').pop() ?? '';
+			if (!basename || !MD5_NAME_RE.test(basename)) continue;
+			const isRemote = /^https?:\/\//i.test(link);
+			const syntax: 'wiki' | 'md' = l.original.startsWith('[[') ? 'wiki' : 'md';
+			results.push({ original: l.original, link, syntax, isRemote, isEmbed: false, displayText: l.displayText });
+			seen.add(l.original);
+		}
+	}
+
+	REMOTE_MD_IMAGE_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = REMOTE_MD_IMAGE_RE.exec(content)) !== null) {
+		const original = m[0];
+		const url = m[2];
+		if (!url || seen.has(original)) continue;
+		results.push({ original, link: url, syntax: 'md', isRemote: true, isEmbed: true });
+		seen.add(original);
+	}
+
+	return results;
 }
 
 export function md5HexForBytes(bytes: Uint8Array): string {
@@ -428,8 +580,13 @@ export class AttachmentLocalizer {
 	// bug). Refs that already resolve are left untouched; unrecoverable ones are reported.
 	async repairNote(file: TFile, silent: boolean = false): Promise<{ repaired: number; unrepairable: number } | null> {
 		// Repair honors the 'lint' scope, matching repairFolder: fixing broken local
-		// links is unrelated to the localization opt-out.
-		if (isPathExcluded(this.settings, file.path, 'lint')) return { repaired: 0, unrepairable: 0 };
+		// links is unrelated to the localization opt-out. This used to return silently —
+		// a Repair click on an excluded note looked identical to "nothing was broken".
+		// Bulk callers (repairFolder, Repair all) pass silent so this stays quiet at scale.
+		if (isPathExcluded(this.settings, file.path, 'lint')) {
+			if (!silent) new Notice(`"${file.basename}" is excluded from localize — repair skipped.`);
+			return { repaired: 0, unrepairable: 0 };
+		}
 		if (file.extension !== 'md') return { repaired: 0, unrepairable: 0 };
 
 		const spinner = silent ? null : new Notice(`Repairing attachment links in "${file.basename}"...`, 0);
@@ -446,18 +603,21 @@ export class AttachmentLocalizer {
 				for (const match of matches) {
 					if (this.app.metadataCache.getFirstLinkpathDest(match.link, file.path) instanceof TFile) continue;
 					let newRef: string | null = null;
+					let reason: AttachmentRepairFailureReason = 'missing';
 					if (match.isRemote) {
 						newRef = await this.processRemote(match, file);
+						if (!newRef) reason = 'remote-download-failed';
 					} else {
-						const target = planLocalAttachmentRepair(match.link, expectedFolder, vaultPaths);
-						if (target) newRef = this.formatEmbed(match.syntax, target);
+						const resolution = resolveLocalAttachmentRepair(match.link, expectedFolder, vaultPaths);
+						if (resolution.target) newRef = formatRef(match, resolution.target);
+						else reason = resolution.reason ?? 'missing';
 					}
 					if (newRef) {
 						if (newRef !== match.original) replacements.push({ from: match.original, to: newRef });
 						repaired++;
 					} else {
 						unrepairable++;
-						await this.debug(file, `repair: ${match.original} -> UNREPAIRABLE`);
+						await this.debug(file, `repair: ${match.original} -> UNREPAIRABLE (${reason})`);
 					}
 				}
 
@@ -509,33 +669,13 @@ export class AttachmentLocalizer {
 		return allOk;
 	}
 
+	// Embeds AND managed-attachment links (see parseAttachmentRefsFromCache) — both
+	// localizeNote and repairNote consume the same match list, so a broken non-embed
+	// link to a managed attachment is visible to repair, not just to the missing-
+	// attachments scan.
 	parseAttachmentRefs(content: string, file: TFile): AttachmentMatch[] {
-		const results: AttachmentMatch[] = [];
-		const seen = new Set<string>();
-
 		const cache = this.app.metadataCache.getFileCache(file);
-		if (cache?.embeds) {
-			for (const e of cache.embeds) {
-				if (!e.original || seen.has(e.original)) continue;
-				const link = e.link ?? '';
-				const isRemote = /^https?:\/\//i.test(link);
-				const syntax: 'wiki' | 'md' = e.original.startsWith('![[') ? 'wiki' : 'md';
-				results.push({ original: e.original, link, syntax, isRemote });
-				seen.add(e.original);
-			}
-		}
-
-		REMOTE_MD_IMAGE_RE.lastIndex = 0;
-		let m: RegExpExecArray | null;
-		while ((m = REMOTE_MD_IMAGE_RE.exec(content)) !== null) {
-			const original = m[0];
-			const url = m[2];
-			if (!url || seen.has(original)) continue;
-			results.push({ original, link: url, syntax: 'md', isRemote: true });
-			seen.add(original);
-		}
-
-		return results;
+		return parseAttachmentRefsFromCache(cache, content);
 	}
 
 	private async processMatch(match: AttachmentMatch, note: TFile): Promise<string | null> {
@@ -575,7 +715,7 @@ export class AttachmentLocalizer {
 			const targetPath = await this.writeAttachment(note, bytes, ext, originalName);
 			if (isImage) this.enqueueImageMetadata?.(targetPath, note.path);
 			await this.debug(note, `remote ${match.link}: downloaded .${download.ext} -> ${targetPath}`);
-			return this.formatEmbed(match.syntax, targetPath);
+			return formatRef(match, targetPath);
 		} catch (e) {
 			logWarn(`localize remote failed: ${match.link}`, e);
 			await this.debug(note, `remote ${match.link}: ERROR ${(e as Error).message} (left as-is)`);
@@ -636,7 +776,7 @@ export class AttachmentLocalizer {
 		}
 		if (isImage) this.enqueueImageMetadata?.(newPath, note.path);
 		await this.debug(note, `local ${match.link}: resolved=${resolved.path} -> ${newPath}`);
-		return this.formatEmbed(match.syntax, newPath);
+		return formatRef(match, newPath);
 	}
 
 	private async writeAttachment(note: TFile, bytes: ArrayBuffer, ext: string, originalName: string): Promise<string> {
@@ -666,15 +806,6 @@ export class AttachmentLocalizer {
 			}
 		});
 		return targetPath;
-	}
-
-	private formatEmbed(syntax: 'wiki' | 'md', targetPath: string): string {
-		if (syntax === 'wiki') return `![[${targetPath}]]`;
-		// Empty alt is deliberate: Obsidian interprets a markdown image's alt text as a
-		// display size when it parses as a number (e.g. `![1](img.png)` renders at 1px wide,
-		// effectively invisible). The localize "alt" is only a guessed filename anyway, so
-		// dropping it avoids accidentally collapsing the image.
-		return `![](${targetPath.replace(/ /g, '%20')})`;
 	}
 
 	private guessRemoteOriginalName(url: string): string {
@@ -822,7 +953,7 @@ export class AttachmentLocalizer {
 			const originalName = file.name.replace(/\.[^.]+$/, '') || 'pasted';
 			const targetPath = await this.writeAttachment(noteFile, bytes, outExt, originalName);
 			if (isImage) this.enqueueImageMetadata?.(targetPath, noteFile.path);
-			inserts.push(this.formatEmbed('wiki', targetPath));
+			inserts.push(formatEmbed('wiki', targetPath));
 		}
 
 		editor.replaceSelection(inserts.join('\n'));
