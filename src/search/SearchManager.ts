@@ -2,7 +2,15 @@ import { App, Notice, TFile } from 'obsidian';
 import { CrucibleSettings, Provider, ProviderEmbeddingResult, ProviderModel, ProviderModelRef } from '../types';
 import { ProviderManager } from '../providers';
 import { normalizePrecision } from '../providers/shared';
-import { buildSearchChunks, hashSearchContent, ImageDescriptionChunkInput, isSearchIndexablePath } from './chunker';
+import {
+	buildSearchChunks,
+	hashSearchContent,
+	ImageDescriptionChunkInput,
+	isSearchIndexablePath,
+	LinkedDocumentChunkInput,
+	MAX_LINKED_DOCUMENTS_PER_NOTE,
+	stripFrontmatterBlock,
+} from './chunker';
 import type { ImageDescriptionStore } from './imageDescriptionStore';
 import { localizedImageInfo } from '../orchestration/utils/imageMetadata';
 import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient, SearchServiceUnavailableError } from './client';
@@ -34,6 +42,13 @@ const SEARCH_PROGRESS_EVERY_FILES = 10;
 // that's a real cost, so a build slower than this is logged as a follow-up rather than
 // shipped silently. See the WP-6 report for a measured figure.
 const SEARCH_LINK_BOOST_SLOW_BUILD_MS = 50;
+
+// Each linked post (`x-metadata`/`yt-metadata` target) is read in full and capped to this many
+// characters before it reaches the chunker. Bounds the cost of one stamp on a note that links a
+// disproportionately long metadata note (an X thread's full quoted-reply chain, say) — sized well
+// above a normal post's body so real content is never truncated in practice, while still bounding
+// the worst case to a handful of chunks rather than an unbounded one.
+const LINKED_DOCUMENT_MAX_CHARS = 4000;
 
 // Generic "what's worth surfacing" terms appended to a sweep's free-text description so a short
 // project brief still matches notes about source material, kits, and guides. Hand-tuned; not
@@ -98,6 +113,43 @@ function rerankDocumentText(result: SearchResult): string {
 	return [result.title, result.heading, result.snippet].filter(Boolean).join('\n');
 }
 
+/**
+ * Every raw `x-metadata`/`yt-metadata` frontmatter value on a note, in stamp order —
+ * `x-metadata` first (a list, appended to in stamp order, but tolerating the legacy scalar shape
+ * a hand-authored or pre-list-format note might carry), then `yt-metadata` (normally a scalar,
+ * but a defensively-tolerated array reads the same way `firstYtMetadataLink` in `youtubeApi.ts`
+ * does). Callers strip wikilink syntax and resolve separately — this only decides *which* raw
+ * values exist and in what order, which is what "first listed wins" (the 8-target cap) reads off.
+ */
+function collectLinkedMetadataLinkpaths(fm: Record<string, unknown>): string[] {
+	const raw: string[] = [];
+	for (const key of ['x-metadata', 'yt-metadata']) {
+		const value = fm[key];
+		if (Array.isArray(value)) {
+			for (const v of value) if (typeof v === 'string' && v.trim()) raw.push(v);
+		} else if (typeof value === 'string' && value.trim()) {
+			raw.push(value);
+		}
+	}
+	const linkpaths: string[] = [];
+	for (const value of raw) {
+		const linkpath = stripWikilink(value);
+		if (linkpath) linkpaths.push(linkpath);
+	}
+	return linkpaths;
+}
+
+/**
+ * `[[path|alias]]` / `[[path#heading]]` -> `path`; a bare (unbracketed) legacy string passes
+ * through unchanged. Copied from `XBackfillWorkflow.stripWikilink` rather than imported — the
+ * search module must not depend on `src/orchestration/**`, and this is a two-line regex, not a
+ * shared-module-worthy abstraction.
+ */
+function stripWikilink(raw: string): string {
+	const trimmed = raw.trim().replace(/^\[\[/, '').replace(/\]\]$/, '');
+	return trimmed.split('|')[0]?.split('#')[0]?.trim() ?? '';
+}
+
 interface PreparedSearchFile {
 	file: TFile;
 	content: string;
@@ -109,6 +161,11 @@ interface PreparedSearchFile {
 	 * chunk construction.
 	 */
 	imageDescriptions?: ImageDescriptionChunkInput[];
+	/**
+	 * Resolved once in `prepareFile` for the same reason as `imageDescriptions` — `metadataCache`/
+	 * `vault.cachedRead` reads are async, chunk building is not.
+	 */
+	linkedDocuments?: LinkedDocumentChunkInput[];
 	/** The facets folded into `contentHash`; threaded on so the chunker's fallback can't drift. */
 	hashFacets?: string[];
 }
@@ -452,17 +509,21 @@ export class SearchManager {
 		if (this.isExcludedFromIndex(file.path)) return null;
 		const content = await this.app.vault.read(file);
 		const images = await this.resolveImageDescriptions(file);
+		const linked = await this.resolveLinkedDocuments(file);
+		const hashFacets = [...images.facets, ...linked.facets];
 		return {
 			file,
 			content,
 			// `hashSearchContent(content, [])` is `hashSearchContent(content)` by construction, so a
-			// note with no described images keeps the exact hash it had before this facet existed and
-			// the coverage-aware skip above is preserved untouched. A description *arriving* moves
-			// the facet, moves the hash, and re-indexes the note once — that is the mechanism, and
-			// without it the note would be skipped forever with its figures never indexed.
-			contentHash: hashSearchContent(content, images.facets),
+			// note with no described images and no linked posts keeps the exact hash it had before
+			// either facet existed, and the coverage-aware skip above is preserved untouched. Either
+			// facet arriving moves the combined array, moves the hash, and re-indexes the note once —
+			// that is the mechanism, and without it the note would be skipped forever with its
+			// figures/linked posts never indexed.
+			contentHash: hashSearchContent(content, hashFacets),
 			imageDescriptions: images.descriptions,
-			hashFacets: images.facets,
+			linkedDocuments: linked.documents,
+			hashFacets,
 		};
 	}
 
@@ -525,6 +586,63 @@ export class SearchManager {
 		return { descriptions, facets: [`image-desc:${store.combinedDescriptionHash(emitted)}`] };
 	}
 
+	/**
+	 * A note's linked posts — the `x-metadata`/`yt-metadata` stamps `XMetadataFetchWorkflow` /
+	 * `linkMetadataToNote` write, resolved to vault files and read.
+	 *
+	 * This is the WP-PF3 facet: a source note's only matching text for a query about the *content*
+	 * of a post it links is otherwise the `_x_metadata`/`_yt_metadata` note itself — which has zero
+	 * relationship to the source note in any ranking leg beyond the client-side link-boost reorder
+	 * (`linkGraph.ts`), and that boost can't add a candidate that never matched anything. Emitting
+	 * the linked note's own body as an ordinary chunk on the *citing* note puts it in the FTS,
+	 * coverage and vector candidate sets for free — no companion change, no schema bump.
+	 *
+	 * Three properties mirrored from `resolveImageDescriptions`, in the same order of how
+	 * expensive getting them wrong is:
+	 *
+	 * 1. **The facet describes exactly what is emitted.** A tombstoned metadata note (X: frontmatter
+	 *    -only, `state: unavailable`, empty body) resolves to empty text after the frontmatter
+	 *    slice — it contributes neither a chunk nor a facet, so it can never move the source note's
+	 *    hash for nothing.
+	 * 2. **Deterministic.** The cap is applied to the *raw stamp list*, before resolution — "first
+	 *    listed wins" reads directly off `x-metadata`'s (then `yt-metadata`'s) frontmatter order,
+	 *    not off which targets happen to resolve.
+	 * 3. **Unresolved targets are silently dropped**, same as `XBackfillWorkflow`'s source-path
+	 *    resolution — a stamp can outlive the note it points at.
+	 */
+	private async resolveLinkedDocuments(file: TFile): Promise<{ documents: LinkedDocumentChunkInput[]; facets: string[] }> {
+		const empty = { documents: [], facets: [] };
+		// Optional-called (not `this.app.metadataCache.getFileCache(file)`): existing test doubles
+		// for `SearchManager` (e.g. `tests/searchManagerHash.test.mjs`) stub `metadataCache` with
+		// only `isUserIgnored`, since `resolveImageDescriptions` never reaches `getFileCache` when
+		// no image-description store is wired. A real Obsidian `MetadataCache` always has the
+		// method; this only changes behavior for a stub that omits it, where "no frontmatter seen"
+		// (empty linked-post facet) is exactly the right degrade.
+		const fm = this.app.metadataCache.getFileCache?.(file)?.frontmatter;
+		if (!fm) return empty;
+		const linkpaths = collectLinkedMetadataLinkpaths(fm).slice(0, MAX_LINKED_DOCUMENTS_PER_NOTE);
+		if (linkpaths.length === 0) return empty;
+
+		const documents: LinkedDocumentChunkInput[] = [];
+		const facets: string[] = [];
+		for (const linkpath of linkpaths) {
+			const dest = this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path);
+			if (!dest) continue;
+			const raw = await this.app.vault.cachedRead(dest);
+			const text = stripFrontmatterBlock(raw).trim().slice(0, LINKED_DOCUMENT_MAX_CHARS);
+			if (!text) continue;
+			documents.push({ path: dest.path, title: dest.basename, text });
+			// Reusing `hashSearchContent` on the linked note's own (already frontmatter-stripped)
+			// text is deliberate rather than a second hash function: it's the same "identity of a
+			// document" primitive this module already imports, applied to a smaller document. The
+			// path is folded in alongside the hash so two different linked notes whose bodies happen
+			// to collide byte-for-byte still each move the citing note's hash independently.
+			facets.push(`linked:${dest.path}:${hashSearchContent(text)}`);
+		}
+		if (documents.length === 0) return empty;
+		return { documents, facets };
+	}
+
 	private buildPreparedFileChunks(prepared: PreparedSearchFile): SearchChunk[] {
 		const { file, content, contentHash } = prepared;
 		return buildSearchChunks({
@@ -538,6 +656,7 @@ export class SearchManager {
 			maxChars: this.settings.searchChunkMaxChars,
 			overlapChars: this.settings.searchChunkOverlapChars,
 			...(prepared.imageDescriptions?.length ? { imageDescriptions: prepared.imageDescriptions } : {}),
+			...(prepared.linkedDocuments?.length ? { linkedDocuments: prepared.linkedDocuments } : {}),
 			...(prepared.hashFacets?.length ? { extraHashFacets: prepared.hashFacets } : {}),
 		});
 	}

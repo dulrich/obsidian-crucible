@@ -66,6 +66,44 @@ export interface ImageDescriptionChunkInput {
 	extraction: string;
 }
 
+/**
+ * The heading prefix every linked-post chunk carries. Mirrors `IMAGE_CHUNK_HEADING_PREFIX`'s
+ * role: a naming convention, not a new `SearchChunk` field — a linked-post chunk is an ordinary
+ * chunk that happens to be titled after the post it summarizes.
+ */
+export const LINKED_POST_HEADING_PREFIX = 'Linked post: ';
+
+/**
+ * A cap on how many `x-metadata`/`yt-metadata` targets a single note can contribute chunks for.
+ * Junk-tolerance, like `MAX_ENTITIES_PER_CHUNK`: a note stamped with an unbounded number of
+ * linked posts (a thread with dozens of X replies, say) must cost a bounded number of extra
+ * chunks, not an unbounded one. Enforced twice on purpose — once here (so a caller that hands
+ * `buildSearchChunks` more than 8 entries directly still gets a bounded result) and once at
+ * `SearchManager`'s assembly step (so reading past the 9th linked note's bytes never happens at
+ * all). Both read this one constant.
+ */
+export const MAX_LINKED_DOCUMENTS_PER_NOTE = 8;
+
+/**
+ * One linked post reaching the chunker: a note this note stamp-links via `x-metadata`/
+ * `yt-metadata` frontmatter. Plain data, like `ImageDescriptionChunkInput` — resolving the
+ * stamps to vault files and reading their bytes is `SearchManager`'s job (it needs
+ * `metadataCache`/`vault`), because this module must stay importable standalone.
+ */
+export interface LinkedDocumentChunkInput {
+	/** The linked note's vault path. Not used as the emitted chunk's `path` — a linked-post
+	 * chunk carries the *citing* note's identity, exactly like an image-description chunk
+	 * carries the embedding note's identity, because a hit is the note a user can act on. */
+	path: string;
+	/** The linked note's basename — what the `Linked post: ` heading is titled after. */
+	title: string;
+	/** The linked note's body, frontmatter already sliced off by the caller, trimmed and
+	 * length-capped. Empty for a tombstoned metadata note (frontmatter-only, no body) — the
+	 * caller drops those before they reach here, but an empty string is tolerated as a no-op
+	 * defensively rather than assumed impossible. */
+	text: string;
+}
+
 export interface BuildChunksInput {
 	vaultId: string;
 	path: string;
@@ -82,6 +120,13 @@ export interface BuildChunksInput {
 	 * ordinal counter — see `buildSearchChunks`.
 	 */
 	imageDescriptions?: ImageDescriptionChunkInput[];
+	/**
+	 * Linked posts this note stamp-links (`x-metadata`/`yt-metadata`), already resolved, read and
+	 * length-capped by the caller. Each entry appends one chunk after the note's own sections and
+	 * its image chunks, through the same monotonic ordinal counter — see `buildSearchChunks`.
+	 * Default empty so every existing call site and test is unaffected.
+	 */
+	linkedDocuments?: LinkedDocumentChunkInput[];
 	/**
 	 * Extra facets for the `contentHash` fallback recompute below. Threaded rather than derived
 	 * so the fallback cannot drift from `SearchManager.prepareFile`'s compute: both must fold the
@@ -188,6 +233,41 @@ export function buildSearchChunks(input: BuildChunksInput): SearchChunk[] {
 				});
 				ordinal++;
 			}
+		}
+	}
+
+	// Linked-post chunks come last, after prose and image chunks, sharing the same monotonic
+	// ordinal — the same full-replace-upsert argument as image descriptions: adding, removing or
+	// reordering a stamp must never renumber a chunk that isn't the linked-post one that moved.
+	//
+	// Truncated defensively to `MAX_LINKED_DOCUMENTS_PER_NOTE` even though `SearchManager` already
+	// caps the array it assembles — see that constant's doc.
+	//
+	// The chunk carries the *citing* note's path/title, never the linked note's — a hit is the
+	// thread a user can open, exactly like an image-description chunk names the note that embeds
+	// the figure rather than the image file.
+	for (const doc of (input.linkedDocuments ?? []).slice(0, MAX_LINKED_DOCUMENTS_PER_NOTE)) {
+		const linkedText = typeof doc?.text === 'string' ? doc.text.trim() : '';
+		if (!linkedText) continue;
+		const linkedTitle = typeof doc?.title === 'string' && doc.title.trim() ? doc.title.trim() : doc.path;
+		const heading = `${LINKED_POST_HEADING_PREFIX}${linkedTitle}`;
+		for (const text of chunkText(linkedText, maxChars, overlapChars)) {
+			const trimmed = text.trim();
+			if (!trimmed) continue;
+			chunks.push({
+				id: stableChunkId(input.vaultId, input.path, ordinal, heading),
+				vaultId: input.vaultId,
+				path: input.path,
+				contentHash,
+				title: metadata.title,
+				heading,
+				text: trimmed,
+				mtime: input.mtime,
+				ordinal,
+				metadata,
+				...(entities.length > 0 ? { entities } : {}),
+			});
+			ordinal++;
 		}
 	}
 
@@ -308,6 +388,21 @@ export function hashSearchContent(content: string, extraFacets?: string[]): stri
 		.filter(Boolean))].sort();
 	if (facets.length === 0) return hashString(base);
 	return hashString(`${base}\nfacets:${facets.join('\n')}`);
+}
+
+/**
+ * Slices the leading `---`-delimited frontmatter block off a document, returning only the body.
+ * The same detection `parseSearchDocument` uses for its own body/metadata split, factored out so
+ * a caller assembling `linkedDocuments` input (`SearchManager`, resolving `x-metadata`/
+ * `yt-metadata` targets) can produce plain body text without re-implementing frontmatter
+ * detection or reaching into `parseSearchDocument`'s return shape just for the `body` field.
+ * `parseSearchDocument` itself is left as-is rather than rewritten in terms of this helper, so
+ * the byte-identical-output regression pin on its existing behavior carries zero risk from this
+ * change.
+ */
+export function stripFrontmatterBlock(content: string): string {
+	const match = content.match(FRONTMATTER_RE);
+	return match ? content.slice(match[0].length) : content;
 }
 
 export function parseSearchDocument(content: string, fallbackTitle: string): { body: string; metadata: SearchDocumentMetadata } {
