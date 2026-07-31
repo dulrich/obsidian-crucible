@@ -5,6 +5,7 @@ import { computeRowSignature, renderTableSection, shouldRepaint } from '../rende
 import { renderEnrichedCell, renderFileLink, renderIgnoreButton, renderChannelLink, renderExternalLink } from '../render/cells';
 import { displayLabel, formatDuration } from '../render/format';
 import { computeUncapturedVideoRows } from '../data/uncaptured';
+import { isYoutubeApiKeyRegistered, renderApiKeyAffordance, youtubeApiKeyMissing } from '../render/apiKeyAffordance';
 import type { DashboardHost, SectionContext, UncapturedVideoRow } from '../render/types';
 
 export interface UncapturedVideosSection {
@@ -22,11 +23,18 @@ export interface UncapturedVideosSection {
 // --- Section: Uncaptured Videos ---
 export function createUncapturedVideosSection(host: DashboardHost): UncapturedVideosSection {
 	let uncapturedVideosCache: UncapturedVideoRow[] = [];
+	// WP-VF-3: the affordance slot lives beside the Auto-enqueue toggle in the
+	// section heading (built once by decorateHeader at mount); render() syncs
+	// it on every pass, same reasoning as controlCenters.ts's enrichAllAffordance.
+	let apiKeyAffordanceEl: HTMLElement | null = null;
 
 	// Re-assert the auto-source enable from the persisted setting on load: the queue's
 	// autoSourceEnabled flag is runtime-only, and the auto-source is dashboard-owned,
-	// so nothing else turns it back on when the dashboard mounts.
-	if (host.plugin.settings.ingestionYoutubeAutoEnqueueEnabled === true) {
+	// so nothing else turns it back on when the dashboard mounts. Skipped when the API
+	// key is missing — auto-enqueuing jobs that can only fail with no-api-key achieves
+	// nothing, and the heading affordance (see renderAutoEnqueueToggle/render below)
+	// explains why enqueue is not firing.
+	if (host.plugin.settings.ingestionYoutubeAutoEnqueueEnabled === true && isYoutubeApiKeyRegistered(host.plugin)) {
 		void host.plugin.setEnrichmentAutoEnqueue(true, () => uncapturedQueueItems());
 	}
 
@@ -41,6 +49,12 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		// instead of being left blank.
 		const rows = await computeUncapturedVideoRows(host.app, host.plugin);
 		uncapturedVideosCache = rows;
+
+		// Heading-hosted affordance slot — synced every pass, not gated on the
+		// paint skip below (same reasoning as the auto-source refresh at the
+		// bottom of this function): the toggle/heading area isn't part of
+		// body's shouldRepaint gate.
+		syncApiKeyAffordance(youtubeApiKeyMissing(isYoutubeApiKeyRegistered(host.plugin)));
 
 		// P5: the 'enriched' column (renderEnrichedCell) reads the LIVE per-video
 		// metadata-fetch status (queued/running/absent) — state that does not live
@@ -103,6 +117,16 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		toggle.addEventListener('change', () => {
 			void host.plugin.setEnrichmentAutoEnqueue(toggle.checked, () => uncapturedQueueItems());
 		});
+		apiKeyAffordanceEl = heading.createSpan({ cls: 'crucible-apikey-affordance-slot' });
+	}
+
+	// Idempotent — safe to call on every render() pass. The toggle itself
+	// stays operable when the key is missing (it's a preference, not the key);
+	// this only explains why auto-enqueue isn't actually firing.
+	function syncApiKeyAffordance(keyMissing: boolean): void {
+		if (!apiKeyAffordanceEl) return;
+		apiKeyAffordanceEl.empty();
+		if (keyMissing) renderApiKeyAffordance(apiKeyAffordanceEl, () => host.plugin.openSettingsToTab('orchestrator'));
 	}
 
 	return { render, uncapturedQueueItems, renderAutoEnqueueToggle };

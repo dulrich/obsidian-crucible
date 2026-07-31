@@ -264,11 +264,18 @@ test('a failed job suppresses its re-seed only for the window, not forever', asy
 	assert.equal(store.count('queued'), 1, 'and it is offered again once the window passes');
 });
 
-// --- 4. the no-api-key latch --------------------------------------------------
+// --- 4. the no-api-key latch was removed (WP-VF-3) ------------------------------
+//
+// It used to disable the auto-source on a typed no-api-key failure — see git
+// history before this commit for the original test. That latch was unsound: it
+// was runtime-only, and uncapturedVideos.ts re-asserts the auto-source enable
+// from the persisted setting on every dashboard mount, so it never actually
+// stuck. Missing-key surfacing is now a UI affordance
+// (src/ingestion/render/apiKeyAffordance.ts) applied at the enqueue/schedule
+// sites, not a queue-side kill switch. `Orchestrator.disableAutoSource` itself
+// stays (nothing else called it), just unreachable from the settle path now.
 
-test('a no-api-key failure latches the auto-source off', async () => {
-	// Gated on the TYPED failureReason, never on a substring of the error text, so a
-	// transient 403 whose message mentions "API key" cannot latch the source off.
+test('a no-api-key failure does not latch the auto-source off', async () => {
 	const { orchestrator, store } = newOrchestrator({
 		workflow: {
 			async run() {
@@ -278,15 +285,14 @@ test('a no-api-key failure latches the auto-source off', async () => {
 	});
 	orchestrator.setAutoSourceEnabled(ENRICHMENT_JOB_TYPE, true);
 	orchestrator.setAutoSource(ENRICHMENT_JOB_TYPE, () => [candidate('aaaaaaaaaaa'), candidate('bbbbbbbbbbb')]);
-	// `disableAutoSource` is reached through `plugin.orchestrator`, which main.ts wires.
 	orchestrator['plugin'].orchestrator = orchestrator;
 
 	await orchestrator.refill(ENRICHMENT_JOB_TYPE);
 	assert.equal(store.count('queued'), 2);
 	assert.equal(await orchestrator.runNextOfType(ENRICHMENT_JOB_TYPE), 'ran');
 
-	assert.equal(orchestrator.isAutoSourceEnabled(ENRICHMENT_JOB_TYPE), false,
-		'the credential is missing, so every other candidate is hopeless too');
+	assert.equal(orchestrator.isAutoSourceEnabled(ENRICHMENT_JOB_TYPE), true,
+		'the latch is gone — a typed no-api-key failure no longer disables the source');
 });
 
 test('an ordinary failure does not latch the auto-source off', async () => {

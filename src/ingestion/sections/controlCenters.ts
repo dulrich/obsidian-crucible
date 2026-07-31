@@ -5,6 +5,7 @@ import { computeRowSignature, shouldRepaint } from '../render/section';
 import { computeBlogControlRows } from '../data/blogs';
 import { computeChannelControlRows } from '../data/channels';
 import { countWithPct, ratio } from '../render/format';
+import { isYoutubeApiKeyRegistered, renderApiKeyAffordance, youtubeApiKeyMissing } from '../render/apiKeyAffordance';
 import type { BlogControlRow, ChannelControlRow, DashboardHost, SectionContext } from '../render/types';
 
 export interface ControlCentersSection {
@@ -20,6 +21,13 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 	let blogFilter: ControlCenterFilter = 'all';
 	// Channel control center filter: which channels to list.
 	let channelFilter: ControlCenterFilter = 'all';
+	// WP-VF-3: "Enrich all" lives in the section heading, built once by
+	// decorateHeader at mount — but the API key can be configured mid-session
+	// from Settings, so renderChannelControl (recomputed on every actual
+	// repaint) syncs this button's disabled state + the affordance slot beside
+	// it on every render pass, unconditionally, rather than only at mount.
+	let enrichAllButton: HTMLButtonElement | null = null;
+	let enrichAllAffordance: HTMLElement | null = null;
 
 	// --- Section: Blog control center ---
 	async function renderBlogControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
@@ -67,8 +75,18 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 	async function renderChannelControl(body: HTMLElement, ctx: SectionContext): Promise<void> {
 		// Compute-then-paint — see renderBlogControl's comment above; same shape.
 		const all = await computeChannelControlRows(host.app, host.plugin);
-		// P5: same reasoning as renderBlogControl — check before the only DOM clear.
-		if (!shouldRepaint(ctx, computeRowSignature(all))) return;
+		const keyMissing = youtubeApiKeyMissing(isYoutubeApiKeyRegistered(host.plugin));
+		// The heading-hosted "Enrich all" affordance isn't part of body's
+		// shouldRepaint gate (it's a static slot built once by decorateHeader at
+		// mount), so keep it in sync on every render() call rather than only on
+		// an actual repaint — cheap, and it's how the affordance appears/
+		// disappears after the user configures the key mid-session.
+		syncEnrichAllAffordance(keyMissing);
+		// P5: same reasoning as renderBlogControl — check before the only DOM
+		// clear. keyMissing is folded into the signature so a key-state change
+		// forces the per-row Enrich/Re-enrich buttons to repaint even when
+		// nothing else about the rows changed.
+		if (!shouldRepaint(ctx, computeRowSignature(all, keyMissing))) return;
 		body.empty();
 
 		// rsp-wp6: left unkeyed — same reasoning as renderBlogControl above
@@ -88,13 +106,26 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 				{ key: 'ignored', label: 'Ignored', sortable: true, sortKey: r => ratio(r.ignoredVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.ignoredVideos, r.trackedVideos)) },
 				{ key: 'uncaptured', label: 'Uncaptured', sortable: true, sortKey: r => ratio(r.uncapturedVideos, r.trackedVideos), render: (r, td) => td.setText(countWithPct(r.uncapturedVideos, r.trackedVideos)) },
 				{ key: 'isTracked', label: 'Tracked?', sortable: true, sortKey: r => r.tracked ? 1 : 0, render: (r, td) => td.setText(r.tracked ? 'yes' : 'no') },
-				{ key: 'enrich', label: '', render: (r, td) => renderChannelEnrichButton(host, td, r, ctx) },
+				{ key: 'enrich', label: '', render: (r, td) => renderChannelEnrichButton(host, td, r, ctx, keyMissing) },
 			],
 		});
 	}
 
+	// Syncs the "Enrich all" button's disabled state and the affordance slot
+	// beside it. Idempotent — safe to call on every render() pass regardless
+	// of whether the body actually repaints.
+	function syncEnrichAllAffordance(keyMissing: boolean): void {
+		if (enrichAllButton) enrichAllButton.disabled = keyMissing;
+		if (enrichAllAffordance) {
+			enrichAllAffordance.empty();
+			if (keyMissing) renderApiKeyAffordance(enrichAllAffordance, () => host.plugin.openSettingsToTab('orchestrator'));
+		}
+	}
+
 	function renderEnrichAllChannelsButton(heading: HTMLElement): void {
+		enrichAllAffordance = heading.createSpan({ cls: 'crucible-apikey-affordance-slot' });
 		const btn = heading.createEl('button', { text: 'Enrich all', cls: 'crucible-ingestion-enqueue-intake' });
+		enrichAllButton = btn;
 		btn.addEventListener('click', () => {
 			void (async () => {
 				btn.disabled = true;
@@ -112,8 +143,14 @@ export function createControlCentersSection(host: DashboardHost): ControlCenters
 	return { renderBlogControl, renderChannelControl, renderEnrichAllChannelsButton };
 }
 
-function renderChannelEnrichButton(host: DashboardHost, td: HTMLElement, row: ChannelControlRow, ctx: SectionContext): void {
+function renderChannelEnrichButton(host: DashboardHost, td: HTMLElement, row: ChannelControlRow, ctx: SectionContext, keyMissing: boolean): void {
 	const btn = td.createEl('button', { text: row.aboutFile ? 'Re-enrich' : 'Enrich' });
+	if (keyMissing) {
+		// The section-level affordance (syncEnrichAllAffordance) already names
+		// the config gap once — this is "N disabled buttons," not per-row spam.
+		btn.disabled = true;
+		return;
+	}
 	btn.addEventListener('click', () => {
 		void (async () => {
 			btn.disabled = true;

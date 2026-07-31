@@ -422,12 +422,13 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 			const kind = classifyFailedJob(job, error) === 'service-outage' ? 'service' : 'job';
 			this.store.transition(job.id, 'failed', Date.now(), { error, failureKind: kind });
 			this.emitQueueUpdate();
-			// A missing credential makes every other candidate of this type hopeless too,
-			// so stop the auto-source re-offering work that cannot run. Gated on the TYPED
-			// reason, never on a substring of `error`, so a transient 403 whose message
-			// happens to mention "API key" can't latch the source off — the same rule
-			// `MemoryJobBackend` applied before the cutover.
-			if (result?.failureReason === 'no-api-key') this.plugin.orchestrator?.disableAutoSource(this.type);
+			// WP-VF-3: the no-api-key auto-source latch that used to live here is removed.
+			// It was unsound — runtime-only, and `uncapturedVideos.ts` re-asserts enable
+			// from the persisted setting on every dashboard mount, so it never actually
+			// stuck. Missing-key surfacing is now a UI affordance
+			// (`src/ingestion/render/apiKeyAffordance.ts`) applied at the enqueue/schedule
+			// sites themselves, not a queue-side kill switch. `Orchestrator.disableAutoSource`
+			// stays (no other caller removed it), but nothing here calls it anymore.
 		} catch (err) {
 			logError(
 				`failed to settle job ${job.id} into failed; it stays running for the stale sweep to recover (original error: ${error})`,
