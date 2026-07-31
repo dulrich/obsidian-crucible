@@ -290,3 +290,31 @@ XM5.
 
 **Total ≈ 1.75 kSLOC, ~830k raw tokens; ~720k Claude-path / ~525k Codex-path
 Opus/Sol-equivalent tokens.**
+
+## Completion (2026-07-31)
+
+Implemented and landed on master, one commit per WP, all subagent-executed (Sonnet)
+except XM5 (orchestrator-direct):
+
+- **XM1** `e3ef027` — xPost.ts/xApi.ts, canonicalizeUrl X branch, `x-status-id` on link
+  records, `SERVICE_X_OEMBED`, `orchestrationXMetadataRoot`. Tests 1432/111.
+- **XM2** `0c9f3ab` — `x_metadata_fetch`/`x_post_discover` workflows, `x-metadata` list
+  stamping (ensure-then-stamp lock order), `x-metadata-enriched` event, configs +
+  registration, feed seen-set skip prefixes. Tests 1459/115.
+- **XM3** `a40394f` — `x-discover-on-clip` founding trigger (pure guard helper),
+  `XBackfillWorkflow` (`x_metadata_backfill`), palette + chain-internal commands,
+  `ingestionXAutoDiscoverEnabled` (default off). Tests 1489/118.
+- **XM4** `0d0b363` — X posts dashboard section (pending-first keyed table, per-row
+  Fetch, Backfill button), settings UI (folder + auto-discover toggle), queue-monitor
+  titles. Tests 1522/121.
+- **XM5** — this note + quirk entries in `src/orchestration/AGENTS.md` and the root
+  quirks index; `pending-plans` deregistered.
+
+Deviation from the Execution section: Wave 3 ran **sequentially XM3 → XM4** (not
+parallel) — XM4's Backfill button needs XM3's `x_metadata_backfill` union member and
+its settings toggle binds XM3's `ingestionXAutoDiscoverEnabled` declaration, so the
+plan's disjoint-files claim didn't hold at the type level. Actuals: ~630k worker tokens
+vs ~830k raw estimate (XM1 190k/230k, XM2 247k/220k, XM3 191k/190k, XM4 191k/190k).
+
+Deferred by design (unchanged): presentation UX, thread/quote reconstruction, media
+localization of post images, manual refresh command, lint derive-source-ids for X.
