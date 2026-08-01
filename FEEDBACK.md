@@ -24,6 +24,12 @@ tags: ""
 - [ ] what commands validate/audit/clean the search state (every note indexed, every image indexed, deleted notes purged, updated from edits)
 - [ ] sweep the repo's AGENTS for terseness/pointers and set the dox pattern active
 - [ ] pin header in Crucible Settings (definitely in tab, live test in modal)
+- [ ] [[2026-05]] [[271 bugs found in Firefox, zero written by a human attacker. What this means for the future of safe code + 2 prompts]]
+	- [ ] sentence version ranks: software developers in crisis/mourning because code generation has caused loss of the historic romanctic craftsman experience
+	- [ ] keyword dump does not: developers mourning because lost historic profession craftsman romantic
+	- [ ] reranker saves the 271 bugs source note
+	- [ ] check if the logger saved my numerous early attempts and if any rank
+- [ ] possible up-ranking based on tag #gold, monthly capture count as a facet
 
 ---
 
