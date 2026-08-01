@@ -7,7 +7,9 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans: []
+pending-plans:
+  - "[[ingestion-intake-controls-parity]]"
+  - "[[search-index-audit-health]]"
 initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 20
