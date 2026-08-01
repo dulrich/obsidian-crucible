@@ -8,7 +8,7 @@
 //   1. **Exact (method, path) equality.** No prefixes, no params, no trailing-slash tolerance:
 //      `POST /v1/search/` was a 404 before and is a 404 now. Every key is one literal method
 //      and one literal pathname, so the Map lookup is the same test the ladder made, in the
-//      same order-independent way (the six keys are mutually exclusive, so ladder order was
+//      same order-independent way (the route keys are mutually exclusive, so ladder order was
 //      never load-bearing).
 //   2. **A miss is a 404, not a 405.** A GET to a POST-only path answered "not found" before;
 //      keying on `METHOD path` rather than on path-then-method preserves that exactly.
@@ -23,6 +23,7 @@ export const ROUTE_IDS = Object.freeze([
 	'POST /v1/files/state',
 	'POST /v1/chunks/upsert',
 	'POST /v1/search',
+	'POST /v1/paths',
 ]);
 
 export function routeId(method, pathname) {
