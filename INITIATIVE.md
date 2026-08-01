@@ -11,8 +11,8 @@ pending-plans:
   - "[[search-index-audit-health]]"
 initiative-status: active
 initiative-cadence: as-needed
-review-after-commits: 20
-review-after-lines: 1500
+review-after-commits: 50
+review-after-lines: 15000
 ---
 
 ---

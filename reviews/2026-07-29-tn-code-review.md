@@ -1,6 +1,7 @@
 ---
 review-date: 2026-07-29
 review-commit: b764f26f374406ee8437cec39fe895d1fdcea03a
+remediation-commit: 95bfc149c8c32a121e9919c2e0daa4e42d2045ec
 review-type: tn-code-review
 review-model: gpt-5.6-sol
 review-harness: codex
@@ -17,9 +18,9 @@ gpt-5.6-terra/medium once its behavioral seams are pinned.*
 | structural-regressions | 0 | 0 |
 | simplification-misses | 0 | 0 |
 | spaghetti | 0 | 0 |
-| boundary-type-contracts | 2 | 0 |
-| file-size | 1 | 0 |
-| modularity | 1 | 0 |
+| boundary-type-contracts | 0 | 2 |
+| file-size | 0 | 1 |
+| modularity | 0 | 1 |
 | legibility | 0 | 0 |
 
 ## Context
