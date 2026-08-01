@@ -4,6 +4,7 @@ import { createDispatcher } from './dispatch.mjs';
 import { createChunksDeleteEndpoint } from './endpoints/chunksDelete.mjs';
 import { createFilesStateEndpoint } from './endpoints/filesState.mjs';
 import { createHealthEndpoint } from './endpoints/health.mjs';
+import { createPathsEndpoint } from './endpoints/paths.mjs';
 import { createResetEndpoint } from './endpoints/reset.mjs';
 import { createSearchEndpoint } from './endpoints/search.mjs';
 import { createUpsertEndpoint } from './endpoints/upsert.mjs';
@@ -69,6 +70,7 @@ export function createRequestHandler(db, options = {}) {
 		'POST /v1/files/state': createFilesStateEndpoint({ statements }),
 		'POST /v1/chunks/upsert': createUpsertEndpoint({ db, statements, vectors, now, delay, state }),
 		'POST /v1/search': createSearchEndpoint({ db, statements, vectors, now, state }),
+		'POST /v1/paths': createPathsEndpoint({ statements }),
 	});
 
 	return async (req, res) => {
