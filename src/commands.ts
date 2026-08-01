@@ -2,16 +2,19 @@ import { Notice } from 'obsidian';
 import { CrucibleCommandPaletteModal, buildHintOptions, buildScoreText, computeHint, getPaletteItems } from './commandPalette';
 import { CrucibleFileOpenPaletteModal } from './fileOpenPalette';
 import { shortestUniqueFuzzyString, shortestTopMatchFuzzyString } from './commandPaletteHints';
-import { appendDebugLog } from './utils';
+import { appendDebugLog, ensureFolder } from './utils';
 import { FilePickerModal } from './orchestration/FilePickerModal';
 import type CruciblePlugin from './main';
 import { VaultSearchModal } from './search/SearchModal';
 import { isSearchIndexablePath } from './search/chunker';
 import { SEARCH_QUERY_EXPORT_FILENAME, buildQueryExport, serializeQueryExport } from './search/queryLog';
+import { AuditImage, computeSearchAudit, formatAuditReport, isCleanAudit, SearchAuditResult } from './search/audit';
+import { computeReferencedImagePaths } from './orchestration/utils/imageDescribe';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
 import { ConfirmModal } from './confirmModal';
+import { confirmDestructive } from './settings/destructiveActions';
 import { RetryFailedImageDescriptionsModal } from './retryImageDescriptionsModal';
 
 /**
@@ -484,7 +487,20 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: async () => {
 			const health = await plugin.searchManager.health();
-			new Notice(`Search service: ${health.ok ? 'ok' : 'not ok'}${health.version ? ` (${health.version})` : ''}`);
+			// WP-SA2: widened past ok/version to report the rest of `/health`'s now-typed payload
+			// — schema, embedded-chunk count, and the active embedding model — and to flag a mixed
+			// `embeddingSpaces` index the same way the Orchestrate → Search status block does.
+			// Every field is read defensively (the health object may come from an older companion
+			// that never sent them), so an omitted field simply drops its segment rather than
+			// printing "undefined".
+			const parts = [`Search service: ${health.ok ? 'ok' : 'not ok'}`];
+			if (health.version) parts.push(`v${health.version}`);
+			if (health.schemaVersion !== undefined) parts.push(`schema ${health.schemaVersion}`);
+			if (health.embeddedChunks !== undefined) parts.push(`${health.embeddedChunks} embedded chunks`);
+			if (health.embeddingModel) parts.push(health.embeddingModel);
+			const spaces = health.embeddingSpaces ?? [];
+			if (spaces.length > 1) parts.push(`MIXED embedding spaces (${spaces.length}): ${spaces.join(', ')}`);
+			new Notice(parts.join(' · '));
 		},
 	});
 
@@ -587,6 +603,75 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 			new Notice(`Cleared ${discarded} logged ${discarded === 1 ? 'search' : 'searches'}.`);
 		},
 	});
+
+	// WP-SA2: read-only. Compares the vault's file list and image-reference set against what the
+	// companion actually holds and writes a report note — never enqueues, deletes, or touches the
+	// index itself. `search-reconcile-index` below runs the identical compute and acts on it.
+	plugin.registerCrucibleCommand({
+		id: 'search-audit-index',
+		name: 'Search: audit index',
+		group: 'Search',
+		mutating: false,
+		run: async () => {
+			const result = await runSearchAudit(plugin);
+			const path = await writeSearchAuditReportNote(plugin, formatAuditReport(result, new Date().toISOString()));
+			if (isCleanAudit(result)) {
+				new Notice(`Search: audit index — all clean. Report: ${path}.`);
+				return;
+			}
+			new Notice(
+				`Search: audit index — missing ${result.missing.length}, orphans ${result.orphans.length}, `
+				+ `stale ${result.stale.length}, embedding gaps ${result.embeddingGaps.length}, images `
+				+ `${result.imageCoverage.pending} pending / ${result.imageCoverage.failed} failed. Report: ${path}.`,
+			);
+		},
+	});
+
+	// WP-SA2: the only mutating half of the audit/reconcile pair, and it mutates ONLY by
+	// enqueueing existing job types (search_upsert_file, search_delete_path) — never a direct
+	// index write, never a new job type. The orphan-deletion half is destructive (it removes rows
+	// for paths the companion holds that the vault no longer has) and routes through
+	// `confirmDestructive('search-reconcile-orphans', …)`; missing/stale upserts are additive and
+	// need no confirmation, matching `search_upsert_file`'s own non-destructive nature elsewhere
+	// in this file.
+	plugin.registerCrucibleCommand({
+		id: 'search-reconcile-index',
+		name: 'Search: reconcile index',
+		group: 'Search',
+		mutating: false,
+		run: async () => {
+			const result = await runSearchAudit(plugin);
+			if (isCleanAudit(result)) {
+				new Notice('Search: reconcile index — already matches the vault. Nothing to do.');
+				return;
+			}
+
+			let upserted = 0;
+			for (const path of [...result.missing, ...result.stale]) {
+				const job = await plugin.orchestrator.enqueue('search_upsert_file', { path }, { priority: 'low', lane: 'user', inputPaths: [path] });
+				if (job) upserted++;
+			}
+
+			let deleted = 0;
+			if (result.orphans.length > 0) {
+				const preview = result.orphans.slice(0, 10).map(p => `- ${p}`);
+				if (result.orphans.length > preview.length) preview.push(`- …and ${result.orphans.length - preview.length} more`);
+				const confirmed = await confirmDestructive(plugin.app, plugin.settings, 'search-reconcile-orphans', {
+					message: `Delete ${result.orphans.length} orphaned path${result.orphans.length === 1 ? '' : 's'} from the search index? `
+						+ 'These paths are indexed but no longer exist in the vault (deleted, moved, or now excluded).',
+					impact: preview,
+				});
+				if (confirmed) {
+					for (const path of result.orphans) {
+						const job = await plugin.orchestrator.enqueue('search_delete_path', { path }, { priority: 'low', lane: 'user' });
+						if (job) deleted++;
+					}
+				}
+			}
+
+			new Notice(`Search: reconcile index — enqueued ${upserted} upsert${upserted === 1 ? '' : 's'} and ${deleted} delete${deleted === 1 ? '' : 's'}.`);
+		},
+	});
 }
 
 /** Escape a cell for a Markdown table. */
@@ -627,4 +712,63 @@ async function writeHintDebugReport(plugin: CruciblePlugin): Promise<void> {
 	const table = [...header, ...rows].join('\n');
 	await appendDebugLog(plugin.app, 'Command palette hints', table);
 	new Notice(`Command palette hint debug written for ${items.length} commands (_crucible/debug.md).`);
+}
+
+/**
+ * WP-SA2: gathers every input `computeSearchAudit` (`src/search/audit.ts`) needs and runs it.
+ * Shared by `search-audit-index` (read-only) and `search-reconcile-index` (acts on the result) so
+ * the two commands can never disagree about what "clean" means.
+ */
+async function runSearchAudit(plugin: CruciblePlugin): Promise<SearchAuditResult> {
+	const vaultFiles = plugin.searchManager.listIndexableFiles().map(file => ({ path: file.path, mtime: file.stat.mtime }));
+	const { paths: indexedPaths } = await plugin.searchManager.client().listPaths();
+	const images = await gatherSearchAuditImages(plugin);
+	return computeSearchAudit({
+		vaultFiles,
+		indexedPaths,
+		images,
+		semanticEnabled: plugin.settings.searchSemanticEnabled,
+	});
+}
+
+/**
+ * Crosses `computeReferencedImagePaths` (every image a resolved link in the vault points at)
+ * against the image-description store's status for each — without launching a vision run.
+ * `has()` alone can't distinguish a described image from a poisoned `kind: 'failed'` one (both
+ * are present in the store's index), so a referenced+present image needs one `get()` to read its
+ * `kind`; a referenced+absent image is `'pending'` at no extra read.
+ */
+async function gatherSearchAuditImages(plugin: CruciblePlugin): Promise<AuditImage[]> {
+	const referenced = computeReferencedImagePaths(plugin);
+	await plugin.imageDescriptions.ensureLoaded();
+	const images: AuditImage[] = [];
+	for (const image of referenced) {
+		if (!plugin.imageDescriptions.has(image.md5)) {
+			images.push({ md5: image.md5, status: 'pending' });
+			continue;
+		}
+		const record = await plugin.imageDescriptions.get(image.md5);
+		images.push({ md5: image.md5, status: record?.kind === 'failed' ? 'failed' : 'described' });
+	}
+	return images;
+}
+
+/**
+ * Overwrite-per-run report note at `_crucible/search-audit.md` (`_crucible` is search-excluded by
+ * default, and is the same folder the Localize/Chain debug flow's shared debug note lives in —
+ * see `appendDebugLog`). Deliberately NOT that shared append-only log: an audit report is a
+ * point-in-time snapshot a user re-runs and re-reads, not a growing history, so overwriting keeps
+ * it from accreting into an ever-longer file the way a per-run append would.
+ */
+async function writeSearchAuditReportNote(plugin: CruciblePlugin, content: string): Promise<string> {
+	const path = '_crucible/search-audit.md';
+	const existing = plugin.app.vault.getFileByPath(path);
+	if (existing) {
+		await plugin.app.vault.modify(existing, content);
+	} else {
+		const folderPath = path.substring(0, path.lastIndexOf('/'));
+		if (folderPath) await ensureFolder(plugin.app, folderPath);
+		await plugin.app.vault.create(path, content);
+	}
+	return path;
 }

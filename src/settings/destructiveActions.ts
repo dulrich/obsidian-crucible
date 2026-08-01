@@ -60,6 +60,7 @@ export const DESTRUCTIVE_ACTIONS: DestructiveAction[] = [
 	{ id: 'provider-model-delete', label: 'Delete provider model', tier: 'medium', group: 'AI' }, // ai.ts:544
 	{ id: 'guard-condition-value-delete', label: 'Delete guard condition value', tier: 'medium', group: 'Automate' }, // guardConditionFields.ts:269
 	{ id: 'lint-excluded-folder-delete', label: 'Delete lint excluded folder', tier: 'medium', group: 'Lint' }, // lint.ts:113
+	{ id: 'search-reconcile-orphans', label: 'Delete orphaned search index paths', tier: 'medium', group: 'Orchestrator' }, // commands.ts — "Search: reconcile index"'s orphan-deletion half
 
 	// --- low ---
 	{ id: 'folder-template-delete', label: 'Delete folder template', tier: 'low', group: 'Configure' }, // configure.ts:87

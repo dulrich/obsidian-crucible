@@ -254,6 +254,122 @@ test('SearchServiceClient throws SearchServiceUnavailableError on a 5xx', async 
 	await assert.rejects(client.search({ query: 'x', limit: 1 }), SearchServiceUnavailableError);
 });
 
+// WP-SA2: `listPaths()` — the audit/reconcile commands' companion-side data source. Follows the
+// SA1 wire contract exactly (sa-1-report.md): `{ok: true, paths: [...], totals: {...}}`.
+test('SearchServiceClient.listPaths() parses rows and totals, and goes through requestUrl (not fetch)', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: {
+			ok: true,
+			paths: [
+				{ path: 'a.md', mtime: 100, contentHash: 'hash-a', chunkCount: 2, embeddedCount: 2 },
+				{ path: 'b.md', mtime: 50, contentHash: '', chunkCount: 1, embeddedCount: 0 },
+			],
+			totals: { paths: 2, chunks: 3, embeddedChunks: 2 },
+		},
+	};
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const response = await client.listPaths();
+
+	assert.deepEqual(response.paths[0], { path: 'a.md', mtime: 100, contentHash: 'hash-a', chunkCount: 2, embeddedCount: 2 });
+	// An empty-string stored hash normalizes to undefined, per the SA1 contract.
+	assert.equal(response.paths[1].contentHash, undefined);
+	assert.deepEqual(response.totals, { paths: 2, chunks: 3, embeddedChunks: 2 });
+	// listPaths is a bulk vault-wide read, the same shape as fileStates/upsertChunks/deletePath —
+	// it must stay on the requestUrl transport, not the abortable interactive fetch path.
+	assert.equal(JSON.parse(globalThis.__searchClientRequests[0].body).vaultId, 'vault');
+	assert.equal(globalThis.__searchClientFetchRequests.length, 0);
+});
+
+test('SearchServiceClient.listPaths() degrades an unindexed/malformed payload to empty arrays and zeroed totals, never throws', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { ok: true, paths: [], totals: { paths: 0, chunks: 0, embeddedChunks: 0 } } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const response = await client.listPaths();
+
+	assert.deepEqual(response, { paths: [], totals: { paths: 0, chunks: 0, embeddedChunks: 0 } });
+});
+
+// WP-SA2: normalizeHealth widened to pass through the full `/health` payload additively — every
+// new field, plus proof the pre-existing fields (ok/version/schemaVersion/vectorAvailable/
+// message) are unaffected.
+test('SearchServiceClient.health() surfaces the full widened payload: version, schema, vector backend/model/dim, spaces, unattributed count', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: {
+			ok: true,
+			version: '1.2.3',
+			schemaVersion: 7,
+			vectorAvailable: true,
+			vectorBackend: 'flat',
+			embeddedChunks: 4200,
+			embeddingDim: 384,
+			embeddingModel: 'bge-small-en-v1.5',
+			embeddingSpaces: ['bge-small-en-v1.5/fp32'],
+			embeddingSpace: 'bge-small-en-v1.5/fp32',
+			unattributedEmbeddedChunks: 0,
+		},
+	};
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const health = await client.health();
+
+	assert.equal(health.ok, true);
+	assert.equal(health.version, '1.2.3');
+	assert.equal(health.schemaVersion, 7);
+	assert.equal(health.vectorAvailable, true);
+	assert.equal(health.vectorBackend, 'flat');
+	assert.equal(health.embeddedChunks, 4200);
+	assert.equal(health.embeddingDim, 384);
+	assert.equal(health.embeddingModel, 'bge-small-en-v1.5');
+	assert.deepEqual(health.embeddingSpaces, ['bge-small-en-v1.5/fp32']);
+	assert.equal(health.embeddingSpace, 'bge-small-en-v1.5/fp32');
+	assert.equal(health.unattributedEmbeddedChunks, 0);
+});
+
+test('SearchServiceClient.health() flags a mixed index: multiple embeddingSpaces and a null embeddingSpace', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: {
+			ok: true,
+			schemaVersion: 7,
+			embeddingSpaces: ['model-a/fp32', 'model-b/f16'],
+			embeddingSpace: null,
+			unattributedEmbeddedChunks: 12,
+		},
+	};
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const health = await client.health();
+
+	assert.deepEqual(health.embeddingSpaces, ['model-a/fp32', 'model-b/f16']);
+	assert.equal(health.embeddingSpace, null);
+	assert.equal(health.unattributedEmbeddedChunks, 12);
+});
+
+test('SearchServiceClient.health() degrades a companion that predates the widened fields to undefined, not coerced values', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { ok: true, version: '0.9.0', schemaVersion: 7 } };
+	const client = new SearchServiceClient('http://search.local', 'vault');
+
+	const health = await client.health();
+
+	assert.equal(health.ok, true);
+	assert.equal(health.version, '0.9.0');
+	assert.equal(health.vectorBackend, undefined);
+	assert.equal(health.embeddedChunks, undefined);
+	assert.equal(health.embeddingDim, undefined);
+	assert.equal(health.embeddingModel, undefined);
+	assert.equal(health.embeddingSpaces, undefined);
+	assert.equal(health.embeddingSpace, undefined);
+	assert.equal(health.unattributedEmbeddedChunks, undefined);
+});
+
 // An interactive request and a bulk write must not share one timeout. A search that hangs
 // should give up quickly so the UI stops waiting; an upsert carries hundreds of chunks and is
 // issued from the same main thread that synchronously chunks the batch's files, so the same
