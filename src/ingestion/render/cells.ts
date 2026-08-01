@@ -48,16 +48,6 @@ export function renderAuthorCell(td: HTMLElement, name: string): void {
 	}
 }
 
-export function renderIgnoredIdCell(td: HTMLElement, id: string, href: string | null): void {
-	if (href) {
-		const a = td.createEl('a', { text: id, href });
-		a.setAttr('target', '_blank');
-		a.setAttr('rel', 'noopener');
-	} else {
-		td.setText(id);
-	}
-}
-
 // Vault-aware cell/button helpers shared across multiple sections (moved here
 // from ingestionDashboard.ts during the WP-D2 decomposition).
 
