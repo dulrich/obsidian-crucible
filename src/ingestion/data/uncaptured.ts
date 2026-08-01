@@ -63,7 +63,10 @@ interface BlogMetadataFields {
 	audioUrl?: string;
 }
 
-function readBlogMetadata(app: App, file: TFile | null): BlogMetadataFields {
+// WP-IC2: exported (visibility only — behavior unchanged) so computeIgnoredPostRows
+// (data/ignored.ts) can join the same blog-metadata-note fields without duplicating
+// this lookup. computeUncapturedPostRows itself is untouched.
+export function readBlogMetadata(app: App, file: TFile | null): BlogMetadataFields {
 	if (!file) return {};
 	const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 	if (!fm) return {};
@@ -114,7 +117,10 @@ export async function computeUncapturedVideoRows(app: App, plugin: CruciblePlugi
 // Reads the video length from an enrichment metadata note's frontmatter.
 // Prefers the pre-parsed `duration_seconds`; falls back to parsing the raw
 // ISO-8601 `duration` (e.g. PT20M4S). Returns null when unavailable.
-function readDurationSeconds(app: App, enrichmentFile: TFile | null): number | null {
+// WP-IC2: exported (visibility only — behavior unchanged) so computeIgnoredVideoRows
+// (data/ignored.ts) can join the same enrichment-note duration field without
+// duplicating this lookup. computeUncapturedVideoRows itself is untouched.
+export function readDurationSeconds(app: App, enrichmentFile: TFile | null): number | null {
 	if (!enrichmentFile) return null;
 	const fm: Record<string, unknown> = app.metadataCache.getFileCache(enrichmentFile)?.frontmatter ?? {};
 	const secs = fm['duration_seconds'];

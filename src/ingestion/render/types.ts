@@ -132,6 +132,23 @@ export interface UncapturedVideoRow {
 	enrichmentFile: TFile | null;
 }
 
+// WP-IC2: the Ignored Videos row — mirrors UncapturedVideoRow's readable fields, but
+// every field besides `id` degrades to null when the video is still ignored yet no
+// longer appears in any scanned tracker run (aged out of retention). `channelId` is
+// intentionally not carried here (unlike UncapturedVideoRow): it exists there only to
+// build a raw youtube.com/channel/<id> fallback link, and a degrade row has no channel
+// to link to at all — see renderIgnoredVideos (sections/ignored.ts) for the cell shape.
+export interface IgnoredVideoRow {
+	id: string;
+	title: string | null;
+	channelName: string | null;
+	publishedAt: string | null;
+	url: string | null;
+	durationSeconds: number | null;
+	channelAboutFile: TFile | null;
+	enrichmentFile: TFile | null;
+}
+
 export interface YoutubeNoMetadataRow {
 	file: TFile;
 	title: string;
@@ -175,6 +192,22 @@ export interface UncapturedPostRow {
 	hasBody: boolean;
 	metadataFile: TFile | null;
 	audioUrl?: string;
+}
+
+// WP-IC2: the Ignored Posts row — mirrors UncapturedPostRow's readable fields, minus
+// `authors`/`categories`/`hasBody`/`audioUrl` (not shown by the Ignored section; see
+// renderIgnoredPosts in sections/ignored.ts for the exact column set), degrading to
+// null when the post is still ignored yet no longer appears in any scanned tracker
+// run (aged out of retention).
+export interface IgnoredPostRow {
+	id: string;
+	title: string | null;
+	blogName: string | null;
+	publishedAt: string | null;
+	url: string | null;
+	kind: 'article' | 'podcast' | null;
+	wordCount: number | null;
+	metadataFile: TFile | null;
 }
 
 export interface OrphanRow {
