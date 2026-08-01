@@ -127,3 +127,28 @@ types.ts,audit.ts}`, `src/commands.ts`, `src/settings/sections/orchestrationSear
 
 **Total ≈ 0.65 kSLOC, ~490k raw tokens; ~334k Claude-path / ~265k Codex-path
 Opus/Sol-equivalent tokens.**
+
+---
+
+## Completion note (2026-08-01)
+
+Implemented and landed on master:
+
+- **WP-SA1** — `eeaf277` (subagent sa-1): `POST /v1/paths` (additive, no schema
+  bump) — `selectPathsByVault` generalizes the dominant-content-hash-group rule to
+  every path via `ROW_NUMBER() OVER (PARTITION BY path)`; `{ok, paths, totals}`
+  contract; 5 new tests.
+- **WP-SA2** — `dbbe0b6` (subagent sa-2): `Search: audit index` (read-only,
+  overwrite-per-run `_crucible/search-audit.md`) + `Search: reconcile index`
+  (existing job types only; orphans via `confirmDestructive
+  'search-reconcile-orphans'`, medium tier); pure `src/search/audit.ts`
+  (embeddingGaps gated on `searchSemanticEnabled`); `normalizeHealth`/`SearchHealth`
+  widened additively; `search-health` Notice + read-only Companion status settings
+  panel with mixed-space warning; 20 new tests.
+- **WP-SA3** — docs close: `src/search/AGENTS.md` quirk entry, root quirks-index
+  line, `docs/search-companion.md` endpoint doc; companion deployed via
+  `home-compose up crucible-search` and live-verified (`/v1/paths` → 5,936 paths /
+  65,469 chunks, `/health` full payload, single embedding space).
+
+Test floor after this plan: **1686 tests / 133 files**. Actuals vs estimate:
+SA1 156k/12min vs 180k/14min; SA2 220k/17min vs 280k/22min (ledger 523, 525).

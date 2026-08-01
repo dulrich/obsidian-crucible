@@ -7,8 +7,7 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans:
-  - "[[search-index-audit-health]]"
+pending-plans: []
 initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 50
