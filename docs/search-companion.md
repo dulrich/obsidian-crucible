@@ -8,6 +8,8 @@ Crucible's Obsidian plugin talks to a local HTTP service for search storage and 
 
 The companion runs as a docker-compose service, either standalone (`docker compose up` from this repo root) or enrolled in the `context-control` fleet as `crucible-search` (`home-compose up crucible-search`). The container binds `0.0.0.0` internally and publishes to the host on loopback only, so from the plugin's point of view it's reachable the same way as the standalone process below.
 
+**Updating the companion's code requires an image rebuild, not a restart.** The image bakes `scripts/search-companion.mjs` and the `scripts/search-companion/` module tree at build time (only `/data` is a volume), so a bare `docker restart crucible-search` runs the *old* code. `home-compose up crucible-search` is the one command that does both — it is `docker compose up -d --build` with the repo's current HEAD baked in as the image's revision label.
+
 Defaults inside the container:
 
 - URL: `http://127.0.0.1:4801`

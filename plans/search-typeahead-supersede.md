@@ -145,3 +145,35 @@ abandons.
 
 **Total ≈ 0.65 kSLOC, ~450k raw tokens; ~310k Claude-path / ~245k Codex-path
 Opus/Sol-equivalent tokens.**
+
+---
+
+## Completion note (2026-07-31)
+
+All three WPs landed same-day; plan closed.
+
+- **SS1** `09cd8b8` — fetch+AbortController transport for interactive `/v1/search` (scoped
+  `eslint-disable` for the plugin's no-bare-`fetch` rule, kept deliberately: `requestUrl`
+  has no abort story); session-latched `requestUrl` fallback on CORS/network-shaped
+  `TypeError`; modal aborts one live controller at all three generation-bump sites;
+  timeout aborts instead of abandoning; `SearchAbortedError` structurally unreachable
+  from the availability latch; companion CORS/OPTIONS. Actuals: ~256k tokens (128% of
+  padded est — test-harness fetch-stub rewrite), 23 min, tests 1604→1624. Ledger 512.
+- **SS2** `f9e8be5` — optional `clientId`/`seq` attached only on signal-carrying
+  (interactive) calls; bounded-LRU supersede tracker (`searchClients.mjs`,
+  `MAX_SEARCH_CLIENTS = 64`) consulted pre-flight; disconnect skip via `res.on('close')`
+  registered before the body read — **`req.destroyed` was live-confirmed unusable**
+  (autoDestroy flips it after every normal body end; the initial implementation hung
+  every real search); `SEARCH_DEADLINE_SKEW_TRUST_BUDGETS = 5`. Identity-less requests
+  byte-identical. Actuals: ~239k tokens (109%), 26 min, tests 1624→1638/128. Ledger 513.
+- **SS3** (this commit) — quirk entries in `src/search/AGENTS.md` (supersede contract +
+  the two traps; companion deploy quirk), root quirks-index line, the
+  rebuild-not-restart note in `docs/search-companion.md` (user-requested: the flow was
+  undocumented), plan deregistered.
+
+Deviations from plan: none of substance. The SS1 CORS "repro first" step was converted
+to defensive coverage (headless worker cannot run Electron) — CORS/OPTIONS shipped
+unconditionally plus a session-latched `requestUrl` fallback, live validation left to the
+user. `runSearch` stays synchronous as planned; revisit only if pile-up persists after
+live validation. Deploy note: these changes reach the running companion only via
+`home-compose up crucible-search` (image rebuild — see the new quirk).
