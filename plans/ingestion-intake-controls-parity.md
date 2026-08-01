@@ -117,3 +117,30 @@ bare-ID fallback rows; Un-ignore returns the item to Uncaptured with full data.
 
 **Total ≈ 0.6 kSLOC, ~450k raw tokens; ~310k Claude-path / ~245k Codex-path
 Opus/Sol-equivalent tokens.**
+
+---
+
+## Completion note (2026-07-31)
+
+Implemented and landed on master:
+
+- **WP-IC1** — `486b73e` (subagent ic-1): merged intake action cells on Uncaptured
+  posts/videos, `renderExternalLink` trailing `external-link` glyph,
+  `renderIconLabelButton` (Ingest `import` / Enrich `sparkles`), warning-tier
+  icon-only Ignore/Un-ignore (`eye-off`/`eye`, `var(--text-warning)`, no
+  `mod-warning`, not in `DESTRUCTIVE_ACTIONS`). Click behavior byte-equivalent;
+  9 new tests. Deviation accepted: one-line `setIcon` stub in two queue-monitor
+  test bundles.
+- **WP-IC2** — `3e97c67` (subagent ic-2): `computeIgnoredPostRows`/
+  `computeIgnoredVideoRows` (`src/ingestion/data/ignored.ts`) — seen set built
+  without the ignored-id fold, filtered to the ignored set, bare-ID degrade rows
+  for aged-out items; Ignored sections render the readable Uncaptured columns +
+  the IC1 action cell; default sort publishedAt desc, degrade rows last.
+  Uncaptured outputs pinned byte-identical; 14 new tests. Orchestrator cleanup:
+  dead `renderIgnoredIdCell` removed.
+- **WP-IC3** — docs close: UI-standards entries in root `AGENTS.md`
+  (reversible-warn-vs-destructive-red split; merged action-cell pattern), this
+  note, deregistration.
+
+Test floor after this plan: **1661 tests / 130 files**. Actuals vs estimate:
+IC1 144k/12min vs 200k/15min; IC2 187k/15min vs 220k/17min (ledger rows 515, 516).
