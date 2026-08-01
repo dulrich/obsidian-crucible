@@ -338,6 +338,23 @@ export interface SearchHealth {
 	vectorAvailable?: boolean;
 	message?: string;
 	rebuildRequired?: boolean;
+	/**
+	 * WP-SA2: the remaining `/health` fields (`scripts/search-companion/endpoints/health.mjs`),
+	 * widened onto `SearchHealth` additively so `search-health`'s Notice and the Orchestrate →
+	 * Search settings status block can report them without a second probe. All optional: an
+	 * older companion (or any code path constructing a `SearchHealth` by hand, e.g. a test
+	 * fixture) simply omits them, and every existing consumer of `ok`/`version`/`schemaVersion`/
+	 * `vectorAvailable`/`message`/`rebuildRequired` is unaffected.
+	 */
+	vectorBackend?: string;
+	embeddedChunks?: number;
+	embeddingDim?: number;
+	embeddingModel?: string;
+	/** Distinct vector spaces across every vault. More than one entry means a mixed index. */
+	embeddingSpaces?: string[];
+	/** The single space in use, or `null` when spaces are mixed/unlabelled/absent — mirrors the companion's own tri-state. */
+	embeddingSpace?: string | null;
+	unattributedEmbeddedChunks?: number;
 }
 
 // Per-stage score attribution: the base score, every boost that fired, and the fused value,
@@ -430,6 +447,30 @@ export interface SearchFileState {
 	 * re-indexing one that did not costs a read.
 	 */
 	embeddingSpace?: string;
+}
+
+/**
+ * WP-SA2: one row per indexed path, from `POST /v1/paths` (WP-SA1, `sa-1-report.md` is the
+ * authoritative wire contract). Unlike `SearchFileState` (per-requested-path, some fields
+ * optional/unknown-tolerant for an older companion) this endpoint is new in this schema
+ * generation, so its rows are fully typed rather than defensively optional — a companion too old
+ * to serve `/v1/paths` at all fails the request outright (refused/timeout), not with a sparse row.
+ */
+export interface SearchIndexedPath {
+	path: string;
+	mtime: number;
+	contentHash?: string;
+	chunkCount: number;
+	embeddedCount: number;
+}
+
+export interface SearchPathsResponse {
+	paths: SearchIndexedPath[];
+	totals: {
+		paths: number;
+		chunks: number;
+		embeddedChunks: number;
+	};
 }
 
 /**
