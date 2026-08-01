@@ -6,6 +6,8 @@ import {
 	SearchChunk,
 	SearchFileState,
 	SearchHealth,
+	SearchIndexedPath,
+	SearchPathsResponse,
 	SearchQueryOptions,
 	SearchResponse,
 	SearchScoreAttribution,
@@ -149,6 +151,18 @@ export class SearchServiceClient {
 			paths: uniquePaths,
 		}, SEARCH_SERVICE_INDEX_TIMEOUT_MS);
 		return normalizeFileStates(json);
+	}
+
+	/**
+	 * WP-SA2: enumerates every indexed path in the vault (WP-SA1's `POST /v1/paths`), for the
+	 * audit/reconcile commands. Not the interactive fetch path — this is a bulk, vault-wide read
+	 * (the same shape as `fileStates`/`upsertChunks`/`deletePath`), so it goes through `post()` on
+	 * the ordinary `requestUrl` transport with the long indexing timeout, not the abortable
+	 * `fetch`-based interactive `search()` path.
+	 */
+	async listPaths(): Promise<SearchPathsResponse> {
+		const json = await this.post('/v1/paths', { vaultId: this.vaultId }, SEARCH_SERVICE_INDEX_TIMEOUT_MS);
+		return normalizePaths(json);
 	}
 
 	// `timeoutMs` defaults to the interactive constant for any caller that doesn't pass one (a
@@ -354,6 +368,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 	}
 }
 
+// WP-SA2: widened to pass through the full `/health` payload (`scripts/search-companion/
+// endpoints/health.mjs:9-31`), additively. Every new field is read defensively and independently,
+// same discipline as `normalizeFileStates` below — an older companion (or a hand-built test
+// fixture) that omits a field degrades to `undefined`, never a coerced falsy/zero value.
 function normalizeHealth(value: unknown): SearchHealth {
 	if (!value || typeof value !== 'object') return { ok: true };
 	const raw = value as Record<string, unknown>;
@@ -363,6 +381,52 @@ function normalizeHealth(value: unknown): SearchHealth {
 		schemaVersion: typeof raw.schemaVersion === 'number' ? raw.schemaVersion : undefined,
 		vectorAvailable: typeof raw.vectorAvailable === 'boolean' ? raw.vectorAvailable : undefined,
 		message: typeof raw.message === 'string' ? raw.message : undefined,
+		vectorBackend: typeof raw.vectorBackend === 'string' ? raw.vectorBackend : undefined,
+		embeddedChunks: numberField(raw.embeddedChunks),
+		embeddingDim: numberField(raw.embeddingDim),
+		embeddingModel: typeof raw.embeddingModel === 'string' ? raw.embeddingModel : undefined,
+		embeddingSpaces: Array.isArray(raw.embeddingSpaces)
+			? raw.embeddingSpaces.filter((s): s is string => typeof s === 'string')
+			: undefined,
+		// `null` is a real, meaningful value here (the companion's own "mixed/unlabelled" state) —
+		// distinct from `undefined` ("this companion never reported the field at all"). Only a
+		// bare string or an explicit null pass through; anything else (e.g. a stray number) is
+		// dropped to undefined rather than coerced.
+		embeddingSpace: typeof raw.embeddingSpace === 'string' ? raw.embeddingSpace : (raw.embeddingSpace === null ? null : undefined),
+		unattributedEmbeddedChunks: numberField(raw.unattributedEmbeddedChunks),
+	};
+}
+
+// WP-SA2: normalizes `POST /v1/paths` (WP-SA1's response contract — `ok: true` alongside
+// `paths`/`totals`; see `runs/dispatch/sa-1-report.md`). `ok` itself is not surfaced on
+// `SearchPathsResponse` — a non-2xx status already throws via `request()`'s status branches, so by
+// the time this runs the only remaining question is "what shape is the payload", not "did it
+// succeed". An unindexed/unknown vaultId legitimately returns empty arrays/zeroed totals (per the
+// SA1 contract) — that degrades to the same empty shape as a malformed payload, which is the
+// correct behavior either way (nothing to report).
+function normalizePaths(value: unknown): SearchPathsResponse {
+	const empty: SearchPathsResponse = { paths: [], totals: { paths: 0, chunks: 0, embeddedChunks: 0 } };
+	if (!value || typeof value !== 'object') return empty;
+	const raw = value as Record<string, unknown>;
+	const rows = Array.isArray(raw.paths) ? raw.paths : [];
+	const paths: SearchIndexedPath[] = rows.map((item) => {
+		const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+		return {
+			path: stringField(row.path),
+			mtime: numberField(row.mtime) ?? 0,
+			contentHash: typeof row.contentHash === 'string' && row.contentHash ? row.contentHash : undefined,
+			chunkCount: numberField(row.chunkCount) ?? 0,
+			embeddedCount: numberField(row.embeddedCount) ?? 0,
+		};
+	}).filter(row => row.path);
+	const totalsRaw = raw.totals && typeof raw.totals === 'object' ? raw.totals as Record<string, unknown> : {};
+	return {
+		paths,
+		totals: {
+			paths: numberField(totalsRaw.paths) ?? paths.length,
+			chunks: numberField(totalsRaw.chunks) ?? 0,
+			embeddedChunks: numberField(totalsRaw.embeddedChunks) ?? 0,
+		},
 	};
 }
 

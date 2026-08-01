@@ -3,11 +3,13 @@ import { Setting, Notice } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { ProviderModelRef } from "../../types";
 import { confirmDestructive } from "../destructiveActions";
+import { addWarningIcon } from "../shared";
 import { bindToggle, bindText, bindNumber } from "../bind";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 import { TEXT_EXTRACTABLE_CATEGORIES, deriveFileTypeGroups } from "../../fileTypes";
 import { renderExtensionCheckboxGroups } from "./commands";
 import { resolveProviderModelRef } from "../../search/SearchManager";
+import { SearchHealth } from "../../search/types";
 import { embeddingModelRefs, imageExtractionModelRefs, rerankModelRefs } from "../modelRefCollectors";
 import {
 	SEARCH_QUERY_LOG_DEFAULT_MAX_ENTRIES,
@@ -81,11 +83,74 @@ export function renderOrchestrationSearchSettings(tab: CrucibleSettingTab, conta
 	containerEl.createEl('p', { text: 'Vault search indexes the file types checked below through the orchestration queue. The local SQLite companion service owns storage and ranking.' });
 	const searchGroup = containerEl.createDiv({ cls: 'crucible-settings-group' });
 
+	renderSearchHealthStatusSettings(tab, searchGroup);
 	renderSearchConnectionSettings(tab, searchGroup);
 	renderSearchIndexingTuningSettings(tab, searchGroup);
 	renderSearchImageDescriptionSettings(tab, searchGroup);
 	renderSearchRerankSettings(tab, searchGroup);
 	renderSearchQueryLogSettings(tab, searchGroup);
+}
+
+// WP-SA2: session-scoped (module-level, mirrors the `describeModel` probe-cache and the client's
+// own CORS-fallback-latch idiom) cache of the last manually-fetched `/health` snapshot. Read-only
+// panel, no polling — the brief is explicit that this stays a manual "Refresh" affordance, not a
+// timer, so the fetch happens only on click and the result survives the `statusBody.empty()` +
+// re-render this function does locally (never a full `tab.display()`, which would also lose
+// scroll position/edit state elsewhere on the tab for an unrelated click).
+let cachedSearchHealth: SearchHealth | null = null;
+let searchHealthFetchError: string | null = null;
+
+function renderSearchHealthStatusSettings(tab: CrucibleSettingTab, searchGroup: HTMLElement) {
+	const heading = new Setting(searchGroup).setName('Companion status').setHeading()
+		.setDesc('Read-only. Reflects the last manual Refresh, not a live connection — click Refresh after starting/rebuilding the companion.');
+	const statusBody = searchGroup.createDiv({ cls: 'crucible-search-health-status' });
+
+	const renderBody = () => {
+		statusBody.empty();
+		if (searchHealthFetchError) {
+			statusBody.createDiv({ cls: 'crucible-setting-warning', text: `Could not reach the search companion — ${searchHealthFetchError}` });
+			return;
+		}
+		if (!cachedSearchHealth) {
+			statusBody.createEl('p', { text: 'Not checked yet this session — click Refresh.' });
+			return;
+		}
+		const health = cachedSearchHealth;
+		const line = (label: string, value: string) => statusBody.createEl('p', { text: `${label}: ${value}` });
+		line('Status', health.ok ? 'ok' : 'not ok');
+		line('Version', health.version ?? 'unknown');
+		line('Schema version', health.schemaVersion !== undefined ? String(health.schemaVersion) : 'unknown');
+		line('Indexed chunks', health.embeddedChunks !== undefined ? String(health.embeddedChunks) : 'unknown');
+		line('Vector backend', health.vectorBackend ?? 'unknown');
+		line('Embedding model', health.embeddingModel ?? 'none');
+		line('Embedding dimension', health.embeddingDim !== undefined ? String(health.embeddingDim) : 'unknown');
+		const spaces = health.embeddingSpaces ?? [];
+		line('Embedding spaces', spaces.length > 0 ? spaces.join(', ') : 'none');
+		if (spaces.length > 1) {
+			const warningRow = statusBody.createDiv({ cls: 'crucible-setting-warning' });
+			addWarningIcon(warningRow, 'Mixed embedding spaces');
+			warningRow.createSpan({ text: `Mixed vector spaces (${spaces.length}): ${spaces.join(', ')}. Some searches degrade to keyword-only until the vault is re-embedded under one space.` });
+		}
+		if (health.message) {
+			statusBody.createDiv({ cls: 'crucible-setting-warning', text: health.message });
+		}
+	};
+
+	heading.addButton(bt => bt.setButtonText('Refresh').onClick(async () => {
+		bt.setDisabled(true);
+		bt.setButtonText('Refreshing…');
+		try {
+			cachedSearchHealth = await tab.plugin.searchManager.health();
+			searchHealthFetchError = null;
+		} catch (e) {
+			searchHealthFetchError = e instanceof Error ? e.message : String(e);
+		}
+		bt.setDisabled(false);
+		bt.setButtonText('Refresh');
+		renderBody();
+	}));
+
+	renderBody();
 }
 
 // The companion connection + what gets indexed at all (enabled, service URL, vault id, semantic
