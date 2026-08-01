@@ -48,6 +48,7 @@ await esbuild.build({
 					'export async function requestUrl() { throw new Error("requestUrl unavailable in tests"); }',
 					'export const Platform = {};',
 					'export const moment = () => {};',
+					'export function setIcon() {}',
 				].join('\n'),
 				loader: 'js',
 			}));
