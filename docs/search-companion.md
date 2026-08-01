@@ -225,6 +225,15 @@ type-ahead search, which does not call it.
 - `POST /v1/chunks/delete`
 - `POST /v1/files/state`
 - `POST /v1/search`
+- `POST /v1/paths` — enumerate every indexed path for a vault: body `{vaultId}` →
+  `{ok, paths: [{path, mtime, contentHash, chunkCount, embeddedCount}], totals: {paths,
+  chunks, embeddedChunks}}`, sorted by path, one aggregate query. This is the endpoint the
+  client's `Search: audit index` / `Search: reconcile index` commands diff against the
+  vault's own file list (`/v1/files/state` only echoes paths the caller already names, so
+  orphan detection needs this). Per-path rows report each path's chunk-count-majority
+  content-hash group (a mid-rewrite path's minority stragglers are transient and excluded
+  from rows and totals alike). An unknown `vaultId` returns 200 with empty paths/zero
+  totals, never an error.
 
 All mutation/search requests include `vaultId` so multiple vaults can share one companion database. That sharing is only actually safe from **schema 5** onwards — see the `4→5` migration above. An implementation of this contract must key chunk storage on `vaultId + chunkId`, never on `chunkId` alone.
 
