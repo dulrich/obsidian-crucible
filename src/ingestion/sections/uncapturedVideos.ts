@@ -8,6 +8,12 @@ import { computeUncapturedVideoRows } from '../data/uncaptured';
 import { isYoutubeApiKeyRegistered, renderApiKeyAffordance, youtubeApiKeyMissing } from '../render/apiKeyAffordance';
 import type { DashboardHost, SectionContext, UncapturedVideoRow } from '../render/types';
 
+function renderVideoActionCell(host: DashboardHost, td: HTMLElement, row: UncapturedVideoRow, ctx: SectionContext): void {
+	td.addClass('crucible-intake-action-cell');
+	renderExternalLink(td, row.url, 'watch');
+	renderIgnoreButton(td, host, 'youtube', row.videoId, 'uncapturedVideos', 'ignoredVideos', ctx);
+}
+
 export interface UncapturedVideosSection {
 	render(body: HTMLElement, ctx: SectionContext): Promise<void>;
 	// The enrichment auto-source: uncaptured videos without an enrichment file
@@ -77,8 +83,9 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 					{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
 					{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
 					{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
-					{ key: 'watch', label: '', render: (r, td) => renderExternalLink(td, r.url, 'watch') },
-					{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'youtube', r.videoId, 'uncapturedVideos', 'ignoredVideos', ctx) },
+					// WP-IC1: merged watch+ignore action column; the stateful Enriched? column
+					// (queued/running/link text, not just a button) stays separate.
+					{ key: 'action', label: '', render: (r, td) => renderVideoActionCell(host, td, r, ctx) },
 					{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r, inFlight.byStandaloneVideoId.get(r.videoId) ?? null) },
 				],
 			});

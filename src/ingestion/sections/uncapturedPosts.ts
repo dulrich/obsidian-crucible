@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian';
 import { runBlogIngestCommand } from '../../orchestration/utils/blogsApi';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
-import { renderAuthorCell, renderExternalLink, renderFileLink, renderIgnoreButton } from '../render/cells';
+import { renderAuthorCell, renderExternalLink, renderFileLink, renderIconLabelButton, renderIgnoreButton } from '../render/cells';
 import { displayLabel } from '../render/format';
 import { computeUncapturedPostRows } from '../data/uncaptured';
 import type { DashboardHost, SectionContext, UncapturedPostRow } from '../render/types';
@@ -40,49 +40,51 @@ export async function renderUncapturedPosts(host: DashboardHost, body: HTMLEleme
 			{ key: 'kind', label: 'Type', sortable: true, sortKey: r => r.kind, render: (r, td) => td.setText(r.kind) },
 			{ key: 'wordCount', label: 'Words', sortable: true, sortKey: r => r.wordCount ?? -1, render: (r, td) => td.setText(r.wordCount == null ? '—' : String(r.wordCount)) },
 			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
+			// WP-IC1: one merged action column (read · metadata · Ingest · Ignore) instead
+			// of separate action/ignore columns — the CSS gap on the cell class replaces
+			// the literal spacer spans this used to insert between children.
 			{ key: 'action', label: '', render: (r, td) => renderPostActionCell(host, td, r, ctx) },
-			{ key: 'ignore', label: '', render: (r, td) => renderIgnoreButton(td, host, 'blog', r.postId, 'uncapturedPosts', 'ignoredPosts', ctx) },
 		],
 	});
 }
 
 function renderPostActionCell(host: DashboardHost, td: HTMLElement, row: UncapturedPostRow, ctx: SectionContext): void {
+	td.addClass('crucible-intake-action-cell');
 	renderExternalLink(td, row.url, 'read');
-	td.createSpan({ text: '  ' });
 	if (row.metadataFile) {
 		renderFileLink(host.app, td, row.metadataFile, 'metadata');
 	} else {
 		td.createSpan({ text: 'metadata' }).addClass('crucible-muted');
 	}
-	if (!row.hasBody) return;
-	td.createSpan({ text: '  ' });
-	renderIngestButton(host, td, row, ctx);
+	if (row.hasBody) renderIngestButton(host, td, row, ctx);
+	renderIgnoreButton(td, host, 'blog', row.postId, 'uncapturedPosts', 'ignoredPosts', ctx);
 }
 
 function renderIngestButton(host: DashboardHost, td: HTMLElement, row: UncapturedPostRow, ctx: SectionContext): void {
-	const btn = td.createEl('button', { text: 'Ingest' });
-	btn.addEventListener('click', () => {
-		void (async () => {
-			btn.disabled = true;
-			try {
-				const res = await runBlogIngestCommand(host.plugin, row);
-				if (res.status === 'ran') {
-					new Notice(`Ran ${res.commandId}`);
-				} else if (res.status === 'missing-command') {
-					new Notice('Choose a queueable blog ingest command in settings.');
-					btn.disabled = false;
-					return;
-				} else {
-					new Notice('No blog metadata note found for this post.');
+	renderIconLabelButton(td, 'import', 'Ingest', btn => {
+		btn.addEventListener('click', () => {
+			void (async () => {
+				btn.disabled = true;
+				try {
+					const res = await runBlogIngestCommand(host.plugin, row);
+					if (res.status === 'ran') {
+						new Notice(`Ran ${res.commandId}`);
+					} else if (res.status === 'missing-command') {
+						new Notice('Choose a queueable blog ingest command in settings.');
+						btn.disabled = false;
+						return;
+					} else {
+						new Notice('No blog metadata note found for this post.');
+						btn.disabled = false;
+						return;
+					}
+				} catch (e) {
+					new Notice(`Ingest failed: ${e instanceof Error ? e.message : String(e)}`);
 					btn.disabled = false;
 					return;
 				}
-			} catch (e) {
-				new Notice(`Ingest failed: ${e instanceof Error ? e.message : String(e)}`);
-				btn.disabled = false;
-				return;
-			}
-			void ctx.refresh();
-		})();
+				void ctx.refresh();
+			})();
+		});
 	});
 }
