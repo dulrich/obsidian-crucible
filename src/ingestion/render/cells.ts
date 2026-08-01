@@ -1,5 +1,5 @@
 import type { App, TFile } from 'obsidian';
-import { Notice } from 'obsidian';
+import { Notice, setIcon } from 'obsidian';
 import type CruciblePlugin from '../../main';
 import {
 	addIgnoredBlogId,
@@ -19,6 +19,13 @@ export function renderExternalLink(td: HTMLElement, url: string, label: string):
 	const a = td.createEl('a', { text: label, href: url });
 	a.setAttr('target', '_blank');
 	a.setAttr('rel', 'noopener');
+	// WP-IC1: a trailing glyph marks every one of this helper's call sites as an
+	// external destination (read/watch links, channel/author links elsewhere all use
+	// their own renderers) — 12px, inherits the anchor's color via currentColor, and
+	// stays un-underlined via the dedicated class even if the anchor itself is styled
+	// with an underline.
+	const icon = a.createSpan({ cls: 'crucible-external-link-icon' });
+	setIcon(icon, 'external-link');
 }
 
 export function renderChannelLink(td: HTMLElement, channelId: string, name: string): void {
@@ -69,6 +76,24 @@ export function renderOpenButton(app: App, td: HTMLElement, file: TFile): void {
 	});
 }
 
+// CC-11 icon-label button: a lucide glyph plus the visible label text, appended
+// straight into `td` (same "icon then span" shape as the Export JSONL button in
+// sourceEvalDashboard.ts). Used for the intake action cell's Ingest (`import`) and
+// Enrich (`sparkles`) actions. Creation only — `onClickWiring` receives the button
+// so the caller attaches its own click handler exactly as before; this helper does
+// not touch click behavior, disable-on-click, or any refresh sequencing.
+export function renderIconLabelButton(
+	td: HTMLElement,
+	iconName: string,
+	label: string,
+	onClickWiring: (btn: HTMLButtonElement) => void,
+): void {
+	const btn = td.createEl('button');
+	setIcon(btn, iconName);
+	btn.createSpan({ text: ` ${label}` });
+	onClickWiring(btn);
+}
+
 /**
  * The Uncaptured Videos "Enriched?" cell.
  *
@@ -96,23 +121,24 @@ export function renderEnrichedCell(
 		td.setText(inFlight === 'running' ? 'enriching…' : 'queued');
 		return;
 	}
-	const btn = td.createEl('button', { text: 'Enrich' });
-	btn.addEventListener('click', () => {
-		void (async () => {
-			const runner = plugin.orchestrationAutoRunner;
-			if (!runner) {
-				new Notice('Enrichment service not available.');
-				return;
-			}
-			btn.disabled = true;
-			const job = await runner.enqueueAndRun(ENRICHMENT_JOB_TYPE, {
-				videoId: row.videoId,
-				title: row.title,
-				channelName: row.channelName,
-			}, { priority: 'high', lane: 'user' });
-			if (job) btn.setText('Queued');
-			else btn.disabled = false;
-		})();
+	renderIconLabelButton(td, 'sparkles', 'Enrich', btn => {
+		btn.addEventListener('click', () => {
+			void (async () => {
+				const runner = plugin.orchestrationAutoRunner;
+				if (!runner) {
+					new Notice('Enrichment service not available.');
+					return;
+				}
+				btn.disabled = true;
+				const job = await runner.enqueueAndRun(ENRICHMENT_JOB_TYPE, {
+					videoId: row.videoId,
+					title: row.title,
+					channelName: row.channelName,
+				}, { priority: 'high', lane: 'user' });
+				if (job) btn.setText('Queued');
+				else btn.disabled = false;
+			})();
+		});
 	});
 }
 
@@ -132,7 +158,11 @@ export function renderIgnoreButton(
 	companionSectionId: SectionId,
 	ctx: TableStateContext,
 ): void {
-	const btn = td.createEl('button', { text: 'Ignore' });
+	// WP-IC1: icon-only, warning-tier (reversible, not destructive — no mod-warning).
+	const btn = td.createEl('button', { cls: 'crucible-intake-warn-btn' });
+	setIcon(btn, 'eye-off');
+	btn.setAttr('aria-label', 'Ignore');
+	btn.setAttr('title', 'Ignore');
 	btn.addEventListener('click', () => {
 		void (async () => {
 			btn.disabled = true;
@@ -164,7 +194,11 @@ export function renderUnignoreButton(
 	companionSectionId: SectionId,
 	ctx: TableStateContext,
 ): void {
-	const btn = td.createEl('button', { text: 'Un-ignore' });
+	// WP-IC1: icon-only, warning-tier — same treatment as renderIgnoreButton above.
+	const btn = td.createEl('button', { cls: 'crucible-intake-warn-btn' });
+	setIcon(btn, 'eye');
+	btn.setAttr('aria-label', 'Un-ignore');
+	btn.setAttr('title', 'Un-ignore');
 	btn.addEventListener('click', () => {
 		void (async () => {
 			btn.disabled = true;
