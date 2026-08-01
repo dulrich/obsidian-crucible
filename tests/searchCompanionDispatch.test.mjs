@@ -61,7 +61,7 @@ async function withServer(db, fn) {
 
 // ── 1. The table is the whole route surface ─────────────────────────────────────────────────
 
-test('the route table names exactly the six live endpoints, in one enumerable place', () => {
+test('the route table names exactly the seven live endpoints, in one enumerable place', () => {
 	assert.deepEqual([...ROUTE_IDS], [
 		'GET /health',
 		'POST /v1/index/reset',
@@ -69,6 +69,7 @@ test('the route table names exactly the six live endpoints, in one enumerable pl
 		'POST /v1/files/state',
 		'POST /v1/chunks/upsert',
 		'POST /v1/search',
+		'POST /v1/paths',
 	]);
 	// Frozen: a caller cannot mutate the canonical list out from under the dispatcher.
 	assert.equal(Object.isFrozen(ROUTE_IDS), true);
@@ -146,6 +147,7 @@ test('every route in the table is reachable through the real handler against a r
 			'POST /v1/files/state': ['POST', '/v1/files/state', { vaultId: VAULT, paths: [] }],
 			'POST /v1/chunks/upsert': ['POST', '/v1/chunks/upsert', { vaultId: VAULT, chunks: [] }],
 			'POST /v1/search': ['POST', '/v1/search', { vaultId: VAULT, query: 'anything' }],
+			'POST /v1/paths': ['POST', '/v1/paths', { vaultId: VAULT }],
 		};
 		assert.deepEqual(Object.keys(requests).sort(), [...ROUTE_IDS].sort(), 'every route id is exercised');
 

@@ -33,6 +33,7 @@ export * from './search-companion/dispatch.mjs';
 export * from './search-companion/endpoints/chunksDelete.mjs';
 export * from './search-companion/endpoints/filesState.mjs';
 export * from './search-companion/endpoints/health.mjs';
+export * from './search-companion/endpoints/paths.mjs';
 export * from './search-companion/endpoints/reset.mjs';
 export * from './search-companion/endpoints/search.mjs';
 export * from './search-companion/endpoints/upsert.mjs';

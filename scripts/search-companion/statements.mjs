@@ -99,6 +99,32 @@ LIMIT 1
 	// ever runs it — preparing is cheap and once, whereas preparing per request would put a
 	// compile on the hot path of the mode we may be about to make the default.
 	const coverageStatement = db.prepare(COVERAGE_SQL);
+	// WP-SA1: every indexed path for a vault, one row each, in one aggregate query — the
+	// `/v1/paths` endpoint's whole job, so no application-code loop over paths exists here.
+	// Same "dominant content-hash group" precedent as `selectStateByPath` above (a path
+	// mid-rewrite can transiently hold rows under two content hashes), generalized to every
+	// path in the vault at once via a window function: `grouped` aggregates per
+	// (path, content_hash) exactly like selectStateByPath's WHERE-one-path version, then
+	// ROW_NUMBER()-ranks each path's groups by chunk_count so `rn = 1` keeps only the
+	// majority-hash group per path — never a naive last-write-wins pick.
+	const selectPathsByVault = db.prepare(`
+WITH grouped AS (
+  SELECT
+    path,
+    content_hash,
+    MAX(mtime) AS mtime,
+    COUNT(*) AS chunk_count,
+    SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded_count,
+    ROW_NUMBER() OVER (PARTITION BY path ORDER BY COUNT(*) DESC) AS rn
+  FROM chunks
+  WHERE vault_id = ?
+  GROUP BY path, content_hash
+)
+SELECT path, content_hash, mtime, chunk_count, embedded_count
+FROM grouped
+WHERE rn = 1
+ORDER BY path
+`);
 
 	return {
 		upsertChunk,
@@ -114,5 +140,6 @@ LIMIT 1
 		resetChunks,
 		searchStatement,
 		coverageStatement,
+		selectPathsByVault,
 	};
 }
