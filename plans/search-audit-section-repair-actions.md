@@ -1,5 +1,13 @@
 # Plan I — Search-audit section: per-condition repair actions (merged Summary/Repair table)
 
+> **STATUS: COMPLETE (2026-08-02).** All three WPs landed on master: WP-I1 seam
+> (`AuditImage.path`, `imageCoverage.pendingPaths`/`failedPaths`, three extracted repair-action
+> helpers in `src/search/auditRun.ts`, commands rewired byte-identical) at `e0ea087`; WP-I2
+> section redesign (nine-row merged Summary/Repair statistics table with per-condition wrench
+> actions hidden at count==0, row-click filtering incl. the two image classes, Run audit inline
+> with Refresh) at `f107a5f`; WP-I3 close in this commit. Test floor moved 1845/144 → 1862/145.
+> Live validation checklist handed to the user at close.
+
 Repo: **obsidian-crucible** · slug `search-audit-section-repair-actions` · follows Plan H (closed at `04c8509`) + the image-coverage follow-up (`fa6c3b2`). Born from user validation of the H4 section.
 
 *Recommended model/effort — Claude: Sonnet/medium workers I1–I2, orchestrator (Fable) closes I3 direct; Codex: Terra/medium workers, Sol/medium orchestrator.*
