@@ -5,6 +5,7 @@ import { ProviderModelRef } from "../../types";
 import { confirmDestructive } from "../destructiveActions";
 import { addWarningIcon } from "../shared";
 import { bindToggle, bindText, bindNumber } from "../bind";
+import { normalizeTagBoostTagsInput } from "../../search/tagBoost";
 import { ModelPickerModal, buildModelPickerOptions } from "../../modelPicker";
 import { TEXT_EXTRACTABLE_CATEGORIES, deriveFileTypeGroups } from "../../fileTypes";
 import { renderExtensionCheckboxGroups } from "./commands";
@@ -312,6 +313,34 @@ function renderSearchIndexingTuningSettings(tab: CrucibleSettingTab, searchGroup
 		set: (v) => { const n = Number(v.trim()); s.searchLinkBoostWeight = Number.isFinite(n) && n >= 0 ? n : 0.05; },
 		min: 0,
 		step: 0.01,
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindToggle(searchGroup, {
+		name: 'Tag boost',
+		desc: 'Boost results tagged with one of the configured tags below by a flat additive amount. Reads frontmatter tags only — an inline body `#gold` is invisible to this boost, because the companion\'s index carries frontmatter tags. Off by default.',
+		get: () => s.searchTagBoostEnabled,
+		set: (v) => { s.searchTagBoostEnabled = v; },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindText(searchGroup, {
+		name: 'Tag boost tags',
+		desc: 'Comma-separated list of frontmatter tags to boost. Matching is case-insensitive and a leading # is stripped, so "Gold", "gold", and "#gold" all match the same tag.',
+		placeholder: 'gold',
+		get: () => s.searchTagBoostTags.join(', '),
+		set: (v) => { s.searchTagBoostTags = normalizeTagBoostTagsInput(v); },
+	}, save);
+
+	searchGroup.createEl('hr', { cls: 'crucible-row-divider' });
+	bindNumber(searchGroup, {
+		name: 'Tag boost weight',
+		desc: 'Flat amount added to a matching result\'s score (score += weight), then results are re-sorted. 0.005 is the measured zero-regression default from the tag-boost spike — 0 disables the boost without touching the toggle above.',
+		placeholder: '0.005',
+		get: () => String(s.searchTagBoostWeight),
+		set: (v) => { const n = Number(v.trim()); s.searchTagBoostWeight = Number.isFinite(n) && n >= 0 ? n : 0.005; },
+		min: 0,
+		step: 0.001,
 	}, save);
 }
 
