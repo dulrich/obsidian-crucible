@@ -1,5 +1,22 @@
 # Plan G — Live-validation remediation: sticky-header clamp, audit truth, queue recency, lint stall, palette cost
 
+> **STATUS: COMPLETE (2026-08-02).** Plan registered at `82398c1`; all five WPs landed the
+> same night, dispatched in one parallel wave. G1 (`57b11a2`): `::before` cover strip paints
+> the sticky containing-block clamp band using F1's measured props — rerun packet in
+> `runs/dispatch/wp-g1-report.md`. G4 (`27120ad`): the frontmatter barrier's block-deleted
+> asymmetric case short-circuits to the splice-creation path — no 2s dead-wait, no stale
+> position handed to `processFrontMatter`; timing-pinned tests. G3 (`e606e6c`): settled queue
+> buckets order by `settled_at DESC` (claim paths untouched), honest "showing K of N" meta
+> line, job-detail Copy is `copy`-icon + label. G5 (`351de4a`): module-level palette hint
+> cache keyed by command-set + hint-settings signature, `limit` = 100, single registry sweep,
+> and `clearCommandRegistryGroup` now `removeCommand`s pruned ids (live-check: id prefix
+> convention). G2 (`151e511`): audit verifies mtime-suspects through the real index write
+> path (`auditPrepareFile`, provenance test-pinned byte-equal) → `mtimeOnly` class; zero-chunk
+> missing candidates → `unindexable`; both informational and excluded from reconcile;
+> `indexFiles` returns per-file outcomes so job notes distinguish written / skipped-unchanged /
+> no-chunks. Test floor 1767/139 → **1812/140**. Live-vault expectation on re-audit: ~19
+> mtimeOnly + ~7 unindexable, stale/missing near zero.
+
 Repo: **obsidian-crucible** · slug `live-validation-remediation` · follows Plan F (closed at `d37c03a`).
 
 *Recommended model/effort — Claude: Sonnet/medium workers G1–G5, orchestrator (Fable) closes G6 direct; Codex: Terra/medium workers, Sol/medium orchestrator.*
