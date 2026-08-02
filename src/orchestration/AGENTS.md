@@ -16,6 +16,32 @@ tracker/intake pipelines. User-facing writeups: `docs/orchestration.md`,
 `TriggerRegistry` and is documented here rather than in its own file — triggers only ever
 *enqueue*, so their semantics are queue semantics.
 
+## Quirks index
+
+The one-line hooks below say *where to walk*, not what to do — read the full entry before acting.
+
+- One durable SQLite queue, one backend — every job type persists to `jobs.sqlite`, never vault files.
+- The drain loop only exists because one line in `onload` constructs it — losing it stops the queue silently.
+- A queue-registration failure is caught and scoped in `main.ts`: orchestration dies, the plugin lives.
+- The old markdown queue folder is a frozen archive — nothing reads or writes it; the setting is legacy.
+- `youtube_metadata_fetch` is one job per note; link-if-exists comes before the rare API-fetch path.
+- `plugin.ingestionEvents` is the source of truth for "ingestion happened"; `metadata-enriched` comes from the workflow, not the queue.
+- `JobTypeConfig.drainsWithoutAutorun` does not bypass the per-type auto-run toggle, despite its name.
+- A job type's auto-ENQUEUE source supplies params never keys; a settled job suppresses its re-seed via a time window.
+- Triggers are hardened against the self-feeding storm class: managed-path exclusion, layout-ready start, validation-gated enablement.
+- `post-id` canonicalization is platform-aware, not a blind param-strip.
+- YT video ID extraction has one home — `extractVideoIdFromUrl`; don't add regexes elsewhere.
+- The YouTube tracker fetches uploads via the Data API, not RSS — the uploads playlist id is a pure string swap.
+- The Ingestion Dashboard and the consolidation workflows share pure intake functions as the single source of truth.
+- Ignored ingestion IDs are folded into the seen set, not checked separately.
+- Blog post enrichment writes `_blog_metadata` notes during intake; those notes do not count as captured posts.
+- User-defined Triggers are the *if*; a Chain (or workflow) is the *then* — they compose, they don't merge.
+- Daily Brief Lite FX comes from Frankfurter; its autocompletes cache to settings, not memory.
+- `newJobId` is millisecond+monotonic, and claim order IS the sorted order.
+- Image-describe failures are classified transient vs permanent at record-write time; infra failures trip a breaker instead of writing skip-forever records.
+- `WorkflowResult` is a discriminated union — construct the variant you mean, never spread one into another.
+- The X post pipeline: the numeric statusId is the identity, and it stays a `string` everywhere.
+
 ## Quirks
 
 - **One durable queue, one backend: every job type is `persistence: 'db'` on `SqliteJobStore`/`DbJobBackend` (thq WP-5..8, 2026-07-30) — jobs are rows in `jobs.sqlite` in the plugin data dir, never vault files.** The store (`db/SqliteJobStore.ts`, opened by `db/sqlite.ts` over `node:sqlite` behind a capability probe) is WAL-mode, self-migrating (meta-table version cookie), and shared by every type; `Orchestrator.register` opens it lazily on the first registration. The contract, piece by piece: (1) **the claim is one atomic `UPDATE … WHERE status='queued'`** (batched candidates, lost race falls through), which makes the old file queue's whole failure class — `JobStore.move`'s rename-then-frontmatter rollback and the "aborted claim" recovery it required — *unrepresentable*, not merely fixed (this entry supersedes the deleted `JobStore.move`/aborted-claim quirks; see git history at `dd8b0b4^` if you need them). (2) **Crash recovery is a lease, not a folder sweep**: rows carry a per-process `claim_token` + `claimed_at`; `recoverStale` (called from every `scan()`, including the silent startup scan) bounces `running → queued` on token mismatch *regardless of age* — so a crashed run recovers on the next plugin load immediately — or on age past the type's timeout + 30s for same-process hangs, and never touches a job `isRunning` says this process still owns. (3) **Terminal rows are pruned by age**: `pruneTerminal` honors `orchestrationJobRetentionDays` (default 30; 0/blank = keep forever) on every scan — the pruning the file queue never had, which is how 37k job files once accumulated. (4) **Stored dedupe keys are type-namespaced `"<type>::<key>"`** because key functions genuinely collide across types (`youtubeMetadataDedupeKey` and `imageDescribeNoteDedupeKey` both mint `note:<path>`); nothing outside `DbJobBackend` reads the column. (5) `hasPending` is an exact indexed `COUNT(*)`, so "empty" is a real answer (which is what makes the auto-source refill hook sound). (6) All store methods take explicit `nowMs` — the backend owns `Date.now()`. Add a future backend as a new `JobBackend` + a `persistence` union member + a `createBackend` case, never as a parallel queue with its own drain loop.
