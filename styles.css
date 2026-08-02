@@ -96,21 +96,29 @@ If your plugin does not need CSS, delete this file.
 }
 
 /*
- * WP-DP4/WP-F1: pin the tab strip + rule while a long tab scrolls underneath.
+ * WP-DP4/WP-F1/WP-G1: pin the tab strip + rule while a long tab scrolls underneath.
  * The scroll parent's padding is NOT a constant: the workspace tab's
  * `.view-content.crucible-settings-host` computes `12px 12px 32px 12px` at runtime
  * (the theme overrides `.view-content` padding) and the native settings modal's
  * `.vertical-tab-content` carries yet another value — a hardcoded 16/24 assumption
  * left an unpainted band above the strip where scrolled content showed through.
  * `src/settings.ts` `display()` measures the actual scroll parent's computed padding
- * at mount and writes it onto these custom properties (`applyStickyHeaderPadding`);
- * a plain `position: sticky; top: 0` child would otherwise park at the CONTENT-box
- * top, below the visible scrollport edge whatever that padding turns out to be. The
- * negative margin pulls the box up into that padding area on all three sides; the
- * matching padding restores the tab strip's visual position exactly (no shift) while
- * extending the painted background full-bleed to the real edges, so no gutter is left
- * uncovered for content to scroll through. Falls back to the old 16/24 constants when
- * no scroll parent is found.
+ * at mount and writes it onto these custom properties (`applyStickyHeaderPadding`).
+ * That measurement is correct and is NOT the fix below — `position: sticky; top: 0`
+ * pins the header at the scrollport's padding-box edge (the visible top), but a
+ * sticky element is additionally clamped inside its containing block: the scroll
+ * parent's CONTENT box, whose top sits `padding-top` lower than the padding-box
+ * edge. Margins move the box's flow position, not that clamp, so the header can
+ * never sit higher than the content-box top no matter what margin/padding it
+ * carries — live probes confirmed a transparent band exactly `padding-top` tall
+ * remained above the pinned strip (12px on the workspace tab, 48px/74px on the
+ * native modal) where scrolled content showed through. The negative margin still
+ * pulls the box's own background up across the padding area on all three sides
+ * for full-bleed width and correct at-rest layout; the matching padding restores
+ * the tab strip's visual content position exactly (no shift). The remaining
+ * padding-top strip above the clamp is closed by the `::before` layer below,
+ * which paints over it independently of the clamp. Falls back to the old 16/24
+ * constants when no scroll parent is found.
  */
 .crucible-settings-sticky-header {
   position: sticky;
@@ -124,6 +132,26 @@ If your plugin does not need CSS, delete this file.
     var(--crucible-sticky-pad-right, 24px)
     20px
     var(--crucible-sticky-pad-left, 24px);
+  background-color: var(--background-primary);
+}
+
+/*
+ * WP-G1: paint over the containing-block clamp band described above. `top:
+ * calc(-1 * pad)` positions this pseudo-element `pad`px above the (already
+ * clamped) header box, i.e. exactly the scroller's padding-top strip; `height:
+ * pad` covers it fully. `.crucible-settings-sticky-header` is `position:
+ * sticky`, which is itself a positioned element, so this absolutely-positioned
+ * child resolves against it without an extra `position: relative` — adding one
+ * would be redundant. `z-index: 1` on the parent (above) already lifts both the
+ * header and this pseudo-element above scrolled content.
+ */
+.crucible-settings-sticky-header::before {
+  content: '';
+  position: absolute;
+  top: calc(-1 * var(--crucible-sticky-pad-top, 16px));
+  left: 0;
+  right: 0;
+  height: var(--crucible-sticky-pad-top, 16px);
   background-color: var(--background-primary);
 }
 
