@@ -1,6 +1,20 @@
 # Plan D — Intake action language v2 + dashboard/settings validation polish
 
-Repo: **obsidian-crucible** · slug `intake-actions-dashboard-settings-polish`
+> **STATUS: COMPLETE (2026-08-01).** All seven WPs landed on master: DP6 `e318c18`
+> (AGENTS dox sweep, quirks indexes activated), DP1 `1877d7b` (intake action language
+> v2 — `renderIconButton` icon-only cells, Clip=`download`/Skip=`circle-x`, muted-never-
+> absent, `Enriched?` column removed, ignored rows un-ignore-then-act), DP2 `2b4db13`
+> (header alignment, xPosts default-collapsed, terse control-center descs), DP3
+> `c4fe0fe` (queue status pills = real filters with honest retention empty states;
+> queue row actions Run=`play`/Details=`info`/Cancel=danger `x`), DP4 `0b66c85`
+> (pinned settings tab-strip via `.crucible-settings-sticky-header`; native-modal
+> verification is a user rerun item — `runs/dispatch/wp-dp4-report.md`), DP5 `3646ddf`
+> (icon-language sweep: Duplicate=`copy-plus`, remove-from-list=`x` vs entity
+> `trash`, TOC chevrons, Refresh=`refresh-cw`; fleet icon table in AGENTS.md), DP7
+> (this commit — v2 UI-standards language finalized in root AGENTS.md; signalworks-
+> design skill pass flagged in `# Blocked on User`). Live validation items listed in
+> the sprint close message; assumption "ignored-videos primary action = Enrich"
+> shipped as flagged.
 
 *Recommended model/effort — Claude: Sonnet/medium workers DP-1…DP-6, orchestrator
 (Fable) closes DP-7 direct; Codex: Terra/medium workers, Sol/medium orchestrator.*

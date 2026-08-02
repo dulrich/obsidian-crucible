@@ -84,7 +84,7 @@ A valid rerun packet includes:
 - **Crucible builds primarily against the N1 Console design system**, adapted where Obsidian's built-in UI requires it. The component specs live in the shared `signalworks-design` skill (`~/.claude/skills/signalworks-design/`, canonical source `context-control/skills/`) — consult them before inventing a treatment or copying a nearby ad-hoc rule. Two rules that look contradictory and are not:
   - **The design language comes from N1**: the pill taxonomy (status / tag / neutral), pill geometry, status semantics, and the fixed lucide icon mapping (one concept = one icon fleet-wide).
   - **The expression stays in Obsidian semantic vars**: write `var(--text-muted)`, never `var(--n1-muted)`. `theme/theme.css`'s adapter maps N1 tokens onto Obsidian's names, and that indirection is exactly what lets the theme reskin plugin views for free (see `theme/AGENTS.md`). **Never reach for an `--n1-*` token from `styles.css`.**
-- **Icon-mapping table (one concept = one icon, fleet-wide).** Wording below is factual/short — polished at DP7.
+- **Icon-mapping table (one concept = one icon, fleet-wide).** The single verb → lucide-glyph lookup. Adding a control means reusing a row or adding a new one — never a second icon for an existing concept, never a second concept on an existing icon.
 
   | Icon | Concept |
   | --- | --- |
@@ -93,7 +93,7 @@ A valid rerun packet includes:
   | `download` | Clip |
   | `circle-x` | Skip (reversible-warn) |
   | `sparkles` | Enrich |
-  | `import` | Ingest (legacy label form) |
+  | `import` | Ingest (retired at DP1 — intake rows use Clip; reserved, don't reuse) |
   | `play` | Run job |
   | `x` | Cancel job / remove a value from a list |
   | `info` | Details |
@@ -121,10 +121,12 @@ A valid rerun packet includes:
 - **Reversible actions carry the warning hue, not `mod-warning`** — the red/warn split is destructive-vs-reversible, not scary-vs-benign.
   - Exemplar: Ignore/Un-ignore on the Ingestion dashboard, icon-only buttons (`eye-off`/`eye`) in `.crucible-intake-warn-btn` (`color: var(--text-warning)` — the same semantic var the `is-warn` pill uses), with `aria-label` + `title` because an icon-only control has no visible label.
   - They deliberately stay OUT of `DESTRUCTIVE_ACTIONS`/`confirmDestructive` (reversible pair). Promoting a reversible action to `mod-warning` red spends the reader's alarm budget on nothing — same law as the pill taxonomy above.
-- **Row actions merge into ONE action cell per table.** `.crucible-intake-action-cell` for intake tables — nowrap, `> * + *` gap since anchors and buttons mix; `.crucible-queue-action-cell` where children are all buttons.
-  - External destinations keep their label and gain a trailing 12px `external-link` glyph via `renderExternalLink` (CC-11: never icon-only for an external destination).
-  - Command buttons are icon+label via `renderIconLabelButton` (Ingest = `import`, Enrich = `sparkles` — one concept, one icon, fleet-wide).
-  - Stateful cells (e.g. `Enriched?`) stay their own column — don't fold state readouts into the action cell.
+- **Row actions merge into ONE action cell per table.** `.crucible-intake-action-cell` for intake tables; `.crucible-queue-action-cell` for the queue monitor — both nowrap, with a real `gap` between children.
+  - **Intake rows are uniform icon-only buttons** (`renderIconButton` in `src/ingestion/render/cells.ts`), fixed order external → meta → command → skip: `external-link` (opens the URL), `file-text` (metadata/blog note), Clip = `download` / Enrich = `sparkles`, Skip = `circle-x` (reversible-warn). Every icon-only control carries `aria-label` + `title` — no exceptions.
+  - **Row scope adapts CC-11, it doesn't break it**: in a dense table row an external destination may be icon-only, but the `external-link` glyph stays mandatory *as the icon itself* and the `title` carries the destination. At panel/inline scope the rule is unchanged — `renderExternalLink`'s labeled anchor + trailing 12px glyph (see the control centers' blog links).
+  - **Muted, never absent**: a deactivated action stays in the cell, rendered muted (`.is-muted` → `var(--text-faint)` + `cursor: not-allowed`, click never wired) with a `title` explaining why (no body, no metadata note, no configured command, …). Don't add state-readout columns — the old `Enriched?` column is the counter-exemplar; state folds into the relevant button's muted/enabled rendering and tooltip.
+  - Ignored-section rows carry no Un-ignore control: Clip/Enrich implicitly un-ignores, then runs the primary action. `eye-off`/`eye` remains the pair only where an explicit Ignore/Un-ignore toggle exists.
+  - Queue monitor rows follow the same law: Run = `play`, Details = `info`, Cancel = danger `x` with `mod-warning` (destructive — it kills a job).
 - **Grouped Cards:** All settings must be organized within `.crucible-settings-group` containers to match the native Obsidian "Options" look.
 - **Inset Dividers:** Use `hr` with `.crucible-row-divider` for separators that don't touch the edges.
 - **Widths:** Use the standardized CSS classes: `.pi-width-half` (150px), `.pi-width-normal` (300px), or `.pi-width-wide` (450px). NEVER use hardcoded pixel widths for controls in CSS.
