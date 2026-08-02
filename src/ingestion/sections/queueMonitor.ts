@@ -202,7 +202,7 @@ function jobTargetPath(job: OrchestrationJob): string | undefined {
 	return typeof path === 'string' ? path : undefined;
 }
 
-function jobTitle(job: OrchestrationJob): string {
+export function jobTitle(job: OrchestrationJob): string {
 	switch (job.type) {
 		// The enrichment types name themselves by their subject rather than by their id —
 		// the memory queue used to carry `display` fields for exactly this, and the row
@@ -218,6 +218,12 @@ function jobTitle(job: OrchestrationJob): string {
 		case 'search_embed_missing': return 'Vault embedding backfill';
 		case 'search_upsert_batch': return searchBatchTitle(job);
 		case 'search_sweep': return typeof job.params?.description === 'string' ? job.params.description : 'Search sweep';
+		// WP-F3: these two carry only `{path}` (SearchIndexCoordinator.enqueueAutomatic /
+		// search-reconcile-index's payload shape — see the `/v1/paths` quirk in
+		// src/search/AGENTS.md), no `targetPath`, so they fell to the `default: job.id` branch
+		// and the queue monitor row read as a bare job id instead of naming the file.
+		case 'search_upsert_file': return typeof job.params?.path === 'string' ? `Index: ${job.params.path.split('/').pop()}` : 'Index update';
+		case 'search_delete_path': return typeof job.params?.path === 'string' ? `De-index: ${job.params.path.split('/').pop()}` : 'Index delete';
 		default: return job.id;
 	}
 }
@@ -581,6 +587,17 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 					const file = host.app.vault.getAbstractFileByPath(r.targetPath);
 					if (file instanceof TFile) {
 						renderFileLink(host.app, td, file);
+						return;
+					}
+					// WP-F3: `search_delete_path` targets a path that, by definition, no
+					// longer resolves to a TFile (that's what makes it an orphan) — and a
+					// `search_upsert_file` target can transiently vanish the same way. The
+					// row previously fell through to `r.title`/job id here; render the raw
+					// vault path instead — more useful than "De-index: <basename>", which
+					// only repeats what the Type column already conveys, and scoped to these
+					// two types so no other job type's Target cell behavior changes.
+					if (r.type === 'search_upsert_file' || r.type === 'search_delete_path') {
+						td.setText(r.targetPath);
 						return;
 					}
 				}
