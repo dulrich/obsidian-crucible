@@ -75,3 +75,27 @@ test('STRUCTURAL: styles.css consumes the measured padding custom properties', (
 		'expected .crucible-settings-sticky-header to read var(--crucible-sticky-pad-top, …)',
 	);
 });
+
+// WP-G1: the measured padding (F1) is correct but insufficient — a `position: sticky`
+// element is clamped inside its containing block's content box, whose top sits
+// `padding-top` lower than the scrollport's padding-box edge where `top: 0` pins. That
+// leaves a `padding-top`-tall transparent band above the header where scrolled content
+// shows through, regardless of margin/padding. The `::before` pseudo-element paints over
+// that band independently of the clamp — pin its presence and its sizing formulas.
+test('STRUCTURAL: a ::before pseudo-element covers the containing-block clamp band', () => {
+	const css = readFileSync('styles.css', 'utf8');
+	const ruleIdx = css.indexOf('.crucible-settings-sticky-header::before');
+	assert.ok(ruleIdx >= 0, 'expected a .crucible-settings-sticky-header::before rule in styles.css');
+
+	const ruleEnd = css.indexOf('}', ruleIdx);
+	const rule = css.slice(ruleIdx, ruleEnd >= 0 ? ruleEnd : undefined);
+
+	assert.ok(
+		rule.includes('calc(-1 * var(--crucible-sticky-pad-top'),
+		'expected ::before top to be calc(-1 * var(--crucible-sticky-pad-top, …)) to sit above the clamped header',
+	);
+	assert.ok(
+		rule.includes('height: var(--crucible-sticky-pad-top'),
+		'expected ::before height to read the same var(--crucible-sticky-pad-top, …) used for top',
+	);
+});
