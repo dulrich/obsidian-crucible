@@ -1,6 +1,9 @@
+import { Notice } from 'obsidian';
 import type CruciblePlugin from '../main';
 import { ensureFolder } from '../utils';
 import { confirmDestructive } from '../settings/destructiveActions';
+import { ConfirmModal } from '../confirmModal';
+import { RetryFailedImageDescriptionsModal } from '../retryImageDescriptionsModal';
 import { computeReferencedImagePaths } from '../orchestration/utils/imageDescribe';
 import {
 	AuditImage,
@@ -19,6 +22,13 @@ import {
  * `writeSearchAuditReportNote`, plus a new `enqueueSearchRepairs` pulled out of the inline
  * `search-reconcile-index` body — both `search-audit-index` and `search-reconcile-index` in
  * `src/commands.ts` import from here.
+ *
+ * WP-I1: `enqueueEmbedMissing`/`confirmAndQueueImageDescribeBackfill`/
+ * `retryFailedImageDescriptions` are the same shape of extraction, moved verbatim (zero behavior
+ * change — same modal titles/messages/confirm text, same Notice text, same job types/params) out
+ * of the `search-embed-missing`/`search-describe-vault-images`/
+ * `search-retry-failed-image-descriptions` command bodies in `src/commands.ts`. A future dashboard
+ * section (I2) calls these directly instead of re-deriving the same modal/enqueue shape.
  */
 
 /**
@@ -78,11 +88,11 @@ async function gatherSearchAuditImages(plugin: CruciblePlugin): Promise<AuditIma
 	const images: AuditImage[] = [];
 	for (const image of referenced) {
 		if (!plugin.imageDescriptions.has(image.md5)) {
-			images.push({ md5: image.md5, status: 'pending' });
+			images.push({ md5: image.md5, path: image.path, status: 'pending' });
 			continue;
 		}
 		const record = await plugin.imageDescriptions.get(image.md5);
-		images.push({ md5: image.md5, status: record?.kind === 'failed' ? 'failed' : 'described' });
+		images.push({ md5: image.md5, path: image.path, status: record?.kind === 'failed' ? 'failed' : 'described' });
 	}
 	return images;
 }
@@ -170,4 +180,54 @@ export async function enqueueSearchRepairs(plugin: CruciblePlugin, targets: Sear
 		deletes: { newCount: deleteNew, dedupedCount: deleteDeduped },
 		orphansDeclined,
 	};
+}
+
+/**
+ * WP-I1: extracted verbatim from the `search-embed-missing` command body (`src/commands.ts`) —
+ * repairs "semantic search was turned on after the vault was indexed" / "the embedding model
+ * changed" without a full `resetIndex()`; see that command's registration comment for the full
+ * rationale. Behavior is unchanged: a plain `search_embed_missing` enqueue, no confirm.
+ */
+export async function enqueueEmbedMissing(plugin: CruciblePlugin): Promise<void> {
+	await plugin.orchestrator.enqueue('search_embed_missing', {}, { priority: 'high', lane: 'user' });
+}
+
+/**
+ * WP-I1: extracted verbatim from the `search-describe-vault-images` command body
+ * (`src/commands.ts`) — the scale-warning `ConfirmModal` (title/message/confirmText unchanged)
+ * gating the `image_describe_backfill` enqueue. Returns `false` when the user declines or
+ * dismisses the modal (no enqueue happened), `true` when the backfill was queued.
+ */
+export async function confirmAndQueueImageDescribeBackfill(plugin: CruciblePlugin): Promise<boolean> {
+	const confirmed = await new ConfirmModal(plugin.app, {
+		title: 'Describe every image referenced in the vault?',
+		message: 'This queues a vision-model description pass (a narrative pass and a structured-extraction pass) over '
+			+ 'every uniquely-referenced localized image not already described — roughly 4,700 images at this vault\'s '
+			+ 'current size, around 12.6 hours of local model time. It runs in the background in ~100-image batches and '
+			+ 'is safely interruptible and resumable: already-described images are skipped on any re-run. Images that '
+			+ 'previously failed with a genuine (permanent) error are skipped too, not retried automatically — infra '
+			+ 'casualties (timeouts, connection errors) are pruned and re-attempted automatically at the start of every '
+			+ 'backfill run, or on demand via "Search: retry failed image descriptions".',
+		confirmText: 'Queue backfill',
+	}).openAndAwait();
+	if (!confirmed) return false;
+	await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
+	return true;
+}
+
+/**
+ * WP-I1: extracted verbatim from the `search-retry-failed-image-descriptions` command body
+ * (`src/commands.ts`) — the `RetryFailedImageDescriptionsModal` choice, `pruneFailed`, the Notice
+ * (text unchanged), then the backfill enqueue. Returns `false` when the modal is cancelled/closed
+ * without a choice (nothing pruned, nothing enqueued), `true` when a choice was made and the
+ * backfill was queued.
+ */
+export async function retryFailedImageDescriptions(plugin: CruciblePlugin): Promise<boolean> {
+	const choice = await new RetryFailedImageDescriptionsModal(plugin.app).openAndAwait();
+	if (!choice) return false;
+	const clearedMd5s = await plugin.imageDescriptions.pruneFailed(choice);
+	new Notice(`Cleared ${clearedMd5s.length} failed image description${clearedMd5s.length === 1 ? '' : 's'} `
+		+ `(${choice}); queuing re-describe backfill.`);
+	await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
+	return true;
 }
