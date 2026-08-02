@@ -721,6 +721,17 @@ export interface CrucibleSettings {
 	// construction is skipped entirely, not built-then-multiplied-by-zero.
 	searchLinkBoostEnabled: boolean;
 	searchLinkBoostWeight: number;
+	// WP-TB2: client-side tag boost, gated on WP-TB1's spike (weight 0.005 measured
+	// zero-regression across 52 graded corpus queries — plans/tag-boost-spike.md). A flat
+	// `score += weight` on every result whose `metadata.tags` matches a configured tag
+	// (frontmatter tags only — an inline body `#gold` is invisible to this boost, since the
+	// companion's index carries frontmatter tags). Off by default until proven live.
+	// `searchTagBoostTags` is normalized (trim, strip leading `#`, lowercase, drop empties) at
+	// settings-save time in orchestrationSearch.ts, so `SearchManager.boostSearchResponse`
+	// never re-normalizes on the hot search path.
+	searchTagBoostEnabled: boolean;
+	searchTagBoostTags: string[];
+	searchTagBoostWeight: number;
 	// WP-5: reranking is a deliberate, explicitly-invoked action on the search modal — never a
 	// type-ahead pipeline stage. Disabled by default, and the modal hides the Rerank button
 	// entirely (not just disables it) until both a model is picked and this is on, so an
@@ -910,6 +921,11 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	// typical ~12-result list. See tests/linkGraph.test.mjs and the WP-6 report for the
 	// worked arithmetic.
 	searchLinkBoostWeight: 0.05,
+	// Default off (TB1's WP note: "proven live" gate). Weight 0.005 is TB1's measured
+	// zero-regression winner at the live limit-40 fetch — see the interface comment above.
+	searchTagBoostEnabled: false,
+	searchTagBoostTags: ['gold'],
+	searchTagBoostWeight: 0.005,
 	searchRerankEnabled: false,
 	searchRerankTopN: 30,
 	// On by default: this is the substrate that lets a ranking change be validated against real
