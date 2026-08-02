@@ -86,6 +86,25 @@ If your plugin does not need CSS, delete this file.
   margin-bottom: 20px !important;
 }
 
+/*
+ * WP-DP4: pin the tab strip + rule while a long tab scrolls underneath.
+ * `.crucible-settings-host` (the workspace-tab scroller) carries `padding: 16px 24px`;
+ * a plain `position: sticky; top: 0` child parks at the CONTENT-box top (16px below the
+ * visible scrollport edge), so scrolled content would ghost through the padding strip
+ * above the header. The negative margin pulls the box up into that padding area on all
+ * three sides; the matching padding restores the tab strip's visual position exactly
+ * (no shift) while extending the painted background full-bleed to the real edges, so no
+ * gutter is left uncovered for content to scroll through.
+ */
+.crucible-settings-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: -16px -24px 0;
+  padding: 16px 24px 0;
+  background-color: var(--background-primary);
+}
+
 /* Grouped Card Look */
 .crucible-settings-group {
   background-color: var(--background-secondary);
