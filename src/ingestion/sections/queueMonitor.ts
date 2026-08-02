@@ -667,15 +667,19 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 				// The cell lays its buttons out itself. Appended bare they sit flush against
 				// each other, which on a destructive action next to a Run button is not just
 				// untidy — it invites the wrong click. WP-DP3: row scope goes icon-only
-				// (CC-11) — Run = play, Cancel = danger x, Details = info — and each
-				// action renders only when it's valid for the row's status: a settled
-				// (done/failed/cancelled) row is never re-run from here and can't be
-				// cancelled; Details is unconditional, the one action every row supports.
+				// (CC-11) — Run = play, Cancel = danger x, Details = info. WP-K2: the cell
+				// is flow layout (styles.css), not a grid, so it depends on every row
+				// rendering the same three children for Run/Details/Cancel to land in
+				// stable visual columns — an action that isn't valid for the row's status
+				// renders muted (per the "Muted, never absent" law) rather than being
+				// omitted; Details is unconditional either way, the one action every row
+				// supports live.
 				td.addClass('crucible-queue-action-cell');
 				// Per-job Run: execute this one queued job now, ignoring the auto-run
-				// gate (for "auto off / deep queue, run this one"). Running rows have no
-				// Run — they're already in flight. Settled rows have no Run either — a
-				// done/cancelled job re-running is not a queue operation.
+				// gate (for "auto off / deep queue, run this one"). Running rows are
+				// already in flight; settled rows are done/cancelled — re-running from
+				// here is not a queue operation. Both render a muted Run instead of
+				// omitting it, so the cell keeps its three-child shape.
 				if (r.status === 'queued') {
 					renderIconButton(td, 'play', {
 						ariaLabel: 'Run',
@@ -693,6 +697,14 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 							})();
 						},
 					});
+				} else {
+					renderIconButton(td, 'play', {
+						ariaLabel: 'Run',
+						disabled: true,
+						title: r.status === 'running'
+							? 'This job is already running.'
+							: 'Finished jobs aren\'t re-run from the queue; re-queue it from its source instead.',
+					});
 				}
 				// Unconditional since thq WP-8: the one row source that used to be excluded
 				// (in-memory enrichment entries, which carried no params/notes/failureKind)
@@ -702,11 +714,9 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 					title: 'Show this job\'s params, error, progress and notes.',
 					onClick: () => new JobDetailModal(host.app, r).open(),
 				});
-				// Cancel only makes sense on a job still in the queue or in flight — a
-				// settled row (done/failed/cancelled) has nothing left to stop.
-				if (r.status === 'queued' || r.status === 'running') {
-					renderCancelAction(host, td, r.type as JobType, r.key, r.status);
-				}
+				// Cancel is unconditional too — a settled row gets a muted `x` instead of
+				// no button (see renderCancelAction's early terminal branch).
+				renderCancelAction(host, td, r.type as JobType, r.key, r.status);
 			},
 		},
 	], rows, ctx, {
@@ -733,8 +743,21 @@ function renderCancelAction(
 	td: HTMLElement,
 	type: JobType,
 	key: string,
-	status: 'queued' | 'running',
+	status: JobStatus,
 ): void {
+	// A settled row (done/failed/cancelled) has nothing left to stop — muted `x`
+	// instead of omitting the button, so the cell keeps its three-child shape. No
+	// `mod-warning` here: unlike the live Cancel below, this button offers nothing
+	// destructive to warn about.
+	if (status !== 'queued' && status !== 'running') {
+		renderIconButton(td, 'x', {
+			ariaLabel: 'Cancel',
+			title: 'This job has already finished — there\'s nothing left to stop.',
+			cls: 'crucible-queue-cancel-btn',
+			disabled: true,
+		});
+		return;
+	}
 	// Re-derived at render time rather than held in a closure, so the state survives
 	// the table's own live refreshes (queue events refresh this section continuously,
 	// which would otherwise reset a "Stopping…" button to "Cancel" every few seconds).

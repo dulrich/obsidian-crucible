@@ -243,14 +243,43 @@ test('STRUCTURAL: Cancel keeps mod-warning (destructive-family styling) even tho
 	assert.match(SRC, /cancel\.addClass\('mod-warning'\);/);
 });
 
-test('STRUCTURAL: Run renders only for queued rows; Cancel renders only for queued/running rows; Details is unconditional', () => {
-	assert.match(SRC, /if \(r\.status === 'queued'\) \{\s*\n\s*renderIconButton\(td, 'play',/);
-	assert.match(SRC, /if \(r\.status === 'queued' \|\| r\.status === 'running'\) \{\s*\n\s*renderCancelAction\(host, td, r\.type as JobType, r\.key, r\.status\);/);
+// WP-K2: "muted, never absent" — every row renders all three action buttons
+// (Run/Details/Cancel), unconditionally. Each of the three call sites below is a
+// mutually-exclusive if/else (or an early-return guard inside renderCancelAction)
+// that resolves to exactly one renderIconButton call no matter the row status, so
+// pinning "one call per branch, no omission branch survives" is equivalent to
+// pinning "3 children in the action cell" without needing a full DOM harness for
+// buildQueueMonitorSection (which needs an Orchestrator double + listJobs stubs —
+// heavier than every other case in this file, which are structural source-text
+// pins for the same reason; see the file banner).
+test('STRUCTURAL: Run always renders — live for queued rows, muted (disabled) with a status-specific title otherwise', () => {
+	assert.match(SRC, /if \(r\.status === 'queued'\) \{\s*\n\s*renderIconButton\(td, 'play', \{\s*\n\s*ariaLabel: 'Run',\s*\n\s*title: 'Run this job now/);
+	assert.match(SRC, /\} else \{\s*\n\s*renderIconButton\(td, 'play', \{\s*\n\s*ariaLabel: 'Run',\s*\n\s*disabled: true,/);
+	assert.match(SRC, /'This job is already running\.'/);
+	assert.match(SRC, /'Finished jobs aren\\'t re-run from the queue; re-queue it from its source instead\.'/);
+});
+
+test('STRUCTURAL: Details is unconditional (no status guard) and Cancel is always invoked (no status guard at the call site)', () => {
 	// Details has no status guard around its renderIconButton call — the surrounding
-	// text between the Run block and the Cancel guard is exactly the Details call.
+	// text between the Run block and the Cancel call is exactly the Details call.
 	const runBlockEnd = SRC.indexOf("renderIconButton(td, 'info'");
-	const cancelGuard = SRC.indexOf("if (r.status === 'queued' || r.status === 'running')");
-	assert.ok(runBlockEnd > 0 && cancelGuard > runBlockEnd, 'Details call must sit between the Run and Cancel blocks, outside both guards');
+	const cancelCallIdx = SRC.indexOf('renderCancelAction(host, td, r.type as JobType, r.key, r.status);');
+	assert.ok(runBlockEnd > 0 && cancelCallIdx > runBlockEnd, 'Details call must sit between the Run and Cancel blocks');
+	// No `if (r.status === ...)` guard immediately precedes the renderCancelAction call
+	// — assert the previous non-blank line is the "unconditional" comment, not an `if`.
+	const before = SRC.slice(0, cancelCallIdx);
+	const lastIfIdx = before.lastIndexOf('if (r.status');
+	assert.ok(lastIfIdx === -1 || before.slice(lastIfIdx).includes('Details'), 'no status guard wraps the renderCancelAction call');
+});
+
+test('STRUCTURAL: renderCancelAction takes the full JobStatus union and renders a muted, non-destructive Cancel for settled rows, before the isCancelling check', () => {
+	assert.match(SRC, /status: JobStatus,\s*\n\)\s*:\s*void \{/);
+	const terminalBranchIdx = SRC.indexOf("if (status !== 'queued' && status !== 'running')");
+	const isCancellingIdx = SRC.indexOf('host.plugin.orchestrator.isCancelling(type, key)');
+	assert.ok(terminalBranchIdx > 0 && isCancellingIdx > terminalBranchIdx, 'the terminal muted branch must precede the isCancelling check');
+	const terminalBranch = SRC.slice(terminalBranchIdx, isCancellingIdx);
+	assert.match(terminalBranch, /renderIconButton\(td, 'x', \{\s*\n\s*ariaLabel: 'Cancel',\s*\n\s*title: 'This job has already finished — there\\'s nothing left to stop\.',\s*\n\s*cls: 'crucible-queue-cancel-btn',\s*\n\s*disabled: true,/);
+	assert.doesNotMatch(terminalBranch, /mod-warning/, 'the muted terminal Cancel must not carry mod-warning — nothing destructive on offer');
 });
 
 test('STRUCTURAL: the filter bar row is created after (moves below) the enable/run/clear control bar', () => {
