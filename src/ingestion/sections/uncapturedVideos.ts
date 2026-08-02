@@ -2,16 +2,43 @@ import type { JobSeed } from '../../orchestration/Orchestrator';
 import { ENRICHMENT_JOB_TYPE } from '../../orchestration/jobTypeConfig';
 import { computeMetadataFetchStatus } from '../data/metadataFetchStatus';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
-import { renderEnrichedCell, renderFileLink, renderIgnoreButton, renderChannelLink, renderExternalLink } from '../render/cells';
+import { renderEnrichButton, renderExternalIconButton, renderFileLink, renderIconButton, renderSkipButton, renderChannelLink } from '../render/cells';
 import { displayLabel, formatDuration } from '../render/format';
 import { computeUncapturedVideoRows } from '../data/uncaptured';
 import { isYoutubeApiKeyRegistered, renderApiKeyAffordance, youtubeApiKeyMissing } from '../render/apiKeyAffordance';
 import type { DashboardHost, SectionContext, UncapturedVideoRow } from '../render/types';
 
-function renderVideoActionCell(host: DashboardHost, td: HTMLElement, row: UncapturedVideoRow, ctx: SectionContext): void {
+// WP-DP1 slot 2 (meta): carries the enrichment-note link once it exists; while a
+// fetch is in flight for this video (no file yet), muted with the live state as its
+// title — this is the "Enriched?" column's old inFlight text (cells.ts's retired
+// renderEnrichedCell), now folded into the meta button instead of a separate column.
+function renderVideoMetaCell(host: DashboardHost, td: HTMLElement, row: UncapturedVideoRow, inFlight: 'queued' | 'running' | null): void {
+	const enrichmentFile = row.enrichmentFile;
+	if (enrichmentFile) {
+		renderIconButton(td, 'file-text', {
+			ariaLabel: 'Metadata',
+			title: 'Metadata',
+			onClick: () => { void host.app.workspace.openLinkText(enrichmentFile.path, '', false); },
+		});
+		return;
+	}
+	if (inFlight) {
+		renderIconButton(td, 'file-text', { ariaLabel: 'Metadata', title: inFlight === 'running' ? 'enriching…' : 'queued', disabled: true });
+		return;
+	}
+	renderIconButton(td, 'file-text', { ariaLabel: 'Metadata', title: 'No enrichment note yet', disabled: true });
+}
+
+// WP-DP1: uniform icon-only slot order (external · meta · command · skip) — watch ·
+// metadata · Enrich · Skip. Replaces the old watch+Ignore-only cell now that the
+// stateful "Enriched?" column is gone (rule 3) and Enrich lives in this cell.
+function renderVideoActionCell(host: DashboardHost, td: HTMLElement, row: UncapturedVideoRow, inFlight: 'queued' | 'running' | null, ctx: SectionContext): void {
 	td.addClass('crucible-intake-action-cell');
-	renderExternalLink(td, row.url, 'watch');
-	renderIgnoreButton(td, host, 'youtube', row.videoId, 'uncapturedVideos', 'ignoredVideos', ctx);
+	renderExternalIconButton(td, row.url, 'Watch');
+	renderVideoMetaCell(host, td, row, inFlight);
+	const blockedTitle = row.enrichmentFile ? 'Already enriched' : inFlight ? (inFlight === 'running' ? 'enriching…' : 'queued') : null;
+	renderEnrichButton(td, host, { videoId: row.videoId, title: row.title, channelName: row.channelName }, blockedTitle, ctx);
+	renderSkipButton(td, host, 'youtube', row.videoId, 'uncapturedVideos', 'ignoredVideos', ctx);
 }
 
 export interface UncapturedVideosSection {
@@ -62,7 +89,7 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 		// body's shouldRepaint gate.
 		syncApiKeyAffordance(youtubeApiKeyMissing(isYoutubeApiKeyRegistered(host.plugin)));
 
-		// P5: the 'enriched' column (renderEnrichedCell) reads the LIVE per-video
+		// P5: the action cell's meta/Enrich buttons read the LIVE per-video
 		// metadata-fetch status (queued/running/absent) — state that does not live
 		// on UncapturedVideoRow itself, so two passes with byte-identical `rows`
 		// could still need to repaint. Fold each row's current status into the
@@ -81,12 +108,13 @@ export function createUncapturedVideosSection(host: DashboardHost): UncapturedVi
 				columns: [
 					{ key: 'channelName', label: 'Creator', sortable: true, sortKey: r => displayLabel(r.channelName).toLowerCase(), render: (r, td) => r.channelAboutFile ? renderFileLink(host.app, td, r.channelAboutFile, displayLabel(r.channelName)) : renderChannelLink(td, r.channelId, r.channelName) },
 					{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
-					{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
+					// WP-DP1: nowrap on both header and cell.
+					{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, headerCls: 'crucible-intake-date-cell', render: (r, td) => { td.addClass('crucible-intake-date-cell'); td.setText((r.publishedAt || '').slice(0, 10)); } },
 					{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
-					// WP-IC1: merged watch+ignore action column; the stateful Enriched? column
-					// (queued/running/link text, not just a button) stays separate.
-					{ key: 'action', label: '', render: (r, td) => renderVideoActionCell(host, td, r, ctx) },
-					{ key: 'enriched', label: 'Enriched?', render: (r, td) => renderEnrichedCell(td, host.plugin, r, inFlight.byStandaloneVideoId.get(r.videoId) ?? null) },
+					// WP-DP1 rule 3: the Enriched? column is gone — the meta button now
+					// carries the enrichment-note link (or its in-flight state) and Enrich
+					// joins this cell as the command slot.
+					{ key: 'action', label: '', render: (r, td) => renderVideoActionCell(host, td, r, inFlight.byStandaloneVideoId.get(r.videoId) ?? null, ctx) },
 				],
 			});
 		}

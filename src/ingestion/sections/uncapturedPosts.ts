@@ -1,10 +1,29 @@
 import { Notice } from 'obsidian';
-import { runBlogIngestCommand } from '../../orchestration/utils/blogsApi';
+import { blogClipBlockedTitle, runBlogIngestCommand } from '../../orchestration/utils/blogsApi';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
-import { renderAuthorCell, renderExternalLink, renderFileLink, renderIconLabelButton, renderIgnoreButton } from '../render/cells';
+import { renderAuthorCell, renderClipButton, renderExternalIconButton, renderMetaIconButton, renderSkipButton } from '../render/cells';
 import { displayLabel } from '../render/format';
 import { computeUncapturedPostRows } from '../data/uncaptured';
 import type { DashboardHost, SectionContext, UncapturedPostRow } from '../render/types';
+
+// WP-DP1: the Clip button's `run` callback — kept in the section file (not cells.ts)
+// so cells.ts doesn't need a build-graph dependency on blogsApi.ts; see
+// renderClipButton's doc comment in render/cells.ts. Shared verbatim by Ignored
+// Posts (sections/ignored.ts), which duplicates this small helper rather than
+// cross-importing between sibling section files.
+async function runClip(host: DashboardHost, metadataFile: UncapturedPostRow['metadataFile']): Promise<boolean> {
+	const res = await runBlogIngestCommand(host.plugin, { metadataFile });
+	if (res.status === 'ran') {
+		new Notice(`Ran ${res.commandId}`);
+		return true;
+	}
+	if (res.status === 'missing-command') {
+		new Notice('Choose a queueable blog ingest command in settings.');
+		return false;
+	}
+	new Notice('No blog metadata note found for this post.');
+	return false;
+}
 
 // Prefer the post's real author(s) (dc:creator / atom author) over the blog name when present.
 function postAuthorLabel(row: UncapturedPostRow): string {
@@ -39,10 +58,11 @@ export async function renderUncapturedPosts(host: DashboardHost, body: HTMLEleme
 			{ key: 'title', label: 'Title', sortable: true, sortKey: r => r.title.toLowerCase(), render: (r, td) => td.setText(r.title) },
 			{ key: 'kind', label: 'Type', sortable: true, sortKey: r => r.kind, render: (r, td) => td.setText(r.kind) },
 			{ key: 'wordCount', label: 'Words', sortable: true, sortKey: r => r.wordCount ?? -1, render: (r, td) => td.setText(r.wordCount == null ? '—' : String(r.wordCount)) },
-			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
-			// WP-IC1: one merged action column (read · metadata · Ingest · Ignore) instead
-			// of separate action/ignore columns — the CSS gap on the cell class replaces
-			// the literal spacer spans this used to insert between children.
+			// WP-DP1: nowrap on both header and cell — see uncapturedVideos.ts/ignored.ts
+			// for the same treatment on the other three Publish Date columns.
+			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt, headerCls: 'crucible-intake-date-cell', render: (r, td) => { td.addClass('crucible-intake-date-cell'); td.setText((r.publishedAt || '').slice(0, 10)); } },
+			// WP-DP1: one merged action column, uniform icon-only slot order (external ·
+			// meta · command · skip) — read · metadata · Clip · Skip.
 			{ key: 'action', label: '', render: (r, td) => renderPostActionCell(host, td, r, ctx) },
 		],
 	});
@@ -50,41 +70,8 @@ export async function renderUncapturedPosts(host: DashboardHost, body: HTMLEleme
 
 function renderPostActionCell(host: DashboardHost, td: HTMLElement, row: UncapturedPostRow, ctx: SectionContext): void {
 	td.addClass('crucible-intake-action-cell');
-	renderExternalLink(td, row.url, 'read');
-	if (row.metadataFile) {
-		renderFileLink(host.app, td, row.metadataFile, 'metadata');
-	} else {
-		td.createSpan({ text: 'metadata' }).addClass('crucible-muted');
-	}
-	if (row.hasBody) renderIngestButton(host, td, row, ctx);
-	renderIgnoreButton(td, host, 'blog', row.postId, 'uncapturedPosts', 'ignoredPosts', ctx);
-}
-
-function renderIngestButton(host: DashboardHost, td: HTMLElement, row: UncapturedPostRow, ctx: SectionContext): void {
-	renderIconLabelButton(td, 'import', 'Ingest', btn => {
-		btn.addEventListener('click', () => {
-			void (async () => {
-				btn.disabled = true;
-				try {
-					const res = await runBlogIngestCommand(host.plugin, row);
-					if (res.status === 'ran') {
-						new Notice(`Ran ${res.commandId}`);
-					} else if (res.status === 'missing-command') {
-						new Notice('Choose a queueable blog ingest command in settings.');
-						btn.disabled = false;
-						return;
-					} else {
-						new Notice('No blog metadata note found for this post.');
-						btn.disabled = false;
-						return;
-					}
-				} catch (e) {
-					new Notice(`Ingest failed: ${e instanceof Error ? e.message : String(e)}`);
-					btn.disabled = false;
-					return;
-				}
-				void ctx.refresh();
-			})();
-		});
-	});
+	renderExternalIconButton(td, row.url, 'Read');
+	renderMetaIconButton(td, host.app, row.metadataFile, 'No blog metadata note');
+	renderClipButton(td, host, blogClipBlockedTitle(host.plugin, row), ctx, () => runClip(host, row.metadataFile));
+	renderSkipButton(td, host, 'blog', row.postId, 'uncapturedPosts', 'ignoredPosts', ctx);
 }

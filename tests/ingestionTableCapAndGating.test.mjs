@@ -390,11 +390,14 @@ test('STRUCTURAL: route() consumes the self-refresh echo marker for every id it 
 	assert.match(dashboardSrc, /import \{ consumeSelfRefreshedEcho \} from '\.\/ingestion\/render\/echoSuppress';/, 'consumeSelfRefreshedEcho must be imported from the real echoSuppress module, not reimplemented');
 });
 
-test('STRUCTURAL: cells.ts and its four call sites mark both the owning and companion section before dispatching either refresh', () => {
+test('STRUCTURAL (WP-DP1): cells.ts marks both the owning and companion section before dispatching either refresh — for renderIgnoreButton/renderSkipButton directly, and for renderClipButton/renderEnrichButton via the shared dispatchPrimaryActionRefresh helper', () => {
 	const cellsSrc = readFileSync('src/ingestion/render/cells.ts', 'utf8');
 	assert.match(cellsSrc, /import \{ markSelfRefreshedForEcho \} from '\.\/echoSuppress';/, 'cells.ts must import the real primitive, not reimplement it');
 
-	for (const fnName of ['renderIgnoreButton', 'renderUnignoreButton']) {
+	// renderIgnoreButton (kept for youtubeWithoutMetadata.ts) and renderSkipButton (its
+	// WP-DP1 replacement for the four sections in scope here) both do the mark-then-
+	// refresh dance inline.
+	for (const fnName of ['renderIgnoreButton', 'renderSkipButton']) {
 		const fnStart = cellsSrc.indexOf(`export function ${fnName}(`);
 		assert.ok(fnStart >= 0, `${fnName} not found`);
 		const fnEnd = cellsSrc.indexOf('\n}', fnStart);
@@ -410,25 +413,60 @@ test('STRUCTURAL: cells.ts and its four call sites mark both the owning and comp
 		);
 	}
 
-	// The four section call sites: own id, companion id — matching the ids route()
-	// actually schedules a debounced refresh for on an IGNORED_IDS_NOTE write.
-	const sites = [
-		{ file: 'src/ingestion/sections/uncapturedVideos.ts', fn: 'renderIgnoreButton', own: 'uncapturedVideos', companion: 'ignoredVideos' },
-		{ file: 'src/ingestion/sections/youtubeWithoutMetadata.ts', fn: 'renderIgnoreButton', own: 'youtubeWithoutMetadata', companion: 'ignoredVideos' },
-		{ file: 'src/ingestion/sections/uncapturedPosts.ts', fn: 'renderIgnoreButton', own: 'uncapturedPosts', companion: 'ignoredPosts' },
-		{ file: 'src/ingestion/sections/ignored.ts', fn: 'renderUnignoreButton', own: 'ignoredPosts', companion: 'uncapturedPosts' },
-		{ file: 'src/ingestion/sections/ignored.ts', fn: 'renderUnignoreButton', own: 'ignoredVideos', companion: 'uncapturedVideos' },
+	// renderClipButton/renderEnrichButton (the Ignored-section un-ignore-then-run path)
+	// factor the same mark-then-refresh dance into one shared helper instead of
+	// repeating it — assert the helper does it correctly, and that both renderers call it.
+	const helperStart = cellsSrc.indexOf('function dispatchPrimaryActionRefresh(');
+	assert.ok(helperStart >= 0, 'dispatchPrimaryActionRefresh not found');
+	const helperEnd = cellsSrc.indexOf('\n}', helperStart);
+	const helperBody = cellsSrc.slice(helperStart, helperEnd);
+	const markOwn = helperBody.indexOf('markSelfRefreshedForEcho(opts.ownSectionId);');
+	const markCompanion = helperBody.indexOf('markSelfRefreshedForEcho(opts.companionSectionId);');
+	const ctxRefresh = helperBody.indexOf('ctx.refresh();');
+	const hostRefresh = helperBody.indexOf('host.refresh(opts.companionSectionId);');
+	assert.ok(markOwn >= 0 && markCompanion >= 0, 'dispatchPrimaryActionRefresh must mark both ids for echo suppression');
+	assert.ok(
+		markOwn < ctxRefresh && markCompanion < hostRefresh,
+		'dispatchPrimaryActionRefresh must mark each id BEFORE dispatching its refresh',
+	);
+	for (const fnName of ['renderClipButton', 'renderEnrichButton']) {
+		const fnStart = cellsSrc.indexOf(`export function ${fnName}(`);
+		assert.ok(fnStart >= 0, `${fnName} not found`);
+		const fnEnd = cellsSrc.indexOf('\nexport function', fnStart + 1);
+		const fnBody = cellsSrc.slice(fnStart, fnEnd < 0 ? cellsSrc.length : fnEnd);
+		assert.ok(fnBody.includes('dispatchPrimaryActionRefresh(host, ctx, opts);'), `${fnName} must dispatch its success refresh via the shared helper`);
+	}
+
+	// The Uncaptured-section Skip call sites: own id, companion id — matching the ids
+	// route() actually schedules a debounced refresh for on an IGNORED_IDS_NOTE write.
+	const skipSites = [
+		{ file: 'src/ingestion/sections/uncapturedVideos.ts', own: 'uncapturedVideos', companion: 'ignoredVideos' },
+		{ file: 'src/ingestion/sections/uncapturedPosts.ts', own: 'uncapturedPosts', companion: 'ignoredPosts' },
 	];
-	for (const { file, fn, own, companion } of sites) {
+	for (const { file, own, companion } of skipSites) {
 		const src = readFileSync(file, 'utf8');
-		const needle = `${fn}(td, host, `;
-		assert.ok(src.includes(needle), `${file} must call ${fn} with (td, host, ...) — a DashboardHost, not a bare App`);
+		assert.ok(src.includes('renderSkipButton(td, host, '), `${file} must call renderSkipButton with (td, host, ...) — a DashboardHost, not a bare App`);
 		assert.match(
 			src,
-			new RegExp(`${fn}\\(td, host, '(?:youtube|blog)', [^,]+, '${own}', '${companion}', ctx\\)`),
-			`${file} must pass own id '${own}' and companion id '${companion}' to ${fn}`,
+			new RegExp(`renderSkipButton\\(td, host, '(?:youtube|blog)', [^,]+, '${own}', '${companion}', ctx\\)`),
+			`${file} must pass own id '${own}' and companion id '${companion}' to renderSkipButton`,
 		);
 	}
+
+	// youtubeWithoutMetadata.ts is out of WP-DP1 scope and still uses renderIgnoreButton.
+	const ywmSrc = readFileSync('src/ingestion/sections/youtubeWithoutMetadata.ts', 'utf8');
+	assert.match(
+		ywmSrc,
+		/renderIgnoreButton\(td, host, 'youtube', [^,]+, 'youtubeWithoutMetadata', 'ignoredVideos', ctx\)/,
+		'youtubeWithoutMetadata.ts must still pass own id \'youtubeWithoutMetadata\' and companion id \'ignoredVideos\' to renderIgnoreButton',
+	);
+
+	// ignored.ts: renderClipButton/renderEnrichButton's own/companion ids arrive as
+	// opts object fields, not positional args — matching call-site shape asserted in
+	// tests/ingestionIgnoredRows.test.mjs's structural block.
+	const ignoredSrc = readFileSync('src/ingestion/sections/ignored.ts', 'utf8');
+	assert.match(ignoredSrc, /ownSectionId: 'ignoredPosts',\s*\n\s*companionSectionId: 'uncapturedPosts',/, 'ignored.ts renderClipButton call must pass ignoredPosts/uncapturedPosts');
+	assert.match(ignoredSrc, /ownSectionId: 'ignoredVideos',\s*\n\s*companionSectionId: 'uncapturedVideos',/, 'ignored.ts renderEnrichButton call must pass ignoredVideos/uncapturedVideos');
 });
 
 /* -------------------------------------------------------------- rsp-wp2: P1–P4 */
