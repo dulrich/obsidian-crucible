@@ -194,7 +194,7 @@ export class IngestionDashboardUI {
 		this.buildSection(
 			'searchAudit',
 			'Search audit',
-			'Compares the vault against the search companion\'s index (missing, orphaned, stale, embedding gaps). Forced-only — click Run audit to scan.',
+			'Vault vs search-index drift, with per-class repairs.',
 			(heading) => this.searchAudit.renderRunAuditButton(heading),
 			true,
 		);
