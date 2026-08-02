@@ -133,9 +133,15 @@ test('queueFetchPlan: null (default view) plans the combined queued+running fetc
 	assert.deepEqual(queueFetchPlan(null), { kind: 'combined' });
 });
 
+// WP-G3: queueFetchPlan's single-status plan also carries an `order` mode — 'claim'
+// (dispatch truth) for queued/running, 'recency' (settlement-newest-first) for a
+// settled bucket, so a done/failed/cancelled filter doesn't bury recent settlements
+// behind older retained rows.
+const EXPECTED_ORDER = { queued: 'claim', running: 'claim', done: 'recency', failed: 'recency', cancelled: 'recency' };
+
 for (const status of ['queued', 'running', 'done', 'failed', 'cancelled']) {
-	test(`queueFetchPlan: '${status}' plans a single-status fetch for that bucket`, () => {
-		assert.deepEqual(queueFetchPlan(status), { kind: 'single', status });
+	test(`queueFetchPlan: '${status}' plans a single-status fetch for that bucket, ordered '${EXPECTED_ORDER[status]}'`, () => {
+		assert.deepEqual(queueFetchPlan(status), { kind: 'single', status, order: EXPECTED_ORDER[status] });
 	});
 }
 

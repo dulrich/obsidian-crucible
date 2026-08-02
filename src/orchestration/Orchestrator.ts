@@ -15,6 +15,7 @@ import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { DbJobBackend, dbQueueCountsSource, dbRowToOrchestrationJob } from './DbJobBackend';
 import { SqliteJobStore } from './db/SqliteJobStore';
+import type { JobListOrder } from './db/types';
 import { SqliteUnavailableError, openJobsDb, resolveJobsDbPath } from './db/sqlite';
 import { logError } from '../log';
 import type CruciblePlugin from '../main';
@@ -182,8 +183,13 @@ export class Orchestrator {
 	 *
 	 * `limit`/`offset` are a real SQL `LIMIT`/`OFFSET`, so a queue thousands deep costs
 	 * the monitor one bounded page rather than a full read followed by a JS-side cap.
+	 *
+	 * `options.order` (WP-G3) threads straight through to `SqliteJobStore.list` —
+	 * `'claim'` (default) for queued/running (dispatch truth), `'recency'` for a
+	 * settled bucket so the newest settlements render first instead of hiding behind
+	 * older retained rows.
 	 */
-	async listJobs(status: JobStatus, options: { limit?: number; offset?: number } = {}): Promise<OrchestrationJob[]> {
+	async listJobs(status: JobStatus, options: { limit?: number; offset?: number; order?: JobListOrder } = {}): Promise<OrchestrationJob[]> {
 		if (!this.dbStore) return [];
 		return this.dbStore.list(status, options).map(dbRowToOrchestrationJob);
 	}
