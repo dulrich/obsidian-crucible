@@ -685,11 +685,51 @@ If your plugin does not need CSS, delete this file.
   margin-left: 0.35rem;
 }
 
-/* Icon-only warning-tier button for the reversible Ignore/Un-ignore actions. Warning
-   hue (not error/mod-warning — that's reserved for destructive controls; Ignore is
-   reversible) via the same semantic var the is-warn pill uses. No background/border
-   of its own so it reads as a plain icon glyph and lets Obsidian's button base
-   styles (hover/focus states) do the rest. */
+/* WP-DP1: nowrap on the Publish Date column's <th> and every section's <td> (same
+   nowrap-on-a-<td> reasoning as .crucible-intake-action-cell above) — the column
+   label wraps to two lines at typical table widths otherwise. */
+.crucible-intake-date-cell {
+  white-space: nowrap;
+}
+
+/* WP-DP1: the uniform icon-only intake action button (renderIconButton) — the base
+   treatment shared by every row action (external/meta/command/skip) across
+   Uncaptured/Ignored Posts/Videos. No background/border of its own so it reads as a
+   plain glyph and lets Obsidian's button base styles (hover/focus) do the rest;
+   colour-only modifiers (warn hue below, muted/disabled here) layer on top. */
+.crucible-intake-icon-btn {
+  background: transparent;
+  box-shadow: none;
+  padding: 0.2rem;
+  line-height: 1;
+}
+
+.crucible-intake-icon-btn:hover:not(:disabled) {
+  background: transparent;
+}
+
+.crucible-intake-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* "Muted, never absent" (WP-DP1 rule 1): a deactivated row action stays in the row
+   as a disabled icon with an explanatory `title`, instead of being omitted. Class-
+   based per the fleet's neutral-state convention (.crucible-pill.is-muted), applied
+   alongside the `disabled` attribute renderIconButton sets. */
+.crucible-intake-icon-btn.is-muted {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/* Icon-only warning-tier button for reversible actions: WP-DP1's Skip (layered on
+   top of .crucible-intake-icon-btn above, via renderSkipButton) and the legacy
+   Ignore/Un-ignore treatment renderIgnoreButton still uses standalone for
+   youtubeWithoutMetadata.ts. Warning hue (not error/mod-warning — that's reserved
+   for destructive controls; both are reversible) via the same semantic var the
+   is-warn pill uses. Self-sufficient (background/padding/line-height/svg sizing
+   duplicated from .crucible-intake-icon-btn) so renderIgnoreButton's standalone use
+   keeps its layout even though it doesn't apply the base class. */
 .crucible-intake-warn-btn {
   color: var(--text-warning);
   background: transparent;

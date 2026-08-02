@@ -250,6 +250,7 @@ test('computeIgnoredPostRows: partition — ignored id present in tracker data j
 		url: 'https://bloga.example/p/ignored-present',
 		kind: 'article',
 		wordCount: null,
+		hasBody: false,
 		metadataFile: null,
 	});
 });
@@ -264,6 +265,7 @@ test('computeIgnoredPostRows: degrade — an ignored id absent from tracker data
 		url: null,
 		kind: null,
 		wordCount: null,
+		hasBody: false,
 		metadataFile: null,
 	});
 });
@@ -314,14 +316,18 @@ test('computeIgnoredVideoRows: the plain uncaptured video (never ignored) does n
 
 const sectionSrc = readFileSync('src/ingestion/sections/ignored.ts', 'utf8');
 
-test('renderIgnoredPosts: reuses IC1 helpers (renderExternalLink + renderUnignoreButton), not a parallel action renderer', () => {
-	assert.match(sectionSrc, /renderExternalLink\(td, url, 'read'\)/);
-	assert.match(sectionSrc, /renderUnignoreButton\(td, host, 'blog', row\.id, 'ignoredPosts', 'uncapturedPosts', ctx\)/);
+test('renderIgnoredPosts: WP-DP1 uniform action cell (external · meta · Clip), no Un-ignore/renderUnignoreButton', () => {
+	assert.match(sectionSrc, /renderExternalIconButton\(td, url, 'Read'\)/);
+	assert.match(sectionSrc, /renderClipButton\(td, host, blockedTitle, ctx, \(\) => runClip\(host, row\.metadataFile\), \{/);
+	assert.match(sectionSrc, /beforeRun: \(\) => removeIgnoredBlogId\(host\.app, row\.id\)/);
+	assert.ok(!sectionSrc.includes('renderUnignoreButton'), 'Ignored sections have no Skip/Un-ignore button (WP-DP1 rule 4)');
 });
 
-test('renderIgnoredVideos: reuses IC1 helpers (renderExternalLink + renderUnignoreButton), not a parallel action renderer', () => {
-	assert.match(sectionSrc, /renderExternalLink\(td, url, 'watch'\)/);
-	assert.match(sectionSrc, /renderUnignoreButton\(td, host, 'youtube', row\.id, 'ignoredVideos', 'uncapturedVideos', ctx\)/);
+test('renderIgnoredVideos: WP-DP1 uniform action cell (external · meta · Enrich), no Un-ignore/renderUnignoreButton', () => {
+	assert.match(sectionSrc, /renderExternalIconButton\(td, url, 'Watch'\)/);
+	assert.match(sectionSrc, /renderEnrichButton\(td, host, \{ videoId: row\.id, title: row\.title \?\? '', channelName: row\.channelName \?\? '' \}, blockedTitle, ctx, \{/);
+	assert.match(sectionSrc, /beforeRun: \(\) => removeIgnoredVideoId\(host\.app, row\.id\)/);
+	assert.ok(!sectionSrc.includes('renderUnignoreButton'), 'Ignored sections have no Skip/Un-ignore button (WP-DP1 rule 4)');
 });
 
 test('both action cells use the shared .crucible-intake-action-cell class', () => {
@@ -329,18 +335,16 @@ test('both action cells use the shared .crucible-intake-action-cell class', () =
 	assert.equal(matches.length, 2);
 });
 
-test('Ignored Posts columns read Author/Title/Type/Words/Publish Date (minus Ingest/Enrich)', () => {
+test('Ignored Posts columns read Author/Title/Type/Words/Publish Date', () => {
 	for (const label of ["label: 'Author'", "label: 'Title'", "label: 'Type'", "label: 'Words'", "label: 'Publish Date'"]) {
 		assert.ok(sectionSrc.includes(label), `missing column label: ${label}`);
 	}
-	assert.ok(!sectionSrc.includes("'Ingest'"));
 });
 
-test('Ignored Videos columns read Creator/Title/Publish Date/Duration (minus Enrich)', () => {
+test('Ignored Videos columns read Creator/Title/Publish Date/Duration', () => {
 	for (const label of ["label: 'Creator'", "label: 'Title'", "label: 'Publish Date'", "label: 'Duration'"]) {
 		assert.ok(sectionSrc.includes(label), `missing column label: ${label}`);
 	}
-	assert.ok(!sectionSrc.includes("'Enrich'"));
 });
 
 test('default sort is publishedAt desc for both sections (degrade rows carry a null publishedAt, which sorts last)', () => {

@@ -1,18 +1,28 @@
-// Covers WP-IC1: the intake action-cell pattern (src/ingestion/render/cells.ts) and
-// its single-action-column adoption in uncapturedPosts.ts / uncapturedVideos.ts.
+// Covers WP-DP1: intake action language v2 (posts, videos, ignored) — the uniform
+// icon-only action-cell pattern (src/ingestion/render/cells.ts) and its adoption in
+// uncapturedPosts.ts / uncapturedVideos.ts / ignored.ts. Supersedes the WP-IC1-era
+// pins this file used to carry (renderExternalLink-as-anchor, renderIconLabelButton,
+// eye-off Ignore/eye Un-ignore) — see git history for that shape.
 //
 // Behavioral cases bundle cells.ts against a minimal obsidian stub (same shape as
 // apiKeyAffordance.test.mjs / youtubeWorkflowServiceHealth.test.mjs — App/TFile/
 // TFolder/normalizePath/requestUrl/Platform/moment, here plus Notice and a recording
 // setIcon) and drive the renderers with a fake DOM element supporting only the
-// surface they touch (createEl/createSpan/setAttr/addClass), same rationale as
-// ingestionRefreshGates.test.mjs's FakeElement. The Ignore/Unignore renderers are
-// only exercised up to the point of building the button — clicking them would need
-// a real host/ctx and vault write, out of scope here (that's ignoredIds.ts's own
-// concern) and irrelevant to the WP-IC1 pins (icon-only, warn class, no mod-warning).
+// surface they touch (createEl/createSpan/setAttr/addClass/disabled), same rationale
+// as ingestionRefreshGates.test.mjs's FakeElement. renderSkipButton/renderIgnoreButton
+// (the ignored-set writers) are only exercised up to the point of building the button
+// — clicking them would need a real host/vault write, out of scope here (that's
+// ignoredIds.ts's own concern). renderClipButton/renderEnrichButton take their actual
+// vault/queue work as a caller-supplied `run`/`beforeRun` callback specifically so
+// their full click lifecycle (disable-on-click, blocked/muted pre-click state, success
+// refresh dispatch, failure re-enable, thrown-error recovery) IS testable here without
+// any vault — see cells.ts's doc comment on renderClipButton for why that split exists
+// (a blogsApi.ts dependency broke unrelated test harnesses that bundle cells.ts via a
+// narrower obsidian stub, e.g. queueMonitorJobDetail.test.mjs).
 //
 // STRUCTURAL source-text pins cover what isn't reachable as a pure function: each
-// section declaring exactly one action column, and both new CSS classes existing.
+// section declaring exactly one action column in the WP-DP1 slot order, and the new
+// CSS classes existing.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -63,17 +73,20 @@ await esbuild.build({
 });
 
 const {
-	renderExternalLink,
-	renderIconLabelButton,
+	renderExternalIconButton,
+	renderMetaIconButton,
+	renderIconButton,
+	renderClipButton,
+	renderEnrichButton,
+	renderSkipButton,
 	renderIgnoreButton,
-	renderUnignoreButton,
 } = await import(pathToFileURL(outfile).href);
 
 /* ------------------------------------------------------------------------- fake DOM */
 
 // A minimal fake element supporting only what cells.ts's renderers touch:
 // createEl/createSpan (with `text`/`cls`/`href`/`type` opts), setAttr, addClass,
-// addEventListener, and the `iconName` property the stub setIcon writes.
+// addEventListener, `disabled`, and the `iconName` property the stub setIcon writes.
 function makeFakeEl(tag) {
 	const el = {
 		tag,
@@ -103,119 +116,313 @@ function makeFakeEl(tag) {
 	return el;
 }
 
-/* ------------------------------------------------------------------------- renderExternalLink */
+// window.open is called directly by renderExternalIconButton's click handler — Node
+// has no global `window`, so stub just enough to record calls.
+function withStubbedWindowOpen(fn) {
+	const calls = [];
+	const prior = globalThis.window;
+	globalThis.window = { open: (...args) => { calls.push(args); } };
+	try {
+		fn(calls);
+	} finally {
+		if (prior === undefined) delete globalThis.window;
+		else globalThis.window = prior;
+	}
+}
 
-test('renderExternalLink: anchor keeps its label and target/rel', () => {
-	const td = makeFakeEl('td');
-	renderExternalLink(td, 'https://example.com/post', 'read');
-	assert.equal(td.children.length, 1);
-	const a = td.children[0];
-	assert.equal(a.tag, 'a');
-	assert.equal(a.text, 'read');
-	assert.equal(a.attrs.href, 'https://example.com/post');
-	assert.equal(a.attrs.target, '_blank');
-	assert.equal(a.attrs.rel, 'noopener');
-});
-
-test('renderExternalLink: appends a trailing external-link glyph as a child of the anchor', () => {
-	const td = makeFakeEl('td');
-	renderExternalLink(td, 'https://example.com/watch', 'watch');
-	const a = td.children[0];
-	assert.equal(a.children.length, 1, 'the glyph is a single child of the anchor, not a sibling in the td');
-	const icon = a.children[0];
-	assert.equal(icon.tag, 'span');
-	assert.deepEqual(icon.cls, ['crucible-external-link-icon']);
-	assert.equal(icon.iconName, 'external-link');
-});
-
-/* ------------------------------------------------------------------------- renderIconLabelButton */
-
-test('renderIconLabelButton: glyph + visible label, and the caller wires its own click handler', () => {
-	const td = makeFakeEl('td');
-	let wired = null;
-	renderIconLabelButton(td, 'import', 'Ingest', btn => { wired = btn; });
-	assert.equal(td.children.length, 1);
-	const btn = td.children[0];
-	assert.equal(btn.tag, 'button');
-	assert.equal(btn.iconName, 'import', 'the icon is set on the button itself (sourceEvalDashboard.ts convention)');
-	assert.equal(btn.children.length, 1, 'one label span');
-	assert.equal(btn.children[0].text, ' Ingest');
-	assert.equal(wired, btn, 'onClickWiring receives the created button so the caller can attach its own listener');
-});
-
-test('renderIconLabelButton: works for the Enrich (sparkles) call site too', () => {
-	const td = makeFakeEl('td');
-	renderIconLabelButton(td, 'sparkles', 'Enrich', () => {});
-	assert.equal(td.children[0].iconName, 'sparkles');
-	assert.equal(td.children[0].children[0].text, ' Enrich');
-});
-
-/* ------------------------------------------------------------------------- Ignore / Unignore */
+function makeHost(overrides = {}) {
+	return {
+		app: { workspace: { openLinkText: () => {} } },
+		plugin: {},
+		refresh: () => Promise.resolve(),
+		...overrides,
+	};
+}
 
 const noopCtx = { refresh: () => {}, sort: null };
-const noopHost = { refresh: () => Promise.resolve() };
 
-test('renderIgnoreButton: icon-only eye-off button, warn class, aria-label/title, never mod-warning', () => {
+/* ------------------------------------------------------------------------- renderIconButton */
+
+test('renderIconButton: active — icon, aria-label, title, click wires the handler with the button itself', () => {
 	const td = makeFakeEl('td');
-	renderIgnoreButton(td, noopHost, 'blog', 'post-1', 'uncapturedPosts', 'ignoredPosts', noopCtx);
+	let received = null;
+	const btn = renderIconButton(td, 'download', { ariaLabel: 'Clip', title: 'Clip', onClick: b => { received = b; } });
+	assert.equal(td.children.length, 1);
+	assert.equal(btn.tag, 'button');
+	assert.equal(btn.iconName, 'download');
+	assert.equal(btn.attrs['aria-label'], 'Clip');
+	assert.equal(btn.attrs.title, 'Clip');
+	assert.equal(btn.disabled, false);
+	assert.ok(!btn.cls.includes('is-muted'));
+	btn.listeners.click();
+	assert.equal(received, btn, 'onClick receives the button itself');
+});
+
+test('renderIconButton: disabled — is-muted class, disabled=true, no click listener wired even if onClick is passed', () => {
+	const td = makeFakeEl('td');
+	let called = false;
+	const btn = renderIconButton(td, 'download', { ariaLabel: 'Clip', title: 'blocked', disabled: true, onClick: () => { called = true; } });
+	assert.equal(btn.disabled, true);
+	assert.ok(btn.cls.includes('is-muted'));
+	assert.equal(btn.attrs.title, 'blocked');
+	assert.equal(btn.listeners.click, undefined, 'a disabled button never wires a click handler');
+	assert.equal(called, false);
+});
+
+test('renderIconButton: an optional `cls` is appended alongside the base class', () => {
+	const td = makeFakeEl('td');
+	const btn = renderIconButton(td, 'circle-x', { ariaLabel: 'Skip', title: 'Skip', cls: 'crucible-intake-warn-btn' });
+	assert.ok(btn.cls.includes('crucible-intake-icon-btn'));
+	assert.ok(btn.cls.includes('crucible-intake-warn-btn'));
+});
+
+/* ------------------------------------------------------------------------- renderExternalIconButton (slot 1) */
+
+test('renderExternalIconButton: url present — icon-only, title carries the destination, click opens it', () => {
+	withStubbedWindowOpen(calls => {
+		const td = makeFakeEl('td');
+		renderExternalIconButton(td, 'https://example.com/post', 'Read');
+		const el = td.children[0];
+		assert.equal(el.iconName, 'external-link');
+		assert.equal(el.attrs['aria-label'], 'Read');
+		assert.equal(el.attrs.title, 'https://example.com/post', 'title carries the URL, not the aria-label text');
+		assert.equal(el.text, '', 'icon-only: no visible text label');
+		el.listeners.click();
+		assert.deepEqual(calls, [['https://example.com/post', '_blank', 'noopener']]);
+	});
+});
+
+test('renderExternalIconButton: url null — muted, never absent (rule 1)', () => {
+	const td = makeFakeEl('td');
+	renderExternalIconButton(td, null, 'Read');
+	const el = td.children[0];
+	assert.equal(el.disabled, true);
+	assert.ok(el.cls.includes('is-muted'));
+	assert.equal(el.attrs.title, 'No URL available');
+});
+
+/* ------------------------------------------------------------------------- renderMetaIconButton (slot 2) */
+
+test('renderMetaIconButton: file present — icon-only, in-tool nav on click', () => {
+	let opened = null;
+	const app = { workspace: { openLinkText: (path) => { opened = path; } } };
+	const td = makeFakeEl('td');
+	renderMetaIconButton(td, app, { path: 'notes/meta.md' }, 'unused');
+	const el = td.children[0];
+	assert.equal(el.iconName, 'file-text');
+	assert.equal(el.attrs['aria-label'], 'Metadata');
+	assert.equal(el.attrs.title, 'Metadata');
+	el.listeners.click();
+	assert.equal(opened, 'notes/meta.md');
+});
+
+test('renderMetaIconButton: file null — muted with the caller-supplied title', () => {
+	const td = makeFakeEl('td');
+	renderMetaIconButton(td, {}, null, 'No blog metadata note');
+	const el = td.children[0];
+	assert.equal(el.disabled, true);
+	assert.equal(el.attrs.title, 'No blog metadata note');
+});
+
+/* ------------------------------------------------------------------------- renderClipButton (slot 3, posts) */
+
+test('renderClipButton: blockedTitle set — muted download icon, run() never wired', () => {
+	const td = makeFakeEl('td');
+	let called = false;
+	renderClipButton(td, makeHost(), 'No post body captured', noopCtx, async () => { called = true; return true; });
+	const el = td.children[0];
+	assert.equal(el.iconName, 'download');
+	assert.equal(el.attrs['aria-label'], 'Clip');
+	assert.equal(el.disabled, true);
+	assert.equal(el.attrs.title, 'No post body captured');
+	assert.equal(el.listeners.click, undefined);
+	assert.equal(called, false);
+});
+
+test('renderClipButton: active click, run() succeeds, no beforeRun/own/companion — dispatches ctx.refresh() only', async () => {
+	const td = makeFakeEl('td');
+	let refreshed = 0;
+	const ctx = { refresh: () => { refreshed++; }, sort: null };
+	let hostRefreshed = false;
+	const host = makeHost({ refresh: () => { hostRefreshed = true; return Promise.resolve(); } });
+	renderClipButton(td, host, null, ctx, async () => true);
+	const el = td.children[0];
+	assert.equal(el.attrs.title, 'Clip');
+	el.listeners.click();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(refreshed, 1);
+	assert.equal(hostRefreshed, false, 'no companion section id was given, so the host-level refresh never fires');
+});
+
+test('renderClipButton: Ignored-section shape (opts.beforeRun + own/companion) — beforeRun runs before run(), success refreshes both', async () => {
+	const td = makeFakeEl('td');
+	const order = [];
+	const ctx = { refresh: () => { order.push('ctx.refresh'); }, sort: null };
+	let companionRefreshed = null;
+	const host = makeHost({ refresh: id => { companionRefreshed = id; order.push('host.refresh:' + id); return Promise.resolve(); } });
+	renderClipButton(td, host, null, ctx, async () => { order.push('run'); return true; }, {
+		beforeRun: async () => { order.push('beforeRun'); },
+		ownSectionId: 'ignoredPosts',
+		companionSectionId: 'uncapturedPosts',
+	});
+	const el = td.children[0];
+	el.listeners.click();
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.deepEqual(order, ['beforeRun', 'run', 'ctx.refresh', 'host.refresh:uncapturedPosts']);
+	assert.equal(companionRefreshed, 'uncapturedPosts');
+});
+
+test('renderClipButton: run() returns false — button re-enables, no refresh dispatched', async () => {
+	const td = makeFakeEl('td');
+	let refreshed = false;
+	const ctx = { refresh: () => { refreshed = true; }, sort: null };
+	renderClipButton(td, makeHost(), null, ctx, async () => false);
+	const el = td.children[0];
+	el.listeners.click();
+	assert.equal(el.disabled, true, 'disabled for the duration of the click');
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(el.disabled, false, 're-enabled after a handled failure');
+	assert.equal(refreshed, false);
+});
+
+test('renderClipButton: run() throws — caught, button re-enables, no refresh dispatched', async () => {
+	const td = makeFakeEl('td');
+	let refreshed = false;
+	const ctx = { refresh: () => { refreshed = true; }, sort: null };
+	renderClipButton(td, makeHost(), null, ctx, async () => { throw new Error('boom'); });
+	const el = td.children[0];
+	el.listeners.click();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(el.disabled, false);
+	assert.equal(refreshed, false);
+});
+
+/* ------------------------------------------------------------------------- renderEnrichButton (slot 3, videos) */
+
+test('renderEnrichButton: blockedTitle set — muted sparkles icon, enqueueAndRun never called', () => {
+	const td = makeFakeEl('td');
+	let called = false;
+	const host = makeHost({ plugin: { orchestrationAutoRunner: { enqueueAndRun: () => { called = true; return Promise.resolve({}); } } } });
+	renderEnrichButton(td, host, { videoId: 'v1', title: 't', channelName: 'c' }, 'Already enriched', noopCtx);
+	const el = td.children[0];
+	assert.equal(el.iconName, 'sparkles');
+	assert.equal(el.attrs['aria-label'], 'Enrich');
+	assert.equal(el.disabled, true);
+	assert.equal(el.attrs.title, 'Already enriched');
+	assert.equal(called, false);
+});
+
+test('renderEnrichButton: active click enqueues via orchestrationAutoRunner and dispatches refresh on success', async () => {
+	const td = makeFakeEl('td');
+	let enqueuedWith = null;
+	let refreshed = 0;
+	const ctx = { refresh: () => { refreshed++; }, sort: null };
+	const host = makeHost({
+		plugin: { orchestrationAutoRunner: { enqueueAndRun: (type, params, opts) => { enqueuedWith = { type, params, opts }; return Promise.resolve({ id: 'job-1' }); } } },
+	});
+	renderEnrichButton(td, host, { videoId: 'v1', title: 't', channelName: 'c' }, null, ctx);
+	const el = td.children[0];
+	el.listeners.click();
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.deepEqual(enqueuedWith.params, { videoId: 'v1', title: 't', channelName: 'c' });
+	assert.equal(refreshed, 1);
+});
+
+test('renderEnrichButton: no orchestrationAutoRunner — re-enables without throwing', async () => {
+	const td = makeFakeEl('td');
+	const host = makeHost({ plugin: {} });
+	renderEnrichButton(td, host, { videoId: 'v1', title: 't', channelName: 'c' }, null, noopCtx);
+	const el = td.children[0];
+	el.listeners.click();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(el.disabled, false);
+});
+
+/* ------------------------------------------------------------------------- renderSkipButton / renderIgnoreButton */
+
+test('renderSkipButton: icon-only circle-x button, warn class, aria-label/title, never mod-warning', () => {
+	const td = makeFakeEl('td');
+	renderSkipButton(td, makeHost(), 'blog', 'post-1', 'uncapturedPosts', 'ignoredPosts', noopCtx);
 	assert.equal(td.children.length, 1);
 	const btn = td.children[0];
 	assert.equal(btn.tag, 'button');
 	assert.equal(btn.text, '', 'icon-only: no visible text label');
+	assert.ok(btn.cls.includes('crucible-intake-icon-btn'));
 	assert.ok(btn.cls.includes('crucible-intake-warn-btn'));
 	assert.ok(!btn.cls.includes('mod-warning'), 'reversible action — never the destructive/error-red class');
+	assert.equal(btn.iconName, 'circle-x');
+	assert.equal(btn.attrs['aria-label'], 'Skip');
+	assert.equal(btn.attrs.title, 'Skip');
+});
+
+test('renderIgnoreButton: kept for youtubeWithoutMetadata.ts — icon-only eye-off button, warn class, aria-label/title', () => {
+	const td = makeFakeEl('td');
+	renderIgnoreButton(td, makeHost(), 'youtube', 'vid-1', 'youtubeWithoutMetadata', 'ignoredVideos', noopCtx);
+	const btn = td.children[0];
+	assert.equal(btn.text, '');
+	assert.ok(btn.cls.includes('crucible-intake-warn-btn'));
+	assert.ok(!btn.cls.includes('mod-warning'));
 	assert.equal(btn.iconName, 'eye-off');
 	assert.equal(btn.attrs['aria-label'], 'Ignore');
 	assert.equal(btn.attrs.title, 'Ignore');
-});
-
-test('renderUnignoreButton: icon-only eye button, warn class, aria-label/title, never mod-warning', () => {
-	const td = makeFakeEl('td');
-	renderUnignoreButton(td, noopHost, 'youtube', 'vid-1', 'ignoredVideos', 'uncapturedVideos', noopCtx);
-	assert.equal(td.children.length, 1);
-	const btn = td.children[0];
-	assert.equal(btn.tag, 'button');
-	assert.equal(btn.text, '', 'icon-only: no visible text label');
-	assert.ok(btn.cls.includes('crucible-intake-warn-btn'));
-	assert.ok(!btn.cls.includes('mod-warning'), 'reversible action — never the destructive/error-red class');
-	assert.equal(btn.iconName, 'eye');
-	assert.equal(btn.attrs['aria-label'], 'Un-ignore');
-	assert.equal(btn.attrs.title, 'Un-ignore');
 });
 
 /* ------------------------------------------------------------------------- structural */
 
 const uncapturedPostsSrc = readFileSync('src/ingestion/sections/uncapturedPosts.ts', 'utf8');
 const uncapturedVideosSrc = readFileSync('src/ingestion/sections/uncapturedVideos.ts', 'utf8');
+const ignoredSrc = readFileSync('src/ingestion/sections/ignored.ts', 'utf8');
+const cellsSrc = readFileSync('src/ingestion/render/cells.ts', 'utf8');
 const stylesCss = readFileSync('styles.css', 'utf8');
 
 function countColumnsUsingClass(src, className) {
-	// Each column render body that applies the class does so via
-	// `td.addClass('<className>')`; count occurrences of that call, which is exactly
-	// one per action column by construction (renderPostActionCell /
-	// renderVideoActionCell each call it once).
 	const re = new RegExp(`addClass\\('${className}'\\)`, 'g');
 	return (src.match(re) ?? []).length;
 }
 
-test('STRUCTURAL: uncapturedPosts.ts declares exactly one action column using crucible-intake-action-cell', () => {
+test('STRUCTURAL: uncapturedPosts.ts declares exactly one action column, slot order external/meta/command/skip', () => {
 	assert.equal(countColumnsUsingClass(uncapturedPostsSrc, 'crucible-intake-action-cell'), 1);
-	// The merged column carries read/metadata/Ingest/Ignore in one cell — the old
-	// separate `ignore` column key (rendered via a second `renderIgnoreButton` column
-	// entry) must be gone.
-	assert.ok(!/key: 'ignore'/.test(uncapturedPostsSrc), 'the ignore column key must be merged away, not just re-styled');
-	assert.ok(!uncapturedPostsSrc.includes("createSpan({ text: '  ' })"), 'the literal spacer spans are replaced by the CSS gap');
+	assert.ok(!/key: 'ignore'/.test(uncapturedPostsSrc));
+	const order = ['renderExternalIconButton', 'renderMetaIconButton', 'renderClipButton', 'renderSkipButton']
+		.map(name => uncapturedPostsSrc.indexOf(name + '('));
+	assert.ok(order.every(i => i >= 0), 'all four slot renderers must be called');
+	assert.deepEqual(order, [...order].sort((a, b) => a - b), 'slot order must be external, meta, command, skip');
 });
 
-test('STRUCTURAL: uncapturedVideos.ts declares exactly one action column using crucible-intake-action-cell', () => {
+test('STRUCTURAL: uncapturedVideos.ts declares exactly one action column and the Enriched? column is gone', () => {
 	assert.equal(countColumnsUsingClass(uncapturedVideosSrc, 'crucible-intake-action-cell'), 1);
-	assert.ok(!/key: 'ignore'/.test(uncapturedVideosSrc), 'the ignore column key must be merged away, not just re-styled');
-	assert.ok(!/key: 'watch'/.test(uncapturedVideosSrc), 'the watch column key must be merged into the action column');
-	// The stateful Enriched? column must still exist as its own column.
-	assert.match(uncapturedVideosSrc, /key: 'enriched'.*label: 'Enriched\?'/);
+	assert.ok(!/key: 'ignore'/.test(uncapturedVideosSrc));
+	assert.ok(!/key: 'watch'/.test(uncapturedVideosSrc));
+	assert.ok(!/key: 'enriched'/.test(uncapturedVideosSrc), 'the stateful Enriched? column must be gone (WP-DP1 rule 3)');
+	assert.ok(!uncapturedVideosSrc.includes("label: 'Enriched?'"));
+	assert.match(uncapturedVideosSrc, /renderExternalIconButton\(td, row\.url, 'Watch'\)/);
+	assert.match(uncapturedVideosSrc, /renderEnrichButton\(/);
+	assert.match(uncapturedVideosSrc, /renderSkipButton\(/);
 });
 
-test('STRUCTURAL: styles.css defines both new WP-IC1 classes', () => {
+test('STRUCTURAL: ignored.ts has no Skip/Un-ignore slot and no renderUnignoreButton reference', () => {
+	assert.ok(!ignoredSrc.includes('renderUnignoreButton'));
+	assert.ok(!ignoredSrc.includes('renderSkipButton'), 'Ignored sections have no skip slot (WP-DP1 rule 4)');
+	assert.equal(countColumnsUsingClass(ignoredSrc, 'crucible-intake-action-cell'), 2);
+});
+
+test('STRUCTURAL: renderUnignoreButton and renderIconLabelButton no longer exist in cells.ts', () => {
+	assert.ok(!cellsSrc.includes('export function renderUnignoreButton'));
+	assert.ok(!cellsSrc.includes('export function renderIconLabelButton'));
+});
+
+test('STRUCTURAL: styles.css defines the WP-DP1 icon-button classes plus the retained warn/action-cell classes', () => {
 	assert.ok(stylesCss.includes('.crucible-intake-action-cell {'));
 	assert.ok(stylesCss.includes('.crucible-intake-warn-btn {'));
+	assert.ok(stylesCss.includes('.crucible-intake-icon-btn {'));
+	assert.ok(stylesCss.includes('.crucible-intake-icon-btn.is-muted {'));
+	assert.ok(stylesCss.includes('.crucible-intake-date-cell {'));
 });

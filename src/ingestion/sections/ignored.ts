@@ -1,8 +1,35 @@
+import { Notice } from 'obsidian';
+import { blogClipBlockedTitle, runBlogIngestCommand } from '../../orchestration/utils/blogsApi';
+import { removeIgnoredBlogId, removeIgnoredVideoId } from '../../orchestration/utils/ignoredIds';
 import { computeIgnoredPostRows, computeIgnoredVideoRows } from '../data/ignored';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
-import { renderAuthorCell, renderExternalLink, renderFileLink, renderUnignoreButton } from '../render/cells';
+import { renderAuthorCell, renderClipButton, renderEnrichButton, renderExternalIconButton, renderFileLink, renderMetaIconButton } from '../render/cells';
 import { blogIgnoreUrl, displayLabel, formatDuration } from '../render/format';
 import type { DashboardHost, IgnoredPostRow, IgnoredVideoRow, SectionContext } from '../render/types';
+
+// WP-DP1: the Clip button's `run` callback — duplicated verbatim from
+// uncapturedPosts.ts (see its comment) rather than cross-importing between sibling
+// section files; keeps cells.ts free of a build-graph dependency on blogsApi.ts.
+async function runClip(host: DashboardHost, metadataFile: IgnoredPostRow['metadataFile']): Promise<boolean> {
+	const res = await runBlogIngestCommand(host.plugin, { metadataFile });
+	if (res.status === 'ran') {
+		new Notice(`Ran ${res.commandId}`);
+		return true;
+	}
+	if (res.status === 'missing-command') {
+		new Notice('Choose a queueable blog ingest command in settings.');
+		return false;
+	}
+	new Notice('No blog metadata note found for this post.');
+	return false;
+}
+
+// WP-DP1 rule 4: Ignored sections have no Skip/Un-ignore button — the row's meta and
+// primary-action (Clip/Enrich) slots share this one degrade-aware muted title. A
+// degrade row (see computeIgnoredPostRows/computeIgnoredVideoRows in
+// ../data/ignored.ts) has aged out of every scanned tracker run, so there is nothing
+// for either slot to act on.
+const AGED_OUT_TITLE = 'No tracker data (aged out)';
 
 // WP-IC2: shared by both sections — a degrade row (see computeIgnoredPostRows/
 // computeIgnoredVideoRows in ../data/ignored.ts) has a null `title`, so the raw id
@@ -37,9 +64,10 @@ export async function renderIgnoredPosts(host: DashboardHost, body: HTMLElement,
 			// Degrade rows carry a null publishedAt, which sorts as '' — the empty
 			// string sorts before every real date, so on the default `desc` sort it
 			// lands last (see computeIgnoredPostRows' doc comment on the degrade shape).
-			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt ?? '', render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
-			// WP-IC2: one merged action column (read · Un-ignore) — same
-			// `.crucible-intake-action-cell` shape WP-IC1 introduced for Uncaptured.
+			// WP-DP1: nowrap on both header and cell.
+			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt ?? '', headerCls: 'crucible-intake-date-cell', render: (r, td) => { td.addClass('crucible-intake-date-cell'); td.setText((r.publishedAt || '').slice(0, 10)); } },
+			// WP-DP1: one merged action column, uniform icon-only slot order (external ·
+			// meta · command) — read · metadata · Clip. Ignored sections have no skip slot.
 			{ key: 'action', label: '', render: (r, td) => renderIgnoredPostActionCell(host, td, r, ctx) },
 		],
 	});
@@ -49,12 +77,21 @@ function renderIgnoredPostActionCell(host: DashboardHost, td: HTMLElement, row: 
 	td.addClass('crucible-intake-action-cell');
 	// Full rows carry their own url; a degrade row falls back to blogIgnoreUrl(id) —
 	// ignored blog ids are canonical URLs, so this resolves for the overwhelming
-	// majority; the rare non-URL id (hand-edited ignore note) renders muted text
-	// instead of a link, same fallback shape as the metadata cell in uncapturedPosts.ts.
+	// majority; the rare non-URL id (hand-edited ignore note) renders muted (WP-DP1
+	// rule 1: still present, disabled + titled, never omitted).
+	const degraded = row.title === null;
 	const url = row.url ?? blogIgnoreUrl(row.id);
-	if (url) renderExternalLink(td, url, 'read');
-	else td.createSpan({ cls: 'crucible-muted', text: 'read' });
-	renderUnignoreButton(td, host, 'blog', row.id, 'ignoredPosts', 'uncapturedPosts', ctx);
+	renderExternalIconButton(td, url, 'Read');
+	renderMetaIconButton(td, host.app, row.metadataFile, degraded ? AGED_OUT_TITLE : 'No blog metadata note');
+	// WP-DP1 rule 4: Clip un-ignores first, then runs the same precondition-gated
+	// ingest as Uncaptured Posts (blogClipBlockedTitle) — the degrade override takes
+	// precedence since a degrade row has no `hasBody`/metadata to evaluate.
+	const blockedTitle = degraded ? AGED_OUT_TITLE : blogClipBlockedTitle(host.plugin, row);
+	renderClipButton(td, host, blockedTitle, ctx, () => runClip(host, row.metadataFile), {
+		beforeRun: () => removeIgnoredBlogId(host.app, row.id),
+		ownSectionId: 'ignoredPosts',
+		companionSectionId: 'uncapturedPosts',
+	});
 }
 
 // --- Section: Ignored videos ---
@@ -76,9 +113,11 @@ export async function renderIgnoredVideos(host: DashboardHost, body: HTMLElement
 			// Degrade rows carry a null publishedAt, which sorts as '' — the empty
 			// string sorts before every real date, so on the default `desc` sort it
 			// lands last (see computeIgnoredVideoRows' doc comment on the degrade shape).
-			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt ?? '', render: (r, td) => td.setText((r.publishedAt || '').slice(0, 10)) },
+			// WP-DP1: nowrap on both header and cell.
+			{ key: 'publishedAt', label: 'Publish Date', sortable: true, sortKey: r => r.publishedAt ?? '', headerCls: 'crucible-intake-date-cell', render: (r, td) => { td.addClass('crucible-intake-date-cell'); td.setText((r.publishedAt || '').slice(0, 10)); } },
 			{ key: 'duration', label: 'Duration', sortable: true, sortKey: r => r.durationSeconds ?? -1, render: (r, td) => td.setText(formatDuration(r.durationSeconds)) },
-			// WP-IC2: one merged action column (watch · Un-ignore) — same shape as posts above.
+			// WP-DP1: one merged action column, uniform icon-only slot order (external ·
+			// meta · command) — watch · metadata · Enrich. Ignored sections have no skip slot.
 			{ key: 'action', label: '', render: (r, td) => renderIgnoredVideoActionCell(host, td, r, ctx) },
 		],
 	});
@@ -88,7 +127,17 @@ function renderIgnoredVideoActionCell(host: DashboardHost, td: HTMLElement, row:
 	td.addClass('crucible-intake-action-cell');
 	// A degrade row falls back to the watch URL built straight from the id — always
 	// resolvable, unlike the blog case above (a video id is never itself a URL).
+	const degraded = row.title === null;
 	const url = row.url ?? `https://www.youtube.com/watch?v=${row.id}`;
-	renderExternalLink(td, url, 'watch');
-	renderUnignoreButton(td, host, 'youtube', row.id, 'ignoredVideos', 'uncapturedVideos', ctx);
+	renderExternalIconButton(td, url, 'Watch');
+	renderMetaIconButton(td, host.app, row.enrichmentFile, degraded ? AGED_OUT_TITLE : 'No enrichment note yet');
+	// WP-DP1 rule 4: Enrich un-ignores first, then runs the same enrichment enqueue as
+	// Uncaptured Videos. `title`/`channelName` fall back to '' when degraded — never
+	// actually read, since a degraded row's blockedTitle disables the click.
+	const blockedTitle = degraded ? AGED_OUT_TITLE : row.enrichmentFile ? 'Already enriched' : null;
+	renderEnrichButton(td, host, { videoId: row.id, title: row.title ?? '', channelName: row.channelName ?? '' }, blockedTitle, ctx, {
+		beforeRun: () => removeIgnoredVideoId(host.app, row.id),
+		ownSectionId: 'ignoredVideos',
+		companionSectionId: 'uncapturedVideos',
+	});
 }
