@@ -50,3 +50,28 @@ test('STRUCTURAL: both the tab-row and detail-editor Back-bar branches render in
 	assert.ok(backBtnIdx >= 0, 'Back button must still be created on navBar (the wrapped element)');
 	assert.ok(createTabIdx >= 0, 'createTab helper (tab-row branch) must still target navBar');
 });
+
+// WP-F1: the wrapper's negative-margin/padding compensation used to hardcode 16px/24px,
+// but the actual scroll parent's padding varies at runtime (workspace tab vs. native
+// modal), leaving an unpainted band. `applyStickyHeaderPadding` measures the real scroll
+// parent at mount and mirrors its padding onto custom properties styles.css consumes.
+test('STRUCTURAL: the sticky header padding is measured at mount, not hardcoded', () => {
+	const navBarIdx = src.indexOf("const navBar = stickyHeader.createDiv({ cls: 'crucible-tab-nav' });");
+	assert.ok(navBarIdx >= 0, 'navBar setup not found');
+	assert.ok(
+		src.indexOf('applyStickyHeaderPadding(stickyHeader);', navBarIdx) >= 0,
+		'expected applyStickyHeaderPadding(stickyHeader) to run after the pinned stickyHeader/navBar lines',
+	);
+	assert.ok(
+		src.includes("stickyHeader.style.setProperty('--crucible-sticky-pad-top'"),
+		'expected applyStickyHeaderPadding to set --crucible-sticky-pad-top on the wrapper',
+	);
+});
+
+test('STRUCTURAL: styles.css consumes the measured padding custom properties', () => {
+	const css = readFileSync('styles.css', 'utf8');
+	assert.ok(
+		css.includes('var(--crucible-sticky-pad-top'),
+		'expected .crucible-settings-sticky-header to read var(--crucible-sticky-pad-top, …)',
+	);
+});
