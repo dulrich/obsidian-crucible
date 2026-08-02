@@ -15,6 +15,36 @@ import { renderSourceEvalSettings } from "./settings/sections/sourceEval";
 export type CrucibleSettingsTab = 'configure' | 'automate' | 'ai' | 'orchestrator' | 'lint' | 'commands';
 
 /**
+ * Measure-at-mount for the sticky header's negative-margin/padding compensation (see the
+ * `.crucible-settings-sticky-header` comment in styles.css). The scroll parent's padding is
+ * NOT a constant: the workspace tab's `.view-content.crucible-settings-host` computes
+ * `12px 12px 32px 12px` at runtime (the theme overrides `.view-content` padding), and the
+ * native settings modal's `.vertical-tab-content` carries yet another value — a hardcoded
+ * 16/24 assumption left an unpainted band above the strip where scrolled content showed
+ * through. Walk ancestors for the first element whose computed `overflow-y` is
+ * `auto`/`scroll`, and mirror its computed padding onto custom properties the wrapper's own
+ * margin/padding read via `var(…, 16px)` fallbacks. No scroll parent found → set nothing;
+ * the CSS fallbacks apply. Cheap: one `getComputedStyle` walk per `display()`.
+ */
+function applyStickyHeaderPadding(stickyHeader: HTMLElement): void {
+	let node: HTMLElement | null = stickyHeader.parentElement;
+	let scrollParent: HTMLElement | null = null;
+	while (node) {
+		const overflowY = getComputedStyle(node).overflowY;
+		if (overflowY === 'auto' || overflowY === 'scroll') {
+			scrollParent = node;
+			break;
+		}
+		node = node.parentElement;
+	}
+	if (!scrollParent) return;
+	const pad = getComputedStyle(scrollParent);
+	stickyHeader.style.setProperty('--crucible-sticky-pad-top', pad.paddingTop);
+	stickyHeader.style.setProperty('--crucible-sticky-pad-right', pad.paddingRight);
+	stickyHeader.style.setProperty('--crucible-sticky-pad-left', pad.paddingLeft);
+}
+
+/**
  * The settings tab is a thin shell: it holds shared editing state and template-variable
  * helpers, and delegates each tab's rendering to a per-feature module in `settings/sections/`.
  * The repetitive `new Setting(...).addX(...).onChange(...)` chains live behind the data-driven
@@ -193,6 +223,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		// same navBar, so the wrap covers both automatically.
 		const stickyHeader = containerEl.createDiv({ cls: 'crucible-settings-sticky-header' });
 		const navBar = stickyHeader.createDiv({ cls: 'crucible-tab-nav' });
+		applyStickyHeaderPadding(stickyHeader);
 
 		if (this.isEditingDetail()) {
 			const backBtn = navBar.createDiv({ cls: 'crucible-tab-btn' });

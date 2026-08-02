@@ -110,9 +110,9 @@ export class SourceEvalDashboardUI {
 			this.exportWeakLabels = weak.checked;
 		});
 
-		const button = controls.createEl('button', { cls: 'mod-cta crucible-source-eval-export' });
+		const button = controls.createEl('button', { cls: 'mod-cta crucible-source-eval-export crucible-icon-label-btn' });
 		setIcon(button, 'download');
-		button.createSpan({ text: ' Export JSONL' });
+		button.createSpan({ text: 'Export JSONL' });
 		button.addEventListener('click', () => {
 			void this.runExport(button);
 		});
