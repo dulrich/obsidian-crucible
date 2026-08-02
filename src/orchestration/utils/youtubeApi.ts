@@ -164,8 +164,17 @@ export interface YoutubeVideoMetadata {
 	url: string;
 }
 
+/**
+ * `channelId` rides ONLY on `created`, and that asymmetry is the point: it is the
+ * in-memory fetch payload (`fetchYoutubeVideo`'s `meta.channelId`), available for free
+ * exactly when we just called the API. An `exists` result never fetched, so producing a
+ * channel id there would mean re-reading the metadata note — which is why the channel
+ * chain in `YoutubeMetadataFetchWorkflow` fires on `created` only. Required (not
+ * optional) on that variant so the compiler walks any future `created` construction site
+ * to supply it.
+ */
 export type IngestResult =
-	| { status: 'created';     metadataPath: string }
+	| { status: 'created';     metadataPath: string; channelId: string }
 	| { status: 'exists';      metadataPath: string }
 	| { status: 'no-video-id'; metadataPath: null }
 	| { status: 'no-api-key';  metadataPath: null };
@@ -329,6 +338,13 @@ export async function fetchChannelUploads(plugin: CruciblePlugin, channelId: str
 	return playlistItemsToRemoteVideos(payload);
 }
 
+export const DEFAULT_YOUTUBE_METADATA_ROOT = '_yt_metadata';
+
+/** The configured YT metadata root, normalized — mirror of `xMetadataRoot` (xApi.ts). */
+export function youtubeMetadataRoot(plugin: CruciblePlugin): string {
+	return normalizePath(plugin.settings.orchestrationYoutubeMetadataRoot || DEFAULT_YOUTUBE_METADATA_ROOT);
+}
+
 export function youtubeMetadataNotePath(root: string, channelFolder: string, videoId: string): string {
 	return normalizePath(`${root}/${channelFolder}/${videoId}.md`);
 }
@@ -410,7 +426,7 @@ export async function ensureMetadataNote(plugin: CruciblePlugin, videoId: string
 	const trimmedId = videoId.trim();
 	if (!trimmedId) return { status: 'no-video-id', metadataPath: null };
 
-	const root = normalizePath(plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata');
+	const root = youtubeMetadataRoot(plugin);
 
 	return await plugin.noteLocks.withResourceLock('yt-video', trimmedId, 'yt-metadata-ensure', async (): Promise<IngestResult> => {
 		const existing = await findExistingMetadataNote(app, root, trimmedId);
@@ -431,7 +447,9 @@ export async function ensureMetadataNote(plugin: CruciblePlugin, videoId: string
 		}
 
 		await writeYoutubeMetadataNote(app, path, meta);
-		return { status: 'created', metadataPath: path };
+		// The channel id comes off the fetch payload we already hold — no note re-read.
+		// It is what lets the caller chain channel enrichment for a first-seen channel.
+		return { status: 'created', metadataPath: path, channelId: meta.channelId };
 	});
 }
 
@@ -442,10 +460,15 @@ export async function enrichYoutubeMetadataStandalone(
 	return await ensureMetadataNote(plugin, videoId);
 }
 
-// One note, one job: under the note's lock, bail if `yt-metadata` already links
-// somewhere, otherwise ensure the metadata note exists (API call only on a miss)
-// and link it onto this note ONLY. Duplicate captures sharing the video id each
-// run their own job; every job after the first finds the note instead of fetching.
+// One note, one job: under the note's lock, bail if `yt-metadata` already carries a
+// link to THIS video's metadata note, otherwise ensure the metadata note exists (API
+// call only on a miss) and append it onto this note ONLY. Duplicate captures sharing
+// the video id each run their own job; every job after the first finds the note
+// instead of fetching.
+//
+// The bail is per-target (WP-J2), not "any link present": `yt-metadata` is a list, and
+// a note that already carries its own captured video's stamp must still be able to gain
+// a stamp for a *referenced* video found in its body.
 export async function ingestYoutubeVideoMetadata(
 	plugin: CruciblePlugin,
 	sourceFile: TFile,
@@ -456,14 +479,10 @@ export async function ingestYoutubeVideoMetadata(
 	if (!trimmedId) return { status: 'no-video-id', metadataPath: null };
 
 	return await plugin.noteLocks.withLock(sourceFile.path, 'yt-metadata', async (): Promise<IngestResult> => {
-		// Already linked → done without touching the API or the note. Resolve the
-		// existing link target for the result's metadataPath when possible.
+		// Already linked for this video → done without touching the API or the note.
 		const fm = app.metadataCache.getFileCache(sourceFile)?.frontmatter;
-		const existingLink = fm ? firstYtMetadataLink(fm['yt-metadata']) : '';
-		if (existingLink) {
-			const dest = app.metadataCache.getFirstLinkpathDest(existingLink, sourceFile.path);
-			if (dest) return { status: 'exists', metadataPath: dest.path };
-		}
+		const linked = fm ? findLinkedYtMetadataFile(app, sourceFile, fm['yt-metadata'], trimmedId) : null;
+		if (linked) return { status: 'exists', metadataPath: linked.path };
 
 		const result = await ensureMetadataNote(plugin, trimmedId);
 		if (result.metadataPath) {
@@ -488,20 +507,85 @@ export function coerceVideoId(value: unknown): string {
 }
 
 // True when `yt-metadata` already carries a link (a non-empty string, or an array
-// with at least one non-empty entry).
+// with at least one non-empty entry). The single source of truth for that predicate —
+// the Ingestion dashboard's backlog scan and the `yt-metadata-on-capture` trigger both
+// import it rather than re-inlining the shape check.
 export function isYtMetadataLinked(value: unknown): boolean {
-	return firstYtMetadataLink(value) !== '';
+	return ytMetadataLinks(value).length > 0;
 }
 
-// First non-empty `yt-metadata` value, with wikilink brackets stripped so it can
-// feed getFirstLinkpathDest. '' when no usable link is present.
-function firstYtMetadataLink(value: unknown): string {
-	const raw = typeof value === 'string'
-		? value
-		: Array.isArray(value)
-			? value.find(v => typeof v === 'string' && v.trim().length > 0) as string | undefined ?? ''
-			: '';
-	return raw.trim().replace(/^\[\[/, '').replace(/\]\]$/, '').split('|')[0]?.trim() ?? '';
+/**
+ * Every non-empty `yt-metadata` entry, wikilink brackets and `|alias` stripped so each
+ * can feed `getFirstLinkpathDest`. Tolerates both shapes on purpose: the key is a LIST
+ * since WP-J2, but legacy notes still hold a bare scalar and reads must never care.
+ */
+export function ytMetadataLinks(value: unknown): string[] {
+	const raw = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
+	const out: string[] = [];
+	for (const item of raw) {
+		if (typeof item !== 'string') continue;
+		const link = item.trim().replace(/^\[\[/, '').replace(/\]\]$/, '').split('|')[0]?.trim() ?? '';
+		if (link) out.push(link);
+	}
+	return out;
+}
+
+/**
+ * The `yt-metadata` entry that stamps THIS video, resolved to its file — or null.
+ *
+ * A video's metadata note is always `<root>/<channelFolder>/<videoId>.md`
+ * (`youtubeMetadataNotePath`), so the entry's final path segment IS the video id; that
+ * makes the membership test pure string work, answerable before any API call. An entry
+ * that names the video but no longer resolves returns null on purpose: the caller then
+ * re-ensures and appends the canonical link, repairing the dead entry instead of
+ * reporting a link that goes nowhere (this is the pre-WP-J2 behavior of the old
+ * any-link bail, kept).
+ */
+export function findLinkedYtMetadataFile(
+	app: App,
+	sourceFile: TFile,
+	value: unknown,
+	videoId: string,
+): TFile | null {
+	for (const link of ytMetadataLinks(value)) {
+		const segment = (link.split('/').pop() ?? '').replace(/\.md$/, '');
+		if (segment !== videoId) continue;
+		const dest = app.metadataCache.getFirstLinkpathDest(link, sourceFile.path);
+		if (dest) return dest;
+	}
+	return null;
+}
+
+/**
+ * Idempotent list-append onto `yt-metadata` — the mirror of `appendXMetadataLink`
+ * (`XMetadataFetchWorkflow.ts`), and the ONLY sanctioned way to write the key.
+ *
+ * An array appends `link` only when not already present (string compare). A non-empty
+ * legacy scalar coerces to `[old, link]`, preserving the old value — except when it
+ * already equals `link`, where it collapses to `[link]` rather than doubling up. An
+ * absent/empty key is created through `insertFrontmatterPropertyAfter` so the list
+ * keeps its historical placement immediately after `yt-video-id`.
+ *
+ * Append-only, never reordering: the capture flow's own video is entry [0] and capture
+ * channel attribution (`firstFrontmatterLink`, `src/sourceEval/captureIndex.ts`) reads
+ * entry [0]. A referenced-video stamp must never displace it.
+ */
+export function appendYtMetadataLink(fm: Record<string, unknown>, link: string): void {
+	const existing = fm['yt-metadata'];
+	if (Array.isArray(existing)) {
+		if (!existing.some(v => v === link)) existing.push(link);
+		fm['yt-metadata'] = existing;
+		return;
+	}
+	if (typeof existing === 'string' && existing.trim()) {
+		fm['yt-metadata'] = existing === link ? [link] : [existing, link];
+		return;
+	}
+	// Absent (or present-but-empty): create the list. `insertFrontmatterPropertyAfter`
+	// assigns in place when the key already exists, so the empty case can't clobber
+	// anything — and only this branch may use it, since its existing-key assignment
+	// would otherwise overwrite a populated list.
+	insertFrontmatterPropertyAfter(fm, 'yt-video-id', 'yt-metadata', [link]);
 }
 
 export async function linkMetadataToNote(plugin: CruciblePlugin, sourceFile: TFile, metadataPath: string): Promise<void> {
@@ -511,7 +595,7 @@ export async function linkMetadataToNote(plugin: CruciblePlugin, sourceFile: TFi
 	// Reentrant under ingestYoutubeVideoMetadata's outer lock.
 	await plugin.noteLocks.withLock(sourceFile.path, 'yt-metadata', () =>
 		updateFrontmatter(plugin.app, sourceFile, fm => {
-			insertFrontmatterPropertyAfter(fm, 'yt-video-id', 'yt-metadata', link);
+			appendYtMetadataLink(fm, link);
 		}),
 	);
 }
@@ -660,7 +744,7 @@ export async function ensureChannelAboutNote(
 	const trimmedId = channelId.trim();
 	if (!trimmedId) return { status: 'no-channel-id', aboutPath: null };
 
-	const root = normalizePath(plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata');
+	const root = youtubeMetadataRoot(plugin);
 	const maxAgeMs = opts.maxAgeMs ?? Number.POSITIVE_INFINITY;
 
 	return await plugin.noteLocks.withResourceLock('yt-channel', trimmedId, 'yt-channel-about-ensure', async (): Promise<ChannelIngestResult> => {

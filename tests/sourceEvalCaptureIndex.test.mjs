@@ -203,6 +203,54 @@ test('parseYtMetadataChannelFromLink extracts the channel folder under the metad
 	assert.equal(parseYtMetadataChannelFromLink('[[Other Root/UC123/videoabc1234]]', '_yt_metadata'), '');
 });
 
+// WP-J2 ordering pin: `yt-metadata` is list-valued, and capture attribution reads entry
+// [0] (firstFrontmatterLink). `appendYtMetadataLink` is append-only precisely so a
+// referenced-video stamp can never displace the capture's own video from the head.
+test('parseYtMetadataChannelFromLink reads entry [0] of a yt-metadata LIST', () => {
+	assert.equal(
+		parseYtMetadataChannelFromLink(
+			['[[_yt_metadata/UC_OWN/videoabc1234]]', '[[_yt_metadata/UC_REFERENCED/refvideo0001]]'],
+			'_yt_metadata',
+		),
+		'UC_OWN',
+		'the appended referenced-video entry must not win attribution',
+	);
+	// Leading blanks are skipped, but a real entry is never reordered past.
+	assert.equal(
+		parseYtMetadataChannelFromLink(['', '[[_yt_metadata/UC_OWN/videoabc1234]]'], '_yt_metadata'),
+		'UC_OWN',
+	);
+});
+
+test('computeCaptureIndex attributes a multi-entry yt-metadata list to the FIRST entry', async () => {
+	const registry = file('core/Tracked Blogs.md', [
+		'| Name | Link | Method | Tags | Priority |',
+		'|------|------|--------|------|----------|',
+		'| Acme | https://acme.example/feed.xml | RSS | tech | normal |',
+	].join('\n'));
+	// No metadata-root note for this video id, so attribution falls through to the
+	// yt-metadata link parse — the path the ordering law protects.
+	const capture = file('daily/day/2026-01-01/Youtube list.md', '', {
+		'yt-video-id': 'ownvideo1234',
+		'yt-metadata': [
+			'[[_yt_metadata/UC_OWN/ownvideo1234]]',
+			'[[_yt_metadata/UC_REFERENCED/refvideo0001]]',
+		],
+	}, { tags: ['#clippings'] });
+	const app = mockApp([registry, capture]);
+	const plugin = {
+		settings: {
+			dailyFolder: 'daily/day',
+			orchestrationYoutubeMetadataRoot: '_yt_metadata',
+			orchestrationBlogsNote: 'core/Tracked Blogs.md',
+		},
+	};
+
+	const records = await computeCaptureIndex(app, plugin);
+	const record = records.find(r => r.file.path === capture.path);
+	assert.equal(record.source, 'youtube:UC_OWN');
+});
+
 test('scanObservationSignals counts monthly observation links and indented quote bullets', async () => {
 	const target = file('daily/day/2026-01-01/Target.md');
 	const other = file('daily/day/2026-01-01/Other.md');
