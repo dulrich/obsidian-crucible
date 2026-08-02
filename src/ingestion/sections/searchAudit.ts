@@ -8,9 +8,16 @@ import {
 	enqueueSearchRepairs,
 	retryFailedImageDescriptions,
 	runSearchAudit,
-	type SearchRepairTargets,
 } from '../../search/auditRun';
 import { type ReconcileEnqueueSummaryInput, type SearchAuditResult } from '../../search/audit';
+import {
+	AUDIT_CONDITIONS,
+	conditionFor,
+	DEFAULT_VIEW_CONDITIONS,
+	type AuditConditionDescriptor,
+	type AuditConditionKey,
+	type AuditSummaryKey,
+} from '../../search/auditConditions';
 import type { DashboardHost, SectionContext } from '../render/types';
 
 /**
@@ -32,54 +39,43 @@ import type { DashboardHost, SectionContext } from '../render/types';
  * action button) filters the paths table to that class, including the two image classes;
  * clicking the active row again restores the default missing+orphans+stale view.
  *
+ * WP-R3: the eight real conditions (everything but `imagesDescribed`) — their keys, canonical
+ * order, count/path projections, and repair-command routing — now come from ONE shared
+ * descriptor set (`src/search/auditConditions.ts`), also consumed by `formatAuditReport`
+ * (`src/search/audit.ts`). Before this WP the two files hand-duplicated that classification,
+ * synced only by a comment cross-reference. See `auditConditions.ts`'s module doc for why the
+ * report's single combined image-coverage bullet and this section's three image rows
+ * (`imagePending`/`imageFailed`/`imagesDescribed`) are a deliberate, preserved divergence in
+ * PROSE, not a gap in the shared model.
+ *
  * State pattern lifted from the settings Search-health panel
  * (`src/settings/sections/orchestrationSearch.ts`'s `cachedSearchHealth`/renderBody): closure-
  * cached `{result, ranAt, error}`, refreshed only by an explicit button click, with the last
  * successful result surviving a later failed run (see the error branch below).
  */
 
-type NoteClass = 'missing' | 'orphans' | 'stale' | 'mtimeOnly' | 'unindexable' | 'embeddingGaps';
-type ImageClass = 'imagePending' | 'imageFailed';
-type AuditClass = NoteClass | ImageClass;
-type SummaryKey = AuditClass | 'imagesDescribed';
-
-// The three classes reconcile can act on (search-reconcile-index's own scope) — drives the
-// default (no filter) paths-table view and the header's honest total count. Everything else
-// (mtimeOnly/unindexable: informational, embeddingGaps/images: their own command families) is
-// excluded from the default combined view, same as WP-H4.
-const DEFECT_CLASSES: readonly NoteClass[] = ['missing', 'orphans', 'stale'];
+type AuditClass = AuditConditionKey;
+type SummaryKey = AuditSummaryKey;
 
 // Fixed row order for the merged Summary/Repair table — mirrors formatAuditReport's Summary
-// section (src/search/audit.ts:296-304) so the dashboard and the report note never disagree
-// about what the nine lines are or what order they read in.
-const SUMMARY_ORDER: readonly SummaryKey[] = [
-	'missing', 'orphans', 'stale', 'mtimeOnly', 'unindexable', 'embeddingGaps', 'imagePending', 'imageFailed', 'imagesDescribed',
-];
+// section (AUDIT_CONDITIONS' declared order, shared with src/search/audit.ts) plus the one
+// virtual, non-condition row (see the module doc above) — so the dashboard and the report note
+// never disagree about what the nine lines are or what order they read in.
+const SUMMARY_ORDER: readonly SummaryKey[] = [...AUDIT_CONDITIONS.map(d => d.key), 'imagesDescribed'];
 
-const SUMMARY_LABELS: Record<SummaryKey, string> = {
-	missing: 'Missing (in vault, not indexed)',
-	orphans: 'Orphans (indexed, not in vault)',
-	stale: 'Stale (vault newer, content changed)',
-	mtimeOnly: 'Mtime-only (unchanged content — index is current)',
-	unindexable: 'Unindexable (no indexable content)',
-	embeddingGaps: 'Embedding gaps (embedded < chunks)',
-	imagePending: 'Images pending',
-	imageFailed: 'Images failed',
-	imagesDescribed: 'Images described (informational)',
-};
+const SUMMARY_LABELS: Readonly<Record<SummaryKey, string>> = (() => {
+	const labels = {} as Record<SummaryKey, string>;
+	for (const d of AUDIT_CONDITIONS) labels[d.key] = d.dashboardLabel;
+	labels.imagesDescribed = 'Images described (informational)';
+	return labels;
+})();
 
 // Short filter-noun used in the paths table's Class column and the summary row's clickable
-// title — the "images pending"/"images failed" wording WP-I2 adds for the two new classes.
-const AUDIT_CLASS_LABELS: Record<AuditClass, string> = {
-	missing: 'missing',
-	orphans: 'orphans',
-	stale: 'stale',
-	mtimeOnly: 'mtime-only',
-	unindexable: 'unindexable',
-	embeddingGaps: 'embedding gaps',
-	imagePending: 'images pending',
-	imageFailed: 'images failed',
-};
+// title — the "images pending"/"images failed" wording WP-I2 adds for the two image classes.
+const AUDIT_CLASS_LABELS: Readonly<Record<AuditClass, string>> = AUDIT_CONDITIONS.reduce((acc, d) => {
+	acc[d.key] = d.classLabel;
+	return acc;
+}, {} as Record<AuditClass, string>);
 
 interface SearchAuditRow {
 	path: string;
@@ -159,7 +155,7 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 			],
 		});
 
-		const totalAffected = DEFECT_CLASSES.reduce((sum, cls) => sum + currentResult[cls].length, 0);
+		const totalAffected = DEFAULT_VIEW_CONDITIONS.reduce((sum, d) => sum + d.paths(currentResult).length, 0);
 		host.setSectionCount('searchAudit', totalAffected);
 		const metaParts = [`as of ${formatDateTime(ranAt ?? Date.now())}`];
 		if (resultStale) metaParts.push('stale — re-run audit to refresh');
@@ -211,19 +207,15 @@ function paintRunAuditButton(btn: HTMLButtonElement, running: boolean): void {
 function buildRows(result: SearchAuditResult, selectedClass: AuditClass | null): SearchAuditRow[] {
 	if (selectedClass === null) {
 		const rows: SearchAuditRow[] = [];
-		for (const cls of DEFECT_CLASSES) for (const path of result[cls]) rows.push({ path, cls });
+		for (const d of DEFAULT_VIEW_CONDITIONS) for (const path of d.paths(result)) rows.push({ path, cls: d.key });
 		return rows;
 	}
-	if (selectedClass === 'imagePending') return result.imageCoverage.pendingPaths.map(path => ({ path, cls: selectedClass }));
-	if (selectedClass === 'imageFailed') return result.imageCoverage.failedPaths.map(path => ({ path, cls: selectedClass }));
-	return result[selectedClass].map(path => ({ path, cls: selectedClass }));
+	return conditionFor(selectedClass).paths(result).map(path => ({ path, cls: selectedClass }));
 }
 
 function summaryCount(result: SearchAuditResult, key: SummaryKey): number {
-	if (key === 'imagePending') return result.imageCoverage.pending;
-	if (key === 'imageFailed') return result.imageCoverage.failed;
 	if (key === 'imagesDescribed') return result.imageCoverage.described;
-	return result[key].length;
+	return conditionFor(key).paths(result).length;
 }
 
 function formatSummaryCount(result: SearchAuditResult, key: SummaryKey): string {
@@ -295,12 +287,12 @@ function renderAuditSummaryTable(
 	}
 }
 
-// Per-row action for the summary table. mtimeOnly/unindexable always read "no action needed"
-// (their permanent informational state, regardless of count); the images-described row always
-// reads "—" (a ratio, not a state — see wp-i2-report.md for why this reads differently from "no
-// action needed"). Every other row's wrench is HIDDEN ENTIRELY when its count is 0 — the
-// user-locked deviation from "muted, never absent" that's scoped to this table only (root
-// AGENTS.md); the paths table below keeps the ordinary muted-wrench law.
+// Per-row action for the summary table. mtimeOnly/unindexable (repairPolicy 'informational')
+// always read "no action needed" (their permanent informational state, regardless of count); the
+// images-described virtual row always reads "—" (a ratio, not a state). Every other row's wrench
+// is HIDDEN ENTIRELY when its count is 0 — the user-locked deviation from "muted, never absent"
+// that's scoped to this table only (root AGENTS.md); the paths table below keeps the ordinary
+// muted-wrench law.
 function renderSummaryAction(
 	td: HTMLElement,
 	host: DashboardHost,
@@ -309,118 +301,93 @@ function renderSummaryAction(
 	count: number,
 	onRepaired: () => void,
 ): void {
-	if (key === 'mtimeOnly' || key === 'unindexable') {
-		td.setText('No action needed');
-		return;
-	}
 	if (key === 'imagesDescribed') {
 		td.setText('—');
+		return;
+	}
+	const descriptor = conditionFor(key);
+	if (descriptor.repairPolicy === 'informational') {
+		td.setText('No action needed');
 		return;
 	}
 	if (count === 0) return;
 
 	const plural = count === 1 ? '' : 's';
+	renderIconButton(td, 'wrench', {
+		ariaLabel: 'Repair',
+		title: summaryRepairTitle(descriptor, count, plural),
+		onClick: btn => void runConditionRepair(btn, host, descriptor, descriptor.paths(result), onRepaired),
+	});
+}
 
-	if (key === 'missing' || key === 'stale') {
-		const paths = key === 'missing' ? result.missing : result.stale;
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: `Enqueue re-index jobs for ${count} ${AUDIT_CLASS_LABELS[key]} path${plural}.`,
-			onClick: btn => void runReconcileAction(btn, host, { upsertPaths: paths, orphanPaths: [] }, onRepaired),
-		});
-		return;
-	}
-	if (key === 'orphans') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: `Delete ${count} orphaned path${plural} from the search index (confirm required).`,
-			onClick: btn => void runReconcileAction(btn, host, { upsertPaths: [], orphanPaths: result.orphans }, onRepaired),
-		});
-		return;
-	}
-	if (key === 'embeddingGaps') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: `Run "Search: embed missing vectors" for ${count} embedding gap${plural}.`,
-			onClick: btn => {
-				void (async () => {
-					btn.disabled = true;
-					try {
-						await enqueueEmbedMissing(host.plugin);
-						new Notice('Search: embed missing vectors — enqueued.');
-						onRepaired();
-					} catch (e) {
-						new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
-					} finally {
-						btn.disabled = false;
-					}
-				})();
-			},
-		});
-		return;
-	}
-	if (key === 'imagePending') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: `Queue the image-describe backfill for ${count} pending image${plural} (confirm dialog follows).`,
-			onClick: btn => {
-				void (async () => {
-					btn.disabled = true;
-					try {
-						// confirmAndQueueImageDescribeBackfill shows its own scale-warning confirm modal
-						// and, on confirm, its own enqueue — no separate Notice here on top of it (brief:
-						// "the image helpers show their own modal/Notice — for those just mark stale on
-						// true"). Declined (false) leaves resultStale untouched, matching the brief.
-						const queued = await confirmAndQueueImageDescribeBackfill(host.plugin);
-						if (queued) onRepaired();
-					} catch (e) {
-						new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
-					} finally {
-						btn.disabled = false;
-					}
-				})();
-			},
-		});
-		return;
-	}
-	if (key === 'imageFailed') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: `Retry ${count} failed image description${plural} (choice dialog follows).`,
-			onClick: btn => {
-				void (async () => {
-					btn.disabled = true;
-					try {
-						// retryFailedImageDescriptions shows its own choice modal and its own Notice on a
-						// made choice — same "no extra Notice here" rule as imagePending above.
-						const queued = await retryFailedImageDescriptions(host.plugin);
-						if (queued) onRepaired();
-					} catch (e) {
-						new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
-					} finally {
-						btn.disabled = false;
-					}
-				})();
-			},
-		});
+// WP-R3: the summary wrench's title text, one template per repair policy — replaces what used to
+// be five separate `renderIconButton` call sites (one per key) each hardcoding its own title.
+function summaryRepairTitle(descriptor: AuditConditionDescriptor, count: number, plural: string): string {
+	switch (descriptor.repairPolicy) {
+		case 'reconcile-upsert':
+			return `Enqueue re-index jobs for ${count} ${descriptor.classLabel} path${plural}.`;
+		case 'reconcile-orphan':
+			return `Delete ${count} orphaned path${plural} from the search index (confirm required).`;
+		case 'embed-missing':
+			return `Run "Search: embed missing vectors" for ${count} embedding gap${plural}.`;
+		case 'image-backfill':
+			return `Queue the image-describe backfill for ${count} pending image${plural} (confirm dialog follows).`;
+		case 'image-retry':
+			return `Retry ${count} failed image description${plural} (choice dialog follows).`;
+		case 'informational':
+		default:
+			return '';
 	}
 }
 
-// Shared by the summary table's missing/stale/orphans wrenches (the reconcile trio) — the
-// confirm gate for orphan deletion lives inside enqueueSearchRepairs (src/search/auditRun.ts),
-// so it fires here exactly as it does from the paths table's per-row wrench and the
-// search-reconcile-index command.
-async function runReconcileAction(
+// WP-R3: the ONE dispatcher over `AuditRepairPolicy`, replacing the six near-identical
+// wrench-click handlers previously duplicated across the summary table (`renderSummaryAction`)
+// and the paths table (`renderRowRepairButton`) — both now call this with their own `paths`
+// (the full class for a summary-row bulk action, a single-element array for a paths-table row).
+// The confirm gate for orphan deletion lives inside `enqueueSearchRepairs`
+// (src/search/auditRun.ts), so it fires here exactly as it always did from either table and from
+// the `search-reconcile-index` command. `image-backfill`/`image-retry` show their own
+// modal/Notice — no extra Notice here on top of them, matching their original extraction comments.
+async function runConditionRepair(
 	btn: HTMLButtonElement,
 	host: DashboardHost,
-	targets: SearchRepairTargets,
+	descriptor: AuditConditionDescriptor,
+	paths: string[],
 	onRepaired: () => void,
 ): Promise<void> {
 	btn.disabled = true;
 	try {
-		const outcome = await enqueueSearchRepairs(host.plugin, targets);
-		new Notice(singleRepairNotice(outcome));
-		if (!outcome.orphansDeclined) onRepaired();
+		switch (descriptor.repairPolicy) {
+			case 'reconcile-upsert': {
+				const outcome = await enqueueSearchRepairs(host.plugin, { upsertPaths: paths, orphanPaths: [] });
+				new Notice(singleRepairNotice(outcome));
+				if (!outcome.orphansDeclined) onRepaired();
+				break;
+			}
+			case 'reconcile-orphan': {
+				const outcome = await enqueueSearchRepairs(host.plugin, { upsertPaths: [], orphanPaths: paths });
+				new Notice(singleRepairNotice(outcome));
+				if (!outcome.orphansDeclined) onRepaired();
+				break;
+			}
+			case 'embed-missing':
+				await enqueueEmbedMissing(host.plugin);
+				new Notice('Search: embed missing vectors — enqueued.');
+				onRepaired();
+				break;
+			case 'image-backfill': {
+				const queued = await confirmAndQueueImageDescribeBackfill(host.plugin);
+				if (queued) onRepaired();
+				break;
+			}
+			case 'image-retry': {
+				const queued = await retryFailedImageDescriptions(host.plugin);
+				if (queued) onRepaired();
+				break;
+			}
+			case 'informational':
+				break;
+		}
 	} catch (e) {
 		new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
 	} finally {
@@ -449,55 +416,26 @@ function renderOpenNoteButton(host: DashboardHost, td: HTMLElement, row: SearchA
 	});
 }
 
-// wrench = Repair (root AGENTS.md's icon table). missing/stale enqueue a search_upsert_file job
-// for the one path; orphans enqueue a search_delete_path job (the confirm-gate for orphan
-// deletion lives inside enqueueSearchRepairs — see src/search/auditRun.ts — so it fires here
-// exactly as it does from the summary table and the reconcile command). mtimeOnly/unindexable
-// render muted per their permanent informational state; embeddingGaps and the two image classes
-// render muted pointing at the summary table's bulk (vault-wide) action — "muted, never absent"
-// (root AGENTS.md) governs THIS table, unlike the summary table's hidden-at-zero rows.
+// wrench = Repair (root AGENTS.md's icon table). WP-R3: driven by the condition's `repairPolicy`
+// via the shared `runConditionRepair` dispatcher instead of six per-class branches. A condition
+// carrying `rowMutedTitle` (mtimeOnly/unindexable's permanent informational state; embeddingGaps
+// and the two image classes, whose repair only exists in bulk from the summary table's wrench)
+// renders muted with that title — "muted, never absent" (root AGENTS.md) governs THIS table,
+// unlike the summary table's hidden-at-zero rows. The two remaining policies (reconcile-upsert
+// for missing/stale, reconcile-orphan for orphans) render a real, enabled wrench for the one path.
 function renderRowRepairButton(host: DashboardHost, td: HTMLElement, row: SearchAuditRow, onRepaired: () => void): void {
-	if (row.cls === 'mtimeOnly') {
-		renderIconButton(td, 'wrench', { ariaLabel: 'Repair', title: 'Nothing to repair — index is current (mtime-only drift).', disabled: true });
+	const descriptor = conditionFor(row.cls);
+	if (descriptor.rowMutedTitle) {
+		renderIconButton(td, 'wrench', { ariaLabel: 'Repair', title: descriptor.rowMutedTitle, disabled: true });
 		return;
 	}
-	if (row.cls === 'unindexable') {
-		renderIconButton(td, 'wrench', { ariaLabel: 'Repair', title: 'No indexable content (frontmatter-only note).', disabled: true });
-		return;
-	}
-	if (row.cls === 'embeddingGaps') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: 'Use the Embedding gaps row\'s repair action — runs "Search: embed missing vectors" for the whole vault.',
-			disabled: true,
-		});
-		return;
-	}
-	if (row.cls === 'imagePending') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: 'Use the Images pending row\'s repair action — describe runs as a vault-wide backfill.',
-			disabled: true,
-		});
-		return;
-	}
-	if (row.cls === 'imageFailed') {
-		renderIconButton(td, 'wrench', {
-			ariaLabel: 'Repair',
-			title: 'Use the Images failed row\'s repair action — retry runs as a vault-wide backfill.',
-			disabled: true,
-		});
-		return;
-	}
-	const targets: SearchRepairTargets = row.cls === 'orphans'
-		? { upsertPaths: [], orphanPaths: [row.path] }
-		: { upsertPaths: [row.path], orphanPaths: [] };
+	const isOrphan = descriptor.repairPolicy === 'reconcile-orphan';
 	renderIconButton(td, 'wrench', {
 		ariaLabel: 'Repair',
-		title: row.cls === 'orphans'
+		title: isOrphan
 			? 'Delete this orphaned path from the search index (confirm required).'
 			: 'Enqueue a re-index job for this path.',
-		onClick: btn => void runReconcileAction(btn, host, targets, onRepaired),
+		onClick: btn => void runConditionRepair(btn, host, descriptor, [row.path], onRepaired),
 	});
 }
 
