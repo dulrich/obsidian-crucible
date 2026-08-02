@@ -15,12 +15,18 @@ import {
 	isCleanAudit,
 	isReconcileTargetClean,
 } from './search/audit';
-import { enqueueSearchRepairs, runSearchAudit, writeSearchAuditReportNote } from './search/auditRun';
+import {
+	confirmAndQueueImageDescribeBackfill,
+	enqueueEmbedMissing,
+	enqueueSearchRepairs,
+	retryFailedImageDescriptions,
+	runSearchAudit,
+	writeSearchAuditReportNote,
+} from './search/auditRun';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
 import { ConfirmModal } from './confirmModal';
-import { RetryFailedImageDescriptionsModal } from './retryImageDescriptionsModal';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -433,19 +439,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Orchestrations',
 		mutating: false,
 		run: async () => {
-			const confirmed = await new ConfirmModal(plugin.app, {
-				title: 'Describe every image referenced in the vault?',
-				message: 'This queues a vision-model description pass (a narrative pass and a structured-extraction pass) over '
-					+ 'every uniquely-referenced localized image not already described — roughly 4,700 images at this vault\'s '
-					+ 'current size, around 12.6 hours of local model time. It runs in the background in ~100-image batches and '
-					+ 'is safely interruptible and resumable: already-described images are skipped on any re-run. Images that '
-					+ 'previously failed with a genuine (permanent) error are skipped too, not retried automatically — infra '
-					+ 'casualties (timeouts, connection errors) are pruned and re-attempted automatically at the start of every '
-					+ 'backfill run, or on demand via "Search: retry failed image descriptions".',
-				confirmText: 'Queue backfill',
-			}).openAndAwait();
-			if (!confirmed) return;
-			await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
+			await confirmAndQueueImageDescribeBackfill(plugin);
 		},
 	});
 
@@ -460,12 +454,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Orchestrations',
 		mutating: false,
 		run: async () => {
-			const choice = await new RetryFailedImageDescriptionsModal(plugin.app).openAndAwait();
-			if (!choice) return;
-			const clearedMd5s = await plugin.imageDescriptions.pruneFailed(choice);
-			new Notice(`Cleared ${clearedMd5s.length} failed image description${clearedMd5s.length === 1 ? '' : 's'} `
-				+ `(${choice}); queuing re-describe backfill.`);
-			await plugin.orchestrator.enqueue('image_describe_backfill', {}, { priority: 'low', lane: 'background' });
+			await retryFailedImageDescriptions(plugin);
 		},
 	});
 
@@ -542,7 +531,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		name: 'Search: embed missing vectors',
 		group: 'Search',
 		mutating: false,
-		run: () => plugin.orchestrator.enqueue('search_embed_missing', {}, { priority: 'high', lane: 'user' }),
+		run: () => enqueueEmbedMissing(plugin),
 	});
 
 	plugin.registerCrucibleCommand({
