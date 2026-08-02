@@ -243,3 +243,17 @@ test count at orchestration start and reject any remediation-induced drop.
 
 **Total ≈ 4.2 kSLOC, ~1,280k raw tokens; ~1,160k Claude-path / ~1,130k Codex-path
 Opus/Sol-equivalent tokens.**
+
+---
+
+> **Closeout (2026-08-02).** All five findings remediated and landed on master:
+> WP-R1 `54f377a` (attachmentRepair.ts extraction, localizeAttachments 1204→802),
+> WP-R2 `a8e4d7e` (search filePreparation.ts extraction, SearchManager 1147→949),
+> WP-R3 `21d549d` (audit-condition descriptor set; report output byte-identity verified),
+> WP-R4 `369e5b8` (canonical intake snapshot; one-scan seam pinned),
+> WP-R5 `23b76be` (frontmatter single splice-and-verify path, net −22).
+> Gated remediation tip `369e5b8` — full gate sequence green in the main checkout:
+> lint, tsc, **1894 tests / 148 files, 0 failures**, production build, console sweep,
+> NUL/file checks, `git diff --check`. Both file-size findings verified closed
+> (`localizeAttachments.ts` 802, `SearchManager.ts` 949 — both < 1,000). Review table:
+> all seven tiers Open = 0. `remediation-commit` recorded in the review frontmatter.

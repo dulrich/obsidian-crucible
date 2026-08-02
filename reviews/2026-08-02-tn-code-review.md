@@ -6,6 +6,7 @@ review-model: gpt-5.6-sol
 review-harness: codex
 review-effort: high
 review-scope: "95bfc149c8c32a121e9919c2e0daa4e42d2045ec..e94e510736f88b333f4db49975e1702311bf49ba"
+remediation-commit: 369e5b86361358beee629ec573ae1d27e39e5d8c
 ---
 # Review — Obsidian Crucible changes since the prior review closeout
 
