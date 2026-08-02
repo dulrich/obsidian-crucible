@@ -55,3 +55,12 @@ Six crucible gates verbatim per landing (floor **1975 tests / 153 files**, count
 - The user's third feedback item (full validation of new captures pending, "so far so good") needs no action; the `note_link_enrich` on-clip trigger stays deferred until that validation closes.
 
 **Total ≈ 0.43 kSLOC, ~330k raw tokens; ~286k Claude-path / ~231k Codex-path Opus/Sol-equivalent tokens.**
+
+---
+
+> **CLOSED 2026-08-02.** Both WPs landed on master:
+> - `5a9ab0b` WP-K2 (subagent k-2): queue action cell renders all three buttons at every status — muted Run for running/terminal (status-specific titles), muted terminal Cancel without `mod-warning`, `renderCancelAction` widened to the full `JobStatus` union with the terminal branch ahead of the `isCancelling` check; the omission-pinning structural test replaced with three inverse pins. Zero deviations.
+> - `fe0bad4` WP-K1 (subagent k-1): `YoutubeVideoUnavailableError` from the zero-items (live) and 404 (dead-in-practice) branches; `<yt-root>/_unavailable/<videoId>.md` tombstone (frontmatter-only, X-exemplar shape); `IngestResult` gains `tombstoned`; workflow settles `done` with "Video unavailable — tombstoned/already tombstoned" wording, breaker never opens, channel chain never fires; tombstone links onto `yt-metadata` through the unchanged call site — backlog exit + on-capture-trigger silence for free; `parseYtMetadataChannelFromLink` declines `_unavailable`; stale AGENTS.md:83 ignore-seeding sentence fixed; `failedJobRepair` rationale refreshed. **Accepted deviations:** `internalCommands.ts` gained the tsc-forced `tombstoned` case (exhaustive switch); the typed 404 covers all three `requestYoutubeApi` callers (verified no behavior change for channel/uploads paths); the "already tombstoned" `exists` sub-case added for X parity.
+> - WP-K3 (orchestrator-direct): this closeout.
+>
+> Gates at close: 1993 tests / 154 files, 0 failures (floor was 1975/153); lint, tsc, production build, console sweep, NUL sweep all clean on merged master. Ledger rows k-1/k-2 recorded. Deferred by design: batch `videos.list` prober, tombstone re-probe/TTL affordance, dashboard tombstone listing.
