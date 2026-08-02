@@ -309,6 +309,73 @@ test('block deleted with a stale (not fresh) cache also short-circuits to splice
 	assert.ok(/word-count: 11/.test(block), `expected word-count to land, got:\n${block}`);
 });
 
+test('post-splice verification failure escalates, and still names which mismatch direction it was (WP-R5)', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const errors = [];
+	const origError = console.error;
+	console.error = (...args) => errors.push(args.join(' '));
+	try {
+		// A vault.process that runs the mutator but never persists its result: the splice
+		// ran, nothing landed. Both asymmetric directions now share one code path, so this
+		// is the pin that they remain distinguishable in diagnostics.
+		const discardingProcess = state => async (_f, fn) => { fn(state.content); return state.content; };
+
+		// Direction 1 — cache claims a block, raw content has none (splice-create).
+		const deleted = makeApp({ content: 'Just a body, block already gone.', cache: FRESH_CACHE });
+		deleted.app.vault.process = discardingProcess(deleted.state);
+		await updateFrontmatter(deleted.app, file, fm => { fm.title = 'Recovered'; }, 5000);
+		assert.ok(
+			errors.some(e => e.includes('block-deleted splice-create') && e.includes('title') && e.includes(file.path)),
+			`expected a block-deleted escalation naming the key and file, got: ${errors.join(' | ')}`,
+		);
+		assert.ok(!errors.some(e => e.includes('never-indexed')), 'wrong direction reported for the block-deleted case');
+
+		errors.length = 0;
+
+		// Direction 2 — cache has no position at all, raw content already has a block (splice-update).
+		const neverIndexed = makeApp({ content: CONTENT, cache: null });
+		neverIndexed.app.vault.process = discardingProcess(neverIndexed.state);
+		await updateFrontmatter(neverIndexed.app, file, fm => { fm['word-count'] = 9; }, 5000);
+		assert.ok(
+			errors.some(e => e.includes('never-indexed splice-update') && e.includes('word-count')),
+			`expected a never-indexed escalation naming the key, got: ${errors.join(' | ')}`,
+		);
+		assert.ok(!errors.some(e => e.includes('block-deleted')), 'wrong direction reported for the never-indexed case');
+	} finally {
+		console.error = origError;
+		delete globalThis.__CRUCIBLE_DEBUG__;
+	}
+});
+
+test('BOM survives the splice path and is never duplicated', async () => {
+	// Reconstruct the BOM numerically rather than pasting the byte — same law as the NUL
+	// quirk in AGENTS.md: an invisible in-band byte in a source file is a review hazard.
+	const BOM = String.fromCharCode(0xFEFF);
+	const content = BOM + ['---', 'title: X', '---', '', 'Body prose.'].join('\n');
+	const { app, state } = makeApp({ content, cache: null });
+	await updateFrontmatter(app, file, fm => { fm['word-count'] = 5; }, 5000);
+	assert.ok(state.content.startsWith(BOM), `expected the BOM to stay first, got: ${JSON.stringify(state.content.slice(0, 12))}`);
+	assert.equal(state.content.split(BOM).length - 1, 1, 'exactly one BOM — the splice must not duplicate or strand it');
+	const block = state.content.match(/---\n([\s\S]*?)\n---/)?.[1] ?? '';
+	assert.ok(/word-count: 5/.test(block), `expected word-count to land, got:\n${block}`);
+	assert.ok(/title: X/.test(block), 'other keys must survive the splice');
+	assert.ok(state.content.includes('Body prose.'), 'body content must survive');
+});
+
+test('empty frontmatter block splices cleanly (the String.replace corruption class)', async () => {
+	// A `---`/`---` block with no keys at all — the shape the deleted String.replace-based
+	// workaround used to corrupt. Index-based splicing must fill it in without duplicating
+	// or eating a delimiter.
+	const content = ['---', '', '---', '', 'Body prose.'].join('\n');
+	const { app, state } = makeApp({ content, cache: null });
+	await updateFrontmatter(app, file, fm => { fm['word-count'] = 3; }, 5000);
+	assert.equal(state.writes.length, 0, 'the empty-block mismatch must not reach processFrontMatter');
+	const block = state.content.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+	assert.ok(/word-count: 3/.test(block), `expected word-count to land in the block, got:\n${state.content}`);
+	assert.equal(state.content.match(/^---/gm)?.length, 2, 'exactly one opening and one closing delimiter');
+	assert.ok(state.content.includes('Body prose.'), 'body content must survive');
+});
+
 test('non-markdown files skip the barrier', async () => {
 	const { app, state } = makeApp({ content: 'binary-ish', cache: null });
 	await updateFrontmatter(app, { path: 'img/pic.png', extension: 'png' }, fm => { fm.x = 1; }, 5000);
