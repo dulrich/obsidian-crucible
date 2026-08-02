@@ -1,12 +1,12 @@
 import { App, Modal, Notice, TFile } from 'obsidian';
-import type { JobType, OrchestrationJob } from '../../orchestration/types';
+import type { JobStatus, JobType, OrchestrationJob } from '../../orchestration/types';
 import type { StopJobOutcome } from '../../orchestration/cancellation';
 import type { ServiceHealthSnapshot } from '../../orchestration/serviceHealth';
 import { runServiceOutageRequeueFlow } from '../../orchestration/failedJobRepair';
 import { ConfirmModal } from '../../confirmModal';
 import { confirmDestructive } from '../../settings/destructiveActions';
 import { renderSortableTable } from '../render/sortableTable';
-import { renderFileLink } from '../render/cells';
+import { renderFileLink, renderIconButton } from '../render/cells';
 import { formatDateTime } from '../render/format';
 import { refreshWithScrollPreserved } from '../render/refresh';
 import type { DashboardHost, SectionContext } from '../render/types';
@@ -112,19 +112,88 @@ function renderServiceHealthPills(host: DashboardHost, container: HTMLElement): 
 	}
 }
 
+// WP-DP3: null selects the default combined view (queued+running, today's
+// behavior); any other value filters the table to that one bucket via
+// `Orchestrator.listJobs`. Kept as a plain view-state value — never persisted,
+// same "per-mount" treatment as section collapse — so it lives on the section's
+// own `SectionContext` (the optional `queueStatusFilter` field) rather than a
+// module-level variable that would bleed across multiple dashboard mounts.
+export type QueueStatusFilter = JobStatus | null;
+
+const QUEUE_STATUS_BUCKETS: readonly JobStatus[] = ['queued', 'running', 'done', 'failed', 'cancelled'];
+
+// Buckets whose rows are pruned by age (`orchestrationJobRetentionDays`, default 30
+// — src/orchestration/AGENTS.md's "terminal rows are pruned by age" quirk). Drives
+// the empty-state wording below: an empty settled bucket may just mean "nothing
+// happened to settle there yet", but it may also mean retention already swept it,
+// and the generic "no jobs" phrasing reads as a bug report either way.
+const SETTLED_STATUSES: readonly JobStatus[] = ['done', 'failed', 'cancelled'];
+
+// Pure: which `listJobs` call(s) a given filter selection requires. The default
+// view (`null`) is the combined queued+running list (today's behavior, unchanged);
+// any other selection fetches that one bucket alone. A discriminated union rather
+// than a bare status array so the caller never has to index into (and TS narrow)
+// a length-1 array to recover the single status. Exported for direct unit testing
+// — no Orchestrator/DOM needed.
+export type QueueFetchPlan =
+	| { kind: 'single'; status: JobStatus }
+	| { kind: 'combined' };
+
+export function queueFetchPlan(filter: QueueStatusFilter): QueueFetchPlan {
+	return filter ? { kind: 'single', status: filter } : { kind: 'combined' };
+}
+
+// Pure: the honest empty-state line for a given filter selection. A settled bucket
+// (done/failed/cancelled) coming back empty is ambiguous — "nothing has settled
+// there" and "retention already pruned it" look identical from the row count alone
+// — so that branch names the mechanism instead of implying the former. Exported for
+// direct unit testing.
+export function queueEmptyStateText(filter: QueueStatusFilter): string {
+	if (!filter) return 'Queue is empty.';
+	if (SETTLED_STATUSES.includes(filter)) {
+		return `No ${filter} jobs retained. Settled jobs are pruned after the retention window `
+			+ '(Queue Configuration → Job retention (days), default 30).';
+	}
+	return `No ${filter} jobs.`;
+}
+
 // Whole-DB bucket counts (all five statuses, every type) — the in-dashboard answer
 // to "what's in the job queue database" that used to require the Scan-queue notice
-// or the sqlite3 CLI. Counts-at-rest are neutral pills per the fleet taxonomy;
-// `failed` alone borrows the error status hue, and only while non-zero — a real
-// ok/warn/error fact, not a count spent on the reader's alarm budget.
-function renderQueueStats(host: DashboardHost, container: HTMLElement): void {
+// or the sqlite3 CLI. WP-DP3: the row this renders into moved below the enable/
+// run/clear control bar and the pills became the job table's filter control —
+// clicking one filters the table to that bucket (`onSelect` toggles it back to the
+// default view when the already-active pill is clicked again). Counts-at-rest are
+// neutral pills per the fleet taxonomy; `failed` alone borrows the error status hue
+// while non-zero, but only in its unselected state — the active pill's selected
+// treatment (`is-contrast`, the existing neutral-pill "selected" variant) takes over
+// once it's the filter, so a real ok/warn/error fact never doubles as a selection
+// indicator.
+// Exported for direct unit testing (tests/queueMonitorStatusFilter.test.mjs) — same
+// rationale as `formatJobDetail`: a DOM-bearing but Orchestrator/host-light function
+// is easier to pin behaviorally than driving the full `renderQueueMonitor` fetch path.
+export function renderQueueFilterBar(
+	host: DashboardHost,
+	container: HTMLElement,
+	active: QueueStatusFilter,
+	onSelect: (status: JobStatus) => void,
+): void {
 	container.empty();
 	const stats = host.plugin.orchestrator?.queueStats();
 	if (!stats) return;
-	for (const bucket of ['queued', 'running', 'done', 'failed', 'cancelled'] as const) {
+	for (const bucket of QUEUE_STATUS_BUCKETS) {
 		const n = stats[bucket];
-		const cls = bucket === 'failed' && n > 0 ? 'crucible-pill is-error' : 'crucible-pill is-muted';
-		container.createSpan({ cls, text: `${bucket} ${n}` });
+		const isActive = active === bucket;
+		let cls = 'crucible-pill';
+		if (isActive) cls += ' is-contrast';
+		else if (bucket === 'failed' && n > 0) cls += ' is-error';
+		else cls += ' is-muted';
+		const btn = container.createEl('button', { cls, text: `${bucket} ${n}` });
+		btn.setAttr('aria-pressed', String(isActive));
+		btn.setAttr('aria-label', `Filter to ${bucket} jobs`);
+		btn.title = isActive
+			? `Showing ${bucket} jobs only — click again to go back to the default queued+running view.`
+			: `Show only ${bucket} jobs.`;
+		btn.addEventListener('click', () => onSelect(bucket));
 	}
 }
 
@@ -186,9 +255,12 @@ function searchBatchTitle(job: OrchestrationJob): string {
 // discriminant along with the in-memory queue that needed it: every row now comes from
 // `Orchestrator.listJobs`, so `key` is always a job id, `title` is always derived from
 // params, and the Details modal (which used to be hidden for memory rows because they
-// carried no params/notes/failureKind) applies to every row.
+// carried no params/notes/failureKind) applies to every row. WP-DP3: `status` widened
+// from `'queued' | 'running'` to the full `JobStatus` — the status filter bar can now
+// fetch a settled bucket (done/failed/cancelled), so a row's own status is no longer
+// guaranteed to be one of the original two.
 type QueueRow = {
-	status: 'queued' | 'running';
+	status: JobStatus;
 	type: string;
 	/** Job id — what Run/Cancel/Details address. */
 	key: string;
@@ -206,7 +278,7 @@ type QueueRow = {
 	params?: Record<string, unknown>;
 };
 
-function toQueueRow(job: OrchestrationJob, status: 'queued' | 'running'): QueueRow {
+function toQueueRow(job: OrchestrationJob, status: JobStatus): QueueRow {
 	return {
 		status,
 		type: job.type,
@@ -300,13 +372,6 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 	const unsubscribeHealthQueue = host.plugin.ingestionEvents?.on('orchestration-queue-updated', () => renderServiceHealthPills(host, healthRow));
 	if (unsubscribeHealthQueue) host.registerDisposer(unsubscribeHealthQueue);
 
-	// Whole-queue stats pills. Built once here (like the health row) and re-rendered
-	// by every renderQueueMonitor pass — the section is marked dirty by the same
-	// coalesced 'orchestration-queue-updated' events that change these counts, so the
-	// row tracks claims/settles/prunes without its own subscription.
-	const statsRow = card.createDiv({ cls: 'crucible-queue-stats-row' });
-	renderQueueStats(host, statsRow);
-
 	// Deliberately just a panic switch here: one motion stops ALL auto-draining
 	// while preserving the Autorun/Auto-enrich/per-type configuration underneath,
 	// so re-enabling restores exactly the prior behavior. Manual Run/enqueue
@@ -384,6 +449,15 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 		})();
 	});
 
+	// WP-DP3: the stats-pill row moved below the control bar above and doubles as
+	// the job table's filter control. The container is created in its new DOM
+	// position here but populated after `ctx` exists below — its buttons need
+	// `ctx.queueStatusFilter`/`host.refresh` to wire their click handlers, and every
+	// later repaint goes through `renderQueueMonitor`'s own call to
+	// `renderQueueFilterBar` (same "built once, re-rendered by every refresh pass"
+	// shape the row already had).
+	const statsRow = card.createDiv({ cls: 'crucible-queue-stats-row' });
+
 	const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
 	body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
 
@@ -395,19 +469,37 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 		countEl,
 		metaEl,
 		sort: null,
+		// Per-mount view state (like section collapse elsewhere) — never persisted.
+		// null = the default combined queued+running view.
+		queueStatusFilter: null,
 		// SectionContext.refresh is itself the scroll-preserving wrapped function
 		// (see AGENTS.md #5 / render/refresh.ts) so every call site — the header
 		// Refresh button, sort-header clicks, and this section's own Cancel/Run/
 		// Clear/panic-toggle handlers below — gets scroll preservation for free.
 		refresh: () => refreshWithScrollPreserved(body, () => renderQueueMonitor(host, body, ctx, statsRow)),
 	};
+
+	renderQueueFilterBar(host, statsRow, ctx.queueStatusFilter ?? null, status => {
+		ctx.queueStatusFilter = ctx.queueStatusFilter === status ? null : status;
+		void host.refresh('queueMonitor');
+	});
+
 	host.registerSection(ctx);
 }
 
 export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement, ctx: SectionContext, statsEl?: HTMLElement): Promise<void> {
-	// Stats first: synchronous store counts, so the bucket row is current even while
-	// the row queries below are still in flight (and even when they fail).
-	if (statsEl) renderQueueStats(host, statsEl);
+	const filter: QueueStatusFilter = ctx.queueStatusFilter ?? null;
+	// Stats/filter-bar first: synchronous store counts, so the bucket row (and its
+	// active-pill state) is current even while the row queries below are still in
+	// flight (and even when they fail). Re-wiring the click handler here on every
+	// pass (rather than once at build time) is cheap and keeps it reading the same
+	// `ctx`/`host` this render call closed over.
+	if (statsEl) {
+		renderQueueFilterBar(host, statsEl, filter, status => {
+			ctx.queueStatusFilter = ctx.queueStatusFilter === status ? null : status;
+			void host.refresh('queueMonitor');
+		});
+	}
 	// Body is intentionally NOT emptied here: `orchestrator.listJobs` below awaits two
 	// full queries, and clearing the body first left it visibly blank for that whole
 	// window on every queue event. Every branch below empties body itself, immediately
@@ -417,11 +509,21 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 	let rows: QueueRow[] = [];
 	if (orchestrator) {
 		try {
-			const [running, queued] = await Promise.all([orchestrator.listJobs('running', { limit: QUEUE_MONITOR_RENDER_LIMIT }), orchestrator.listJobs('queued', { limit: QUEUE_MONITOR_RENDER_LIMIT })]);
-			rows = [
-				...running.map(job => toQueueRow(job, 'running')),
-				...queued.map(job => toQueueRow(job, 'queued')),
-			];
+			// WP-DP3: the default view (no filter) stays the combined queued+running
+			// list; selecting a bucket fetches that one status alone via the same
+			// `listJobs` seam. `queueFetchPlan` is the pure routing decision — the
+			// branch below just executes whichever plan it names.
+			const plan = queueFetchPlan(filter);
+			if (plan.kind === 'single') {
+				const jobs = await orchestrator.listJobs(plan.status, { limit: QUEUE_MONITOR_RENDER_LIMIT });
+				rows = jobs.map(job => toQueueRow(job, plan.status));
+			} else {
+				const [running, queued] = await Promise.all([orchestrator.listJobs('running', { limit: QUEUE_MONITOR_RENDER_LIMIT }), orchestrator.listJobs('queued', { limit: QUEUE_MONITOR_RENDER_LIMIT })]);
+				rows = [
+					...running.map(job => toQueueRow(job, 'running')),
+					...queued.map(job => toQueueRow(job, 'queued')),
+				];
+			}
 		} catch (e) {
 			body.empty();
 			body.createDiv({ cls: 'crucible-empty-state', text: `Failed to read the job queue: ${e instanceof Error ? e.message : String(e)}` });
@@ -441,7 +543,7 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 
 	if (rows.length === 0) {
 		body.empty();
-		body.createDiv({ cls: 'crucible-empty-state', text: 'Queue is empty.' });
+		body.createDiv({ cls: 'crucible-empty-state', text: queueEmptyStateText(filter) });
 		return;
 	}
 
@@ -452,8 +554,10 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			key: 'status',
 			label: 'Status',
 			sortable: true,
-			// Running rows sort before queued rows
-			sortKey: r => (r.status === 'running' ? 0 : 1),
+			// Running rows sort before queued rows; any other status (a filtered
+			// settled bucket) sorts after both — moot in practice, since a filtered
+			// fetch returns one status only, but keeps the comparator total.
+			sortKey: r => (r.status === 'running' ? 0 : r.status === 'queued' ? 1 : 2),
 			render: (r, td) => td.setText(r.status),
 		},
 		{
@@ -508,34 +612,47 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 			render: (r, td) => {
 				// The cell lays its buttons out itself. Appended bare they sit flush against
 				// each other, which on a destructive action next to a Run button is not just
-				// untidy — it invites the wrong click.
+				// untidy — it invites the wrong click. WP-DP3: row scope goes icon-only
+				// (CC-11) — Run = play, Cancel = danger x, Details = info — and each
+				// action renders only when it's valid for the row's status: a settled
+				// (done/failed/cancelled) row is never re-run from here and can't be
+				// cancelled; Details is unconditional, the one action every row supports.
 				td.addClass('crucible-queue-action-cell');
 				// Per-job Run: execute this one queued job now, ignoring the auto-run
 				// gate (for "auto off / deep queue, run this one"). Running rows have no
-				// Run — they're already in flight.
+				// Run — they're already in flight. Settled rows have no Run either — a
+				// done/cancelled job re-running is not a queue operation.
 				if (r.status === 'queued') {
-					const run = td.createEl('button', { text: 'Run' });
-					run.title = 'Run this job now, ignoring the auto-run gate.';
-					run.addEventListener('click', () => {
-						void (async () => {
-							run.disabled = true;
-							const outcome = await host.plugin.orchestrationAutoRunner?.runJob(r.type as JobType, r.key);
-							// 'ran' ⇒ the row is gone, 'blocked' ⇒ it ran and came back deferred
-							// because a dependency is down; both change the row, so refresh.
-							// Otherwise (already claimed by a drain / no runner) leave the
-							// button usable.
-							if (outcome === 'ran' || outcome === 'blocked') await host.refresh('queueMonitor');
-							else run.disabled = false;
-						})();
+					renderIconButton(td, 'play', {
+						ariaLabel: 'Run',
+						title: 'Run this job now, ignoring the auto-run gate.',
+						onClick: btn => {
+							void (async () => {
+								btn.disabled = true;
+								const outcome = await host.plugin.orchestrationAutoRunner?.runJob(r.type as JobType, r.key);
+								// 'ran' ⇒ the row is gone, 'blocked' ⇒ it ran and came back deferred
+								// because a dependency is down; both change the row, so refresh.
+								// Otherwise (already claimed by a drain / no runner) leave the
+								// button usable.
+								if (outcome === 'ran' || outcome === 'blocked') await host.refresh('queueMonitor');
+								else btn.disabled = false;
+							})();
+						},
 					});
 				}
 				// Unconditional since thq WP-8: the one row source that used to be excluded
 				// (in-memory enrichment entries, which carried no params/notes/failureKind)
 				// is now an ordinary job with all three.
-				const details = td.createEl('button', { text: 'Details' });
-				details.title = 'Show this job\'s params, error, progress and notes.';
-				details.addEventListener('click', () => new JobDetailModal(host.app, r).open());
-				renderCancelAction(host, td, r.type as JobType, r.key, r.status);
+				renderIconButton(td, 'info', {
+					ariaLabel: 'Details',
+					title: 'Show this job\'s params, error, progress and notes.',
+					onClick: () => new JobDetailModal(host.app, r).open(),
+				});
+				// Cancel only makes sense on a job still in the queue or in flight — a
+				// settled row (done/failed/cancelled) has nothing left to stop.
+				if (r.status === 'queued' || r.status === 'running') {
+					renderCancelAction(host, td, r.type as JobType, r.key, r.status);
+				}
 			},
 		},
 	], rows, ctx, {
@@ -568,37 +685,52 @@ function renderCancelAction(
 	// the table's own live refreshes (queue events refresh this section continuously,
 	// which would otherwise reset a "Stopping…" button to "Cancel" every few seconds).
 	if (host.plugin.orchestrator.isCancelling(type, key)) {
-		const pending = td.createEl('button', { text: 'Stopping…' });
-		pending.disabled = true;
-		pending.title = 'Stop requested. Cancellation is cooperative: the job stops at its next checkpoint, and any '
-			+ 'request already in flight has to finish first.';
+		renderIconButton(td, 'x', {
+			ariaLabel: 'Stopping',
+			title: 'Stop requested. Cancellation is cooperative: the job stops at its next checkpoint, and any '
+				+ 'request already in flight has to finish first.',
+			cls: 'crucible-queue-cancel-btn',
+			disabled: true,
+		});
 		return;
 	}
 
 	// mod-warning: Cancel destroys queued work or stops work in progress, and it sits
 	// immediately beside Run. It carries the danger semantic for the same reason the
 	// queue-wide Clear does — the two destructive controls in this view should read as
-	// destructive at a glance, not only once the tooltip is open.
-	const cancel = td.createEl('button', { text: 'Cancel', cls: 'mod-warning' });
-	cancel.title = status === 'running'
-		? 'Stop this job. It stops at its next checkpoint — a request already in flight finishes first — so a long job '
-			+ 'can take a while to acknowledge.'
-		: 'Drop this job from the queue before it runs.';
-	cancel.addEventListener('click', () => {
-		void (async () => {
-			// clsl-WP-4: job-cancel is registered default-suppressed (preserves the documented
-			// single-row-cancel policy above) — with default settings this resolves true without
-			// showing a modal, and only prompts once a user has explicitly turned it on.
-			if (!(await confirmDestructive(host.app, host.plugin.settings, 'job-cancel', {
-				message: status === 'running'
-					? 'Stop this running job? It stops at its next checkpoint.'
-					: 'Remove this job from the queue before it runs?',
-			}))) return;
-			cancel.disabled = true;
-			cancel.setText(status === 'running' ? 'Stopping…' : 'Cancelling…');
-			const outcome = (await host.plugin.orchestrationAutoRunner?.stopJob(type, key)) ?? 'not-found';
-			new Notice(STOP_OUTCOME_NOTICE[outcome]);
-			await host.refresh('queueMonitor');
-		})();
+	// destructive at a glance, not only once the tooltip is open. WP-DP3: goes
+	// icon-only (the `x` glyph) but keeps `mod-warning` — this is the one row action
+	// that IS destructive-family styling, unlike intake's reversible Skip. `cls` adds
+	// a queue-scoped hook (`crucible-queue-cancel-btn`, styles.css) rather than
+	// relying on cascade order between .crucible-intake-icon-btn's transparent
+	// background and Obsidian's own `button.mod-warning` fill — `renderIconButton`'s
+	// `cls` option is a single class (DOM `addClass` rejects a space-separated
+	// string), so `mod-warning` itself is applied separately on the returned button.
+	const cancel = renderIconButton(td, 'x', {
+		ariaLabel: 'Cancel',
+		title: status === 'running'
+			? 'Stop this job. It stops at its next checkpoint — a request already in flight finishes first — so a long job '
+				+ 'can take a while to acknowledge.'
+			: 'Drop this job from the queue before it runs.',
+		cls: 'crucible-queue-cancel-btn',
+		onClick: btn => {
+			void (async () => {
+				// clsl-WP-4: job-cancel is registered default-suppressed (preserves the documented
+				// single-row-cancel policy above) — with default settings this resolves true without
+				// showing a modal, and only prompts once a user has explicitly turned it on.
+				if (!(await confirmDestructive(host.app, host.plugin.settings, 'job-cancel', {
+					message: status === 'running'
+						? 'Stop this running job? It stops at its next checkpoint.'
+						: 'Remove this job from the queue before it runs?',
+				}))) return;
+				btn.disabled = true;
+				btn.setAttr('aria-label', status === 'running' ? 'Stopping' : 'Cancelling');
+				btn.title = status === 'running' ? 'Stopping…' : 'Cancelling…';
+				const outcome = (await host.plugin.orchestrationAutoRunner?.stopJob(type, key)) ?? 'not-found';
+				new Notice(STOP_OUTCOME_NOTICE[outcome]);
+				await host.refresh('queueMonitor');
+			})();
+		},
 	});
+	cancel.addClass('mod-warning');
 }

@@ -672,6 +672,28 @@ If your plugin does not need CSS, delete this file.
   overflow-wrap: anywhere;
 }
 
+/* WP-DP3: Cancel keeps the mod-warning (destructive) treatment even though it now
+   shares .crucible-intake-icon-btn's icon-only base — that base's transparent
+   background/box-shadow reset is a plain class selector, and Obsidian core's own
+   `button.mod-warning` rules are also class-scoped, so which one wins the
+   background/hover declarations depends on stylesheet load order rather than
+   anything guaranteed. Restated here, scoped to the queue action cell, so Cancel
+   reads as destructive regardless of that ordering. This is the "add a scoped CSS
+   rule rather than forking a second primitive" case the icon-button primitive's
+   doc comment anticipates. */
+.crucible-queue-action-cell .crucible-queue-cancel-btn {
+  background-color: var(--background-modifier-error);
+  color: var(--text-on-accent);
+}
+
+.crucible-queue-action-cell .crucible-queue-cancel-btn:hover:not(:disabled) {
+  background-color: var(--background-modifier-error-hover);
+}
+
+.crucible-queue-action-cell .crucible-queue-cancel-btn:disabled {
+  opacity: 0.6;
+}
+
 /* Ingestion intake action cell (WP-IC1): the merged action column on the Uncaptured
    Posts/Videos tables — read/watch link, metadata link, Ingest/Enrich, Ignore, all in
    one cell. Same nowrap-on-a-<td> reasoning as .crucible-queue-action-cell above, but
@@ -1040,7 +1062,10 @@ If your plugin does not need CSS, delete this file.
 
 /* Queue monitor's whole-queue stats pills: same gapped-row shape as the
    service-health row above it, hidden while orchestration is unavailable
-   (queueStats answers null and the row stays empty). */
+   (queueStats answers null and the row stays empty). WP-DP3: this row moved
+   below the enable/run/clear control bar and its pills became the job table's
+   filter control (buttons, not spans) — the shape and the `:empty` rule are
+   otherwise unchanged. */
 .crucible-queue-stats-row {
   display: flex;
   flex-wrap: wrap;
@@ -1050,6 +1075,21 @@ If your plugin does not need CSS, delete this file.
 
 .crucible-queue-stats-row:empty {
   display: none;
+}
+
+/* WP-DP3: the stats pills are now <button>s so they read as the filter control.
+   .crucible-pill already supplies border/background/radius/font (see its rule
+   above); box-shadow: none strips the default button shadow a <button> carries
+   that a <span> never did. Active state reuses the existing neutral is-contrast
+   treatment (`.crucible-pill.is-contrast` above) — no extra selected-state rule
+   needed. */
+.crucible-queue-stats-row button.crucible-pill {
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.crucible-queue-stats-row button.crucible-pill:hover {
+  background: var(--background-modifier-hover);
 }
 
 /* The pinned-concurrency pill states its reason in a tooltip, so it takes the help
