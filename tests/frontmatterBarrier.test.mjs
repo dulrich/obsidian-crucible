@@ -272,6 +272,31 @@ test('timeout verify passes when the value did land', async () => {
 	}
 });
 
+test('block deleted: cache claims a frontmatter block but raw content has none — no dead wait, splice-creates instead (WP-G4)', async () => {
+	const { app, state } = makeApp({ content: 'Just a body, block already gone.', cache: FRESH_CACHE });
+	const start = Date.now();
+	await updateFrontmatter(app, file, fm => { fm.title = 'Recovered'; }, 5000);
+	const elapsed = Date.now() - start;
+	assert.ok(elapsed < 200, `expected no dead wait against a 5000ms barrier, took ${elapsed}ms`);
+	assert.equal(state.writes.length, 0, 'processFrontMatter must never see the stale, now-nonexistent position');
+	assert.equal(state.listeners.size, 0, 'no metadataCache listener should be left behind');
+	const block = state.content.match(/---\n([\s\S]*?)\n---/)?.[1];
+	assert.ok(block, `expected a valid created frontmatter block, got:\n${state.content}`);
+	assert.ok(/title: Recovered/.test(block), `expected title to land, got:\n${block}`);
+	assert.ok(state.content.includes('Just a body, block already gone.'), 'body content must survive');
+});
+
+test('block deleted with a stale (not fresh) cache also short-circuits to splice-create', async () => {
+	const { app, state } = makeApp({ content: 'No block here either.', cache: STALE_CACHE });
+	const start = Date.now();
+	await updateFrontmatter(app, file, fm => { fm['word-count'] = 11; }, 5000);
+	const elapsed = Date.now() - start;
+	assert.ok(elapsed < 200, `expected no dead wait, took ${elapsed}ms`);
+	assert.equal(state.writes.length, 0);
+	const block = state.content.match(/---\n([\s\S]*?)\n---/)?.[1];
+	assert.ok(/word-count: 11/.test(block), `expected word-count to land, got:\n${block}`);
+});
+
 test('non-markdown files skip the barrier', async () => {
 	const { app, state } = makeApp({ content: 'binary-ish', cache: null });
 	await updateFrontmatter(app, { path: 'img/pic.png', extension: 'png' }, fm => { fm.x = 1; }, 5000);
