@@ -72,6 +72,18 @@ export class IngestionDashboardUI {
 		'uncapturedPosts', 'uncapturedVideos', 'blogControl', 'orphanedAttachments',
 		'missingAttachments', 'youtubeWithoutMetadata', 'queueMonitor', 'xPosts',
 	]);
+	// WP-J4: sections whose header Refresh button is dead chrome — never
+	// FAST/SCAN-registered (so nothing ever calls their ctx.refresh
+	// automatically) and whose render is a pure projection of a
+	// closure-cached, forced-only result (searchAudit's cached audit; see
+	// src/ingestion/sections/searchAudit.ts). Refresh would only rebuild
+	// pixel-identical DOM, so buildSection omits the button entirely for
+	// these ids and leaves decorateHeader's own action (e.g. "Run audit")
+	// as the sole header control. Additive, default-off — every other
+	// section keeps its Refresh button byte-identical.
+	private static readonly NO_REFRESH_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
+		'searchAudit',
+	]);
 	// Two cadence-classed gates, reusing the same tested minIntervalGate
 	// primitive the pre-P6 code already relied on for youtubeWithoutMetadata
 	// and queueMonitor (see render/refresh.ts) — leading-immediate +
@@ -495,9 +507,13 @@ export class IngestionDashboardUI {
 	): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
 		const { heading, countEl, metaEl } = this.createSectionHeader(card, title, description, defaultCollapsed);
-		const refreshBtn = heading.createEl('button', { cls: 'crucible-ingestion-refresh crucible-icon-label-btn' });
-		setIcon(refreshBtn, 'refresh-cw');
-		refreshBtn.createSpan({ text: 'Refresh' });
+		const noRefresh = IngestionDashboardUI.NO_REFRESH_SECTIONS.has(id);
+		let refreshBtn: HTMLButtonElement | undefined;
+		if (!noRefresh) {
+			refreshBtn = heading.createEl('button', { cls: 'crucible-ingestion-refresh crucible-icon-label-btn' });
+			setIcon(refreshBtn, 'refresh-cw');
+			refreshBtn.createSpan({ text: 'Refresh' });
+		}
 		decorateHeader?.(heading);
 		const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
 		body.createDiv({ cls: 'crucible-empty-state', text: 'Loading…' });
@@ -526,7 +542,7 @@ export class IngestionDashboardUI {
 			},
 		};
 		this.sections.set(id, ctx);
-		refreshBtn.addEventListener('click', () => void ctx.refresh());
+		refreshBtn?.addEventListener('click', () => void ctx.refresh());
 	}
 
 	private setSectionCount(id: SectionId, n: number): void {
