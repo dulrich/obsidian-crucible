@@ -21,6 +21,31 @@ image in the same change.
 (`/home/_shared_code/eval-harness/local-inference-bench/measurements/`), not in this repo —
 `runs/` is scrubbed and `.gitignore`d here. Re-run measurements into a new sibling dir there.
 
+## Quirks index
+
+The one-line hooks below say *where to walk*, not what to do — read the full entry before acting.
+
+- The search companion's container image has no `npm install` step and needs `node:24-slim` minimum.
+- The companion's listen host defaults to loopback everywhere except inside the container.
+- The companion's pooling CTE must stay `MATERIALIZED`; its FTS schema migrates itself.
+- Counting vault notes by globbing `*.md` is wrong by ~7.7x — archived queue job files dwarf the real corpus.
+- The search client has two timeouts on purpose; a mid-operation failure must not latch the availability gate.
+- The interactive search timeout drives a third, request-scoped budget: the companion's cooperative deadline.
+- The cooperative deadline starts at the client's `sentAt`; the backfill yields to interactive searches; the matrix invalidates once per flush.
+- Companion search latency is governed by how much of the index the query matches, not by index size.
+- Obsidian's "Excluded files" list is honored asymmetrically: search hides those paths, the file-open palette deranks them.
+- The vector leg is dimension-agnostic by design and scans the full matrix by requirement — every number below is measured.
+- A chunk id is unique only within a vault; every companion statement must key on `(vault_id, id)`.
+- `embedding_space` is a conservative guard, not evidence that precision changes the vector space.
+- Quantization degrades spread, not ranking — Q2_K still retrieves perfectly.
+- FTS5's implicit AND is per chunk, not per document — root cause of the "matt pocock" class of misses.
+- The entity facet (schema 7): frontmatter `author` reaches FTS as a dedicated `entities` column on every chunk.
+- The search query log lives outside the vault's note tree, so it cannot be indexed by construction.
+- Linked-post chunks (pf-3): a source note ranks on the text of the notes it stamp-links, as ordinary chunks.
+- Superseded interactive searches are recallable end to end: client-side abort, companion-side pre-flight abandon, deadline skew guard.
+- Companion code ships only via an image rebuild (`home-compose up crucible-search`) — a bare restart runs stale code.
+- `POST /v1/paths` is the enumeration endpoint the audit/reconcile pair depends on — a hard read/write boundary.
+
 ## Quirks
 
 - **The search companion's container image has no `npm install` step, and the base tag must never drop below `node:24-slim`.** `scripts/search-companion.mjs` imports only Node builtins — including `node:sqlite` (`DatabaseSync`), which is unflagged starting Node 23.4 and is what the FTS5 index runs on. Because the server has zero npm dependencies, the `Dockerfile` copies only the facade (`scripts/search-companion.mjs`) plus the `scripts/search-companion/` module directory (rem-R3 decomposition — the `COPY` lines and the `.dockerignore` allowlist must track that module tree) and skips `package.json`/`node_modules` entirely; adding an install step or downgrading the base image below 24 breaks the `node:sqlite` import silently (it throws at the `import` line, not at some later call site). Don't "helpfully" add a `package.json` copy or an install step just because that's the usual shape of a Node Dockerfile — this one is dependency-free by design. **`.dockerignore` is load-bearing for the same reason**: without it the build context drags in `node_modules/`, the 2.8 MB `main.js`, and the multi-hundred-MB `.crucible/search.sqlite`, none of which the image needs.

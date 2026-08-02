@@ -8,6 +8,14 @@ Related areas: the container that serves these endpoints locally is
 `/home/_shared_code/inference-engine/llama/AGENTS.md` (inference-engine repo); the embedding-model lifecycle that consumes them is
 `src/search/AGENTS.md`; the user-facing writeup is `docs/local-inference.md`.
 
+## Quirks index
+
+The one-line hooks below say *where to walk*, not what to do — read the full entry before acting.
+
+- LM Studio (and llama.cpp/vLLM/LocalAI) is the `openai-compatible` provider kind, not `ollama`.
+- Completion-class calls ride a per-provider concurrency limiter — release on settle, local default 1, embed/rerank exempt.
+- A reranker is not an embedding model — every structural guard passes it.
+
 ## Quirks
 
 - **LM Studio (and llama.cpp/vLLM/LocalAI) is the `openai-compatible` provider kind, NOT `ollama`.** The two local kinds speak different wire protocols: `ollamaClient` (`src/providers/ollama.ts`) POSTs to `<baseUrl>/api/chat` with Ollama-native JSON, while LM Studio serves the OpenAI wire format at `<baseUrl>/chat/completions`. Pointing an `ollama`-kind provider at LM Studio's port silently fails — LM Studio doesn't serve `/api/chat`, so the response carries no `message.content`/`done_reason`, the client yields empty text + `rawFinishReason: undefined` → normalized `'unknown'`, and the strict `enforceNormalFinishReason` guard (`src/agents.ts`) throws `finished with non-normal reason "missing" (normalized: unknown; partial response length: 0)`. Two non-obvious things about the `openai-compatible` kind: (1) **`baseUrl` must include the API path** — `openAICompatibleClient` builds `${apiBaseUrl(provider)}/chat/completions` and `${apiBaseUrl(provider)}/embeddings`, so the Server URL field expects e.g. `http://localhost:1234/v1`, not the bare host:port. (2) **The API key is optional** — `httpContext` (`src/providers.ts`) skips the missing-key throw for `openai-compatible` (as it does for `ollama`), and `authHeaders` only emits `Authorization` when a key is present, so a no-auth local server works while a vLLM `--api-key` server can still carry one. The same `openAICompatibleClient.complete()` now resolves its URL through `apiBaseUrl()` for all three kinds (`openai`/`openrouter`/`openai-compatible`); the vendor kinds are behavior-preserving because `apiBaseUrl` falls back to their fixed defaults when `baseUrl` is empty. Temperature is pinned (`0.7`) only for the `openai` vendor — OpenRouter and local servers leave it to the model default.
