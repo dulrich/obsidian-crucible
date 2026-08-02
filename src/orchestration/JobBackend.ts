@@ -259,8 +259,9 @@ export async function runWorkflowWithTimeout(
 	job: OrchestrationJob,
 	timeoutMs: number,
 	signal: AbortSignal,
+	reportProgress: (message: string) => void,
 ): Promise<WorkflowResult> {
-	const ctx: WorkflowContext = { plugin, signal, throwIfAborted: () => signal.throwIfAborted() };
+	const ctx: WorkflowContext = { plugin, signal, throwIfAborted: () => signal.throwIfAborted(), reportProgress };
 	try {
 		signal.throwIfAborted();
 		const result = timeoutMs <= 0

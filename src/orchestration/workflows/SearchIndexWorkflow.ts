@@ -158,7 +158,7 @@ export class SearchUpsertBatchWorkflow implements Workflow {
 				.filter((file): file is TFile => file instanceof TFile && isSearchIndexablePath(file.path, plugin.settings.searchIndexExtensions));
 			const batchIndex = numberParam(job, 'batchIndex');
 			const batchCount = numberParam(job, 'batchCount');
-			const progress = new SearchJobProgress(plugin, job);
+			const progress = new SearchJobProgress(ctx);
 			// Set by SearchEmbedMissingWorkflow only: this batch exists to produce vectors, so
 			// FTS-only chunks are a failure rather than a graceful degradation.
 			const requireEmbeddings = booleanParam(job, 'requireEmbeddings');
@@ -217,6 +217,11 @@ export class SearchSweepWorkflow implements Workflow {
 		const description = stringParam(job, 'description');
 		if (!description) return Promise.resolve({ status: 'failed', error: 'Missing params.description' });
 		return runSearchWorkflow(ctx, async () => {
+			// Not a multi-item loop like the other three loopers — one round trip to the
+			// companion — but still a job that can sit in the queue monitor for as long as
+			// the sweep takes, so it gets the same single-line seam write rather than
+			// staying frozen with an empty Progress cell for the duration.
+			ctx.reportProgress(`sweep: ${description}`);
 			const response: SearchResponse = await plugin.searchManager.sweep(description);
 			return {
 				status: 'done',
@@ -340,20 +345,18 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 class SearchJobProgress {
-	constructor(
-		private readonly plugin: WorkflowContext['plugin'],
-		private readonly job: OrchestrationJob,
-	) {}
+	constructor(private readonly ctx: WorkflowContext) {}
 
 	/**
-	 * WP-7: retired the scan-`running/`-for-my-own-TFile dance (and the store-shaped
-	 * `scheduleQueueChanged` call it required) in favor of the backend-agnostic seam.
-	 * `Orchestrator.setJobProgress` dispatches to this job's own type's backend, which
-	 * writes its own row (one indexed UPDATE) and emits its own coalesced
-	 * `orchestration-queue-updated`, so a long batch still can't out-emit the 250ms
-	 * window.
+	 * WP-7 retired the scan-`running/`-for-my-own-TFile dance in favor of the
+	 * backend-agnostic `Orchestrator.setJobProgress` seam; WP-J1 retires THAT
+	 * reach-through in turn — `ctx.reportProgress` is a closure `DbJobBackend`
+	 * built over this exact job's own type+id (`runWorkflowWithTimeout`), so no
+	 * workflow needs to reach back through `plugin.orchestrator` at all. Kept
+	 * `async` (though `reportProgress` itself is synchronous) so this stays a
+	 * drop-in for `SearchManager.indexFiles`'s `onProgress`, which awaits it.
 	 */
 	async update(message: string): Promise<void> {
-		await this.plugin.orchestrator.setJobProgress(this.job.type, this.job.id, message);
+		this.ctx.reportProgress(message);
 	}
 }
