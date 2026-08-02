@@ -17,7 +17,7 @@ the reviewable filesystem contract.
 
 | Tier | Open | Resolved |
 |---|---:|---:|
-| structural-regressions | 1 | 0 |
+| structural-regressions | 0 | 1 |
 | simplification-misses | 0 | 2 |
 | spaghetti | 0 | 0 |
 | boundary-type-contracts | 0 | 0 |
