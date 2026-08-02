@@ -951,6 +951,47 @@ If your plugin does not need CSS, delete this file.
   color: var(--text-accent);
 }
 
+/* WP-I2: search-audit's merged Summary/Repair statistics table. Reuses
+   .crucible-ingestion-table's border/padding/font above; adds only the two things that table
+   doesn't already have — a right-aligned count column, and a plain-text "button" for the
+   condition label so a clickable row's label stays keyboard-focusable/operable (native
+   Enter/Space) without an ARIA role hack on the <tr>. */
+.crucible-audit-summary-count {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.crucible-audit-condition-btn {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.crucible-audit-condition-btn:hover {
+  color: var(--text-accent);
+}
+
+.crucible-audit-row-clickable {
+  cursor: pointer;
+}
+
+.crucible-audit-row-active {
+  background-color: var(--background-modifier-hover);
+}
+
+.crucible-audit-row-active .crucible-audit-condition-btn {
+  color: var(--text-accent);
+  font-weight: 600;
+}
+
 .crucible-ingestion-queue-controls {
   display: flex;
   flex-wrap: wrap;
