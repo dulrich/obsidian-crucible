@@ -540,7 +540,13 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 				if (newStep && scrollEl) {
 					const stepTop = newStep.offsetTop;
 					const stepCenter = stepTop + newStep.offsetHeight / 2;
-					scrollEl.scrollTop = stepCenter - scrollEl.clientHeight / 2;
+					// WP-DP4: the pinned tab-strip header covers the top of the scroller's
+					// visible area, so center the new step within the region BELOW it, not
+					// the raw scroller viewport. Measure the header live rather than
+					// hardcoding its height.
+					const headerEl = tab.containerEl.querySelector<HTMLElement>('.crucible-settings-sticky-header');
+					const headerHeight = headerEl?.offsetHeight ?? 0;
+					scrollEl.scrollTop = stepCenter - (scrollEl.clientHeight + headerHeight) / 2;
 				}
 			});
 		})();

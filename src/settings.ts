@@ -186,7 +186,13 @@ export class CrucibleSettingTab extends PluginSettingTab {
 		const focusTrap = containerEl.createEl('button', { cls: 'crucible-focus-trap' });
 		requestAnimationFrame(() => focusTrap.focus());
 
-		const navBar = containerEl.createDiv({ cls: 'crucible-tab-nav' });
+		// WP-DP4: the tab strip + rule are wrapped in a sticky header so they stay pinned
+		// while a long tab (e.g. Automate with many chains) scrolls underneath. The focus
+		// trap above is a keyboard affordance, not header chrome, so it stays outside/before
+		// the wrap. Both branches below (tab row, detail-editor "Back" bar) render into the
+		// same navBar, so the wrap covers both automatically.
+		const stickyHeader = containerEl.createDiv({ cls: 'crucible-settings-sticky-header' });
+		const navBar = stickyHeader.createDiv({ cls: 'crucible-tab-nav' });
 
 		if (this.isEditingDetail()) {
 			const backBtn = navBar.createDiv({ cls: 'crucible-tab-btn' });
@@ -218,7 +224,7 @@ export class CrucibleSettingTab extends PluginSettingTab {
 			createTab('commands', 'terminal', 'Commands');
 		}
 
-		containerEl.createEl('hr', { cls: 'crucible-tab-hr' });
+		stickyHeader.createEl('hr', { cls: 'crucible-tab-hr' });
 
 		if (this.activeTab === 'configure') {
 			renderConfigureSettings(this, containerEl);
