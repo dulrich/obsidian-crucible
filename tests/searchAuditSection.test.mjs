@@ -783,3 +783,26 @@ test('STRUCTURAL: root AGENTS.md documents the wrench icon row', () => {
 	const agentsSrc = readFileSync('AGENTS.md', 'utf8');
 	assert.match(agentsSrc, /\| `wrench` \| Repair/);
 });
+
+/* ---------------------------------------------------- STRUCTURAL: WP-J4 no-refresh opt-out */
+
+test('STRUCTURAL: NO_REFRESH_SECTIONS includes searchAudit, so the header carries no Refresh button — "Run audit" is the sole header action', () => {
+	const noRefreshMatch = dashboardSrc.match(/NO_REFRESH_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>\(\[([\s\S]*?)\]\);/);
+	assert.ok(noRefreshMatch, 'NO_REFRESH_SECTIONS set not found');
+	assert.ok(noRefreshMatch[1].includes("'searchAudit'"), 'searchAudit must opt out of the header Refresh button');
+});
+
+test('STRUCTURAL: a control section (uncapturedPosts) is NOT in NO_REFRESH_SECTIONS — it keeps its Refresh button byte-identical', () => {
+	const noRefreshMatch = dashboardSrc.match(/NO_REFRESH_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>\(\[([\s\S]*?)\]\);/);
+	assert.ok(noRefreshMatch);
+	assert.ok(!noRefreshMatch[1].includes("'uncapturedPosts'"), 'every other section must still get the header Refresh button');
+});
+
+test('STRUCTURAL: buildSection creates the crucible-ingestion-refresh button conditionally on NO_REFRESH_SECTIONS, and wires its click listener optionally (never unconditionally, so an omitted button cannot throw)', () => {
+	const buildSectionMatch = dashboardSrc.match(/private buildSection\(([\s\S]*?)\n\t\}/);
+	assert.ok(buildSectionMatch, 'buildSection not found');
+	const body = buildSectionMatch[1];
+	assert.match(body, /const noRefresh = IngestionDashboardUI\.NO_REFRESH_SECTIONS\.has\(id\);/);
+	assert.match(body, /if \(!noRefresh\) \{[\s\S]*?crucible-ingestion-refresh/, 'the refresh button must be created only when the section is not opted out');
+	assert.match(body, /refreshBtn\?\.addEventListener\('click', \(\) => void ctx\.refresh\(\)\);/, 'the click listener must not be wired to a re-run of the audit — optional chaining is required so an omitted button is a no-op');
+});
