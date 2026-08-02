@@ -7,6 +7,7 @@ import {
 	SearchEmbeddingMismatchError,
 	SearchEmbeddingUnavailableError,
 	SearchServiceUnavailableError,
+	type SearchFileIndexResult,
 	type SearchServiceUnavailableErrorKind,
 	type SearchResponse,
 } from '../../search/types';
@@ -136,11 +137,11 @@ export class SearchUpsertFileWorkflow implements Workflow {
 				await plugin.searchManager.deletePath(path);
 				return { status: 'done', notes: `Removed missing file from search index: ${path}` };
 			}
-			const chunks = await plugin.searchManager.indexFile(file);
+			const result = await plugin.searchManager.indexFile(file);
 			return {
 				status: 'done',
 				outputPaths: [file.path],
-				notes: `Indexed ${file.path}: ${chunks} chunks.`,
+				notes: formatUpsertFileNotes(file.path, result),
 			};
 		});
 	}
@@ -292,6 +293,21 @@ function searchDeferredResult(
 		// simply never produced by this path.
 		serviceUnhealthy: { service: 'search-companion', kind, reason: message },
 	};
+}
+
+/**
+ * WP-G2: the honest job-note text for `SearchUpsertFileWorkflow` — replaces the old
+ * `Indexed <path>: <chunks> chunks.` for every outcome, which made `0` ambiguous between
+ * "skipped, unchanged" and "produced no chunks" (see the background in `SearchFileIndexResult`'s
+ * doc). Pure and exported so the three outcome strings are tested without a plugin/workflow
+ * scaffold — `tests/searchWorkflowQueue.test.mjs` pins them.
+ */
+export function formatUpsertFileNotes(path: string, result: SearchFileIndexResult): string {
+	switch (result.outcome) {
+		case 'written': return `Indexed ${path}: ${result.chunks} chunks.`;
+		case 'skipped-unchanged': return 'Unchanged (hash match), skipped.';
+		case 'no-chunks': return 'No indexable content.';
+	}
 }
 
 function stringParam(job: OrchestrationJob, key: string): string {

@@ -106,13 +106,14 @@ test('SearchManager indexFile skips a user-ignored path before reading it', asyn
 		},
 	};
 	const manager = new SearchManager(app, settings, {});
-	const count = await manager.indexFile({
+	const result = await manager.indexFile({
 		path: 'private/journal.md',
 		basename: 'journal',
 		extension: 'md',
 		stat: { mtime: 1 },
 	});
-	assert.equal(count, 0);
+	assert.equal(result.chunks, 0);
+	assert.equal(result.outcome, 'no-chunks');
 });
 
 test('SearchManager indexFile skips search-excluded paths before reading', async () => {
@@ -125,11 +126,12 @@ test('SearchManager indexFile skips search-excluded paths before reading', async
 		},
 	};
 	const manager = new SearchManager(app, settings, {});
-	const count = await manager.indexFile({
+	const result = await manager.indexFile({
 		path: '_crucible/orchestration/queue/job.md',
 		basename: 'job',
 		extension: 'md',
 		stat: { mtime: 1 },
 	});
-	assert.equal(count, 0);
+	assert.equal(result.chunks, 0);
+	assert.equal(result.outcome, 'no-chunks');
 });

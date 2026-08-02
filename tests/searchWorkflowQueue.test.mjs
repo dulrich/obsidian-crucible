@@ -21,7 +21,7 @@ await mkdir(outdir, { recursive: true });
 await esbuild.build({
 	stdin: {
 		contents: [
-			"export { SearchRebuildWorkflow, SearchEmbedMissingWorkflow, SearchUpsertFileWorkflow, SearchUpsertBatchWorkflow, SearchDeletePathWorkflow, SearchSweepWorkflow } from './src/orchestration/workflows/SearchIndexWorkflow';",
+			"export { SearchRebuildWorkflow, SearchEmbedMissingWorkflow, SearchUpsertFileWorkflow, SearchUpsertBatchWorkflow, SearchDeletePathWorkflow, SearchSweepWorkflow, formatUpsertFileNotes } from './src/orchestration/workflows/SearchIndexWorkflow';",
 			"export { SearchServiceUnavailableError, SearchEmbeddingUnavailableError, SearchEmbeddingMismatchError, SearchEmbeddingConfigError } from './src/search/types';",
 			"export { TFile } from 'obsidian';",
 		].join('\n'),
@@ -57,6 +57,7 @@ const {
 	SearchEmbeddingMismatchError,
 	SearchEmbeddingConfigError,
 	TFile,
+	formatUpsertFileNotes,
 } = await import(pathToFileURL(outfile));
 
 // A TFile-like stand-in whose `instanceof TFile` matches the bundle's own class.
@@ -292,4 +293,43 @@ test('a plain index whose embedder returns a width mismatch fails outright rathe
 	assert.equal(result.status, 'failed');
 	assert.match(result.error, /dimensions but returned/);
 	assert.equal(result.serviceUnhealthy, undefined);
+});
+
+// WP-G2: honest per-file job notes — formatUpsertFileNotes is the pure function behind
+// SearchUpsertFileWorkflow's `notes`. Background: the old `Indexed <path>: <chunks> chunks.`
+// made `0` ambiguous between "skipped, unchanged" and "produced no chunks," which is exactly
+// what made a 28-job reconcile run (26 of them writing 0 chunks) look like silent failure.
+
+test('formatUpsertFileNotes: written outcome reports the real chunk count', () => {
+	assert.equal(formatUpsertFileNotes('note.md', { outcome: 'written', chunks: 3 }), 'Indexed note.md: 3 chunks.');
+});
+
+test('formatUpsertFileNotes: skipped-unchanged outcome names the hash match, not a chunk count', () => {
+	assert.equal(formatUpsertFileNotes('note.md', { outcome: 'skipped-unchanged', chunks: 0 }), 'Unchanged (hash match), skipped.');
+});
+
+test('formatUpsertFileNotes: no-chunks outcome says there was nothing indexable, distinct from a skip', () => {
+	assert.equal(formatUpsertFileNotes('note.md', { outcome: 'no-chunks', chunks: 0 }), 'No indexable content.');
+});
+
+// SearchUpsertFileWorkflow end-to-end: each outcome from a (mocked) indexFile produces the
+// matching notes text, through the real workflow rather than the pure function directly.
+test('SearchUpsertFileWorkflow renders the outcome-specific notes text for each SearchFileIndexResult', async () => {
+	async function runWithOutcome(result) {
+		const plugin = makePlugin({ searchManager: { indexFile: async () => result } });
+		plugin.app.vault.getAbstractFileByPath = fakeFile;
+		return new SearchUpsertFileWorkflow().run({ id: 'upsert-notes', params: { path: 'note.md' } }, makeCtx(plugin));
+	}
+
+	const written = await runWithOutcome({ outcome: 'written', chunks: 5 });
+	assert.equal(written.status, 'done');
+	assert.equal(written.notes, 'Indexed note.md: 5 chunks.');
+
+	const skipped = await runWithOutcome({ outcome: 'skipped-unchanged', chunks: 0 });
+	assert.equal(skipped.status, 'done');
+	assert.equal(skipped.notes, 'Unchanged (hash match), skipped.');
+
+	const noChunks = await runWithOutcome({ outcome: 'no-chunks', chunks: 0 });
+	assert.equal(noChunks.status, 'done');
+	assert.equal(noChunks.notes, 'No indexable content.');
 });
