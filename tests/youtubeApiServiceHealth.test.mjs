@@ -50,6 +50,7 @@ const {
 	fetchYoutubeVideo,
 	fetchYoutubeChannel,
 	YoutubeApiUnavailableError,
+	YoutubeVideoUnavailableError,
 	youtubeApiDeferredResult,
 	YOUTUBE_QUOTA_RETRY_AFTER_MS,
 } = await import(pathToFileURL(outfile).href);
@@ -163,15 +164,43 @@ test('a non-quota 403 (bad API key) stays a plain job-level Error, not YoutubeAp
 	);
 });
 
-test('a 404 stays a plain job-level Error, not YoutubeApiUnavailableError', async () => {
+// The live not-found shape (WP-K1): the HTTP-404 branch is dead in practice, but stays
+// typed for symmetry — see requestYoutubeApi's doc comment.
+test('a 404 is a YoutubeVideoUnavailableError(deleted-or-private), not YoutubeApiUnavailableError', async () => {
 	respondWith(404, {});
 	await assert.rejects(
 		() => fetchYoutubeVideo('key', 'missing-video'),
 		(err) => {
 			assert.ok(!(err instanceof YoutubeApiUnavailableError));
+			assert.ok(err instanceof YoutubeVideoUnavailableError);
+			assert.equal(err.reason, 'deleted-or-private');
 			assert.match(err.message, /not found/);
 			return true;
 		},
+	);
+});
+
+// ── The live not-found shape: HTTP 200 with items: [] (WP-K1) ──────────────────────────────
+
+test('a 200 response with an empty items array is a YoutubeVideoUnavailableError(deleted-or-private)', async () => {
+	respondWith(200, { text: JSON.stringify({ items: [] }) });
+	await assert.rejects(
+		() => fetchYoutubeVideo('key', 'deleted-video'),
+		(err) => {
+			assert.ok(!(err instanceof YoutubeApiUnavailableError));
+			assert.ok(err instanceof YoutubeVideoUnavailableError);
+			assert.equal(err.reason, 'deleted-or-private');
+			assert.match(err.message, /deleted-video not found/);
+			return true;
+		},
+	);
+});
+
+test('a 200 response with a missing items key is treated the same as an empty array', async () => {
+	respondWith(200, { text: JSON.stringify({}) });
+	await assert.rejects(
+		() => fetchYoutubeVideo('key', 'deleted-video'),
+		(err) => err instanceof YoutubeVideoUnavailableError && err.reason === 'deleted-or-private',
 	);
 });
 

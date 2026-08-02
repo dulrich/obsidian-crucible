@@ -71,6 +71,14 @@ export function buildYoutubeVideoChannelMap(app: App, metadataRoot: string): Map
 	return out;
 }
 
+/**
+ * Fallback channel attribution when `buildYoutubeVideoChannelMap` misses (a tombstone
+ * has no `channelId`, so it always misses — that's exactly when this fallback fires,
+ * WP-K1). `_unavailable` is a reserved child folder of the YT metadata root (the
+ * tombstone folder, `youtubeApi.ts`), not a channel — return '' so the caller's
+ * `channelId ? ... : null` declines instead of minting a phantom `"_unavailable"`
+ * channel.
+ */
 export function parseYtMetadataChannelFromLink(value: unknown, metadataRoot: string): string {
 	const link = firstFrontmatterLink(value);
 	if (!link) return '';
@@ -80,6 +88,7 @@ export function parseYtMetadataChannelFromLink(value: unknown, metadataRoot: str
 	if (!path.startsWith(rootPrefix)) return '';
 	const rest = path.slice(rootPrefix.length);
 	const channel = rest.split('/')[0]?.trim() ?? '';
+	if (channel === '_unavailable') return '';
 	return channel;
 }
 

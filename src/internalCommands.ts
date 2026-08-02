@@ -312,6 +312,13 @@ export async function fetchYoutubeMetadataForActiveNote(plugin: CruciblePlugin, 
 				new Notice('YouTube metadata already exists; linked.');
 				emitMetadataEnriched(plugin, videoId, result.metadataPath, file);
 				return true;
+			case 'tombstoned':
+				// Taken-down video (WP-K1): a durable, successful materialization, not a
+				// failure — same treatment as 'created'/'exists', mirroring the workflow's
+				// emitEnriched, which fires for tombstoned outcomes too.
+				new Notice('Video unavailable — tombstoned.');
+				emitMetadataEnriched(plugin, videoId, result.metadataPath, file);
+				return true;
 			case 'no-video-id':
 				// eslint-disable-next-line obsidianmd/ui/sentence-case
 				new Notice('Active note has no yt-video-id in frontmatter');

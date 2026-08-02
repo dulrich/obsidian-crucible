@@ -45,7 +45,7 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 				}
 				const result = await enrichYoutubeMetadataStandalone(plugin, paramVideoId);
 				const chained = await this.maybeChainChannelEnrich(plugin, result);
-				return this.emitEnriched(plugin, this.toResult(result, paramVideoId, chained), paramVideoId, '');
+				return this.emitEnriched(plugin, this.toResult(plugin, result, paramVideoId, chained), paramVideoId, '');
 			}
 
 			const file = plugin.app.vault.getAbstractFileByPath(targetPath);
@@ -62,7 +62,7 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 			const result = await ingestYoutubeVideoMetadata(plugin, file, videoId);
 			const chained = await this.maybeChainChannelEnrich(plugin, result);
 			const label = referenced ? `${targetPath} (referenced video ${videoId})` : targetPath;
-			return this.emitEnriched(plugin, this.toResult(result, label, chained), videoId, targetPath);
+			return this.emitEnriched(plugin, this.toResult(plugin, result, label, chained), videoId, targetPath);
 		} catch (e) {
 			// The Data API itself is down/throttled — a service-level deferral, not a
 			// per-job failure. See the class doc on YoutubeApiUnavailableError.
@@ -154,7 +154,17 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 		}
 	}
 
+	/**
+	 * Maps `IngestResult` → `WorkflowResult`. `tombstoned` settles `done` — a taken-down
+	 * video is a durable, successful materialization, not a failure (WP-K1, X-pipeline
+	 * port) — with wording modeled on `XMetadataFetchWorkflow.outcomeNotes`. `exists`
+	 * also gets the "already tombstoned" wording when the probe's find lands in the
+	 * `_unavailable` folder, since a repeat job on a tombstoned video reports `exists`
+	 * (the probe treats a tombstone as found, same as any other metadata note — see
+	 * `ensureMetadataNote`'s doc comment).
+	 */
 	private toResult(
+		plugin: WorkflowContext['plugin'],
 		result: IngestResult,
 		label: string,
 		chainedChannelId: string,
@@ -163,8 +173,15 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 		switch (result.status) {
 			case 'created':
 				return { status: 'done', outputPaths: [result.metadataPath], notes: `Created metadata for ${label}${chainNote}` };
-			case 'exists':
-				return { status: 'done', outputPaths: [result.metadataPath], notes: `Linked existing metadata for ${label}` };
+			case 'exists': {
+				const unavailablePrefix = `${youtubeMetadataRoot(plugin)}/_unavailable/`;
+				const notes = result.metadataPath.startsWith(unavailablePrefix)
+					? `Video unavailable — already tombstoned ${label}`
+					: `Linked existing metadata for ${label}`;
+				return { status: 'done', outputPaths: [result.metadataPath], notes };
+			}
+			case 'tombstoned':
+				return { status: 'done', outputPaths: [result.metadataPath], notes: `Video unavailable — tombstoned ${label}` };
 			case 'no-video-id':
 				return { status: 'failed', error: `No video id for ${label}` };
 			case 'no-api-key':
