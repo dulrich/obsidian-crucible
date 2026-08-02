@@ -919,6 +919,7 @@ If your plugin does not need CSS, delete this file.
 }
 
 .crucible-ingestion-header-toggle {
+  align-self: center;
   font-size: var(--font-ui-small);
   font-weight: normal;
 }

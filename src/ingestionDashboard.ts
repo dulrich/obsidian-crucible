@@ -150,7 +150,7 @@ export class IngestionDashboardUI {
 		this.buildSection(
 			'blogControl',
 			'Blog control center',
-			'Every blog known to the vault, with tracked / ingested / ignored post counts.',
+			'Per-status post counts, per blog.',
 			undefined,
 			true,
 		);
@@ -165,7 +165,7 @@ export class IngestionDashboardUI {
 		this.buildSection(
 			'channelControl',
 			'Channel control center',
-			'Every YouTube channel known to the vault, with tracked / ingested / ignored video counts and a link to its about.md.',
+			'Per-status video counts and about.md link, per channel.',
 			(heading) => this.controlCenters.renderEnrichAllChannelsButton(heading),
 			true,
 		);
@@ -186,6 +186,7 @@ export class IngestionDashboardUI {
 			'X posts',
 			'X statuses seen in the link registry or already materialized as _x_metadata notes.',
 			(heading) => this.xPosts.renderBackfillButton(heading),
+			true,
 		);
 
 		this.registerListeners();
