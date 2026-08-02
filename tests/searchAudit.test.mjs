@@ -27,6 +27,7 @@ await esbuild.build({
 
 const {
 	computeSearchAudit,
+	identifyAuditCandidates,
 	isCleanAudit,
 	isReconcileTargetClean,
 	formatAuditReport,
@@ -358,6 +359,220 @@ test('formatReconcileCompletedSummary says "nothing enqueued" and notes a declin
 	});
 	assert.match(summary, /nothing enqueued/i);
 	assert.match(summary, /declined/i);
+});
+
+// WP-G2: identifyAuditCandidates — the shared candidate-naming function `computeSearchAudit`
+// itself calls, and the one `runSearchAudit` (src/commands.ts) uses to scope hash/chunk
+// verification to only the mtime-suspect subset.
+
+test('identifyAuditCandidates: a vault file with no indexed row is a missing candidate', () => {
+	const result = identifyAuditCandidates([{ path: 'new.md', mtime: 100 }], []);
+	assert.deepEqual(result.missing, ['new.md']);
+	assert.deepEqual(result.staleMtime, []);
+});
+
+test('identifyAuditCandidates: a vault file newer than its indexed row is a staleMtime candidate, not missing', () => {
+	const result = identifyAuditCandidates(
+		[{ path: 'edited.md', mtime: 500 }],
+		[indexedRow({ path: 'edited.md', mtime: 100 })],
+	);
+	assert.deepEqual(result.missing, []);
+	assert.deepEqual(result.staleMtime, ['edited.md']);
+});
+
+test('identifyAuditCandidates: a vault file at or behind its indexed mtime is neither candidate', () => {
+	const result = identifyAuditCandidates(
+		[{ path: 'same.md', mtime: 100 }],
+		[indexedRow({ path: 'same.md', mtime: 100 })],
+	);
+	assert.deepEqual(result.missing, []);
+	assert.deepEqual(result.staleMtime, []);
+});
+
+// WP-G2: hash-verified staleness — mtimeOnly closes the permanent-stale loop.
+
+test('a staleMtime candidate whose freshly-computed hash matches the indexed contentHash reclassifies mtimeOnly, not stale', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'touched.md', mtime: 500 }],
+		indexedPaths: [indexedRow({ path: 'touched.md', mtime: 100, contentHash: 'abc123' })],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['touched.md', 'abc123']]),
+	});
+	assert.deepEqual(result.stale, []);
+	assert.deepEqual(result.mtimeOnly, ['touched.md']);
+	assert.equal(isCleanAudit(result), true, 'mtimeOnly is informational, not a defect');
+	assert.equal(isReconcileTargetClean(result), true);
+});
+
+test('a staleMtime candidate whose freshly-computed hash differs from the indexed contentHash stays stale', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'edited.md', mtime: 500 }],
+		indexedPaths: [indexedRow({ path: 'edited.md', mtime: 100, contentHash: 'old-hash' })],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['edited.md', 'new-hash']]),
+	});
+	assert.deepEqual(result.stale, ['edited.md']);
+	assert.deepEqual(result.mtimeOnly, []);
+});
+
+test('a staleMtime candidate with no verification entry keeps today\'s behavior: stale, not silently reclassified', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'unverified.md', mtime: 500 }],
+		indexedPaths: [indexedRow({ path: 'unverified.md', mtime: 100, contentHash: 'abc123' })],
+		images: [],
+		semanticEnabled: true,
+		// staleContentHashes omitted entirely — same as pre-WP-G2 callers.
+	});
+	assert.deepEqual(result.stale, ['unverified.md']);
+	assert.deepEqual(result.mtimeOnly, []);
+});
+
+test('a staleMtime candidate is not reclassified when the indexed row itself carries no contentHash', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'nohash.md', mtime: 500 }],
+		indexedPaths: [{ path: 'nohash.md', mtime: 100, chunkCount: 1, embeddedCount: 1 }],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['nohash.md', 'whatever']]),
+	});
+	assert.deepEqual(result.stale, ['nohash.md']);
+	assert.deepEqual(result.mtimeOnly, []);
+});
+
+// WP-G2: chunker-verified missing — unindexable closes the permanent phantom-missing loop.
+
+test('a missing candidate whose real chunk count is zero reclassifies unindexable, not missing', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'frontmatter-only.md', mtime: 10 }],
+		indexedPaths: [],
+		images: [],
+		semanticEnabled: true,
+		missingChunkCounts: new Map([['frontmatter-only.md', 0]]),
+	});
+	assert.deepEqual(result.missing, []);
+	assert.deepEqual(result.unindexable, ['frontmatter-only.md']);
+	assert.equal(isCleanAudit(result), true, 'unindexable is informational, not a defect');
+	assert.equal(isReconcileTargetClean(result), true);
+});
+
+test('a missing candidate with a non-zero real chunk count stays missing', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'real-content.md', mtime: 10 }],
+		indexedPaths: [],
+		images: [],
+		semanticEnabled: true,
+		missingChunkCounts: new Map([['real-content.md', 3]]),
+	});
+	assert.deepEqual(result.missing, ['real-content.md']);
+	assert.deepEqual(result.unindexable, []);
+});
+
+test('a missing candidate with no verification entry keeps today\'s behavior: missing, not silently reclassified', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'unverified-missing.md', mtime: 10 }],
+		indexedPaths: [],
+		images: [],
+		semanticEnabled: true,
+		// missingChunkCounts omitted entirely.
+	});
+	assert.deepEqual(result.missing, ['unverified-missing.md']);
+	assert.deepEqual(result.unindexable, []);
+});
+
+test('mtimeOnly and unindexable are excluded from missing/stale, so reconcile\'s [...missing, ...stale] enqueue set never contains them', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [
+			{ path: 'touched.md', mtime: 500 },
+			{ path: 'genuinely-stale.md', mtime: 500 },
+			{ path: 'frontmatter-only.md', mtime: 10 },
+			{ path: 'genuinely-missing.md', mtime: 10 },
+		],
+		indexedPaths: [
+			indexedRow({ path: 'touched.md', mtime: 100, contentHash: 'same' }),
+			indexedRow({ path: 'genuinely-stale.md', mtime: 100, contentHash: 'old' }),
+		],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['touched.md', 'same'], ['genuinely-stale.md', 'new']]),
+		missingChunkCounts: new Map([['frontmatter-only.md', 0], ['genuinely-missing.md', 2]]),
+	});
+	assert.deepEqual(result.mtimeOnly, ['touched.md']);
+	assert.deepEqual(result.unindexable, ['frontmatter-only.md']);
+	const enqueueSet = [...result.missing, ...result.stale];
+	assert.deepEqual(enqueueSet.sort(), ['genuinely-missing.md', 'genuinely-stale.md']);
+	assert.ok(!enqueueSet.includes('touched.md'));
+	assert.ok(!enqueueSet.includes('frontmatter-only.md'));
+});
+
+test('mtimeOnly and unindexable are each returned sorted, independent of input order', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [
+			{ path: 'z-touched.md', mtime: 500 },
+			{ path: 'a-touched.md', mtime: 500 },
+			{ path: 'z-empty.md', mtime: 10 },
+			{ path: 'a-empty.md', mtime: 10 },
+		],
+		indexedPaths: [
+			indexedRow({ path: 'z-touched.md', mtime: 100, contentHash: 'same' }),
+			indexedRow({ path: 'a-touched.md', mtime: 100, contentHash: 'same' }),
+		],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['z-touched.md', 'same'], ['a-touched.md', 'same']]),
+		missingChunkCounts: new Map([['z-empty.md', 0], ['a-empty.md', 0]]),
+	});
+	assert.deepEqual(result.mtimeOnly, ['a-touched.md', 'z-touched.md']);
+	assert.deepEqual(result.unindexable, ['a-empty.md', 'z-empty.md']);
+});
+
+// WP-G2: report text — the two new classes read as informational, never gain a repair command.
+
+test('formatAuditReport summarizes mtimeOnly/unindexable counts and lists them under their own informational sections', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'touched.md', mtime: 500 }, { path: 'frontmatter-only.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'touched.md', mtime: 100, contentHash: 'same' })],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['touched.md', 'same']]),
+		missingChunkCounts: new Map([['frontmatter-only.md', 0]]),
+	});
+	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
+	assert.match(report, /Mtime-only \(newer mtime, unchanged content — index is current; no action needed\): 1/);
+	assert.match(report, /Unindexable \(no indexable content — frontmatter-only; nothing to index; no action needed\): 1/);
+	assert.match(report, /## Mtime only \(unchanged content — informational, no action needed\)\n- touched\.md/);
+	assert.match(report, /## Unindexable \(no content to index — informational, no action needed\)\n- frontmatter-only\.md/);
+	// Missing/stale summary lines report zero — the two files fully moved out of those classes.
+	assert.match(report, /Missing \(in vault, not indexed\): 0/);
+	assert.match(report, /Stale \(vault newer than indexed, content changed\): 0/);
+});
+
+test('formatAuditReport names no repair command for mtimeOnly or unindexable — they are not defects', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'touched.md', mtime: 500 }, { path: 'frontmatter-only.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'touched.md', mtime: 100, contentHash: 'same' })],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['touched.md', 'same']]),
+		missingChunkCounts: new Map([['frontmatter-only.md', 0]]),
+	});
+	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
+	// No repair section at all: missing/stale/orphans/embeddingGaps/imageCoverage are all zero,
+	// and mtimeOnly/unindexable never contribute a repair line.
+	assert.doesNotMatch(report, /## Repair/);
+});
+
+test('formatReconcileNothingToDoSummary treats mtimeOnly/unindexable-only findings as fully clean', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'touched.md', mtime: 500 }, { path: 'frontmatter-only.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'touched.md', mtime: 100, contentHash: 'same' })],
+		images: [],
+		semanticEnabled: true,
+		staleContentHashes: new Map([['touched.md', 'same']]),
+		missingChunkCounts: new Map([['frontmatter-only.md', 0]]),
+	});
+	assert.equal(formatReconcileNothingToDoSummary(result), 'Search: reconcile index — already matches the vault. Nothing to do.');
 });
 
 test('formatReconcileCompletedSummary names unhandled embedding/image classes alongside a real enqueue result', () => {
