@@ -485,7 +485,9 @@ export class IngestionDashboardUI {
 	): void {
 		const card = this.container.createDiv({ cls: 'crucible-settings-group crucible-ingestion-section' });
 		const { heading, countEl, metaEl } = this.createSectionHeader(card, title, description, defaultCollapsed);
-		const refreshBtn = heading.createEl('button', { text: 'Refresh', cls: 'crucible-ingestion-refresh' });
+		const refreshBtn = heading.createEl('button', { cls: 'crucible-ingestion-refresh' });
+		setIcon(refreshBtn, 'refresh-cw');
+		refreshBtn.createSpan({ text: ' Refresh' });
 		decorateHeader?.(heading);
 		const body = card.createDiv({ cls: 'crucible-ingestion-section-body' });
 		body.createDiv({ cls: 'crucible-empty-state', text: 'Loading…' });

@@ -97,7 +97,7 @@ function renderCaptureListSection(tab: CrucibleSettingTab, containerEl: HTMLElem
 			const setting = new Setting(group)
 				.setName(capture.name || '(unnamed)')
 				.setDesc(describeCapture(capture))
-				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate capture').onClick(async () => {
+				.addExtraButton(cb => cb.setIcon('copy-plus').setTooltip('Duplicate capture').onClick(async () => {
 					const copy = JSON.parse(JSON.stringify(capture)) as Capture;
 					copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
 					tab.plugin.settings.captures.push(copy);
@@ -186,7 +186,7 @@ function renderChainListSection(tab: CrucibleSettingTab, containerEl: HTMLElemen
 			debug.setAttr('aria-label', 'Debug mode');
 			debug.setAttr('title', 'Debug mode');
 			setting
-				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate chain').onClick(async () => {
+				.addExtraButton(cb => cb.setIcon('copy-plus').setTooltip('Duplicate chain').onClick(async () => {
 					const copy = JSON.parse(JSON.stringify(chain)) as Chain;
 					copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
 					tab.plugin.settings.chains.push(copy);
@@ -270,7 +270,7 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 				chain.variables = variables;
 				await save();
 			}).inputEl.addClass('pi-width-normal'));
-		row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove variable').onClick(async () => {
+		row.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove variable').onClick(async () => {
 			if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-variable-delete', {
 				message: `Delete variable "${key || '(unnamed)'}"?`,
 			}))) return;
@@ -317,7 +317,7 @@ function renderEditChain(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 					await save();
 					tab.refreshDisplay();
 				}))
-			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove step').onClick(async () => {
+			.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove step').onClick(async () => {
 				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'chain-step-delete', {
 					message: `Delete step ${index + 1} of chain "${chain.name || '(unnamed)'}"?`,
 				}))) return;
@@ -575,7 +575,7 @@ function renderShortcutSettings(tab: CrucibleSettingTab, containerEl: HTMLElemen
 				if (el) el.addClass('crucible-search-container', 'pi-width-normal');
 				new FileSuggest(tab.app, cb.inputEl);
 			})
-			.addExtraButton(cb => { cb.setIcon('trash').onClick(async () => {
+			.addExtraButton(cb => { cb.setIcon('x').onClick(async () => {
 				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'shortcut-delete', {
 					message: `Delete shortcut "${shortcut.name || '(unnamed)'}"?`,
 				}))) return;

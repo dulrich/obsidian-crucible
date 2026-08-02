@@ -171,7 +171,7 @@ function renderConstrainedBindingEditor(
 				: `${ref.providerId}:${ref.modelId} (missing)`;
 			new Setting(list)
 				.setName(label)
-				.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove').onClick(async () => {
+				.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove').onClick(async () => {
 					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'constrained-binding-model-delete', {
 						message: `Remove "${label}" from the allowed models list?`,
 					}))) return;

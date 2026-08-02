@@ -94,7 +94,7 @@ function renderCurrencyPairsEditor(tab: CrucibleSettingTab, containerEl: HTMLEle
 					.onChange(async (v) => { pair.label = v; await save(); });
 				t.inputEl.addClass('pi-width-normal');
 			});
-			row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove pair').onClick(async () => {
+			row.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove pair').onClick(async () => {
 				if (!(await confirmDestructive(tab.app, s, 'fx-pair-delete', {
 					message: `Delete FX pair "${pair.label || `${pair.base} -> ${pair.quote}` || '(unnamed)'}"?`,
 				}))) return;
@@ -179,7 +179,7 @@ function renderWeatherLocationsEditor(tab: CrucibleSettingTab, containerEl: HTML
 				t.inputEl.type = 'number';
 				t.inputEl.addClass('pi-width-small');
 			});
-			row.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove location').onClick(async () => {
+			row.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove location').onClick(async () => {
 				if (!(await confirmDestructive(tab.app, s, 'weather-location-delete', {
 					message: `Delete weather location "${loc.label || '(unnamed)'}"?`,
 				}))) return;

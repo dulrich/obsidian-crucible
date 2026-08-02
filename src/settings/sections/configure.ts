@@ -83,7 +83,7 @@ export function renderConfigureSettings(tab: CrucibleSettingTab, containerEl: HT
 				new FileSuggest(tab.app, cb.inputEl);
 			})
 			.addExtraButton(cb => {
-				cb.setIcon('trash').onClick(async () => {
+				cb.setIcon('x').onClick(async () => {
 					if (!(await confirmDestructive(tab.app, s, 'folder-template-delete', {
 						message: `Delete folder template mapping for "${ft.folder || '(unnamed)'}"?`,
 					}))) return;
@@ -245,7 +245,7 @@ function renderPinnedFoldersSettings(tab: CrucibleSettingTab, containerEl: HTMLE
 				suggest: (el) => { new FolderSuggest(tab.app, el); },
 			}, save);
 			setting.addExtraButton(cb => {
-				cb.setIcon('trash')
+				cb.setIcon('x')
 					.setTooltip('Remove pinned folder')
 					.onClick(async () => {
 						if (!(await confirmDestructive(tab.app, s, 'pinned-folder-delete', {
