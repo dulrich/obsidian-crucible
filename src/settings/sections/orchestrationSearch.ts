@@ -142,13 +142,15 @@ function renderSearchHealthStatusSettings(tab: CrucibleSettingTab, searchGroup: 
 		// existing children (they both go through Node.empty() under the hood), so
 		// naively calling setIcon() once and setButtonText() on every state change
 		// would silently drop the icon the first time the text swaps. Compose both
-		// by hand instead, matching the repo's icon+label DOM shape (setIcon then a
-		// leading-space text span — see settings.ts's tab buttons / sourceEvalDashboard's
-		// Export button) and re-apply it on every state change.
+		// by hand instead, matching the repo's icon+label DOM shape (setIcon then a text
+		// span gapped via .crucible-icon-label-btn — see sourceEvalDashboard's Export
+		// button) and re-apply it on every state change. The class is added once here,
+		// not inside setLabel: buttonEl.empty() clears children, not classes.
+		bt.buttonEl.addClass('crucible-icon-label-btn');
 		const setLabel = (text: string) => {
 			bt.buttonEl.empty();
 			setIcon(bt.buttonEl, 'refresh-cw');
-			bt.buttonEl.createSpan({ text: ` ${text}` });
+			bt.buttonEl.createSpan({ text });
 		};
 		setLabel('Refresh');
 		bt.onClick(async () => {
