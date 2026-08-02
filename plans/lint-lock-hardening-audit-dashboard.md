@@ -1,5 +1,7 @@
 # Plan H — Lint/lock class hardening + Search-audit Ingestion-Dashboard section
 
+> **STATUS: COMPLETE** (2026-08-02). All five WPs landed on master: H2 `7d5f63d` (note-lock slow-acquire diagnostic + honest overlay labels), H3 `31a8cb7` (auditRun.ts extraction + shared enqueueSearchRepairs), H1 `88cab9c` (never-indexed frontmatter fast path + write watchdogs + lintFolder hardening), H4 `1db0058` (searchAudit dashboard section, wrench repair, forced-trigger only), H5 this commit. Test floor rose 1812/140 → 1844/144. Live validation checklist handed to user at close; the hang mechanism remains unproven — the H1 watchdogs and H2 slow-acquire diagnostic are the instrument for the next occurrence.
+
 Repo: **obsidian-crucible** · slug `lint-lock-hardening-audit-dashboard` · follows Plan G (closed at `2ac2ad7`; G1/G2/G3/G5 validated clean).
 
 *Recommended model/effort — Claude: Sonnet/medium workers H1–H4, orchestrator (Fable) closes H5 direct; Codex: Terra/medium workers, Sol/medium orchestrator.*
