@@ -18,6 +18,7 @@
  */
 
 import { SearchIndexedPath } from './types';
+import { AuditConditionDescriptor, AuditConditionKey, conditionFor, NOTE_CONDITIONS } from './auditConditions';
 
 export interface AuditVaultFile {
 	path: string;
@@ -267,21 +268,46 @@ export function computeSearchAudit(input: ComputeSearchAuditInput): SearchAuditR
 }
 
 /**
- * Per-class repair instruction, keyed the same way `formatRepairSection` walks the result —
- * WP-F3: the audit used to name zero repair commands, leaving a user who ran it with a dirty
- * report no path forward except reading source. Missing/stale/orphans all repair through the
- * same command (reconcile's upsert half for the first two, its confirm-gated delete half for
- * orphans); embedding gaps and image coverage are NOT touched by reconcile (see the `/v1/paths`
- * quirk in `src/search/AGENTS.md`) and need their own dedicated commands.
+ * WP-R3: the report's per-condition repair sentence, derived from `repairPolicy` (plus
+ * `classLabel` for the two policies whose wording embeds the class noun) instead of a
+ * hand-maintained `Record` keyed in parallel with the dashboard's own per-key branches (the old
+ * `REPAIR_INSTRUCTIONS`, deleted by this WP — see `src/search/auditConditions.ts` for the shared
+ * descriptor set both this file and `src/ingestion/sections/searchAudit.ts` now read).
+ * `null` for `informational` conditions (mtimeOnly/unindexable): no command exists to name —
+ * WP-G2 made that the whole point of the two classes.
  */
-const REPAIR_INSTRUCTIONS: Record<'missing' | 'stale' | 'orphans' | 'embeddingGaps' | 'imagePending' | 'imageFailed', string> = {
-	missing: 'Run "Search: reconcile index" — it enqueues a search_upsert_file job for each missing path.',
-	stale: 'Run "Search: reconcile index" — it enqueues a search_upsert_file job for each stale path.',
-	orphans: 'Run "Search: reconcile index" — its orphan-deletion half (confirm-gated) enqueues a search_delete_path job for each orphaned path.',
-	embeddingGaps: 'Run "Search: embed missing vectors" (requires semantic search enabled and an embedding model configured; NOT handled by reconcile).',
-	imagePending: 'Run "Search: describe vault images" (NOT handled by reconcile).',
-	imageFailed: 'Run "Search: retry failed image descriptions" (NOT handled by reconcile).',
+function reportRepairInstruction(descriptor: AuditConditionDescriptor): string | null {
+	switch (descriptor.repairPolicy) {
+		case 'reconcile-upsert':
+			return `Run "Search: reconcile index" — it enqueues a search_upsert_file job for each ${descriptor.classLabel} path.`;
+		case 'reconcile-orphan':
+			return 'Run "Search: reconcile index" — its orphan-deletion half (confirm-gated) enqueues a search_delete_path job for each orphaned path.';
+		case 'embed-missing':
+			return 'Run "Search: embed missing vectors" (requires semantic search enabled and an embedding model configured; NOT handled by reconcile).';
+		case 'image-backfill':
+			return 'Run "Search: describe vault images" (NOT handled by reconcile).';
+		case 'image-retry':
+			return 'Run "Search: retry failed image descriptions" (NOT handled by reconcile).';
+		case 'informational':
+		default:
+			return null;
+	}
+}
+
+// The two image conditions have no `reportSectionTitle` (the report never lists image paths —
+// see auditConditions.ts's module doc), so the Repair section's line prefix for them is named
+// here instead — "Image coverage (pending)"/"(failed)", matching the report's combined Summary
+// bullet's vocabulary rather than the dashboard's "Images pending"/"Images failed" row labels.
+const IMAGE_REPAIR_PREFIX: Partial<Record<AuditConditionKey, string>> = {
+	imagePending: 'Image coverage (pending)',
+	imageFailed: 'Image coverage (failed)',
 };
+
+// Repair-section line order — deliberately NOT the Summary section's order (there, orphans reads
+// third; here it reads third too, but stale reads BEFORE orphans — this is the order the
+// "## Repair" section has always listed its lines in, and formatAuditReport's byte-identical
+// contract means it stays exactly this order rather than being re-derived from SUMMARY_ORDER).
+const REPAIR_SECTION_ORDER: readonly AuditConditionKey[] = ['missing', 'stale', 'orphans', 'embeddingGaps', 'imagePending', 'imageFailed'];
 
 /**
  * Renders `search-audit-index`'s report note. `generatedAt` is a caller-supplied timestamp
@@ -294,26 +320,14 @@ export function formatAuditReport(result: SearchAuditResult, generatedAt: string
 		`# Search index audit — ${generatedAt}`,
 		'',
 		'## Summary',
-		`- Missing (in vault, not indexed): ${result.missing.length}`,
-		`- Orphans (indexed, not in vault): ${result.orphans.length}`,
-		`- Stale (vault newer than indexed, content changed): ${result.stale.length}`,
-		`- Mtime-only (newer mtime, unchanged content — index is current; no action needed): ${result.mtimeOnly.length}`,
-		`- Unindexable (no indexable content — frontmatter-only; nothing to index; no action needed): ${result.unindexable.length}`,
-		`- Embedding gaps (embedded < chunks): ${result.embeddingGaps.length}`,
+		...NOTE_CONDITIONS.map(descriptor => `- ${descriptor.reportSummaryLabel}: ${descriptor.paths(result).length}`),
 		`- Image coverage: ${result.imageCoverage.described}/${result.imageCoverage.referenced} described, `
 			+ `${result.imageCoverage.failed} failed, ${result.imageCoverage.pending} pending`,
 		'',
 	];
 	const repairSection = formatRepairSection(result);
 	if (repairSection) lines.push(repairSection);
-	lines.push(
-		formatAuditSection('Missing', result.missing),
-		formatAuditSection('Orphans', result.orphans),
-		formatAuditSection('Stale', result.stale),
-		formatAuditSection('Mtime only (unchanged content — informational, no action needed)', result.mtimeOnly),
-		formatAuditSection('Unindexable (no content to index — informational, no action needed)', result.unindexable),
-		formatAuditSection('Embedding gaps', result.embeddingGaps),
-	);
+	lines.push(...NOTE_CONDITIONS.map(descriptor => formatAuditSection(descriptor.reportSectionTitle ?? descriptor.classLabel, descriptor.paths(result))));
 	return `${lines.join('\n')}\n`;
 }
 
@@ -325,12 +339,14 @@ export function formatAuditReport(result: SearchAuditResult, generatedAt: string
  */
 function formatRepairSection(result: SearchAuditResult): string {
 	const lines: string[] = [];
-	if (result.missing.length > 0) lines.push(`- Missing: ${REPAIR_INSTRUCTIONS.missing}`);
-	if (result.stale.length > 0) lines.push(`- Stale: ${REPAIR_INSTRUCTIONS.stale}`);
-	if (result.orphans.length > 0) lines.push(`- Orphans: ${REPAIR_INSTRUCTIONS.orphans}`);
-	if (result.embeddingGaps.length > 0) lines.push(`- Embedding gaps: ${REPAIR_INSTRUCTIONS.embeddingGaps}`);
-	if (result.imageCoverage.pending > 0) lines.push(`- Image coverage (pending): ${REPAIR_INSTRUCTIONS.imagePending}`);
-	if (result.imageCoverage.failed > 0) lines.push(`- Image coverage (failed): ${REPAIR_INSTRUCTIONS.imageFailed}`);
+	for (const key of REPAIR_SECTION_ORDER) {
+		const descriptor = conditionFor(key);
+		if (descriptor.paths(result).length === 0) continue;
+		const instruction = reportRepairInstruction(descriptor);
+		if (!instruction) continue;
+		const prefix = descriptor.reportSectionTitle ?? IMAGE_REPAIR_PREFIX[key] ?? descriptor.classLabel;
+		lines.push(`- ${prefix}: ${instruction}`);
+	}
 	if (lines.length === 0) return '';
 	lines.push('', 'Re-run "Search: audit index" after repairing to refresh this report — reconcile does not do it automatically.');
 	return `## Repair\n${lines.join('\n')}\n`;
