@@ -35,6 +35,21 @@ export async function updateFrontmatter(
 	update: (fm: FrontmatterRecord) => void,
 	cacheBarrierTimeoutMs = FRONTMATTER_CACHE_BARRIER_TIMEOUT_MS,
 ): Promise<void> {
+	// Asymmetric case: the cache still reports a frontmatterPosition but the raw file has
+	// no `---` block at all (the block was deleted/never landed after the cache indexed
+	// it). Nothing is writing this file, so no metadataCache 'changed' event will ever fire
+	// to release waitForFreshFrontmatterCache's wait — it would just burn the full
+	// cacheBarrierTimeoutMs — and handing processFrontMatter the stale position risks it
+	// mis-splicing against a block that no longer exists. Detect it up front and go
+	// straight to the index-based splice-creation path instead of either.
+	if (file.extension === 'md' && cacheClaimsFrontmatterBlock(app, file)) {
+		const content = await app.vault.read(file);
+		if (content.match(FRONTMATTER_REGEX) === null) {
+			await writeViaBlockDeletedSpliceCreate(app, file, update);
+			return;
+		}
+	}
+
 	const fresh = await waitForFreshFrontmatterCache(app, file, cacheBarrierTimeoutMs);
 	if (fresh) {
 		await app.fileManager.processFrontMatter(file, update);
@@ -77,24 +92,53 @@ export async function updateFrontmatter(
 	}
 }
 
-// Fallback write path for updateFrontmatter's stale-cache-timeout case. Re-reads the
-// file's actual current bytes (rather than trusting anything the metadata cache
-// reported), locates the frontmatter block by parsing the raw `---` delimiters, parses
-// it, applies `update` to that real object, and splices the serialized result back into
-// the content by index. This never touches `frontmatterPosition` and never does a
-// substring `String.replace` of the block text (which can corrupt an empty/odd block) —
-// the splice points come from the regex match's own span on the freshly-read content.
-async function repairFrontmatterViaContentSplice(
+// Whether the metadata cache still reports a frontmatterPosition for this file — cheap,
+// synchronous, no read. Callers pair this with an actual content read only when it's true,
+// since the common case (no block claimed by either side) never needs one.
+function cacheClaimsFrontmatterBlock(app: App, file: TFile): boolean {
+	return app.metadataCache.getFileCache(file)?.frontmatterPosition?.end?.offset !== undefined;
+}
+
+// Handles updateFrontmatter's block-deleted asymmetric case (cache claims a block, raw
+// content has none): goes straight to the splice-creation path — never processFrontMatter,
+// which would merge against the stale, now-nonexistent position — then verifies the
+// mutated keys landed, the same way the stale-cache-timeout path does, logging on failure.
+async function writeViaBlockDeletedSpliceCreate(
 	app: App,
 	file: TFile,
 	update: (fm: FrontmatterRecord) => void,
 ): Promise<void> {
+	const fm = await repairFrontmatterViaContentSplice(app, file, update);
+	const content = await app.vault.read(file);
+	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
+	const lost = Object.entries(fm).filter(([key, value]) => !frontmatterValueLanded(block, key, value));
+	if (lost.length > 0) {
+		logError(`frontmatter write lost after block-deleted splice-create for keys `
+			+ `[${lost.map(([key]) => key).join(', ')}] (${file.path})`);
+	}
+}
+
+// Fallback write path for updateFrontmatter's stale-cache-timeout and block-deleted cases.
+// Re-reads the file's actual current bytes (rather than trusting anything the metadata
+// cache reported), locates the frontmatter block by parsing the raw `---` delimiters,
+// parses it, applies `update` to that real object, and splices the serialized result back
+// into the content by index. This never touches `frontmatterPosition` and never does a
+// substring `String.replace` of the block text (which can corrupt an empty/odd block) —
+// the splice points come from the regex match's own span on the freshly-read content.
+// Returns the mutated frontmatter record so callers can verify what should have landed.
+async function repairFrontmatterViaContentSplice(
+	app: App,
+	file: TFile,
+	update: (fm: FrontmatterRecord) => void,
+): Promise<FrontmatterRecord> {
+	let mutatedFm: FrontmatterRecord = {};
 	await app.vault.process(file, (raw: string) => {
 		const bom = raw.startsWith('\uFEFF') ? '\uFEFF' : '';
 		const m = raw.match(FRONTMATTER_REGEX);
 		if (!m) {
 			const fm: FrontmatterRecord = {};
 			update(fm);
+			mutatedFm = fm;
 			const serialized = ObsidianAPI.stringifyYaml(fm).replace(/\n$/, '');
 			const body = bom ? raw.slice(1) : raw;
 			return `${bom}---\n${serialized}\n---\n\n${body}`;
@@ -105,6 +149,7 @@ async function repairFrontmatterViaContentSplice(
 			? (parsed as FrontmatterRecord)
 			: {};
 		update(fm);
+		mutatedFm = fm;
 
 		const trailingNewlines = m[2] ?? '';
 		const closeEnd = m[0].slice(0, m[0].length - trailingNewlines.length).replace(/[^\S\r\n]+$/, '').length;
@@ -114,6 +159,7 @@ async function repairFrontmatterViaContentSplice(
 		const serialized = ObsidianAPI.stringifyYaml(fm).replace(/\n$/, '');
 		return `${before}${bom}---\n${serialized}\n---${rest}`;
 	});
+	return mutatedFm;
 }
 
 // Raw-content check that a scalar write survived; structured values (arrays, objects)
