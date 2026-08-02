@@ -2,6 +2,7 @@ import type { App, TFile } from 'obsidian';
 import type { LocalizeMediaType } from '../../types';
 import type CruciblePlugin from '../../main';
 import type { JobSeed } from '../../orchestration/Orchestrator';
+import type { JobStatus } from '../../orchestration/types';
 
 export type IntakeKind = 'blog' | 'youtube';
 
@@ -63,6 +64,13 @@ export interface SectionContext extends TableStateContext {
 	body: HTMLElement;
 	countEl: HTMLElement;
 	metaEl: HTMLElement;
+	// WP-DP3, queueMonitor.ts only: the status filter bar's active selection. null =
+	// the default combined queued+running view. Lives here (rather than a
+	// module-level variable in queueMonitor.ts) so it survives across the section's
+	// own re-renders without threading an extra parameter through the pinned
+	// `renderQueueMonitor(host, body, ctx, statsRow)` call shape — every other
+	// section simply never sets it.
+	queueStatusFilter?: JobStatus | null;
 }
 
 // Narrow seam section modules render against instead of the full controller:
