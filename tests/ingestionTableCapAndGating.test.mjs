@@ -267,6 +267,12 @@ test('STRUCTURAL (rsp-wp5 P6): FAST_SECTIONS / SCAN_SECTIONS partition every aut
 	}
 	const overlap = fast.filter(id => scan.includes(id));
 	assert.deepEqual(overlap, [], 'no SectionId may belong to both cadence classes');
+
+	// WP-H4: searchAudit is forced-trigger only — like queueControls/channelControl, it has no
+	// vault-event-driven auto-refresh trigger at all, and its scan is additionally expensive/
+	// unbounded on a cold index (every candidate costs a read + full chunker run, plus a
+	// companion round trip), so it must never be reachable from either cadence gate.
+	assert.ok(!fast.includes('searchAudit') && !scan.includes('searchAudit'), 'searchAudit must not belong to either cadence class — it only ever repaints from its own Run-audit button');
 });
 
 test('STRUCTURAL (rsp-wp5 P6): markDirty routes to the fast gate for FAST_SECTIONS ids and the scan gate for SCAN_SECTIONS ids, nothing else', () => {
