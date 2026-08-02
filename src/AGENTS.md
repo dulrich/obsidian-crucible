@@ -1,7 +1,8 @@
 # src/ — flat plugin modules (lint, localize, chains, commands, agents, dataview)
 
 Local instructions for the ~30 top-level `src/*.ts` modules that have no subdirectory of
-their own — the lint engine (`lint.ts`), attachment localizer (`localizeAttachments.ts`),
+their own — the lint engine (`lint.ts`), attachment localizer (`localizeAttachments.ts`) and
+its pure ref/repair core (`attachmentRepair.ts`),
 chain runner (`chains.ts`), command registration (`commands.ts`, `internalCommands.ts`),
 agents (`agents.ts`), fuzzy suggesters (`suggesters.ts`, `modelPicker.ts`), and
 `frontmatter.ts`. The root `AGENTS.md` is the canonical contract (Rule 0: walk root → here
