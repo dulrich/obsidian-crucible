@@ -7,7 +7,8 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans: []
+pending-plans:
+  - "[[lint-lock-hardening-audit-dashboard]]"
 initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 50
