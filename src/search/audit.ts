@@ -30,6 +30,14 @@ export type AuditImageStatus = 'described' | 'failed' | 'pending';
 export interface AuditImage {
 	md5: string;
 	status: AuditImageStatus;
+	/**
+	 * WP-I1: the vault-relative path of the referenced image (from `computeReferencedImagePaths`,
+	 * `src/orchestration/utils/imageDescribe.ts` — already available at the `gatherSearchAuditImages`
+	 * call site, just not threaded through before this). Feeds `imageCoverage.pendingPaths`/
+	 * `failedPaths` so a future dashboard row can filter the paths table to the affected images
+	 * without re-deriving them.
+	 */
+	path: string;
 }
 
 export interface ComputeSearchAuditInput {
@@ -109,6 +117,17 @@ export interface SearchAuditResult {
 		failed: number;
 		/** Referenced but neither described nor failed — the backfill's actual work queue. */
 		pending: number;
+		/**
+		 * WP-I1: paths of every image counted in `pending`, sorted — matches the sorted-array
+		 * convention of the six path classes above (`missing`/`orphans`/`stale`/`mtimeOnly`/
+		 * `unindexable`/`embeddingGaps`). `pendingPaths.length === pending` always.
+		 */
+		pendingPaths: string[];
+		/**
+		 * WP-I1: paths of every image counted in `failed`, sorted. `failedPaths.length === failed`
+		 * always.
+		 */
+		failedPaths: string[];
 	};
 }
 
@@ -215,10 +234,18 @@ export function computeSearchAudit(input: ComputeSearchAuditInput): SearchAuditR
 	let described = 0;
 	let failed = 0;
 	let pending = 0;
+	const pendingPaths: string[] = [];
+	const failedPaths: string[] = [];
 	for (const image of input.images) {
-		if (image.status === 'described') described++;
-		else if (image.status === 'failed') failed++;
-		else pending++;
+		if (image.status === 'described') {
+			described++;
+		} else if (image.status === 'failed') {
+			failed++;
+			failedPaths.push(image.path);
+		} else {
+			pending++;
+			pendingPaths.push(image.path);
+		}
 	}
 
 	return {
@@ -233,6 +260,8 @@ export function computeSearchAudit(input: ComputeSearchAuditInput): SearchAuditR
 			described,
 			failed,
 			pending,
+			pendingPaths: pendingPaths.sort(),
+			failedPaths: failedPaths.sort(),
 		},
 	};
 }

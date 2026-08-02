@@ -43,14 +43,16 @@ test('a healthy vault (indexed paths match the vault, no image gaps) reports cle
 	const result = computeSearchAudit({
 		vaultFiles: [{ path: 'a.md', mtime: 100 }, { path: 'b.md', mtime: 50 }],
 		indexedPaths: [indexedRow({ path: 'a.md', mtime: 100 }), indexedRow({ path: 'b.md', mtime: 50 })],
-		images: [{ md5: 'img1', status: 'described' }],
+		images: [{ md5: 'img1', status: 'described', path: 'images/img1.png' }],
 		semanticEnabled: true,
 	});
 	assert.deepEqual(result.missing, []);
 	assert.deepEqual(result.orphans, []);
 	assert.deepEqual(result.stale, []);
 	assert.deepEqual(result.embeddingGaps, []);
-	assert.deepEqual(result.imageCoverage, { referenced: 1, described: 1, failed: 0, pending: 0 });
+	assert.deepEqual(result.imageCoverage, {
+		referenced: 1, described: 1, failed: 0, pending: 0, pendingPaths: [], failedPaths: [],
+	});
 	assert.equal(isCleanAudit(result), true);
 });
 
@@ -134,24 +136,72 @@ test('image coverage: described, failed, and pending are counted independently, 
 		vaultFiles: [],
 		indexedPaths: [],
 		images: [
-			{ md5: 'd1', status: 'described' },
-			{ md5: 'd2', status: 'described' },
-			{ md5: 'f1', status: 'failed' },
-			{ md5: 'p1', status: 'pending' },
-			{ md5: 'p2', status: 'pending' },
-			{ md5: 'p3', status: 'pending' },
+			{ md5: 'd1', status: 'described', path: 'images/d1.png' },
+			{ md5: 'd2', status: 'described', path: 'images/d2.png' },
+			{ md5: 'f1', status: 'failed', path: 'images/f1.png' },
+			{ md5: 'p1', status: 'pending', path: 'images/p1.png' },
+			{ md5: 'p2', status: 'pending', path: 'images/p2.png' },
+			{ md5: 'p3', status: 'pending', path: 'images/p3.png' },
 		],
 		semanticEnabled: true,
 	});
-	assert.deepEqual(result.imageCoverage, { referenced: 6, described: 2, failed: 1, pending: 3 });
+	assert.deepEqual(result.imageCoverage, {
+		referenced: 6,
+		described: 2,
+		failed: 1,
+		pending: 3,
+		pendingPaths: ['images/p1.png', 'images/p2.png', 'images/p3.png'],
+		failedPaths: ['images/f1.png'],
+	});
 	assert.equal(isCleanAudit(result), false, 'failed and pending images both break the clean fast path');
+});
+
+// WP-I1: pendingPaths/failedPaths — sorted, independent of input order, and their lengths must
+// stay derived-identical to the pending/failed counts (never a second source of truth).
+
+test('imageCoverage.pendingPaths/failedPaths are sorted independent of input order, and their lengths match pending/failed', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [],
+		indexedPaths: [],
+		images: [
+			{ md5: 'p-z', status: 'pending', path: 'images/z-pending.png' },
+			{ md5: 'p-a', status: 'pending', path: 'images/a-pending.png' },
+			{ md5: 'f-z', status: 'failed', path: 'images/z-failed.png' },
+			{ md5: 'f-a', status: 'failed', path: 'images/a-failed.png' },
+			{ md5: 'd1', status: 'described', path: 'images/described.png' },
+		],
+		semanticEnabled: true,
+	});
+	assert.deepEqual(result.imageCoverage.pendingPaths, ['images/a-pending.png', 'images/z-pending.png']);
+	assert.deepEqual(result.imageCoverage.failedPaths, ['images/a-failed.png', 'images/z-failed.png']);
+	assert.equal(result.imageCoverage.pendingPaths.length, result.imageCoverage.pending);
+	assert.equal(result.imageCoverage.failedPaths.length, result.imageCoverage.failed);
+	// The described image contributes to neither path list.
+	assert.ok(!result.imageCoverage.pendingPaths.includes('images/described.png'));
+	assert.ok(!result.imageCoverage.failedPaths.includes('images/described.png'));
+});
+
+test('formatAuditReport output is unaffected by imageCoverage.pendingPaths/failedPaths — the report stays byte-identical', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [],
+		indexedPaths: [],
+		images: [
+			{ md5: 'p1', status: 'pending', path: 'images/p1.png' },
+			{ md5: 'f1', status: 'failed', path: 'images/f1.png' },
+		],
+		semanticEnabled: true,
+	});
+	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
+	assert.match(report, /Image coverage: 0\/2 described, 1 failed, 1 pending/);
+	assert.doesNotMatch(report, /images\/p1\.png/, 'the report never lists raw image paths');
+	assert.doesNotMatch(report, /images\/f1\.png/, 'the report never lists raw image paths');
 });
 
 test('isCleanAudit is false when only image coverage has a failed/pending count, even with empty path lists', () => {
 	const result = computeSearchAudit({
 		vaultFiles: [],
 		indexedPaths: [],
-		images: [{ md5: 'f1', status: 'failed' }],
+		images: [{ md5: 'f1', status: 'failed', path: 'images/f1.png' }],
 		semanticEnabled: true,
 	});
 	assert.equal(isCleanAudit(result), false);
@@ -160,7 +210,9 @@ test('isCleanAudit is false when only image coverage has a failed/pending count,
 test('a fully empty vault (no files, no index, no images) is clean', () => {
 	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
 	assert.equal(isCleanAudit(result), true);
-	assert.deepEqual(result.imageCoverage, { referenced: 0, described: 0, failed: 0, pending: 0 });
+	assert.deepEqual(result.imageCoverage, {
+		referenced: 0, described: 0, failed: 0, pending: 0, pendingPaths: [], failedPaths: [],
+	});
 });
 
 test('missing/orphans/stale/embeddingGaps are each returned sorted, independent of input order', () => {
@@ -193,7 +245,7 @@ test('formatAuditReport renders the summary counts and per-category path lists, 
 	const result = computeSearchAudit({
 		vaultFiles: [{ path: 'missing.md', mtime: 1 }],
 		indexedPaths: [indexedRow({ path: 'orphan.md' })],
-		images: [{ md5: 'p1', status: 'pending' }, { md5: 'f1', status: 'failed' }],
+		images: [{ md5: 'p1', status: 'pending', path: 'images/p1.png' }, { md5: 'f1', status: 'failed', path: 'images/f1.png' }],
 		semanticEnabled: true,
 	});
 	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
@@ -252,13 +304,13 @@ test('formatAuditReport names "Search: embed missing vectors" for embedding gaps
 
 test('formatAuditReport names describe/retry commands for pending and failed image coverage independently', () => {
 	const pendingOnly = formatAuditReport(computeSearchAudit({
-		vaultFiles: [], indexedPaths: [], images: [{ md5: 'p1', status: 'pending' }], semanticEnabled: true,
+		vaultFiles: [], indexedPaths: [], images: [{ md5: 'p1', status: 'pending', path: 'images/p1.png' }], semanticEnabled: true,
 	}), 'ts');
 	assert.match(pendingOnly, /- Image coverage \(pending\): Run "Search: describe vault images"/);
 	assert.doesNotMatch(pendingOnly, /retry failed image descriptions/);
 
 	const failedOnly = formatAuditReport(computeSearchAudit({
-		vaultFiles: [], indexedPaths: [], images: [{ md5: 'f1', status: 'failed' }], semanticEnabled: true,
+		vaultFiles: [], indexedPaths: [], images: [{ md5: 'f1', status: 'failed', path: 'images/f1.png' }], semanticEnabled: true,
 	}), 'ts');
 	assert.match(failedOnly, /- Image coverage \(failed\): Run "Search: retry failed image descriptions"/);
 	assert.doesNotMatch(failedOnly, /describe vault images"/);
@@ -270,7 +322,7 @@ test('isReconcileTargetClean is true when missing/stale/orphans are empty, even 
 	const result = computeSearchAudit({
 		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
 		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
-		images: [{ md5: 'p1', status: 'pending' }, { md5: 'f1', status: 'failed' }],
+		images: [{ md5: 'p1', status: 'pending', path: 'images/p1.png' }, { md5: 'f1', status: 'failed', path: 'images/f1.png' }],
 		semanticEnabled: true,
 	});
 	assert.equal(isReconcileTargetClean(result), true);
@@ -302,7 +354,7 @@ test('formatReconcileNothingToDoSummary names embedding-gap and image-coverage c
 	const result = computeSearchAudit({
 		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
 		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
-		images: [{ md5: 'p1', status: 'pending' }],
+		images: [{ md5: 'p1', status: 'pending', path: 'images/p1.png' }],
 		semanticEnabled: true,
 	});
 	const summary = formatReconcileNothingToDoSummary(result);
@@ -579,7 +631,7 @@ test('formatReconcileCompletedSummary names unhandled embedding/image classes al
 	const result = computeSearchAudit({
 		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
 		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
-		images: [{ md5: 'f1', status: 'failed' }],
+		images: [{ md5: 'f1', status: 'failed', path: 'images/f1.png' }],
 		semanticEnabled: true,
 	});
 	const summary = formatReconcileCompletedSummary(result, {
