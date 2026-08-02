@@ -72,7 +72,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { updateFrontmatter } = await import(pathToFileURL(outfile));
+const { updateFrontmatter, withWriteWatchdog } = await import(pathToFileURL(outfile));
 
 const file = { path: 'daily/note.md', extension: 'md' };
 
@@ -173,15 +173,27 @@ test('changed events for other files do not release the barrier', async () => {
 	assert.equal(state.writes.length, 1);
 });
 
-test('missing cache entry for a note with frontmatter is stale', async () => {
+test('never-indexed cache (inverted asymmetry): no dead wait, splice-updates the existing block instead (WP-H1)', async () => {
+	// The cache has never indexed a frontmatterPosition for this file at all — a first
+	// lint right after creation, or a second lint immediately after a formerly-empty note
+	// gained its first block — while the raw content already has a real `---` block. This
+	// used to burn the full cacheBarrierTimeoutMs waiting for a `changed` event nothing
+	// guarantees will fire for this specific transition (the old assertion below proved
+	// it: writes only landed after a manually-fired `fireChanged`). It must now resolve
+	// immediately via the same index-based splice machinery as the block-deleted case,
+	// never through processFrontMatter (which this file's own header comment establishes
+	// merges against the cache's view — unsafe to hand a file with no cached position).
 	const { app, state } = makeApp({ content: CONTENT, cache: null });
-	const pending = updateFrontmatter(app, file, fm => { fm['word-count'] = 9; }, 5000);
-	await tick();
-	assert.equal(state.writes.length, 0);
-	state.cache = FRESH_CACHE;
-	fireChanged(state, file);
-	await pending;
-	assert.equal(state.writes.length, 1);
+	const start = Date.now();
+	await updateFrontmatter(app, file, fm => { fm['word-count'] = 9; }, 5000);
+	const elapsed = Date.now() - start;
+	assert.ok(elapsed < 200, `expected no dead wait against a 5000ms barrier, took ${elapsed}ms`);
+	assert.equal(state.writes.length, 0, 'processFrontMatter must never see a file the cache has no position for at all');
+	assert.equal(state.listeners.size, 0, 'no metadataCache listener should be left behind');
+	const block = state.content.match(/---\n([\s\S]*?)\n---/)?.[1];
+	assert.ok(block, `expected the existing frontmatter block to survive, got:\n${state.content}`);
+	assert.ok(/word-count: 9/.test(block), `expected word-count to land, got:\n${block}`);
+	assert.ok(/title: X/.test(block), 'other keys must survive the splice-update');
 });
 
 test('matching offsets but diverged key set is stale', async () => {
@@ -301,4 +313,60 @@ test('non-markdown files skip the barrier', async () => {
 	const { app, state } = makeApp({ content: 'binary-ish', cache: null });
 	await updateFrontmatter(app, { path: 'img/pic.png', extension: 'png' }, fm => { fm.x = 1; }, 5000);
 	assert.equal(state.writes.length, 1);
+});
+
+test('write watchdog: logError fires once the op outlives the threshold, naming op/file/elapsed (WP-H1b)', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const errors = [];
+	const origError = console.error;
+	console.error = (...args) => errors.push(args.join(' '));
+	try {
+		let resolveOp;
+		const op = new Promise(resolve => { resolveOp = resolve; });
+		const watched = withWriteWatchdog(file, 'vault.process (test)', op, 20);
+		await new Promise(resolve => setTimeout(resolve, 80));
+		assert.ok(
+			errors.some(e => e.includes('vault.process (test)') && e.includes(file.path)),
+			`expected a watchdog logError naming the op and file, got: ${errors.join(' | ')}`,
+		);
+		resolveOp('done');
+		assert.equal(await watched, 'done', 'the watchdog must not race/reject — the op still resolves normally');
+	} finally {
+		console.error = origError;
+		delete globalThis.__CRUCIBLE_DEBUG__;
+	}
+});
+
+test('write watchdog: does not fire when the op settles before the threshold', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const errors = [];
+	const origError = console.error;
+	console.error = (...args) => errors.push(args.join(' '));
+	try {
+		const op = new Promise(resolve => setTimeout(() => resolve('quick'), 5));
+		const result = await withWriteWatchdog(file, 'vault.process (test)', op, 100);
+		assert.equal(result, 'quick');
+		// Give the (should-be-cleared) timer a chance to fire if it wasn't actually cleared.
+		await new Promise(resolve => setTimeout(resolve, 150));
+		assert.equal(errors.length, 0, `expected no watchdog log for a fast-settling op, got: ${errors.join(' | ')}`);
+	} finally {
+		console.error = origError;
+		delete globalThis.__CRUCIBLE_DEBUG__;
+	}
+});
+
+test('write watchdog: a rejecting op still rejects, and does not fire the watchdog once settled', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const errors = [];
+	const origError = console.error;
+	console.error = (...args) => errors.push(args.join(' '));
+	try {
+		const op = Promise.reject(new Error('write failed'));
+		await assert.rejects(() => withWriteWatchdog(file, 'vault.process (test)', op, 50), /write failed/);
+		await new Promise(resolve => setTimeout(resolve, 80));
+		assert.equal(errors.length, 0, `expected no watchdog log once the op already settled (rejected), got: ${errors.join(' | ')}`);
+	} finally {
+		console.error = origError;
+		delete globalThis.__CRUCIBLE_DEBUG__;
+	}
 });

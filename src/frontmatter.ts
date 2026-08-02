@@ -13,6 +13,9 @@ type FrontmatterRecord = Record<string, unknown>;
 
 export const FRONTMATTER_CACHE_BARRIER_TIMEOUT_MS = 2000;
 
+// Threshold for the write watchdogs below — see their doc comment for what they're for.
+export const FRONTMATTER_WRITE_WATCHDOG_MS = 5000;
+
 export async function withMaterializing<T>(setMaterializing: (state: boolean) => void, action: () => Promise<T>): Promise<T> {
 	setMaterializing(true);
 	try {
@@ -20,6 +23,30 @@ export async function withMaterializing<T>(setMaterializing: (state: boolean) =>
 	} finally {
 		setMaterializing(false);
 	}
+}
+
+// Non-cancelling watchdog for an in-flight Obsidian file-mutating await (`processFrontMatter`,
+// `vault.process`, …). Obsidian's `processFrontMatter`/`vault.process` are documented
+// atomic-per-file with no client-side bound; a live-vault forever-hang was traced to
+// (likely) that app-level per-file queue jamming — an op abandoned mid-flight at plugin
+// reload can jam the queue until a full app restart (see the processFrontMatter quirk in
+// AGENTS.md). This deliberately does NOT race/abort the operation — the op may still
+// complete on its own, and aborting risks a double write — it only names a stuck operation
+// in the debug log (file path, op label, elapsed ms) so a live jam is diagnosable instead
+// of silently hanging forever. The timer is cleared as soon as the promise settles either
+// way, so a normal fast write never logs anything.
+export function withWriteWatchdog<T>(
+	file: TFile,
+	op: string,
+	promise: Promise<T>,
+	timeoutMs: number = FRONTMATTER_WRITE_WATCHDOG_MS,
+): Promise<T> {
+	const startedAt = Date.now();
+	const timer = setTimeout(() => {
+		logError(`${op} has not settled after ${Date.now() - startedAt}ms (${file.path}) — `
+			+ `Obsidian's per-file write queue may be jammed; the operation may still complete`);
+	}, timeoutMs);
+	return promise.finally(() => clearTimeout(timer));
 }
 
 // All frontmatter writes go through here. `fileManager.processFrontMatter` merges the
@@ -50,20 +77,42 @@ export async function updateFrontmatter(
 		}
 	}
 
+	// Inverted asymmetric case: the cache has never indexed a frontmatterPosition for this
+	// file at all (`cachedEnd === undefined`) — a note the cache hasn't caught up to yet
+	// (first lint right after creation) or one that just gained its first block (second
+	// lint of a formerly-empty note) — while the raw content already HAS a `---` block.
+	// waitForFreshFrontmatterCache would burn the full cacheBarrierTimeoutMs here: nothing
+	// guarantees the cache's *next* `changed` event is the one that indexes this block, so
+	// this is not the genuine stale-position case (block in both, offsets merely disagree —
+	// that one keeps its bounded wait, since a rename + rapid edit really can resolve via
+	// the next cache tick). And handing processFrontMatter a file the cache has no position
+	// for at all is exactly the risk the block-deleted branch above avoids for the mirror
+	// case — this file's own header comment establishes processFrontMatter merges against
+	// the cache's view, not the raw bytes. So: skip the wait and go straight to the same
+	// index-based splice machinery as the block-deleted case, updating (not creating) the
+	// block that's actually there.
+	if (file.extension === 'md' && !cacheClaimsFrontmatterBlock(app, file)) {
+		const content = await app.vault.read(file);
+		if (content.match(FRONTMATTER_REGEX) !== null) {
+			await writeViaNeverIndexedSpliceUpdate(app, file, update);
+			return;
+		}
+	}
+
 	const fresh = await waitForFreshFrontmatterCache(app, file, cacheBarrierTimeoutMs);
 	if (fresh) {
-		await app.fileManager.processFrontMatter(file, update);
+		await withWriteWatchdog(file, 'processFrontMatter (fresh cache)', app.fileManager.processFrontMatter(file, update));
 		return;
 	}
 	logWarn(`frontmatter cache still stale after ${cacheBarrierTimeoutMs}ms; writing anyway (${file.path})`);
 	const mutated = new Map<string, unknown>();
-	await app.fileManager.processFrontMatter(file, (fm: FrontmatterRecord) => {
+	await withWriteWatchdog(file, 'processFrontMatter (stale cache, writing anyway)', app.fileManager.processFrontMatter(file, (fm: FrontmatterRecord) => {
 		const before = new Map(Object.entries(fm));
 		update(fm);
 		for (const key of Object.keys(fm)) {
 			if (!before.has(key) || before.get(key) !== fm[key]) mutated.set(key, fm[key]);
 		}
-	});
+	}));
 	if (mutated.size === 0) return;
 	const content = await app.vault.read(file);
 	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
@@ -118,6 +167,25 @@ async function writeViaBlockDeletedSpliceCreate(
 	}
 }
 
+// Handles updateFrontmatter's never-indexed inverted-asymmetry case (cache has no
+// frontmatterPosition for this file at all, raw content already has a block): goes
+// straight to the splice-*update* path — never processFrontMatter — then verifies the
+// mutated keys landed, the same way the block-deleted splice-create case does.
+async function writeViaNeverIndexedSpliceUpdate(
+	app: App,
+	file: TFile,
+	update: (fm: FrontmatterRecord) => void,
+): Promise<void> {
+	const fm = await repairFrontmatterViaContentSplice(app, file, update);
+	const content = await app.vault.read(file);
+	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
+	const lost = Object.entries(fm).filter(([key, value]) => !frontmatterValueLanded(block, key, value));
+	if (lost.length > 0) {
+		logError(`frontmatter write lost after never-indexed splice-update for keys `
+			+ `[${lost.map(([key]) => key).join(', ')}] (${file.path})`);
+	}
+}
+
 // Fallback write path for updateFrontmatter's stale-cache-timeout and block-deleted cases.
 // Re-reads the file's actual current bytes (rather than trusting anything the metadata
 // cache reported), locates the frontmatter block by parsing the raw `---` delimiters,
@@ -132,7 +200,7 @@ async function repairFrontmatterViaContentSplice(
 	update: (fm: FrontmatterRecord) => void,
 ): Promise<FrontmatterRecord> {
 	let mutatedFm: FrontmatterRecord = {};
-	await app.vault.process(file, (raw: string) => {
+	await withWriteWatchdog(file, 'vault.process (content-splice repair)', app.vault.process(file, (raw: string) => {
 		const bom = raw.startsWith('\uFEFF') ? '\uFEFF' : '';
 		const m = raw.match(FRONTMATTER_REGEX);
 		if (!m) {
@@ -158,7 +226,7 @@ async function repairFrontmatterViaContentSplice(
 		const rest = raw.slice(start + closeEnd);
 		const serialized = ObsidianAPI.stringifyYaml(fm).replace(/\n$/, '');
 		return `${before}${bom}---\n${serialized}\n---${rest}`;
-	});
+	}));
 	return mutatedFm;
 }
 
