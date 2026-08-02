@@ -10,6 +10,56 @@ export interface PaletteHint {
 	kind: 'unique' | 'top-match';
 }
 
+/** Bounds an empty-query row count, mirroring `FILE_OPEN_LIMIT` (`fileOpenRanking.ts`). */
+export const COMMAND_PALETTE_LIMIT = 100;
+
+/** One cache generation: the signature it was built for, plus its memoized hints. */
+interface HintCacheState {
+	signature: string;
+	hints: Map<string, PaletteHint | null>;
+}
+
+// Module-level so a hint computed on one palette open survives to the next one. The
+// previous cache was a `Map` *field* on `CrucibleCommandPaletteModal`, and Crucible
+// constructs a fresh modal instance per open (`commands.ts`), so it started empty every
+// time — the whole cost this WP removes. Only the LATEST signature's entries are kept
+// (a `null` state resets to a fresh Map) because there is only ever one "current"
+// disambiguation problem in a running plugin instance; a changed signature invalidates
+// wholesale rather than pruning per-entry, which is the simplest correct policy per the
+// governing plan (WP-G5).
+let hintCacheState: HintCacheState | null = null;
+
+/**
+ * Order-insensitive signature identifying "the same disambiguation problem": the
+ * launched command-name set (sorted, so open order never matters) plus every setting
+ * `computeHint` actually reads. Folding the hint settings in (not just the name list) is
+ * a deliberate widening of the plan's literal "signature of the command-name list": a
+ * settings-only change (e.g. flipping the hint charset or fallback) with an unchanged
+ * command set must still invalidate the cache, or the palette would silently keep
+ * serving hints computed under the old settings until some command was added/removed.
+ * `JSON.stringify` on a fixed-shape plain object also sidesteps hand-rolled delimiters
+ * (see the NUL-sentinel quirk in the root AGENTS.md) — cheap at ~85 names.
+ */
+export function computeHintCacheSignature(names: string[], settings: CrucibleSettings): string {
+	return JSON.stringify({
+		names: [...names].sort(),
+		maxLen: settings.crucibleCommandPaletteHintMaxLen,
+		charsetMode: settings.crucibleCommandPaletteHintCharsetMode,
+		whitelist: settings.crucibleCommandPaletteHintWhitelist,
+		prefixPenalty: settings.crucibleCommandPaletteHintPrefixPenalty,
+		positionBias: settings.crucibleCommandPaletteHintPositionBias,
+		fallbackTopMatch: settings.crucibleCommandPaletteHintFallbackTopMatch,
+	});
+}
+
+/** The hint cache for `signature`, resetting to empty whenever the signature changes. */
+export function getHintCache(signature: string): Map<string, PaletteHint | null> {
+	if (hintCacheState === null || hintCacheState.signature !== signature) {
+		hintCacheState = { signature, hints: new Map() };
+	}
+	return hintCacheState.hints;
+}
+
 /** Charset predicate for hint candidate characters, per settings. */
 export function buildAllowedChar(settings: CrucibleSettings): (ch: string) => boolean {
 	if (settings.crucibleCommandPaletteHintCharsetMode === 'all-ascii') {
@@ -100,9 +150,11 @@ function isObsidianCommandAvailable(cmd: Command): boolean {
 
 export class CrucibleCommandPaletteModal extends FuzzySuggestModal<Command> {
 	private readonly pinnedOrder: Map<string, number>;
+	/** Swept once at construction and reused for every `getItems()` call this open. */
+	private readonly items: Command[];
 	/** Names of every command in the palette at launch — the set the unique string disambiguates against. */
 	private readonly launchedNames: string[];
-	private readonly hintCache = new Map<string, PaletteHint | null>();
+	private readonly hintCache: Map<string, PaletteHint | null>;
 	private readonly hintOptions: HintOptions;
 	private readonly scoreText = buildScoreText();
 
@@ -110,14 +162,20 @@ export class CrucibleCommandPaletteModal extends FuzzySuggestModal<Command> {
 		super(app);
 		this.setPlaceholder('Crucible: search commands...');
 		this.modalEl.addClass('crucible-command-palette');
+		this.limit = COMMAND_PALETTE_LIMIT;
 		const pinned = plugin.settings.crucibleCommandPalettePinned;
 		this.pinnedOrder = new Map(pinned.map((id, i) => [id, i]));
-		this.launchedNames = this.getItems().map(c => c.name);
+		// Single sweep of app.commands.commands for this open — getItems() below just
+		// returns this snapshot, instead of every keystroke's getSuggestions() (and the
+		// old launchedNames computation) each re-sweeping and re-filtering it.
+		this.items = getPaletteItems(this.app, this.plugin);
+		this.launchedNames = this.items.map(c => c.name);
 		this.hintOptions = buildHintOptions(plugin.settings);
+		this.hintCache = getHintCache(computeHintCacheSignature(this.launchedNames, plugin.settings));
 	}
 
 	getItems(): Command[] {
-		return getPaletteItems(this.app, this.plugin);
+		return this.items;
 	}
 
 	getItemText(cmd: Command): string {
