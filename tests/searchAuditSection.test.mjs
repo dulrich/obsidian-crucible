@@ -316,7 +316,7 @@ test('render: fixture result — six pills with honest counts and hues, default 
 	assert.ok(byLabel.get('embedding gaps 1').className.includes('is-muted'), 'embeddingGaps is not reconcile-actionable from here — neutral even when non-zero');
 
 	// Default (no filter) view: the table shows missing+orphans+stale only.
-	const tableContainer = body.children[2];
+	const tableContainer = body.children[3];
 	const rows = tableContainer.querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	assert.equal(rows.length, 3);
 	const paths = rows.map(tr => tr.children[0].textContent).sort();
@@ -324,6 +324,51 @@ test('render: fixture result — six pills with honest counts and hues, default 
 
 	assert.equal(state.count, 3, 'the header count is the stable defect total, not the filtered row count');
 	assert.match(state.meta, /^as of /);
+});
+
+test('render: image-coverage row — read-only neutral span pills with honest counts from the scan', async () => {
+	// Three localized images, all referenced via resolvedLinks: one described, one with a durable
+	// failed record, one pending (no record). Flows through the REAL gatherSearchAuditImages →
+	// computeSearchAudit path, not a hand-assembled imageCoverage.
+	const describedMd5 = 'a'.repeat(32);
+	const failedMd5 = 'b'.repeat(32);
+	const pendingMd5 = 'c'.repeat(32);
+	const { plugin } = makeFixturePlugin();
+	plugin.app.vault.getFiles = () => [
+		{ path: `img/${describedMd5}_MD5.png` },
+		{ path: `img/${failedMd5}_MD5.png` },
+		{ path: `img/${pendingMd5}_MD5.png` },
+	];
+	plugin.app.metadataCache.resolvedLinks = {
+		'note.md': {
+			[`img/${describedMd5}_MD5.png`]: 1,
+			[`img/${failedMd5}_MD5.png`]: 1,
+			[`img/${pendingMd5}_MD5.png`]: 1,
+		},
+	};
+	plugin.imageDescriptions = {
+		ensureLoaded: async () => {},
+		has: (md5) => md5 !== pendingMd5,
+		get: async (md5) => (md5 === failedMd5 ? { kind: 'failed' } : { kind: 'described' }),
+	};
+	const { host } = makeHost(plugin);
+	const section = createSearchAuditSection(host);
+	await runSuccessfulAudit(section);
+
+	const body = new FakeEl();
+	section.render(body, makeCtx(section.render, body));
+
+	const coverageRow = body.children[1];
+	assert.equal(buttons(coverageRow).length, 0, 'coverage pills are read-only spans, never buttons — nothing here is actionable');
+	const spans = coverageRow.querySelectorAll('span');
+	assert.deepEqual(
+		spans.map(s => s.textContent),
+		['images referenced 3', 'described 1', 'failed 1', 'pending 1'],
+	);
+	for (const span of spans) {
+		assert.ok(span.className.includes('is-muted'), 'image coverage never spends a status hue — neutral per the pill-taxonomy law');
+		assert.ok(span.title.length > 0, 'every pill carries an explanatory title');
+	}
 });
 
 test('render: clicking a pill filters the table to that class alone, click again returns to the combined view', async () => {
@@ -339,7 +384,7 @@ test('render: clicking a pill filters the table to that class alone, click again
 	const mtimePill = buttons(body.children[0]).find(b => b.textContent === 'mtime-only 1');
 	mtimePill.click();
 
-	const filteredRows = body.children[2].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
+	const filteredRows = body.children[3].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	assert.equal(filteredRows.length, 1);
 	assert.equal(filteredRows[0].children[0].textContent, 'mtimeonly.md');
 	const activePill = buttons(body.children[0]).find(b => b.textContent === 'mtime-only 1');
@@ -347,7 +392,7 @@ test('render: clicking a pill filters the table to that class alone, click again
 	assert.ok(activePill.className.includes('is-contrast'));
 
 	activePill.click(); // click again — back to the default combined view
-	const restoredRows = body.children[2].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
+	const restoredRows = body.children[3].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	assert.equal(restoredRows.length, 3);
 });
 
@@ -363,7 +408,7 @@ test('render: muted-wrench law — mtimeOnly/unindexable/embeddingGaps repair bu
 		section.render(body, ctx);
 		const pill = buttons(body.children[0]).find(b => b.textContent === label);
 		pill.click();
-		return body.children[2].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
+		return body.children[3].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	}
 
 	const mtimeRow = rowsForClass('mtime-only 1')[0];
@@ -395,7 +440,7 @@ test('render: open-note button — orphan rows are always muted, a resolvable pa
 	const body = new FakeEl();
 	const ctx = makeCtx(section.render, body);
 	section.render(body, ctx);
-	const rows = body.children[2].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
+	const rows = body.children[3].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	const byPath = new Map(rows.map(tr => [tr.children[0].textContent, tr]));
 
 	const orphanOpen = byPath.get('orphan.md').children[2].querySelectorAll('button')[0];
@@ -420,7 +465,7 @@ test('render: single-row repair enqueues the documented job for that path alone 
 	const body = new FakeEl();
 	const ctx = makeCtx(section.render, body);
 	section.render(body, ctx);
-	const rows = body.children[2].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
+	const rows = body.children[3].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	const missingRow = rows.find(tr => tr.children[0].textContent === 'missing.md');
 	const wrench = missingRow.children[2].querySelectorAll('button')[1];
 	wrench._listeners.click[0]();
@@ -447,10 +492,10 @@ test('render: bulk "Repair all" reads the cached FULL result, not the currently-
 	// Filter down to just one class (1 visible row) before clicking bulk repair.
 	const stalePill = buttons(body.children[0]).find(b => b.textContent === 'stale 1');
 	stalePill.click();
-	const visibleRows = body.children[2].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
+	const visibleRows = body.children[3].querySelectorAll('tr').filter(tr => tr.parentElement.tagName === 'TBODY');
 	assert.equal(visibleRows.length, 1, 'the table is now filtered down to one row');
 
-	const bulkBtn = buttons(body.children[1])[0];
+	const bulkBtn = buttons(body.children[2])[0];
 	bulkBtn.click();
 	await flush();
 

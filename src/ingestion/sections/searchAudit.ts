@@ -26,7 +26,8 @@ import type { DashboardHost, SectionContext } from '../render/types';
  * cached `{result, ranAt, error}`, refreshed only by an explicit button click, with the last
  * successful result surviving a later failed run (see the error branch below).
  *
- * v1 deliberately omits `SearchAuditResult.imageCoverage` — see the WP-H4 report for why.
+ * `SearchAuditResult.imageCoverage` renders as a read-only neutral-pill summary row (v2 —
+ * v1 omitted it; see `renderImageCoverageRow` for the no-render-time-gate rationale).
  */
 
 type AuditClass = 'missing' | 'orphans' | 'stale' | 'mtimeOnly' | 'unindexable' | 'embeddingGaps';
@@ -98,6 +99,8 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 			selectedClass = selectedClass === cls ? null : cls;
 			void ctx.refresh();
 		});
+
+		renderImageCoverageRow(body, currentResult);
 
 		const bulkRow = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
 		renderBulkRepairButton(host, bulkRow, () => result, () => {
@@ -203,6 +206,28 @@ function renderAuditFilterBar(
 			? `Showing ${label} paths only — click again to go back to the default view.`
 			: `Show only ${label} paths.`;
 		btn.addEventListener('click', () => onSelect(cls));
+	}
+}
+
+// Image-coverage summary (v2 follow-up to the WP-H4 v1 omission): the four counts
+// `runSearchAudit` already computed at scan time (`gatherSearchAuditImages` reads
+// `metadataCache.resolvedLinks` when the audit runs, so there is nothing to gate at render
+// time — the numbers are frozen into the cached result, same as the report note's "Image
+// coverage" line). Read-only span pills, all neutral: none of the four is actionable from this
+// section (pending belongs to the image-describe backfill, failed is a deliberate durable
+// skip), so per the pill-taxonomy law they never spend a status hue.
+function renderImageCoverageRow(body: HTMLElement, result: SearchAuditResult): void {
+	const row = body.createDiv({ cls: 'crucible-queue-stats-row' });
+	const c = result.imageCoverage;
+	const pills: Array<{ text: string; title: string }> = [
+		{ text: `images referenced ${c.referenced}`, title: 'Images referenced by a resolved link anywhere in the vault, as of this audit run.' },
+		{ text: `described ${c.described}`, title: 'Referenced images with a description record.' },
+		{ text: `failed ${c.failed}`, title: 'Durable failed records — the image-describe backfill will not retry these.' },
+		{ text: `pending ${c.pending}`, title: 'Referenced but neither described nor failed — the image-describe backfill’s work queue.' },
+	];
+	for (const p of pills) {
+		const span = row.createSpan({ cls: 'crucible-pill is-muted', text: p.text });
+		span.title = p.title;
 	}
 }
 
