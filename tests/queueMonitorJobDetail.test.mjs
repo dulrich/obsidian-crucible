@@ -121,9 +121,14 @@ test('formatJobDetail is exported for the Details button — STRUCTURAL: rendere
 	// gate is gone — and its absence is worth pinning, because re-introducing a
 	// per-row-source condition here would silently hide the only remaining surface a
 	// db-backed job has (there is no job note to open any more).
+	//
+	// WP-DP3: Details went icon-only (renderIconButton, 'info' glyph) as part of the
+	// row-scope icon language — the pin now matches that shape instead of the old
+	// text-button `createEl`.
 	const src = readFileSync('src/ingestion/sections/queueMonitor.ts', 'utf8');
 	assert.doesNotMatch(src, /r\.source/, 'QueueRow has no `source` discriminant post-cutover');
-	assert.match(src, /const details = td\.createEl\('button', \{ text: 'Details' \}\);/);
+	assert.match(src, /renderIconButton\(td, 'info', \{\s*\n\s*ariaLabel: 'Details',/);
+	assert.match(src, /onClick: \(\) => new JobDetailModal\(host\.app, r\)\.open\(\),/);
 });
 
 test('STRUCTURAL: the queue monitor reads every row through the Orchestrator seam, never a store', () => {
