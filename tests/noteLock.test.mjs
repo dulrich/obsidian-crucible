@@ -20,7 +20,7 @@ await esbuild.build({
 	outfile,
 });
 
-const { NoteLockManager, withOptionalNoteLock, resourceLockKey } = await import(pathToFileURL(outfile).href);
+const { NoteLockManager, withOptionalNoteLock, resourceLockKey, SLOW_ACQUIRE_WARN_MS } = await import(pathToFileURL(outfile).href);
 
 // Minimal event bus capturing emitted events.
 function makeBus() {
@@ -358,4 +358,91 @@ test('plain path locks still emit note-lock-changed when a bus is present', asyn
 	assert.equal(bus.events.length, 2, 'acquire + release each emit');
 	assert.equal(bus.events[0].name, 'note-lock-changed');
 	assert.equal(bus.events[1].name, 'note-lock-changed');
+});
+
+// ── Slow-acquire diagnostic (WP-H2) ──────────────────────────────────────────
+//
+// `logError`/`logWarn` (src/log.ts, bundled into the same esbuild output) are
+// gated behind debug mode; setting the global flag turns the gate on for these
+// tests without needing to import `setCrucibleDebug` (NoteLockManager.ts does
+// not re-export it). Captured via a `console.error` stub, restored per test.
+
+function captureConsoleError(t) {
+	const calls = [];
+	const original = console.error;
+	console.error = (...args) => calls.push(args);
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	t.after(() => {
+		console.error = original;
+		delete globalThis.__CRUCIBLE_DEBUG__;
+	});
+	return calls;
+}
+
+test('slow-acquire diagnostic fires once with path/holder/waiter labels when a waiter is starved past the threshold', async t => {
+	const calls = captureConsoleError(t);
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+
+	const locks = new NoteLockManager();
+	const relHolder = await locks.acquire('a.md', 'holder-label');
+	const pWaiter = locks.acquire('a.md', 'waiter-label');
+	const pOther = locks.acquire('a.md', 'other-waiter');
+
+	assert.equal(calls.length, 0, 'no diagnostic before the threshold elapses');
+
+	t.mock.timers.tick(SLOW_ACQUIRE_WARN_MS);
+
+	assert.equal(calls.length, 2, 'one diagnostic per starved waiter (fire-once each, not repeating)');
+	const [context, details] = calls[0];
+	assert.equal(context, '[crucible] note-lock slow acquire');
+	assert.deepEqual(details, {
+		path: 'a.md',
+		waitingLabel: 'waiter-label',
+		holderLabel: 'holder-label',
+		waiterLabels: ['waiter-label', 'other-waiter'],
+	});
+
+	// Fires once per waiter, not on a repeating interval: ticking well past a
+	// second threshold window produces no further calls for the same waiters.
+	t.mock.timers.tick(SLOW_ACQUIRE_WARN_MS * 2);
+	assert.equal(calls.length, 2, 'no repeat firing for the same still-starved waiters');
+
+	relHolder();
+	const relWaiter = await pWaiter;
+	relWaiter();
+	const relOther = await pOther;
+	relOther();
+});
+
+test('slow-acquire diagnostic does not fire and leaks no timer when the lock is granted promptly', async t => {
+	const calls = captureConsoleError(t);
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+
+	const locks = new NoteLockManager();
+	const relHolder = await locks.acquire('a.md', 'holder');
+	const pWaiter = locks.acquire('a.md', 'waiter');
+
+	// Grant well before the threshold.
+	t.mock.timers.tick(SLOW_ACQUIRE_WARN_MS / 2);
+	relHolder();
+	const relWaiter = await pWaiter;
+	assert.equal(calls.length, 0, 'no diagnostic while granted promptly');
+
+	// If the waiter's timer had not been cleared on grant, it would still fire
+	// here once the original threshold window elapses.
+	t.mock.timers.tick(SLOW_ACQUIRE_WARN_MS);
+	assert.equal(calls.length, 0, 'granted waiter timer was cleared — no leaked-timer firing');
+
+	relWaiter();
+});
+
+test('slow-acquire diagnostic never arms on the uncontended fast path', async t => {
+	const calls = captureConsoleError(t);
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+
+	const locks = new NoteLockManager();
+	const rel = await locks.acquire('a.md', 'solo'); // no existing holder: fast path, no waiter timer
+	t.mock.timers.tick(SLOW_ACQUIRE_WARN_MS * 3);
+	assert.equal(calls.length, 0, 'uncontended acquire never starts a diagnostic timer');
+	rel();
 });

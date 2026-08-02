@@ -4,12 +4,24 @@
 // eslint-disable-next-line import/no-nodejs-modules
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IngestionEventBus } from './events';
-import { logWarn } from '../log';
+import { logError, logWarn } from '../log';
 
 interface Waiter {
 	label: string;
 	resolve: (release: () => void) => void;
+	/** Diagnostic-only slow-acquire timer; cleared the moment this waiter is granted. */
+	slowAcquireTimer: ReturnType<typeof setTimeout> | null;
 }
+
+/**
+ * How long a waiter can sit queued before `acquire` logs a diagnostic. This is
+ * observability only — it never rejects or reorders the waiter, it just makes a
+ * starved/leaked holder debuggable (see `note-lock slow acquire` below). Fires
+ * once per waiter, not on an interval: a single line is enough to identify the
+ * stuck holder, and re-firing every 10s for the remainder of an app-level jam
+ * would only spam `window.__CRUCIBLE_DEBUG__` logs without adding information.
+ */
+export const SLOW_ACQUIRE_WARN_MS = 10_000;
 
 interface LockState {
 	// Current path this lock is keyed under. Updated by `handleRename` so a lock
@@ -82,7 +94,20 @@ export class NoteLockManager {
 			return Promise.resolve(this.makeRelease(state));
 		}
 		return new Promise<() => void>(resolve => {
-			existing.waiters.push({ label, resolve });
+			const waiter: Waiter = { label, resolve, slowAcquireTimer: null };
+			waiter.slowAcquireTimer = setTimeout(() => {
+				waiter.slowAcquireTimer = null;
+				// Read the queue fresh at fire time, not at enqueue time: the holder
+				// may have changed (earlier waiters promoted ahead of this one) while
+				// this waiter is still stuck behind it.
+				logError('note-lock slow acquire', {
+					path,
+					waitingLabel: label,
+					holderLabel: existing.label,
+					waiterLabels: existing.waiters.map(w => w.label),
+				});
+			}, SLOW_ACQUIRE_WARN_MS);
+			existing.waiters.push(waiter);
 		});
 	}
 
@@ -150,6 +175,7 @@ export class NoteLockManager {
 			released = true;
 			const next = state.waiters.shift();
 			if (next) {
+				if (next.slowAcquireTimer) clearTimeout(next.slowAcquireTimer);
 				state.label = next.label;
 				this.emit(state.key, true, next.label);
 				next.resolve(this.makeRelease(state));

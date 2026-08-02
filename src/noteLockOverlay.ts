@@ -7,8 +7,17 @@ const LABEL_TEXT: Record<string, string> = {
 	'yt-metadata': 'Fetching metadata…',
 };
 
-function labelToText(label: string): string {
+/** Exported for unit tests (`tests/noteLockOverlayLabels.test.mjs`). */
+export function labelToText(label: string): string {
 	if (label.startsWith('chain:')) return `Running chain: ${label.slice('chain:'.length)}`;
+	// `command:<id>` is synthesized by `src/chains.ts` for any internal command run
+	// as a chain step (e.g. `command:lint-note`, what "Lint: all" runs under).
+	// The raw id (e.g. `lint-note`) is shown as-is, not humanized — it already
+	// reads as a command name, and leaving it byte-identical to the id makes it
+	// greppable against logs/command registrations.
+	if (label.startsWith('command:')) {
+		return `Running: ${label.slice('command:'.length)}…`;
+	}
 	return LABEL_TEXT[label] ?? 'Working…';
 }
 
