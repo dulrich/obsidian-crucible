@@ -95,7 +95,7 @@ function countRequestsMatching(pattern) {
 // q4_k_m (a lowercase spelling some server might use) and GGUF's numeric general.file_type 15
 // (ollama's /api/show fallback) must all produce the identical token. If they didn't, the same
 // weights served by two runtimes would split into two vector "spaces" and force a pointless full
-// re-embed of the vault — see AGENTS.md's embedding-space-identity quirk.
+// re-embed of the vault — see src/search/AGENTS.md's embedding-space-identity quirk.
 
 test('normalizePrecision collapses Q4_K_M, q4_k_m, and GGUF file_type 15 to one identical token', () => {
 	const fromUppercase = normalizePrecision('Q4_K_M');

@@ -4,7 +4,7 @@
 //
 // Answers: given the same real vault text, how much do two (or more) runtimes' vectors agree?
 // This is diagnostic tooling, not plugin code — it lives outside `src/`, so the `console.*` ban
-// (see AGENTS.md Quirks) does not apply here.
+// (see root AGENTS.md Quirks) does not apply here.
 //
 // Reads a SAMPLE of chunk texts from a SNAPSHOT copy of the search companion database (never
 // the live one — see scripts/search-snapshot.sh), embeds each sampled text through every

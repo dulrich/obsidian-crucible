@@ -3,7 +3,7 @@
  *
  * One JSON record per described image, keyed by the image's content MD5 (the same hash the
  * `_MD5` attachment naming convention already computes — see the deterministic-content-hash
- * quirk in the root `AGENTS.md`). Records live outside the vault's note tree entirely (WP-1's
+ * quirk in `src/AGENTS.md`). Records live outside the vault's note tree entirely (WP-1's
  * caller, `main.ts`, points `baseDir` at `pluginDataPath('image-descriptions')`), which is what
  * lets the chunker (WP-2) attribute description chunks to the *note* embedding the image without
  * a second file ever landing in the vault, and what keeps the store invisible to the search index

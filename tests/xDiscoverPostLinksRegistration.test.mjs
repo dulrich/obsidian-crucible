@@ -6,7 +6,7 @@ import test from 'node:test';
 // (via internalCommands.ts's `register(...)` helper, which aliases both the
 // manifest-prefixed and fixed `crucible:` ids and takes an awaited, boolean-
 // returning, optional-`targetFile` handler), not only as a palette command that
-// routes through `executeCommandById` — the root AGENTS.md chain-step quirk: a
+// routes through `executeCommandById` — the src/AGENTS.md chain-step quirk: a
 // note-related chain step that isn't an internal command runs fire-and-forget,
 // outside the chain's note lock, and its effect can silently vanish. Source-text
 // pin, not a bundle: this is about the registration call shape, not runtime

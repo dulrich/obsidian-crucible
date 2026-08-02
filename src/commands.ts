@@ -405,7 +405,7 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 
 	// Also registered as a chain-internal command (internalCommands.ts) so a
 	// note-related chain step routes through the awaited internal registry rather
-	// than fire-and-forget executeCommandById (root AGENTS.md's chain-step quirk).
+	// than fire-and-forget executeCommandById (src/AGENTS.md's chain-step quirk).
 	// Enqueueing doesn't mutate the note itself, so mutating:false is correct.
 	plugin.registerCrucibleCommand({
 		id: 'x-discover-post-links',
