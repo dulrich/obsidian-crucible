@@ -16,6 +16,7 @@ import { localizedImageInfo } from '../orchestration/utils/imageMetadata';
 import { SEARCH_BACKGROUND_PROBE_TIMEOUT_MS, SearchServiceClient, SearchServiceUnavailableError } from './client';
 import { CompanionAvailabilityGate } from './lifecycleGate';
 import { applyLinkBoost, buildLinkGraph, citersOf as citersOfLinkGraph, LinkGraph } from './linkGraph';
+import { applyTagBoost } from './tagBoost';
 import {
 	embeddingSpaceId,
 	resolveEmbeddingSpaceModelId,
@@ -852,14 +853,28 @@ export class SearchManager {
 	// Obsidian's in-memory link graph. Disabled or zero weight skips graph construction
 	// entirely — it must never build the graph and then multiply by zero. `sweep()` calls
 	// `search()`, so sweeps get the boost too; that's intended, not an oversight.
+	// WP-TB2: the tag boost applies independently of the link boost above — link disabled +
+	// tag enabled must still tag-boost, and vice versa. Each boost gets its own structural
+	// early-return (same law as the link boost's own comment: never build-then-multiply-by-
+	// zero), so the combined guard below is only the "neither is doing anything" fast path
+	// that keeps `response` byte-identical when both are off.
 	private boostSearchResponse(response: SearchResponse): SearchResponse {
-		if (!this.settings.searchLinkBoostEnabled || !this.settings.searchLinkBoostWeight) return response;
-		if (response.results.length === 0) return response;
+		const linkActive = this.settings.searchLinkBoostEnabled && !!this.settings.searchLinkBoostWeight;
+		const tagActive = this.settings.searchTagBoostEnabled && !!this.settings.searchTagBoostWeight
+			&& this.settings.searchTagBoostTags.length > 0;
+		if ((!linkActive && !tagActive) || response.results.length === 0) return response;
 
-		return {
-			...response,
-			results: applyLinkBoost(response.results, this.linkGraph(), { weight: this.settings.searchLinkBoostWeight }),
-		};
+		let results = response.results;
+		if (linkActive) {
+			results = applyLinkBoost(results, this.linkGraph(), { weight: this.settings.searchLinkBoostWeight });
+		}
+		if (tagActive) {
+			// `searchTagBoostTags` is normalized at settings-save time (see
+			// orchestrationSearch.ts), so the hot search path never re-normalizes per call.
+			results = applyTagBoost(results, { tags: this.settings.searchTagBoostTags, weight: this.settings.searchTagBoostWeight });
+		}
+
+		return { ...response, results };
 	}
 
 	/**
