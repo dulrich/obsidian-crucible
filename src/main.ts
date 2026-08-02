@@ -551,9 +551,23 @@ export default class CruciblePlugin extends Plugin {
 	}
 
 	// Widened from `private`: called by captureCommands.ts's registerCaptures.
+	//
+	// Also unregisters each pruned id from the native `app.commands` registry
+	// (`Plugin.removeCommand`, typed on the installed obsidian.d.ts since 1.7.2 — no
+	// guarded augmentation needed) — mirroring the cleanup `registerChains` already does
+	// for its own chain-internal ids just above. Before this, a deleted chain/capture/
+	// shortcut/agent stayed registered in Obsidian's own command list — reachable from the
+	// NATIVE palette (not just Crucible's) as a silent no-op, since `executeCrucibleCommand`
+	// returns null once `commandRunners` no longer has the id — until the next reload.
+	// `Plugin.removeCommand` may not exist on very old host versions despite the current
+	// typings (manifest.json's minAppVersion predates 1.7.2), so it's feature-detected
+	// rather than called unconditionally.
 	clearCommandRegistryGroup(group: CrucibleCommandGroup): void {
+		const canRemoveCommand = typeof this.removeCommand === 'function';
 		for (const entry of this.commandRegistry) {
-			if (entry.group === group) this.commandRunners.delete(entry.id);
+			if (entry.group !== group) continue;
+			this.commandRunners.delete(entry.id);
+			if (canRemoveCommand) this.removeCommand(entry.id);
 		}
 		this.commandRegistry = this.commandRegistry.filter(c => c.group !== group);
 	}
