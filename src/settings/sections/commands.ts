@@ -454,7 +454,7 @@ function renderPinnedCommandList(tab: CrucibleSettingTab, containerEl: HTMLEleme
 					tab.refreshDisplay();
 				}))
 			.addExtraButton(cb => cb
-				.setIcon('trash')
+				.setIcon('x')
 				.setTooltip('Remove from pinned')
 				.onClick(async () => {
 					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'pinned-command-delete', {
@@ -517,7 +517,7 @@ function renderPaletteFilterSection(tab: CrucibleSettingTab, containerEl: HTMLEl
 			.setName(getCommandSuggestDisplayName(tab.app, id))
 			.setDesc(id)
 			.addExtraButton(cb => cb
-				.setIcon('trash')
+				.setIcon('x')
 				.setTooltip('Remove')
 				.onClick(async () => {
 					if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'palette-list-entry-delete', {

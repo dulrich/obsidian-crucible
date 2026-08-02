@@ -170,7 +170,7 @@ export function renderTriggerListSection(tab: CrucibleSettingTab, containerEl: H
 						await tab.plugin.saveSettings();
 						tab.plugin.registerTriggers();
 					}))
-				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate trigger').onClick(async () => {
+				.addExtraButton(cb => cb.setIcon('copy-plus').setTooltip('Duplicate trigger').onClick(async () => {
 					const copy = JSON.parse(JSON.stringify(trigger)) as TriggerDef;
 					copy.id = newTriggerId();
 					copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
@@ -236,7 +236,7 @@ function renderTriggerConditions(tab: CrucibleSettingTab, containerEl: HTMLEleme
 					tab.refreshDisplay();
 				});
 			})
-			.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove condition').onClick(async () => {
+			.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove condition').onClick(async () => {
 				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'trigger-guard-condition-delete', {
 					message: `Delete condition ${i + 1} of trigger "${trigger.name || '(unnamed)'}"?`,
 				}))) return;

@@ -92,7 +92,7 @@ export class TableOfContentsUI {
 		};
 
 		const chevron = footer.createDiv({ cls: 'crucible-toc-chevron' });
-		setIcon(chevron, this.isCollapsed ? 'chevron-down' : 'chevron-up');
+		setIcon(chevron, this.isCollapsed ? 'chevron-right' : 'chevron-down');
 
 		footer.onclick = (e) => {
 			e.stopPropagation();

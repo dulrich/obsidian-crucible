@@ -109,7 +109,7 @@ export function renderLintSettings(tab: CrucibleSettingTab, containerEl: HTMLEle
 			set: (v) => { entry.folder = v; },
 			suggest: (el) => { el.classList.add('crucible-full-width-search'); new FolderSuggest(tab.app, el); },
 		}, save);
-		setting.addExtraButton(cb => { cb.setIcon('trash').setTooltip('Remove').onClick(async () => {
+		setting.addExtraButton(cb => { cb.setIcon('x').setTooltip('Remove').onClick(async () => {
 			if (!(await confirmDestructive(tab.app, s, 'lint-excluded-folder-delete', {
 				message: `Delete excluded folder "${entry.folder || '(unnamed)'}"?`,
 			}))) return;

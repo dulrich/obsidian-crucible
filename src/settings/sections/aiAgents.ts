@@ -34,7 +34,7 @@ export function renderAgentListSection(tab: CrucibleSettingTab, containerEl: HTM
 			new Setting(listGroup)
 				.setName(agent.name || '(unnamed)')
 				.setDesc(describeAgent(tab, agent))
-				.addExtraButton(cb => cb.setIcon('copy').setTooltip('Duplicate agent').onClick(async () => {
+				.addExtraButton(cb => cb.setIcon('copy-plus').setTooltip('Duplicate agent').onClick(async () => {
 					const copy = JSON.parse(JSON.stringify(agent)) as Agent;
 					copy.id = Math.random().toString(36).substring(2, 9);
 					copy.name = copy.name ? `${copy.name} (copy)` : '(copy)';
