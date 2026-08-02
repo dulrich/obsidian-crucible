@@ -60,8 +60,11 @@ export const SERVICE_OUTAGE_PATTERNS: FailurePattern[] = [
 	{
 		name: 'youtube-5xx',
 		re: /YouTube Data API: HTTP 5\d\d/i,
-		rationale: 'youtubeApi.ts\'s generic HTTP passthrough on a 5xx. 403 (bad/missing key) and 404 '
-			+ '(video/channel not found) are separate, more specific shapes and are deliberately NOT matched.',
+		rationale: 'youtubeApi.ts\'s generic HTTP passthrough on a 5xx. 403 (bad/missing key) is a separate, '
+			+ 'more specific shape and is deliberately NOT matched. A video not-found (the 200 items:[] shape, or '
+			+ 'the dead 404 branch) no longer reaches failed jobs at all as of WP-K1 — `ensureMetadataNote` catches '
+			+ 'the typed `YoutubeVideoUnavailableError` and tombstones instead, settling the job `done`; only a '
+			+ 'channel/playlist 404 (channel/uploads not found) can still land here as a genuine failure.',
 	},
 	{
 		name: 'all-channel-feeds-failed',
