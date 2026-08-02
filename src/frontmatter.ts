@@ -62,39 +62,33 @@ export async function updateFrontmatter(
 	update: (fm: FrontmatterRecord) => void,
 	cacheBarrierTimeoutMs = FRONTMATTER_CACHE_BARRIER_TIMEOUT_MS,
 ): Promise<void> {
-	// Asymmetric case: the cache still reports a frontmatterPosition but the raw file has
-	// no `---` block at all (the block was deleted/never landed after the cache indexed
-	// it). Nothing is writing this file, so no metadataCache 'changed' event will ever fire
-	// to release waitForFreshFrontmatterCache's wait — it would just burn the full
-	// cacheBarrierTimeoutMs — and handing processFrontMatter the stale position risks it
-	// mis-splicing against a block that no longer exists. Detect it up front and go
-	// straight to the index-based splice-creation path instead of either.
-	if (file.extension === 'md' && cacheClaimsFrontmatterBlock(app, file)) {
-		const content = await app.vault.read(file);
-		if (content.match(FRONTMATTER_REGEX) === null) {
-			await writeViaBlockDeletedSpliceCreate(app, file, update);
-			return;
-		}
-	}
-
-	// Inverted asymmetric case: the cache has never indexed a frontmatterPosition for this
-	// file at all (`cachedEnd === undefined`) — a note the cache hasn't caught up to yet
-	// (first lint right after creation) or one that just gained its first block (second
-	// lint of a formerly-empty note) — while the raw content already HAS a `---` block.
-	// waitForFreshFrontmatterCache would burn the full cacheBarrierTimeoutMs here: nothing
-	// guarantees the cache's *next* `changed` event is the one that indexes this block, so
-	// this is not the genuine stale-position case (block in both, offsets merely disagree —
-	// that one keeps its bounded wait, since a rename + rapid edit really can resolve via
-	// the next cache tick). And handing processFrontMatter a file the cache has no position
-	// for at all is exactly the risk the block-deleted branch above avoids for the mirror
-	// case — this file's own header comment establishes processFrontMatter merges against
-	// the cache's view, not the raw bytes. So: skip the wait and go straight to the same
-	// index-based splice machinery as the block-deleted case, updating (not creating) the
-	// block that's actually there.
-	if (file.extension === 'md' && !cacheClaimsFrontmatterBlock(app, file)) {
-		const content = await app.vault.read(file);
-		if (content.match(FRONTMATTER_REGEX) !== null) {
-			await writeViaNeverIndexedSpliceUpdate(app, file, update);
+	// Asymmetric mismatch, in either direction: the metadata cache and the raw bytes
+	// disagree about whether this file has a `---` block AT ALL. Two shapes, one defect —
+	//   * cache claims a frontmatterPosition, raw content has no block (deleted/never landed
+	//     after the cache indexed it) -> the splice path CREATES the block;
+	//   * cache has never indexed a position (`cachedEnd === undefined`) while the raw
+	//     content already HAS a block (first lint right after creation, or the second lint
+	//     of a formerly-empty note) -> the splice path UPDATES the block that's there.
+	// Both are dead waits for waitForFreshFrontmatterCache: in the first nothing is writing
+	// the file, so no `changed` event will ever fire; in the second nothing guarantees the
+	// cache's *next* `changed` event is the one that indexes this block. Either way the wait
+	// just burns the full cacheBarrierTimeoutMs, and handing processFrontMatter a position
+	// that doesn't describe the current bytes risks it mis-splicing (this function's own
+	// header comment establishes it merges against the cache's view, not the raw content).
+	// So: detect both up front, skip the wait, and go straight to the index-based splice
+	// machinery. The genuine stale-*offset* case — both sides agree a block exists and only
+	// the offsets/keys disagree — is deliberately NOT here: a rename + rapid edit really can
+	// resolve on the next cache tick, so it keeps its bounded wait below.
+	if (file.extension === 'md') {
+		const cacheHasBlock = cacheClaimsFrontmatterBlock(app, file);
+		const rawHasBlock = (await app.vault.read(file)).match(FRONTMATTER_REGEX) !== null;
+		if (cacheHasBlock !== rawHasBlock) {
+			await writeViaContentSpliceAndVerify(
+				app,
+				file,
+				update,
+				cacheHasBlock ? 'block-deleted splice-create' : 'never-indexed splice-update',
+			);
 			return;
 		}
 	}
@@ -142,51 +136,35 @@ export async function updateFrontmatter(
 }
 
 // Whether the metadata cache still reports a frontmatterPosition for this file — cheap,
-// synchronous, no read. Callers pair this with an actual content read only when it's true,
-// since the common case (no block claimed by either side) never needs one.
+// synchronous, no read. Paired with the raw-content check above: it's the disagreement
+// between the two, not either one alone, that identifies an asymmetric mismatch.
 function cacheClaimsFrontmatterBlock(app: App, file: TFile): boolean {
 	return app.metadataCache.getFileCache(file)?.frontmatterPosition?.end?.offset !== undefined;
 }
 
-// Handles updateFrontmatter's block-deleted asymmetric case (cache claims a block, raw
-// content has none): goes straight to the splice-creation path — never processFrontMatter,
-// which would merge against the stale, now-nonexistent position — then verifies the
-// mutated keys landed, the same way the stale-cache-timeout path does, logging on failure.
-async function writeViaBlockDeletedSpliceCreate(
+// Handles both of updateFrontmatter's asymmetric cache/raw mismatch directions: goes
+// straight to the splice path — never processFrontMatter, which would merge against a
+// position that doesn't describe the current bytes — then verifies the mutated keys landed,
+// the same way the stale-cache-timeout path does, logging on failure. `reason` names the
+// direction ('block-deleted splice-create' / 'never-indexed splice-update') so the two stay
+// distinguishable in the log even though they share this one code path.
+async function writeViaContentSpliceAndVerify(
 	app: App,
 	file: TFile,
 	update: (fm: FrontmatterRecord) => void,
+	reason: string,
 ): Promise<void> {
 	const fm = await repairFrontmatterViaContentSplice(app, file, update);
 	const content = await app.vault.read(file);
 	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
 	const lost = Object.entries(fm).filter(([key, value]) => !frontmatterValueLanded(block, key, value));
 	if (lost.length > 0) {
-		logError(`frontmatter write lost after block-deleted splice-create for keys `
+		logError(`frontmatter write lost after ${reason} for keys `
 			+ `[${lost.map(([key]) => key).join(', ')}] (${file.path})`);
 	}
 }
 
-// Handles updateFrontmatter's never-indexed inverted-asymmetry case (cache has no
-// frontmatterPosition for this file at all, raw content already has a block): goes
-// straight to the splice-*update* path — never processFrontMatter — then verifies the
-// mutated keys landed, the same way the block-deleted splice-create case does.
-async function writeViaNeverIndexedSpliceUpdate(
-	app: App,
-	file: TFile,
-	update: (fm: FrontmatterRecord) => void,
-): Promise<void> {
-	const fm = await repairFrontmatterViaContentSplice(app, file, update);
-	const content = await app.vault.read(file);
-	const block = content.match(FRONTMATTER_REGEX)?.[1] ?? '';
-	const lost = Object.entries(fm).filter(([key, value]) => !frontmatterValueLanded(block, key, value));
-	if (lost.length > 0) {
-		logError(`frontmatter write lost after never-indexed splice-update for keys `
-			+ `[${lost.map(([key]) => key).join(', ')}] (${file.path})`);
-	}
-}
-
-// Fallback write path for updateFrontmatter's stale-cache-timeout and block-deleted cases.
+// Fallback write path for updateFrontmatter's stale-cache-timeout and asymmetric-mismatch cases.
 // Re-reads the file's actual current bytes (rather than trusting anything the metadata
 // cache reported), locates the frontmatter block by parsing the raw `---` delimiters,
 // parses it, applies `update` to that real object, and splices the serialized result back
