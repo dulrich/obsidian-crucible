@@ -33,15 +33,19 @@ tags: ""
 	- [x] reranker saves the 271 bugs source note
 	- [x] check if the logger saved my numerous early attempts and if any rank
 - [x] possible up-ranking based on tag #gold, monthly capture count as a facet
-- [ ] brief me on the eval-harness bug (we probably bring it in now)
-- [ ] section buttons are now misaligned with each other (Uncaptured videos Refresh -> auto-enqueue did align)
-- [ ] Refresh icon needs a space before the text
-- [ ] audit tells the state, needs commands/instruction for repair
-	- [ ] reconcile says enqueued but nothing visible in queue monitor
-- [ ] pinned header leaves a visual gap, small in tab view, large in the Obsidian settings window
-	- [ ] this happened previously when pinned header was attempted as well, was unable to resolve in the settings window
-	- [ ] worth a try at least in the tab view (screenshots if helpful -> or how best to debug live?)
-- [ ] Pending: sweep the repo's AGENTS for terseness/pointers and set the dox pattern active
+- [x] brief me on the eval-harness bug (we probably bring it in now)
+- [x] section buttons are now misaligned with each other (Uncaptured videos Refresh -> auto-enqueue did align)
+- [x] Refresh icon needs a space before the text
+- [x] audit tells the state, needs commands/instruction for repair
+	- [x] reconcile says enqueued but nothing visible in queue monitor
+- [x] pinned header leaves a visual gap, small in tab view, large in the Obsidian settings window
+	- [x] this happened previously when pinned header was attempted as well, was unable to resolve in the settings window
+	- [x] worth a try at least in the tab view (screenshots if helpful -> or how best to debug live?)
+- [x] Pending: sweep the repo's AGENTS for terseness/pointers and set the dox pattern active
+- [x] Lint: all needs to handle missing frontmatter without hanging
+- [x] sometimes feels like there is a lag on launching Command palette (maybe most often Clipping -> Command palette -> gg -> Ingest as blog)
+	- [x] probably a red herring, also noticeable with a selection when wanting to spawn Monthly Capture
+- [x] sticky headers landed
 
 ---
 
