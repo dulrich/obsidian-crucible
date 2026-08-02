@@ -294,7 +294,7 @@ function renderModelIdentityFields(
 			.setValue(model.label)
 			.onChange(async (v) => { model.label = v; await tab.plugin.saveSettings(); })
 			.inputEl.addClass('pi-width-normal'))
-		.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove model').onClick(async () => {
+		.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove model').onClick(async () => {
 			if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'provider-model-delete', {
 				message: `Delete model "${model.label || model.id || '(unnamed)'}" from provider "${provider.name || '(unnamed)'}"?`,
 			}))) return;

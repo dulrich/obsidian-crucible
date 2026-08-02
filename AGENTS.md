@@ -84,6 +84,35 @@ A valid rerun packet includes:
 - **Crucible builds primarily against the N1 Console design system**, adapted where Obsidian's built-in UI requires it. The component specs live in the shared `signalworks-design` skill (`~/.claude/skills/signalworks-design/`, canonical source `context-control/skills/`) — consult them before inventing a treatment or copying a nearby ad-hoc rule. Two rules that look contradictory and are not:
   - **The design language comes from N1**: the pill taxonomy (status / tag / neutral), pill geometry, status semantics, and the fixed lucide icon mapping (one concept = one icon fleet-wide).
   - **The expression stays in Obsidian semantic vars**: write `var(--text-muted)`, never `var(--n1-muted)`. `theme/theme.css`'s adapter maps N1 tokens onto Obsidian's names, and that indirection is exactly what lets the theme reskin plugin views for free (see `theme/AGENTS.md`). **Never reach for an `--n1-*` token from `styles.css`.**
+- **Icon-mapping table (one concept = one icon, fleet-wide).** Wording below is factual/short — polished at DP7.
+
+  | Icon | Concept |
+  | --- | --- |
+  | `external-link` | External destination |
+  | `file-text` | Metadata/meta note |
+  | `download` | Clip |
+  | `circle-x` | Skip (reversible-warn) |
+  | `sparkles` | Enrich |
+  | `import` | Ingest (legacy label form) |
+  | `play` | Run job |
+  | `x` | Cancel job / remove a value from a list |
+  | `info` | Details |
+  | `pencil` | Edit |
+  | `trash` | Delete an entity |
+  | `copy-plus` | Duplicate |
+  | `copy` | Copy to clipboard/path |
+  | `refresh-cw` | Refresh |
+  | `chevron-right` / `chevron-down` | Collapsed / expanded |
+  | `eye-off` / `eye` | Ignore / Un-ignore |
+  | `arrow-up` / `arrow-down` | Reorder |
+  | `arrow-right` | Open note (row scope) |
+
+  `trash` is reserved for deleting a standalone entity (a List + edit pattern collection
+  row — Capture, Chain, Trigger, Agent, Provider — or an equivalent top-level record with
+  its own lifecycle); removing a row/value from an array field nested inside an entity's
+  own editor (a condition, a variable, a step, a pinned folder, an excluded folder, a
+  provider's model entry, an FX pair, …) uses `x` instead — it deletes list membership,
+  not the entity.
 - **Pill family choice is a real error, not a nitpick — `.crucible-pill` + a variant is the shared primitive.**
   - **Status** pills (ANSI hue label + border + 5%-tint background) are for ok/warn/error/info and must never be the sole carrier of that meaning.
   - **Neutral** pills — `.is-muted` / `.is-contrast`, transparent background, border and label the same colour, same geometry — are for *non-semantic* states: disabled, n/a, counts-at-rest, and constraints like the Queue Configuration `serial` marker. Spending a status hue on a non-status fact spends the reader's alarm budget on nothing.

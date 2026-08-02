@@ -1,5 +1,5 @@
 /* eslint-disable obsidianmd/ui/sentence-case */
-import { Setting, Notice } from "obsidian";
+import { Setting, Notice, setIcon } from "obsidian";
 import type { CrucibleSettingTab } from "../../settings";
 import { ProviderModelRef } from "../../types";
 import { confirmDestructive } from "../destructiveActions";
@@ -137,19 +137,34 @@ function renderSearchHealthStatusSettings(tab: CrucibleSettingTab, searchGroup: 
 		}
 	};
 
-	heading.addButton(bt => bt.setButtonText('Refresh').onClick(async () => {
-		bt.setDisabled(true);
-		bt.setButtonText('Refreshing…');
-		try {
-			cachedSearchHealth = await tab.plugin.searchManager.health();
-			searchHealthFetchError = null;
-		} catch (e) {
-			searchHealthFetchError = e instanceof Error ? e.message : String(e);
-		}
-		bt.setDisabled(false);
-		bt.setButtonText('Refresh');
-		renderBody();
-	}));
+	heading.addButton(bt => {
+		// ButtonComponent.setButtonText() and .setIcon() each clear the buttonEl's
+		// existing children (they both go through Node.empty() under the hood), so
+		// naively calling setIcon() once and setButtonText() on every state change
+		// would silently drop the icon the first time the text swaps. Compose both
+		// by hand instead, matching the repo's icon+label DOM shape (setIcon then a
+		// leading-space text span — see settings.ts's tab buttons / sourceEvalDashboard's
+		// Export button) and re-apply it on every state change.
+		const setLabel = (text: string) => {
+			bt.buttonEl.empty();
+			setIcon(bt.buttonEl, 'refresh-cw');
+			bt.buttonEl.createSpan({ text: ` ${text}` });
+		};
+		setLabel('Refresh');
+		bt.onClick(async () => {
+			bt.setDisabled(true);
+			setLabel('Refreshing…');
+			try {
+				cachedSearchHealth = await tab.plugin.searchManager.health();
+				searchHealthFetchError = null;
+			} catch (e) {
+				searchHealthFetchError = e instanceof Error ? e.message : String(e);
+			}
+			bt.setDisabled(false);
+			setLabel('Refresh');
+			renderBody();
+		});
+	});
 
 	renderBody();
 }

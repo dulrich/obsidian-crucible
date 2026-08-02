@@ -264,7 +264,7 @@ function renderGuardValueSetting(
 		});
 	}
 	if (opts.remove) {
-		setting.addExtraButton(cb => cb.setIcon('trash').setTooltip('Remove value').onClick(() => {
+		setting.addExtraButton(cb => cb.setIcon('x').setTooltip('Remove value').onClick(() => {
 			void (async () => {
 				if (!(await confirmDestructive(tab.app, tab.plugin.settings, 'guard-condition-value-delete', {
 					message: `Delete guard condition value "${opts.get() || '(empty)'}"?`,
