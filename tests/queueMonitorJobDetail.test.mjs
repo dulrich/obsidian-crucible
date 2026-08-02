@@ -140,3 +140,17 @@ test('STRUCTURAL: the queue monitor reads every row through the Orchestrator sea
 	assert.match(src, /orchestrator\.listJobs\('queued', \{ limit: QUEUE_MONITOR_RENDER_LIMIT \}\)/);
 	assert.doesNotMatch(src, /jobStore|listFolder|enrichmentQueue/);
 });
+
+test('STRUCTURAL (WP-G3): JobDetailModal Copy control is the standard icon+label button, not bare text', () => {
+	// The bare `createEl('button', { text: 'Copy to clipboard' })` was a UI-standards
+	// miss — every other icon-bearing control in the plugin uses the
+	// crucible-icon-label-btn + setIcon + span shape (exemplar:
+	// src/sourceEvalDashboard.ts's "Export JSONL" button). `copy` is the fleet-wide
+	// reserved glyph for exactly this concept (tests/iconLanguageConsistencyGuard.
+	// test.mjs), so this also has to not regress that guard.
+	const src = readFileSync('src/ingestion/sections/queueMonitor.ts', 'utf8');
+	assert.doesNotMatch(src, /createEl\('button', \{ text: 'Copy to clipboard' \}\)/, 'the bare-text Copy button must be gone');
+	assert.match(src, /const copy = buttons\.createEl\('button', \{ cls: 'crucible-icon-label-btn' \}\);/);
+	assert.match(src, /setIcon\(copy, 'copy'\);/);
+	assert.match(src, /copy\.createSpan\(\{ text: 'Copy' \}\);/);
+});

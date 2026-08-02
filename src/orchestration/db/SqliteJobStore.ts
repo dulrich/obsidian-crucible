@@ -2,7 +2,7 @@ import { logWarn } from '../../log';
 import { CANCELLED_BEFORE_RUN } from '../cancellation';
 import { defaultLaneForPriority } from '../lanes';
 import type { JobLane, JobPriority, JobStatus, JobType } from '../types';
-import type { DbJobRow, NewJobInput, SqliteDatabase, TransitionPatch } from './types';
+import type { DbJobRow, JobListOrder, NewJobInput, SqliteDatabase, TransitionPatch } from './types';
 
 /**
  * The storage layer for the DB-backed job queue (thq WP-5). Wraps a `SqliteDatabase`
@@ -74,20 +74,28 @@ export class SqliteJobStore {
 		return row ? mapRow(row) : null;
 	}
 
-	/** Rows in claim order — `ORDER BY lane_rank, priority_rank, created, id`, the
-	 * same comparator `claimNext` uses (see its doc comment for the rank-map
-	 * citation). `limit` follows SQLite's own convention: omitted/negative means no
-	 * limit. `type` narrows to one job type *inside* the statement, so it composes
-	 * with `limit` correctly (filtering a limited page in JS would silently return
-	 * fewer rows than asked for). */
-	list(status: JobStatus, options: { limit?: number; offset?: number; type?: JobType } = {}): DbJobRow[] {
+	/** Rows in claim order by default — `ORDER BY lane_rank, priority_rank, created,
+	 * id`, the same comparator `claimNext` uses (see its doc comment for the
+	 * rank-map citation). `options.order: 'recency'` (WP-G3) switches to `settled_at
+	 * DESC, id DESC` instead — for a *settled* status (done/failed/cancelled) claim
+	 * order shows the oldest retained rows first, burying recent settlements behind
+	 * them; recency order is what a settled-bucket UI wants. `'recency'` is a display
+	 * ordering only — `claimNext`/`selectClaimCandidates`/`findActive` never call
+	 * `list` and are untouched by this option. `limit` follows SQLite's own
+	 * convention: omitted/negative means no limit. `type` narrows to one job type
+	 * *inside* the statement, so it composes with `limit` correctly (filtering a
+	 * limited page in JS would silently return fewer rows than asked for). */
+	list(status: JobStatus, options: { limit?: number; offset?: number; type?: JobType; order?: JobListOrder } = {}): DbJobRow[] {
 		const limit = options.limit ?? -1;
 		const offset = options.offset ?? 0;
 		const typeFilter = options.type ? ' AND type = ?' : '';
+		const orderBy = options.order === 'recency'
+			? 'settled_at DESC, id DESC'
+			: 'lane_rank ASC, priority_rank ASC, created ASC, id ASC';
 		const params: unknown[] = options.type ? [status, options.type, limit, offset] : [status, limit, offset];
 		const rows = this.db.prepare(`
 			SELECT * FROM jobs WHERE status = ?${typeFilter}
-			ORDER BY lane_rank ASC, priority_rank ASC, created ASC, id ASC
+			ORDER BY ${orderBy}
 			LIMIT ? OFFSET ?
 		`).all(...params);
 		return rows.map(mapRow);
