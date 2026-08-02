@@ -450,6 +450,29 @@ export interface SearchFileState {
 }
 
 /**
+ * WP-G2: what actually happened to one file inside `SearchManager.indexFiles` — the fix for
+ * `SearchIndexWorkflow`'s old `Indexed <path>: <chunks> chunks.` note, where `0` was ambiguous
+ * between "skipped, unchanged" and "produced no chunks" (a frontmatter-only note) and between
+ * both of those and "excluded from indexing entirely." All three are legitimate, non-error
+ * outcomes with different meanings a user needs to tell apart:
+ * - `written` — chunks were built and (assuming the flush succeeds) sent to the companion.
+ *   `chunks` is the count.
+ * - `skipped-unchanged` — the coverage-aware skip fired: stored `contentHash` matched and
+ *   embedding coverage was satisfied, so nothing was read from or sent to the companion.
+ * - `no-chunks` — the file was read (or excluded before reading) but produced zero real chunks:
+ *   either the chunker emitted nothing for it (frontmatter-only/empty body — the unindexable
+ *   class `src/search/audit.ts` also detects) or the file was excluded from indexing entirely.
+ *   Both collapse to the same outward fact — nothing was upserted — and `chunks` is always 0.
+ */
+export type SearchFileIndexOutcome = 'written' | 'skipped-unchanged' | 'no-chunks';
+
+export interface SearchFileIndexResult {
+	outcome: SearchFileIndexOutcome;
+	/** Chunks actually built for this file. 0 for both non-`written` outcomes. */
+	chunks: number;
+}
+
+/**
  * WP-SA2: one row per indexed path, from `POST /v1/paths` (WP-SA1, `sa-1-report.md` is the
  * authoritative wire contract). Unlike `SearchFileState` (per-requested-path, some fields
  * optional/unknown-tolerant for an older companion) this endpoint is new in this schema

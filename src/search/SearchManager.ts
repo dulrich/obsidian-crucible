@@ -24,6 +24,7 @@ import {
 	SearchEmbeddingConfigError,
 	SearchEmbeddingMismatchError,
 	SearchEmbeddingUnavailableError,
+	SearchFileIndexResult,
 	SearchFileState,
 	SearchHealth,
 	SearchResponse,
@@ -368,9 +369,14 @@ export class SearchManager {
 		await this.withFlushInFlight(() => this.client().resetIndex());
 	}
 
-	async indexFile(file: TFile): Promise<number> {
+	// WP-G2: returns the per-file outcome, not just a chunk count — see `SearchFileIndexResult`'s
+	// doc for why the old bare-number return made `SearchIndexWorkflow`'s job notes ambiguous.
+	// Falls back to `no-chunks`/0 only if `indexFiles` somehow didn't record an entry for `file`
+	// (it always does, for every path in its input array — see the loop below), so this can't
+	// silently under-report.
+	async indexFile(file: TFile): Promise<SearchFileIndexResult> {
 		const result = await this.indexFiles([file]);
-		return result.chunks;
+		return result.outcomes.get(file.path) ?? { outcome: 'no-chunks', chunks: 0 };
 	}
 
 	// Index many files with as few round-trips as possible: build chunks per file, but
@@ -380,7 +386,7 @@ export class SearchManager {
 		files: TFile[],
 		onProgress?: (files: number, chunks: number) => Promise<void>,
 		options?: SearchIndexOptions,
-	): Promise<{ files: number; chunks: number }> {
+	): Promise<{ files: number; chunks: number; outcomes: Map<string, SearchFileIndexResult> }> {
 		const requireEmbeddings = options?.requireEmbeddings === true;
 		// Fail before reading a single file rather than after chunking the vault: a backfill with
 		// nothing to embed with is a configuration error, not a transient one, so it must not be
@@ -399,6 +405,10 @@ export class SearchManager {
 		let upsertedFiles = 0;
 		let totalChunks = 0;
 		const preparedFiles: PreparedSearchFile[] = [];
+		// WP-G2: one entry per path in `files`, by the time this method returns — populated as
+		// excluded (below), skipped-unchanged, or written/no-chunks (in the classify loop). Never
+		// left sparse, so `indexFile`'s `.get(file.path) ?? …` fallback is defensive only.
+		const outcomes = new Map<string, SearchFileIndexResult>();
 
 		const flush = async (): Promise<void> => {
 			if (buffer.length === 0) return;
@@ -439,6 +449,9 @@ export class SearchManager {
 			signal?.throwIfAborted();
 			const prepared = await this.prepareFile(file);
 			if (prepared) preparedFiles.push(prepared);
+			// Excluded from indexing entirely (isExcludedFromIndex) — nothing was or will be sent
+			// for it, same outward fact as a real zero-chunk file, so it shares that outcome.
+			else outcomes.set(file.path, { outcome: 'no-chunks', chunks: 0 });
 		}
 
 		const fileStates = await this.loadFileStates(client, preparedFiles.map(item => item.file.path));
@@ -457,6 +470,7 @@ export class SearchManager {
 			// every already-indexed file with a matching hash and no usable vectors — which is how
 			// "enable semantic later" used to be a silent no-op repairable only by resetIndex().
 			if (stored && stored.contentHash === prepared.contentHash && this.embeddingCoverageSatisfied(stored, activeSpace)) {
+				outcomes.set(prepared.file.path, { outcome: 'skipped-unchanged', chunks: 0 });
 				if (onProgress && (processedFiles === preparedFiles.length || processedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
 					await onProgress(processedFiles, totalChunks);
 				}
@@ -466,6 +480,10 @@ export class SearchManager {
 			upsertedFiles++;
 			totalChunks += chunks.length;
 			buffer.push(...chunks);
+			// `chunks.length === 0` is the real zero-chunk case (a frontmatter-only/empty-body file
+			// the chunker emits nothing for) — pushing [] onto buffer and never flushing it is
+			// harmless, but the outcome must say "no-chunks", not "written 0".
+			outcomes.set(prepared.file.path, chunks.length > 0 ? { outcome: 'written', chunks: chunks.length } : { outcome: 'no-chunks', chunks: 0 });
 			if (buffer.length >= SEARCH_UPSERT_FLUSH_CHUNKS) await flush();
 			if (onProgress && (processedFiles === preparedFiles.length || processedFiles % SEARCH_PROGRESS_EVERY_FILES === 0)) {
 				await onProgress(processedFiles, totalChunks);
@@ -474,7 +492,7 @@ export class SearchManager {
 		await flush();
 		// `files` is the count actually re-indexed (content changed), not the number seen — files
 		// whose content hash matched are skipped above and don't count.
-		return { files: upsertedFiles, chunks: totalChunks };
+		return { files: upsertedFiles, chunks: totalChunks, outcomes };
 	}
 
 	// Read + chunk a single file with no embedding or upsert. Returns [] for files that
@@ -483,6 +501,23 @@ export class SearchManager {
 		const prepared = await this.prepareFile(file);
 		if (!prepared) return [];
 		return this.buildPreparedFileChunks(prepared);
+	}
+
+	/**
+	 * WP-G2: `Search: audit index`'s hash/chunk verification primitive — reads and prepares one
+	 * file through the exact write path (`prepareFile` + `buildPreparedFileChunks`, the same two
+	 * calls `indexFiles` makes) without touching the companion, so a mtime-newer candidate's
+	 * freshly-computed `contentHash` is provably the same value the index write path would send,
+	 * and a missing candidate's chunk count is provably the real chunker's output rather than a
+	 * heuristic. `null` only if the file turns out to be excluded from indexing — should not
+	 * happen for a candidate drawn from `listIndexableFiles()`, but callers must not assume it
+	 * can't (a race with a settings/exclusion change between the two calls, say).
+	 */
+	async auditPrepareFile(file: TFile): Promise<{ contentHash: string; chunkCount: number } | null> {
+		const prepared = await this.prepareFile(file);
+		if (!prepared) return null;
+		const chunks = this.buildPreparedFileChunks(prepared);
+		return { contentHash: prepared.contentHash, chunkCount: chunks.length };
 	}
 
 	/**

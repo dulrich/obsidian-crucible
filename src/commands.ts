@@ -14,6 +14,7 @@ import {
 	formatAuditReport,
 	formatReconcileCompletedSummary,
 	formatReconcileNothingToDoSummary,
+	identifyAuditCandidates,
 	isCleanAudit,
 	isReconcileTargetClean,
 	SearchAuditResult,
@@ -630,7 +631,8 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 			}
 			new Notice(
 				`Search: audit index — missing ${result.missing.length}, orphans ${result.orphans.length}, `
-				+ `stale ${result.stale.length}, embedding gaps ${result.embeddingGaps.length}, images `
+				+ `stale ${result.stale.length}, mtime-only ${result.mtimeOnly.length} (index current), `
+				+ `unindexable ${result.unindexable.length} (no content), embedding gaps ${result.embeddingGaps.length}, images `
 				+ `${result.imageCoverage.pending} pending / ${result.imageCoverage.failed} failed. `
 				+ `Repair commands: see the report. Report: ${path}.`,
 			);
@@ -748,16 +750,43 @@ async function writeHintDebugReport(plugin: CruciblePlugin): Promise<void> {
  * WP-SA2: gathers every input `computeSearchAudit` (`src/search/audit.ts`) needs and runs it.
  * Shared by `search-audit-index` (read-only) and `search-reconcile-index` (acts on the result) so
  * the two commands can never disagree about what "clean" means.
+ *
+ * WP-G2: candidates needing hash/chunk-count verification are named FIRST via
+ * `identifyAuditCandidates` — the same function `computeSearchAudit` uses internally, so the two
+ * can't disagree about what counts as a candidate — and only THAT subset is read/hashed/chunked
+ * (`SearchManager.auditPrepareFile`, the real index-write path). This is the perf requirement: a
+ * vault with 21 mtime-suspect files out of 5,500 reads exactly 21, never the whole vault. Audit
+ * stays read-only throughout — `auditPrepareFile` only reads the vault and runs the chunker, it
+ * never touches the companion.
  */
 async function runSearchAudit(plugin: CruciblePlugin): Promise<SearchAuditResult> {
-	const vaultFiles = plugin.searchManager.listIndexableFiles().map(file => ({ path: file.path, mtime: file.stat.mtime }));
+	const vaultFileList = plugin.searchManager.listIndexableFiles();
+	const vaultFiles = vaultFileList.map(file => ({ path: file.path, mtime: file.stat.mtime }));
 	const { paths: indexedPaths } = await plugin.searchManager.client().listPaths();
 	const images = await gatherSearchAuditImages(plugin);
+
+	const candidates = identifyAuditCandidates(vaultFiles, indexedPaths);
+	const filesByPath = new Map(vaultFileList.map(file => [file.path, file]));
+	const missingCandidates = new Set(candidates.missing);
+	const staleCandidates = new Set(candidates.staleMtime);
+	const staleContentHashes = new Map<string, string>();
+	const missingChunkCounts = new Map<string, number>();
+	for (const path of [...missingCandidates, ...staleCandidates]) {
+		const file = filesByPath.get(path);
+		if (!file) continue;
+		const prepared = await plugin.searchManager.auditPrepareFile(file);
+		if (!prepared) continue;
+		if (staleCandidates.has(path)) staleContentHashes.set(path, prepared.contentHash);
+		if (missingCandidates.has(path)) missingChunkCounts.set(path, prepared.chunkCount);
+	}
+
 	return computeSearchAudit({
 		vaultFiles,
 		indexedPaths,
 		images,
 		semanticEnabled: plugin.settings.searchSemanticEnabled,
+		staleContentHashes,
+		missingChunkCounts,
 	});
 }
 
