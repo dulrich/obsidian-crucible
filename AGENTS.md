@@ -112,6 +112,7 @@ A valid rerun packet includes:
   | `eye-off` / `eye` | Ignore / Un-ignore |
   | `arrow-up` / `arrow-down` | Reorder |
   | `arrow-right` | Open note (row scope) |
+  | `wrench` | Repair (enqueue repair/re-index job) |
 
   `trash` is reserved for deleting a standalone entity (a List + edit pattern collection
   row — Capture, Chain, Trigger, Agent, Provider — or an equivalent top-level record with
