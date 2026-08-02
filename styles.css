@@ -718,7 +718,8 @@ If your plugin does not need CSS, delete this file.
 .crucible-ingestion-enqueue-intake,
 .crucible-ingestion-cleanup-all,
 .crucible-ingestion-repair-all,
-.crucible-ingestion-backfill-x {
+.crucible-ingestion-backfill-x,
+.crucible-ingestion-run-audit {
   flex: 0 0 auto;
 
   /* The heading is `align-items: baseline` (below). A button whose first flex item

@@ -24,6 +24,7 @@ import { createControlCentersSection, type ControlCentersSection } from './inges
 import { createOrphanedAttachmentsSection, type OrphanedAttachmentsSection } from './ingestion/sections/orphanedAttachments';
 import { createMissingAttachmentsSection, type MissingAttachmentsSection } from './ingestion/sections/missingAttachments';
 import { createXPostsSection, type XPostsSection } from './ingestion/sections/xPosts';
+import { createSearchAuditSection, type SearchAuditSection } from './ingestion/sections/searchAudit';
 import { xMetadataRoot } from './orchestration/utils/xApi';
 import { renderIgnoredPosts, renderIgnoredVideos } from './ingestion/sections/ignored';
 import { consumeSelfRefreshedEcho } from './ingestion/render/echoSuppress';
@@ -103,6 +104,7 @@ export class IngestionDashboardUI {
 	private readonly orphanedAttachments: OrphanedAttachmentsSection;
 	private readonly missingAttachments: MissingAttachmentsSection;
 	private readonly xPosts: XPostsSection;
+	private readonly searchAudit: SearchAuditSection;
 
 	constructor(private readonly plugin: CruciblePlugin, private readonly container: HTMLElement) {
 		this.app = plugin.app;
@@ -127,6 +129,7 @@ export class IngestionDashboardUI {
 		this.orphanedAttachments = createOrphanedAttachmentsSection(this.host);
 		this.missingAttachments = createMissingAttachmentsSection(this.host);
 		this.xPosts = createXPostsSection(this.host);
+		this.searchAudit = createSearchAuditSection(this.host);
 	}
 
 	mount(): void {
@@ -186,6 +189,13 @@ export class IngestionDashboardUI {
 			'X posts',
 			'X statuses seen in the link registry or already materialized as _x_metadata notes.',
 			(heading) => this.xPosts.renderBackfillButton(heading),
+			true,
+		);
+		this.buildSection(
+			'searchAudit',
+			'Search audit',
+			'Compares the vault against the search companion\'s index (missing, orphaned, stale, embedding gaps). Forced-only — click Run audit to scan.',
+			(heading) => this.searchAudit.renderRunAuditButton(heading),
 			true,
 		);
 
@@ -548,6 +558,7 @@ export class IngestionDashboardUI {
 			'orphanedAttachments',
 			'missingAttachments',
 			'xPosts',
+			'searchAudit',
 		];
 		for (const id of ids) await this.refresh(id);
 	}
@@ -578,6 +589,7 @@ export class IngestionDashboardUI {
 			case 'orphanedAttachments': return this.orphanedAttachments.render(body, ctx);
 			case 'missingAttachments': return this.missingAttachments.render(body, ctx);
 			case 'xPosts': return this.xPosts.render(body, ctx);
+			case 'searchAudit': return this.searchAudit.render(body, ctx);
 		}
 	}
 }

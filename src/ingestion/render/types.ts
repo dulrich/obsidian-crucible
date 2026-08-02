@@ -22,6 +22,7 @@ export type SectionId =
 	| 'channelControl'
 	| 'orphanedAttachments'
 	| 'missingAttachments'
+	| 'searchAudit'
 	| 'xPosts';
 
 export interface SortState {
