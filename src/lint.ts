@@ -1,7 +1,7 @@
 import { App, MarkdownView, Notice, moment, TFile, TFolder } from 'obsidian';
 import { CrucibleSettings } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
-import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing } from './frontmatter';
+import { sortFrontmatterProperties, updateFrontmatter, upsertFrontmatterProperty, upsertFrontmatterPropertyIfEmpty, withMaterializing, withWriteWatchdog } from './frontmatter';
 import { extractVideoIdFromUrl } from './orchestration/utils/youtube';
 import { postIdFromUrl } from './orchestration/utils/blogs';
 import { logError, logWarn } from './log';
@@ -342,7 +342,7 @@ export const LINT_STEPS: LintStep[] = [
 		settingsGate: (settings) => !!settings.lintBlankLineAfterYaml,
 		configuredBySetting: 'lintBlankLineAfterYaml',
 		run: async (ctx) => {
-			await ctx.app.vault.process(ctx.file, (contentAfterFM) => {
+			await withWriteWatchdog(ctx.file, 'vault.process (blank-line-after-yaml)', ctx.app.vault.process(ctx.file, (contentAfterFM) => {
 				const yamlMatch = contentAfterFM.match(FRONTMATTER_REGEX);
 				if (!yamlMatch) return contentAfterFM;
 				const yamlBlockWithNewlines = yamlMatch[0];
@@ -351,7 +351,7 @@ export const LINT_STEPS: LintStep[] = [
 				const yamlBlockWithoutNewlines = yamlBlockWithNewlines.slice(0, yamlBlockWithNewlines.length - currentNewlines.length);
 				const body = contentAfterFM.slice(yamlBlockWithNewlines.length);
 				return yamlBlockWithoutNewlines.trimEnd() + "\n\n" + body.trimStart();
-			});
+			}));
 		},
 	},
 	{
@@ -447,18 +447,39 @@ export class Linter {
 		const notice = new Notice(`Linting ${files.length} notes...`, 0);
 		let count = 0;
 		let allSuccess = true;
+		const failedPaths: string[] = [];
 
-		for (const file of files) {
-			const success = await this.lintFile(file, true);
-			if (!success) allSuccess = false;
-			count++;
-			if (count % 10 === 0) {
-				notice.setMessage(`Linting ${files.length} notes... (${count}/${files.length})`);
+		try {
+			for (const file of files) {
+				let success = false;
+				try {
+					success = await this.lintFile(file, true);
+				} catch (e) {
+					// lintFile already catches and reports its own step failures — this is a
+					// belt-and-suspenders catch for anything that escapes it (e.g. the
+					// excluded-folder-guard step, which runs before lintFile's own try block)
+					// so one broken note can never orphan the progress Notice or abort the run.
+					logError(`lint failed (${file.path})`, e);
+				}
+				if (!success) {
+					allSuccess = false;
+					failedPaths.push(file.path);
+				}
+				count++;
+				if (count % 10 === 0) {
+					notice.setMessage(`Linting ${files.length} notes... (${count}/${files.length})`);
+				}
 			}
+		} finally {
+			notice.hide();
 		}
 
-		notice.hide();
-		new Notice(`Finished linting ${count} notes`);
+		const failedCount = failedPaths.length;
+		const summary = failedCount > 0
+			? `Finished linting ${count} notes (${failedCount} failed: ${failedPaths.slice(0, 3).join(', ')}`
+				+ `${failedCount > 3 ? ', …' : ''})`
+			: `Finished linting ${count} notes`;
+		new Notice(summary);
 		return allSuccess;
 	}
 
