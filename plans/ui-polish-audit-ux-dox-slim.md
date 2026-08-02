@@ -1,5 +1,23 @@
 # Plan F — UI polish, audit/reconcile honesty, resolver promotion, root-dox slimming
 
+> **STATUS: COMPLETE (2026-08-01).** Plan registered at `7cef197`. F1 landed on crucible
+> master (`0713b13`): shared `.crucible-icon-label-btn` gap primitive, `align-self: center`
+> on heading buttons, and the measure-at-mount sticky header (`applyStickyHeaderPadding`
+> mirrors the real scroll parent's computed padding onto CSS custom props — one mechanism
+> for workspace tab and native modal; rerun packet in `runs/dispatch/wp-f1-report.md`).
+> F2 landed in eval-harness (`36c406c`): `local-inference-bench/lib/link-graph.mjs`
+> promoted with the `/\.[^./\s]+$/` fix at both resolveLinkpath sites, 6-test suite,
+> erratum in `rrlb-arm-2026-08-01/run.md` + validity-memo item 8; archives byte-identical.
+> F3 landed (`4ad7464`): audit report gains a per-class `## Repair` section naming exact
+> commands, reconcile's early-return gate fixed to `isReconcileTargetClean` (the actual
+> source of the "enqueued 0 upserts and 0 deletes" absurdity), honest new-vs-deduped
+> Notices, Queue Monitor `Index:`/`De-index:` titles, and the Companion-status pending-jobs
+> line. F4 landed (`af3239e`): root AGENTS.md 9,308 → 4,104 words — 26 quirk bodies
+> relocated verbatim to `src/`, `src/ingestion/`, `src/settings/` (new, with CLAUDE.md
+> symlinks), orchestration, and providers children; zero content loss, line-level
+> verified. Test floor 1767/139. Live validation items handed to the user at close
+> (F1 tab+modal rerun packet, F3 audit/reconcile/queue-title checks).
+
 Repo of record: **obsidian-crucible** · slug `ui-polish-audit-ux-dox-slim` · WP-F2 lands in
 **eval-harness** per its conventions. Months-facet boost explicitly deferred (user choice).
 
