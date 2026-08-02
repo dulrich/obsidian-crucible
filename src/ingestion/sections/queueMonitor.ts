@@ -1,5 +1,6 @@
-import { App, Modal, Notice, TFile } from 'obsidian';
+import { App, Modal, Notice, setIcon, TFile } from 'obsidian';
 import type { JobStatus, JobType, OrchestrationJob } from '../../orchestration/types';
+import type { JobListOrder } from '../../orchestration/db/types';
 import type { StopJobOutcome } from '../../orchestration/cancellation';
 import type { ServiceHealthSnapshot } from '../../orchestration/serviceHealth';
 import { runServiceOutageRequeueFlow } from '../../orchestration/failedJobRepair';
@@ -130,17 +131,26 @@ const QUEUE_STATUS_BUCKETS: readonly JobStatus[] = ['queued', 'running', 'done',
 const SETTLED_STATUSES: readonly JobStatus[] = ['done', 'failed', 'cancelled'];
 
 // Pure: which `listJobs` call(s) a given filter selection requires. The default
-// view (`null`) is the combined queued+running list (today's behavior, unchanged);
-// any other selection fetches that one bucket alone. A discriminated union rather
-// than a bare status array so the caller never has to index into (and TS narrow)
-// a length-1 array to recover the single status. Exported for direct unit testing
-// — no Orchestrator/DOM needed.
+// view (`null`) is the combined queued+running list (today's behavior, unchanged —
+// claim order, since queued/running dispatch order is dispatch truth); any other
+// selection fetches that one bucket alone. A discriminated union rather than a bare
+// status array so the caller never has to index into (and TS narrow) a length-1
+// array to recover the single status. Exported for direct unit testing — no
+// Orchestrator/DOM needed.
+//
+// WP-G3: a single-bucket fetch also carries its `order` mode. Settled buckets
+// (`SETTLED_STATUSES` — done/failed/cancelled) order by settlement recency: claim
+// order (`lane_rank, priority_rank, created, id`) is dispatch truth for queued/
+// running, but for a *settled* bucket it just replays old retained rows first and
+// buries recent settlements behind them — a 28-job reconcile burst was invisible
+// behind older rows this way. Queued/running singles keep claim order.
 export type QueueFetchPlan =
-	| { kind: 'single'; status: JobStatus }
+	| { kind: 'single'; status: JobStatus; order: JobListOrder }
 	| { kind: 'combined' };
 
 export function queueFetchPlan(filter: QueueStatusFilter): QueueFetchPlan {
-	return filter ? { kind: 'single', status: filter } : { kind: 'combined' };
+	if (!filter) return { kind: 'combined' };
+	return { kind: 'single', status: filter, order: SETTLED_STATUSES.includes(filter) ? 'recency' : 'claim' };
 }
 
 // Pure: the honest empty-state line for a given filter selection. A settled bucket
@@ -171,14 +181,21 @@ export function queueEmptyStateText(filter: QueueStatusFilter): string {
 // Exported for direct unit testing (tests/queueMonitorStatusFilter.test.mjs) — same
 // rationale as `formatJobDetail`: a DOM-bearing but Orchestrator/host-light function
 // is easier to pin behaviorally than driving the full `renderQueueMonitor` fetch path.
+//
+// `statsOverride` (WP-G3): `renderQueueMonitor` already fetches `queueStats()` once
+// per pass (to derive the honest "showing K of N" meta-line total) and passes that
+// same result here, so the filter bar doesn't run a second identical whole-DB count
+// query. Omitted (the section's own initial-mount call site, before any row fetch
+// has happened) falls back to fetching it here, same as before this WP.
 export function renderQueueFilterBar(
 	host: DashboardHost,
 	container: HTMLElement,
 	active: QueueStatusFilter,
 	onSelect: (status: JobStatus) => void,
+	statsOverride?: Record<JobStatus, number> | null,
 ): void {
 	container.empty();
-	const stats = host.plugin.orchestrator?.queueStats();
+	const stats = statsOverride !== undefined ? statsOverride : host.plugin.orchestrator?.queueStats();
 	if (!stats) return;
 	for (const bucket of QUEUE_STATUS_BUCKETS) {
 		const n = stats[bucket];
@@ -323,7 +340,13 @@ class JobDetailModal extends Modal {
 		contentEl.createEl('pre', { text, cls: 'crucible-inspector-pre' });
 
 		const buttons = contentEl.createDiv({ cls: 'modal-button-container' });
-		const copy = buttons.createEl('button', { text: 'Copy to clipboard' });
+		// WP-G3: standard icon+label control (exemplar: sourceEvalDashboard.ts's
+		// "Export JSONL" button) — the bare-text button was a UI-standards miss.
+		// `copy` is reserved fleet-wide for copy-to-clipboard/copy-path
+		// (tests/iconLanguageConsistencyGuard.test.mjs), which this is exactly.
+		const copy = buttons.createEl('button', { cls: 'crucible-icon-label-btn' });
+		setIcon(copy, 'copy');
+		copy.createSpan({ text: 'Copy' });
 		copy.addEventListener('click', () => {
 			void navigator.clipboard.writeText(text);
 			new Notice('Job detail copied to clipboard.');
@@ -495,6 +518,12 @@ export function buildQueueMonitorSection(host: DashboardHost): void {
 
 export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement, ctx: SectionContext, statsEl?: HTMLElement): Promise<void> {
 	const filter: QueueStatusFilter = ctx.queueStatusFilter ?? null;
+	const orchestrator = host.plugin.orchestrator;
+	// WP-G3: fetched once per render pass and reused both for the filter bar's pill
+	// counts and the meta line's honest "showing K of N" total below — see
+	// `renderQueueFilterBar`'s `statsOverride` doc comment for why this isn't a
+	// second whole-DB count query.
+	const stats = orchestrator?.queueStats() ?? null;
 	// Stats/filter-bar first: synchronous store counts, so the bucket row (and its
 	// active-pill state) is current even while the row queries below are still in
 	// flight (and even when they fail). Re-wiring the click handler here on every
@@ -504,24 +533,24 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 		renderQueueFilterBar(host, statsEl, filter, status => {
 			ctx.queueStatusFilter = ctx.queueStatusFilter === status ? null : status;
 			void host.refresh('queueMonitor');
-		});
+		}, stats);
 	}
 	// Body is intentionally NOT emptied here: `orchestrator.listJobs` below awaits two
 	// full queries, and clearing the body first left it visibly blank for that whole
 	// window on every queue event. Every branch below empties body itself, immediately
 	// before it writes — the error message, the empty state, and (via
 	// renderSortableTable's own `parent.empty()`) the table.
-	const orchestrator = host.plugin.orchestrator;
+	// WP-DP3: the default view (no filter) stays the combined queued+running list;
+	// selecting a bucket fetches that one status alone via the same `listJobs` seam.
+	// `queueFetchPlan` is the pure routing decision — the branch below just executes
+	// whichever plan it names, including (WP-G3) its `order` mode for a single-status
+	// fetch.
+	const plan = queueFetchPlan(filter);
 	let rows: QueueRow[] = [];
 	if (orchestrator) {
 		try {
-			// WP-DP3: the default view (no filter) stays the combined queued+running
-			// list; selecting a bucket fetches that one status alone via the same
-			// `listJobs` seam. `queueFetchPlan` is the pure routing decision — the
-			// branch below just executes whichever plan it names.
-			const plan = queueFetchPlan(filter);
 			if (plan.kind === 'single') {
-				const jobs = await orchestrator.listJobs(plan.status, { limit: QUEUE_MONITOR_RENDER_LIMIT });
+				const jobs = await orchestrator.listJobs(plan.status, { limit: QUEUE_MONITOR_RENDER_LIMIT, order: plan.order });
 				rows = jobs.map(job => toQueueRow(job, plan.status));
 			} else {
 				const [running, queued] = await Promise.all([orchestrator.listJobs('running', { limit: QUEUE_MONITOR_RENDER_LIMIT }), orchestrator.listJobs('queued', { limit: QUEUE_MONITOR_RENDER_LIMIT })]);
@@ -542,7 +571,14 @@ export async function renderQueueMonitor(host: DashboardHost, body: HTMLElement,
 	const typeCounts = new Map<string, number>();
 	for (const r of rows) typeCounts.set(r.type, (typeCounts.get(r.type) ?? 0) + 1);
 	const metaParts = Array.from(typeCounts.entries()).map(([t, n]) => `${t} ${n}`);
-	if (rows.length > QUEUE_MONITOR_RENDER_LIMIT) metaParts.push(`showing ${QUEUE_MONITOR_RENDER_LIMIT} of ${rows.length}`);
+	// WP-G3: replaces the dead `rows.length > QUEUE_MONITOR_RENDER_LIMIT` check — rows
+	// arrive pre-limited by `listJobs`'s own SQL `LIMIT`, so for a single-status fetch
+	// that comparison could never fire. `stats` (the same whole-DB bucket-count row
+	// the filter bar renders, fetched once above) gives an honest total: a
+	// single-status fetch's total is that bucket's whole-DB count; the combined
+	// default view's is queued+running (the two buckets it actually fetches).
+	const bucketTotal = stats ? (plan.kind === 'single' ? stats[plan.status] : stats.queued + stats.running) : null;
+	if (bucketTotal !== null && bucketTotal > rows.length) metaParts.push(`showing ${rows.length} of ${bucketTotal}`);
 	const metaText = metaParts.join(' · ');
 	host.setSectionMeta('queueMonitor', metaText);
 	host.setSectionCount('queueMonitor', rows.length);

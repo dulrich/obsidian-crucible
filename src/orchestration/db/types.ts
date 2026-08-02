@@ -64,6 +64,18 @@ export interface DbJobRow {
 	dedupeKey?: string;
 }
 
+/**
+ * `SqliteJobStore.list` / `Orchestrator.listJobs` ordering mode (WP-G3). `'claim'`
+ * (the default) is `lane_rank, priority_rank, created, id` — dispatch truth, and the
+ * ONLY order `claimNext`/`selectClaimCandidates`/`findActive` ever use; nothing here
+ * changes those. `'recency'` is `settled_at DESC, id DESC` — settlement-newest-first,
+ * for rendering a *settled* bucket (done/failed/cancelled) where claim order shows
+ * the oldest retained rows first and buries recent settlements behind them. Callers
+ * choose per status: `'recency'` on a settled status, `'claim'` (or omitted) on
+ * queued/running — see `queueFetchPlan` in `src/ingestion/sections/queueMonitor.ts`.
+ */
+export type JobListOrder = 'claim' | 'recency';
+
 /** Input to `SqliteJobStore.insert`. `id`/`created` are minted by the caller via the
  * existing `newJobId`/`nowIso` (`src/orchestration/utils/dates.ts`) — the store never
  * generates or parses an id, per the WP-5 brief's hard constraint. */

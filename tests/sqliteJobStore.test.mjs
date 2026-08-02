@@ -584,6 +584,84 @@ test('list: returns rows for a status in claim order, respects limit and offset'
 	db.close();
 });
 
+// WP-G3: the queue monitor's done/failed/cancelled buckets showed the 100 OLDEST
+// retained settled jobs, because `list` only ever ordered by claim order
+// (`lane_rank, priority_rank, created, id` — mint order), which is right for
+// queued/running (dispatch truth) but wrong for a settled bucket: recent
+// settlements sat invisible behind older retained rows. `list(status, { order:
+// 'recency' })` orders by `settled_at DESC, id DESC` instead — this is display
+// ordering only, so `order: 'claim'` (or omitted) must produce byte-identical
+// results to today.
+test('list: order "recency" sorts a settled bucket by settled_at DESC (newest settlement first), id DESC tiebreak', () => {
+	const db = newDb();
+	const store = newStore(db, 'proc-list-recency');
+	// Insert in mint order, then settle out of order so settlement recency and
+	// creation order genuinely diverge — the bug this WP fixes.
+	const a = insertJob(store, { created: '0000000001' });
+	const b = insertJob(store, { created: '0000000002' });
+	const c = insertJob(store, { created: '0000000003' });
+	// b settles first (oldest settlement), then a, then c (newest settlement) —
+	// deliberately not mint order, so a recency sort and a claim-order sort of the
+	// same three rows disagree.
+	store.transition(b.id, 'done', 1000);
+	store.transition(a.id, 'done', 2000);
+	store.transition(c.id, 'done', 3000);
+
+	assert.deepEqual(store.list('done', { order: 'recency' }).map(r => r.id), [c.id, a.id, b.id]);
+	// The old claim-order default (mint order here, since none were reordered by
+	// lane/priority) is unaffected by the recency-sorted rows above still existing.
+	assert.deepEqual(store.list('done').map(r => r.id), [a.id, b.id, c.id]);
+	db.close();
+});
+
+test('list: order "recency" tiebreaks on id DESC when settled_at is identical', () => {
+	const db = newDb();
+	const store = newStore(db, 'proc-list-recency-tie');
+	const a = insertJob(store, { id: 'job-a', created: '0000000001' });
+	const b = insertJob(store, { id: 'job-b', created: '0000000002' });
+	store.transition(a.id, 'done', 5000);
+	store.transition(b.id, 'done', 5000);
+
+	assert.deepEqual(store.list('done', { order: 'recency' }).map(r => r.id), ['job-b', 'job-a']);
+	db.close();
+});
+
+test('list: order "recency" respects limit/offset and composes with a type filter, same as claim order', () => {
+	const db = newDb();
+	const store = newStore(db, 'proc-list-recency-page');
+	const ids = [];
+	for (let i = 0; i < 5; i++) {
+		const job = insertJob(store, { created: String(i).padStart(10, '0') });
+		store.transition(job.id, 'done', 1000 + i);
+		ids.push(job.id);
+	}
+	// Newest-settled first is reverse mint order here.
+	const newestFirst = [...ids].reverse();
+	assert.deepEqual(store.list('done', { order: 'recency' }).map(r => r.id), newestFirst);
+	assert.deepEqual(store.list('done', { order: 'recency', limit: 2 }).map(r => r.id), newestFirst.slice(0, 2));
+	assert.deepEqual(store.list('done', { order: 'recency', limit: 2, offset: 2 }).map(r => r.id), newestFirst.slice(2, 4));
+	db.close();
+});
+
+// Queued/running ordering must stay byte-identical to today — `order` is opt-in and
+// defaults to claim order, and `claimNext`/`selectClaimCandidates` never pass it.
+test('list: queued/running order is unaffected by the "recency" option existing — claim order stays the default', () => {
+	const db = newDb();
+	const store = newStore(db, 'proc-list-queued-unchanged');
+	const ids = [];
+	for (let i = 0; i < 4; i++) {
+		ids.push(insertJob(store, { created: String(i).padStart(10, '0') }).id);
+	}
+	assert.deepEqual(store.list('queued').map(r => r.id), ids);
+	assert.deepEqual(store.list('queued', { order: 'claim' }).map(r => r.id), ids);
+	// Passing 'recency' against a non-terminal status is inert-but-honest: queued
+	// rows never have settled_at, so it degrades to id DESC — not a case any caller
+	// exercises (queueFetchPlan never requests recency for queued/running), but the
+	// store itself doesn't special-case status, so pin what it actually does.
+	assert.deepEqual(store.list('queued', { order: 'recency' }).map(r => r.id), [...ids].reverse());
+	db.close();
+});
+
 test('count/countByTypeAndStatus/hasActive', () => {
 	const db = newDb();
 	const store = newStore(db, 'proc-counts');
