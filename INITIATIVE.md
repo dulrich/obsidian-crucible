@@ -7,7 +7,9 @@ tags: ""
 initiative-visibility: public
 initiative-slug: obsidian-crucible
 initiative-title: Obsidian Crucible
-pending-plans: []
+pending-plans:
+  - "[[intake-actions-dashboard-settings-polish]]"
+  - "[[tag-boost-spike]]"
 initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 50
