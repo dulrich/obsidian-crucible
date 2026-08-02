@@ -101,6 +101,12 @@ export function renderOrchestrationSearchSettings(tab: CrucibleSettingTab, conta
 let cachedSearchHealth: SearchHealth | null = null;
 let searchHealthFetchError: string | null = null;
 
+// WP-F3: the two search-file job types' queued+running counts — a local orchestrator query,
+// not a companion round-trip, so it's fetched (and rendered) independently of whether the
+// health fetch above succeeded. Same session-scoped cache idiom as `cachedSearchHealth`: no
+// polling, refreshed only by the same Refresh click.
+let cachedPendingIndexJobs: { upserts: number; deletes: number } | null = null;
+
 function renderSearchHealthStatusSettings(tab: CrucibleSettingTab, searchGroup: HTMLElement) {
 	const heading = new Setting(searchGroup).setName('Companion status').setHeading()
 		.setDesc('Read-only. Reflects the last manual Refresh, not a live connection — click Refresh after starting/rebuilding the companion.');
@@ -108,6 +114,13 @@ function renderSearchHealthStatusSettings(tab: CrucibleSettingTab, searchGroup: 
 
 	const renderBody = () => {
 		statusBody.empty();
+		if (cachedPendingIndexJobs) {
+			const { upserts, deletes } = cachedPendingIndexJobs;
+			const text = upserts === 0 && deletes === 0
+				? 'Index jobs pending: none'
+				: `Index jobs pending: ${upserts} upsert${upserts === 1 ? '' : 's'}, ${deletes} delete${deletes === 1 ? '' : 's'}`;
+			statusBody.createEl('p', { text });
+		}
 		if (searchHealthFetchError) {
 			statusBody.createDiv({ cls: 'crucible-setting-warning', text: `Could not reach the search companion — ${searchHealthFetchError}` });
 			return;
@@ -161,6 +174,18 @@ function renderSearchHealthStatusSettings(tab: CrucibleSettingTab, searchGroup: 
 				searchHealthFetchError = null;
 			} catch (e) {
 				searchHealthFetchError = e instanceof Error ? e.message : String(e);
+			}
+			// `Orchestrator.countJobs` never throws (an unregistered type answers 0), but the
+			// try/catch keeps the panel showing its last-known value rather than wiping it on
+			// an unexpected failure — same defensive shape as the health fetch above.
+			try {
+				const [upserts, deletes] = await Promise.all([
+					tab.plugin.orchestrator.countJobs('search_upsert_file', ['queued', 'running']),
+					tab.plugin.orchestrator.countJobs('search_delete_path', ['queued', 'running']),
+				]);
+				cachedPendingIndexJobs = { upserts, deletes };
+			} catch {
+				// Leave cachedPendingIndexJobs at its last value.
 			}
 			bt.setDisabled(false);
 			setLabel('Refresh');
