@@ -1,5 +1,5 @@
 import { App } from 'obsidian';
-import { MD5_NAME_RE } from '../../localizeAttachments';
+import { MD5_NAME_RE } from '../../attachmentRepair';
 import { classifyLocalizeMediaType } from '../../utils';
 import type { OrphanRow } from '../render/types';
 

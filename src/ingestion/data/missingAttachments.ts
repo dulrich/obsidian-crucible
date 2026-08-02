@@ -1,5 +1,5 @@
 import { App, TFile } from 'obsidian';
-import { buildAttachmentPathIndex, MD5_NAME_RE, resolveLocalAttachmentRepair } from '../../localizeAttachments';
+import { buildAttachmentPathIndex, MD5_NAME_RE, resolveLocalAttachmentRepair } from '../../attachmentRepair';
 import type { MissingRefRow } from '../render/types';
 
 // A caller-supplied narrowing of AttachmentLocalizer's public surface — kept a plain
@@ -55,11 +55,11 @@ function normalizeRefTargetForResolve(rawLink: string): string {
 // refs are out of scope, same accepted gap as the orphan scan), keeps only refs that look
 // like managed attachments, and flags the ones `getFirstLinkpathDest` can no longer
 // resolve — the exact brokenness predicate `AttachmentLocalizer.repairNote` uses
-// (src/localizeAttachments.ts:427).
+// (src/localizeAttachments.ts:506).
 export function computeMissingAttachmentRows(app: App, localizer: AttachmentFolderResolver): MissingRefRow[] {
 	const vaultPaths = app.vault.getFiles().map(f => f.path);
 	// Built once per scan pass (not once per broken row) — collapses planLocalAttachmentRepair's
-	// per-row full-vault filter passes (see src/localizeAttachments.ts's AttachmentPathIndex doc
+	// per-row full-vault filter passes (see src/attachmentRepair.ts's AttachmentPathIndex doc
 	// comment) down to O(1)/O(log n) lookups. Byte-identical decisions to the naive path; see
 	// tests/localizeAttachments.edge.test.mjs's index-vs-naive equivalence coverage.
 	const attachmentIndex = buildAttachmentPathIndex(vaultPaths);
