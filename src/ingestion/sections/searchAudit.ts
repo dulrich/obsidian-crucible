@@ -1,44 +1,75 @@
-import { Notice, TFile } from 'obsidian';
+import { Notice, setIcon, TFile } from 'obsidian';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderIconButton } from '../render/cells';
 import { formatDateTime } from '../render/format';
-import { enqueueSearchRepairs, runSearchAudit, type SearchRepairTargets } from '../../search/auditRun';
 import {
-	formatReconcileCompletedSummary,
-	formatReconcileNothingToDoSummary,
-	isReconcileTargetClean,
-	type ReconcileEnqueueSummaryInput,
-	type SearchAuditResult,
-} from '../../search/audit';
+	confirmAndQueueImageDescribeBackfill,
+	enqueueEmbedMissing,
+	enqueueSearchRepairs,
+	retryFailedImageDescriptions,
+	runSearchAudit,
+	type SearchRepairTargets,
+} from '../../search/auditRun';
+import { type ReconcileEnqueueSummaryInput, type SearchAuditResult } from '../../search/audit';
 import type { DashboardHost, SectionContext } from '../render/types';
 
 /**
- * WP-H4: the Ingestion-dashboard face of the WP-H3 audit/reconcile seam
- * (`src/search/auditRun.ts`, `src/search/audit.ts`) — a forced-trigger-only section (never
- * FAST_SECTIONS/SCAN_SECTIONS; see `ingestionDashboard.ts`'s membership sets) because the scan
- * itself reads/chunks every mtime-suspect and missing-candidate file plus a companion round trip,
- * which is expensive and unbounded on a cold index. The section never calls `runSearchAudit`
- * itself — only the header's Run-audit button does — so mounting/refreshing the dashboard can
- * never trigger a scan.
+ * WP-I2: the Ingestion-dashboard face of the WP-H3/I1 audit/reconcile seam (`src/search/
+ * auditRun.ts`, `src/search/audit.ts`) — a forced-trigger-only section (never FAST_SECTIONS/
+ * SCAN_SECTIONS; see `ingestionDashboard.ts`'s membership sets) because the scan itself reads/
+ * chunks every mtime-suspect and missing-candidate file plus a companion round trip, which is
+ * expensive and unbounded on a cold index. The section never calls `runSearchAudit` itself —
+ * only the header's Run-audit button does — so mounting/refreshing the dashboard can never
+ * trigger a scan.
+ *
+ * Layout (WP-I2 redesign, replacing WP-H4's pill filter bar + image-coverage pill row + "Repair
+ * all" button): ONE merged Summary/Repair statistics table mirroring the report's Summary
+ * section (`formatAuditReport`, `src/search/audit.ts`) — nine fixed rows (the six path classes,
+ * images pending, images failed, and an informational images-described row), each with a count
+ * and a per-class wrench action (hidden entirely when its count is 0 — a user-locked deviation
+ * from the fleet's muted-never-absent law, scoped to this summary table only; the paths table
+ * below keeps the ordinary muted-wrench treatment). Clicking a non-zero row (anywhere but its
+ * action button) filters the paths table to that class, including the two image classes;
+ * clicking the active row again restores the default missing+orphans+stale view.
  *
  * State pattern lifted from the settings Search-health panel
  * (`src/settings/sections/orchestrationSearch.ts`'s `cachedSearchHealth`/renderBody): closure-
  * cached `{result, ranAt, error}`, refreshed only by an explicit button click, with the last
  * successful result surviving a later failed run (see the error branch below).
- *
- * `SearchAuditResult.imageCoverage` renders as a read-only neutral-pill summary row (v2 —
- * v1 omitted it; see `renderImageCoverageRow` for the no-render-time-gate rationale).
  */
 
-type AuditClass = 'missing' | 'orphans' | 'stale' | 'mtimeOnly' | 'unindexable' | 'embeddingGaps';
+type NoteClass = 'missing' | 'orphans' | 'stale' | 'mtimeOnly' | 'unindexable' | 'embeddingGaps';
+type ImageClass = 'imagePending' | 'imageFailed';
+type AuditClass = NoteClass | ImageClass;
+type SummaryKey = AuditClass | 'imagesDescribed';
 
-// Order matches SearchAuditResult's field order (src/search/audit.ts:79-113).
-const AUDIT_CLASSES: readonly AuditClass[] = ['missing', 'orphans', 'stale', 'mtimeOnly', 'unindexable', 'embeddingGaps'];
-// The three classes reconcile can act on (search-reconcile-index's own scope) — everything else
-// (mtimeOnly/unindexable: informational, no repair command; embeddingGaps: a different command
-// family) is excluded from both the default combined table view and the "Repair all" bulk action.
-const DEFECT_CLASSES: readonly AuditClass[] = ['missing', 'orphans', 'stale'];
+// The three classes reconcile can act on (search-reconcile-index's own scope) — drives the
+// default (no filter) paths-table view and the header's honest total count. Everything else
+// (mtimeOnly/unindexable: informational, embeddingGaps/images: their own command families) is
+// excluded from the default combined view, same as WP-H4.
+const DEFECT_CLASSES: readonly NoteClass[] = ['missing', 'orphans', 'stale'];
 
+// Fixed row order for the merged Summary/Repair table — mirrors formatAuditReport's Summary
+// section (src/search/audit.ts:296-304) so the dashboard and the report note never disagree
+// about what the nine lines are or what order they read in.
+const SUMMARY_ORDER: readonly SummaryKey[] = [
+	'missing', 'orphans', 'stale', 'mtimeOnly', 'unindexable', 'embeddingGaps', 'imagePending', 'imageFailed', 'imagesDescribed',
+];
+
+const SUMMARY_LABELS: Record<SummaryKey, string> = {
+	missing: 'Missing (in vault, not indexed)',
+	orphans: 'Orphans (indexed, not in vault)',
+	stale: 'Stale (vault newer, content changed)',
+	mtimeOnly: 'Mtime-only (unchanged content — index is current)',
+	unindexable: 'Unindexable (no indexable content)',
+	embeddingGaps: 'Embedding gaps (embedded < chunks)',
+	imagePending: 'Images pending',
+	imageFailed: 'Images failed',
+	imagesDescribed: 'Images described (informational)',
+};
+
+// Short filter-noun used in the paths table's Class column and the summary row's clickable
+// title — the "images pending"/"images failed" wording WP-I2 adds for the two new classes.
 const AUDIT_CLASS_LABELS: Record<AuditClass, string> = {
 	missing: 'missing',
 	orphans: 'orphans',
@@ -46,6 +77,8 @@ const AUDIT_CLASS_LABELS: Record<AuditClass, string> = {
 	mtimeOnly: 'mtime-only',
 	unindexable: 'unindexable',
 	embeddingGaps: 'embedding gaps',
+	imagePending: 'images pending',
+	imageFailed: 'images failed',
 };
 
 interface SearchAuditRow {
@@ -63,9 +96,9 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 	let ranAt: number | null = null;
 	let error: string | null = null;
 	let selectedClass: AuditClass | null = null;
-	// Set true by any repair enqueue (single-row or bulk) so the meta line can say the cached
-	// result no longer reflects the index — repair never re-runs the scan itself (out of scope;
-	// the brief is explicit that this stays a manual, explicit action).
+	// Set true by any repair enqueue (a single summary-row action) so the meta line can say the
+	// cached result no longer reflects the index — repair never re-runs the scan itself (out of
+	// scope; the brief is explicit that this stays a manual, explicit action).
 	let resultStale = false;
 
 	function render(body: HTMLElement, ctx: SectionContext): void {
@@ -94,16 +127,11 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 
 		body.empty();
 
-		const statsRow = body.createDiv({ cls: 'crucible-queue-stats-row' });
-		renderAuditFilterBar(statsRow, currentResult, selectedClass, cls => {
+		const summaryContainer = body.createDiv();
+		renderAuditSummaryTable(summaryContainer, host, currentResult, selectedClass, cls => {
 			selectedClass = selectedClass === cls ? null : cls;
 			void ctx.refresh();
-		});
-
-		renderImageCoverageRow(body, currentResult);
-
-		const bulkRow = body.createDiv({ cls: 'crucible-ingestion-queue-controls' });
-		renderBulkRepairButton(host, bulkRow, () => result, () => {
+		}, () => {
 			resultStale = true;
 			void ctx.refresh();
 		});
@@ -139,11 +167,16 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 	}
 
 	function renderRunAuditButton(heading: HTMLElement): void {
-		const btn = heading.createEl('button', { text: 'Run audit', cls: 'crucible-ingestion-run-audit' });
+		// WP-I2: icon-label chrome (matches buildSection's Refresh button, ingestionDashboard.ts)
+		// so "Run audit" sits inline with Refresh instead of reading as a differently-styled
+		// outlier — the header's flex-wrap can now keep both on one line once the section
+		// description is short (see ingestionDashboard.ts's searchAudit registration).
+		const btn = heading.createEl('button', { cls: 'crucible-ingestion-run-audit crucible-icon-label-btn' });
+		paintRunAuditButton(btn, false);
 		btn.addEventListener('click', () => {
 			void (async () => {
 				btn.disabled = true;
-				btn.setText('Running…');
+				paintRunAuditButton(btn, true);
 				if (!host.plugin.settings.searchEnabled) {
 					error = 'search indexing is disabled (Settings → Orchestrate → Search → Enabled).';
 				} else {
@@ -160,7 +193,7 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 					}
 				}
 				btn.disabled = false;
-				btn.setText('Run audit');
+				paintRunAuditButton(btn, false);
 				void host.refresh('searchAudit');
 			})();
 		});
@@ -169,72 +202,236 @@ export function createSearchAuditSection(host: DashboardHost): SearchAuditSectio
 	return { render, renderRunAuditButton };
 }
 
-function buildRows(result: SearchAuditResult, selectedClass: AuditClass | null): SearchAuditRow[] {
-	const classes: readonly AuditClass[] = selectedClass ? [selectedClass] : DEFECT_CLASSES;
-	const rows: SearchAuditRow[] = [];
-	for (const cls of classes) {
-		for (const path of result[cls]) rows.push({ path, cls });
-	}
-	return rows;
+function paintRunAuditButton(btn: HTMLButtonElement, running: boolean): void {
+	btn.empty();
+	setIcon(btn, 'play');
+	btn.createSpan({ text: running ? 'Running…' : 'Run audit' });
 }
 
-// Modeled on renderQueueFilterBar (queueMonitor.ts:190-215): clickable .crucible-pill buttons,
-// is-contrast when active, aria-pressed + title, click-again-to-clear toggle. Hues restricted to
-// the three genuine defect classes (missing/orphans/stale) per root AGENTS.md's pill-taxonomy
-// law — mtimeOnly/unindexable/embeddingGaps are informational or not reconcile-actionable from
-// here, so they stay neutral even when non-zero (spending a status hue on a non-actionable fact
-// spends the reader's alarm budget on nothing).
-function renderAuditFilterBar(
+function buildRows(result: SearchAuditResult, selectedClass: AuditClass | null): SearchAuditRow[] {
+	if (selectedClass === null) {
+		const rows: SearchAuditRow[] = [];
+		for (const cls of DEFECT_CLASSES) for (const path of result[cls]) rows.push({ path, cls });
+		return rows;
+	}
+	if (selectedClass === 'imagePending') return result.imageCoverage.pendingPaths.map(path => ({ path, cls: selectedClass }));
+	if (selectedClass === 'imageFailed') return result.imageCoverage.failedPaths.map(path => ({ path, cls: selectedClass }));
+	return result[selectedClass].map(path => ({ path, cls: selectedClass }));
+}
+
+function summaryCount(result: SearchAuditResult, key: SummaryKey): number {
+	if (key === 'imagePending') return result.imageCoverage.pending;
+	if (key === 'imageFailed') return result.imageCoverage.failed;
+	if (key === 'imagesDescribed') return result.imageCoverage.described;
+	return result[key].length;
+}
+
+function formatSummaryCount(result: SearchAuditResult, key: SummaryKey): string {
+	if (key === 'imagesDescribed') return `${result.imageCoverage.described} / ${result.imageCoverage.referenced}`;
+	return String(summaryCount(result, key));
+}
+
+// WP-I2: the merged Summary/Repair statistics table replacing WP-H4's pill bar + image-coverage
+// pill row + "Repair all" button. Nine fixed rows in SUMMARY_ORDER, each with a count and one
+// action cell. Every non-informational row (all eight AuditClass keys, including mtimeOnly/
+// unindexable — clickable for their filtering value even though they carry no repair action) is
+// clickable when its count is > 0; only the informational "images described" row is never
+// clickable, at any count. The condition label renders as a real <button> only when the row is
+// clickable, so keyboard focus/Enter/Space work natively without an ARIA role hack on the <tr> —
+// the click handler itself lives on the <tr> (real-DOM click bubbling carries a button click up
+// to it), guarded so a click landing in the action cell never also toggles the filter.
+function renderAuditSummaryTable(
 	container: HTMLElement,
+	host: DashboardHost,
 	result: SearchAuditResult,
-	active: AuditClass | null,
+	selectedClass: AuditClass | null,
 	onSelect: (cls: AuditClass) => void,
+	onRepaired: () => void,
 ): void {
 	container.empty();
-	for (const cls of AUDIT_CLASSES) {
-		const n = result[cls].length;
-		const isActive = active === cls;
-		const label = AUDIT_CLASS_LABELS[cls];
-		let pillCls = 'crucible-pill';
-		if (isActive) pillCls += ' is-contrast';
-		else if (DEFECT_CLASSES.includes(cls) && n > 0) pillCls += cls === 'stale' ? ' is-warn' : ' is-error';
-		else pillCls += ' is-muted';
-		const btn = container.createEl('button', { cls: pillCls, text: `${label} ${n}` });
-		btn.setAttr('aria-pressed', String(isActive));
-		btn.setAttr('aria-label', `Filter to ${label} paths`);
-		btn.title = isActive
-			? `Showing ${label} paths only — click again to go back to the default view.`
-			: `Show only ${label} paths.`;
-		btn.addEventListener('click', () => onSelect(cls));
+	const table = container.createEl('table', { cls: 'crucible-ingestion-table crucible-audit-summary-table' });
+	const thead = table.createEl('thead');
+	const headerRow = thead.createEl('tr');
+	headerRow.createEl('th', { text: 'Condition' });
+	headerRow.createEl('th', { text: 'Count', cls: 'crucible-audit-summary-count' });
+	headerRow.createEl('th', { text: '' });
+	const tbody = table.createEl('tbody');
+
+	for (const key of SUMMARY_ORDER) {
+		const count = summaryCount(result, key);
+		const clickable = key !== 'imagesDescribed' && count > 0;
+		const isActive = clickable && selectedClass === key;
+
+		const tr = tbody.createEl('tr');
+		if (clickable) tr.addClass('crucible-audit-row-clickable');
+		if (isActive) tr.addClass('crucible-audit-row-active');
+
+		const labelTd = tr.createEl('td');
+		if (clickable) {
+			const label = AUDIT_CLASS_LABELS[key];
+			const btn = labelTd.createEl('button', { cls: 'crucible-audit-condition-btn', text: SUMMARY_LABELS[key] });
+			btn.setAttr('aria-pressed', String(isActive));
+			btn.title = isActive
+				? `Showing ${label} paths only — click again to return to the default view.`
+				: `Filter the table below to ${label} paths.`;
+		} else {
+			labelTd.setText(SUMMARY_LABELS[key]);
+		}
+
+		const countTd = tr.createEl('td', { cls: 'crucible-audit-summary-count' });
+		countTd.setText(formatSummaryCount(result, key));
+
+		const actionTd = tr.createEl('td');
+		actionTd.addClass('crucible-intake-action-cell');
+		renderSummaryAction(actionTd, host, key, result, count, onRepaired);
+
+		if (clickable) {
+			tr.addEventListener('click', evt => {
+				const target = evt.target as HTMLElement;
+				if (target.closest('.crucible-intake-action-cell')) return;
+				onSelect(key);
+			});
+		}
 	}
 }
 
-// Image-coverage summary (v2 follow-up to the WP-H4 v1 omission): the four counts
-// `runSearchAudit` already computed at scan time (`gatherSearchAuditImages` reads
-// `metadataCache.resolvedLinks` when the audit runs, so there is nothing to gate at render
-// time — the numbers are frozen into the cached result, same as the report note's "Image
-// coverage" line). Read-only span pills, all neutral: none of the four is actionable from this
-// section (pending belongs to the image-describe backfill, failed is a deliberate durable
-// skip), so per the pill-taxonomy law they never spend a status hue.
-function renderImageCoverageRow(body: HTMLElement, result: SearchAuditResult): void {
-	const row = body.createDiv({ cls: 'crucible-queue-stats-row' });
-	const c = result.imageCoverage;
-	const pills: Array<{ text: string; title: string }> = [
-		{ text: `images referenced ${c.referenced}`, title: 'Images referenced by a resolved link anywhere in the vault, as of this audit run.' },
-		{ text: `described ${c.described}`, title: 'Referenced images with a description record.' },
-		{ text: `failed ${c.failed}`, title: 'Durable failed records — the image-describe backfill will not retry these.' },
-		{ text: `pending ${c.pending}`, title: 'Referenced but neither described nor failed — the image-describe backfill’s work queue.' },
-	];
-	for (const p of pills) {
-		const span = row.createSpan({ cls: 'crucible-pill is-muted', text: p.text });
-		span.title = p.title;
+// Per-row action for the summary table. mtimeOnly/unindexable always read "no action needed"
+// (their permanent informational state, regardless of count); the images-described row always
+// reads "—" (a ratio, not a state — see wp-i2-report.md for why this reads differently from "no
+// action needed"). Every other row's wrench is HIDDEN ENTIRELY when its count is 0 — the
+// user-locked deviation from "muted, never absent" that's scoped to this table only (root
+// AGENTS.md); the paths table below keeps the ordinary muted-wrench law.
+function renderSummaryAction(
+	td: HTMLElement,
+	host: DashboardHost,
+	key: SummaryKey,
+	result: SearchAuditResult,
+	count: number,
+	onRepaired: () => void,
+): void {
+	if (key === 'mtimeOnly' || key === 'unindexable') {
+		td.setText('No action needed');
+		return;
+	}
+	if (key === 'imagesDescribed') {
+		td.setText('—');
+		return;
+	}
+	if (count === 0) return;
+
+	const plural = count === 1 ? '' : 's';
+
+	if (key === 'missing' || key === 'stale') {
+		const paths = key === 'missing' ? result.missing : result.stale;
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: `Enqueue re-index jobs for ${count} ${AUDIT_CLASS_LABELS[key]} path${plural}.`,
+			onClick: btn => void runReconcileAction(btn, host, { upsertPaths: paths, orphanPaths: [] }, onRepaired),
+		});
+		return;
+	}
+	if (key === 'orphans') {
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: `Delete ${count} orphaned path${plural} from the search index (confirm required).`,
+			onClick: btn => void runReconcileAction(btn, host, { upsertPaths: [], orphanPaths: result.orphans }, onRepaired),
+		});
+		return;
+	}
+	if (key === 'embeddingGaps') {
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: `Run "Search: embed missing vectors" for ${count} embedding gap${plural}.`,
+			onClick: btn => {
+				void (async () => {
+					btn.disabled = true;
+					try {
+						await enqueueEmbedMissing(host.plugin);
+						new Notice('Search: embed missing vectors — enqueued.');
+						onRepaired();
+					} catch (e) {
+						new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
+					} finally {
+						btn.disabled = false;
+					}
+				})();
+			},
+		});
+		return;
+	}
+	if (key === 'imagePending') {
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: `Queue the image-describe backfill for ${count} pending image${plural} (confirm dialog follows).`,
+			onClick: btn => {
+				void (async () => {
+					btn.disabled = true;
+					try {
+						// confirmAndQueueImageDescribeBackfill shows its own scale-warning confirm modal
+						// and, on confirm, its own enqueue — no separate Notice here on top of it (brief:
+						// "the image helpers show their own modal/Notice — for those just mark stale on
+						// true"). Declined (false) leaves resultStale untouched, matching the brief.
+						const queued = await confirmAndQueueImageDescribeBackfill(host.plugin);
+						if (queued) onRepaired();
+					} catch (e) {
+						new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
+					} finally {
+						btn.disabled = false;
+					}
+				})();
+			},
+		});
+		return;
+	}
+	if (key === 'imageFailed') {
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: `Retry ${count} failed image description${plural} (choice dialog follows).`,
+			onClick: btn => {
+				void (async () => {
+					btn.disabled = true;
+					try {
+						// retryFailedImageDescriptions shows its own choice modal and its own Notice on a
+						// made choice — same "no extra Notice here" rule as imagePending above.
+						const queued = await retryFailedImageDescriptions(host.plugin);
+						if (queued) onRepaired();
+					} catch (e) {
+						new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
+					} finally {
+						btn.disabled = false;
+					}
+				})();
+			},
+		});
+	}
+}
+
+// Shared by the summary table's missing/stale/orphans wrenches (the reconcile trio) — the
+// confirm gate for orphan deletion lives inside enqueueSearchRepairs (src/search/auditRun.ts),
+// so it fires here exactly as it does from the paths table's per-row wrench and the
+// search-reconcile-index command.
+async function runReconcileAction(
+	btn: HTMLButtonElement,
+	host: DashboardHost,
+	targets: SearchRepairTargets,
+	onRepaired: () => void,
+): Promise<void> {
+	btn.disabled = true;
+	try {
+		const outcome = await enqueueSearchRepairs(host.plugin, targets);
+		new Notice(singleRepairNotice(outcome));
+		if (!outcome.orphansDeclined) onRepaired();
+	} catch (e) {
+		new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
+	} finally {
+		btn.disabled = false;
 	}
 }
 
 // arrow-right = open note (row scope, per root AGENTS.md's icon table). Orphan rows are
 // muted/disabled unconditionally — the path is, by definition, no longer in the vault — and any
-// other class whose path fails to resolve (a race between the scan and a later delete/move)
-// degrades the same way rather than throwing.
+// other class whose path fails to resolve (a race between the scan and a later delete/move, or —
+// WP-I2 — an image class) degrades the same way rather than throwing.
 function renderOpenNoteButton(host: DashboardHost, td: HTMLElement, row: SearchAuditRow): void {
 	if (row.cls === 'orphans') {
 		renderIconButton(td, 'arrow-right', { ariaLabel: 'Open note', title: 'Orphaned — this path no longer exists in the vault.', disabled: true });
@@ -252,12 +449,13 @@ function renderOpenNoteButton(host: DashboardHost, td: HTMLElement, row: SearchA
 	});
 }
 
-// wrench = Repair (new row in root AGENTS.md's icon table, this WP). missing/stale enqueue a
-// search_upsert_file job for the one path; orphans enqueue a search_delete_path job (the
-// confirm-gate for orphan deletion lives inside enqueueSearchRepairs — see src/search/auditRun.ts
-// — so it fires here exactly as it does from the bulk button and the reconcile command).
-// mtimeOnly/unindexable/embeddingGaps render muted per the brief's per-class titles — "muted,
-// never absent" (root AGENTS.md).
+// wrench = Repair (root AGENTS.md's icon table). missing/stale enqueue a search_upsert_file job
+// for the one path; orphans enqueue a search_delete_path job (the confirm-gate for orphan
+// deletion lives inside enqueueSearchRepairs — see src/search/auditRun.ts — so it fires here
+// exactly as it does from the summary table and the reconcile command). mtimeOnly/unindexable
+// render muted per their permanent informational state; embeddingGaps and the two image classes
+// render muted pointing at the summary table's bulk (vault-wide) action — "muted, never absent"
+// (root AGENTS.md) governs THIS table, unlike the summary table's hidden-at-zero rows.
 function renderRowRepairButton(host: DashboardHost, td: HTMLElement, row: SearchAuditRow, onRepaired: () => void): void {
 	if (row.cls === 'mtimeOnly') {
 		renderIconButton(td, 'wrench', { ariaLabel: 'Repair', title: 'Nothing to repair — index is current (mtime-only drift).', disabled: true });
@@ -270,7 +468,23 @@ function renderRowRepairButton(host: DashboardHost, td: HTMLElement, row: Search
 	if (row.cls === 'embeddingGaps') {
 		renderIconButton(td, 'wrench', {
 			ariaLabel: 'Repair',
-			title: 'Run "Search: embed missing vectors" to fix embedding gaps — a different command family, not enqueued from here.',
+			title: 'Use the Embedding gaps row\'s repair action — runs "Search: embed missing vectors" for the whole vault.',
+			disabled: true,
+		});
+		return;
+	}
+	if (row.cls === 'imagePending') {
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: 'Use the Images pending row\'s repair action — describe runs as a vault-wide backfill.',
+			disabled: true,
+		});
+		return;
+	}
+	if (row.cls === 'imageFailed') {
+		renderIconButton(td, 'wrench', {
+			ariaLabel: 'Repair',
+			title: 'Use the Images failed row\'s repair action — retry runs as a vault-wide backfill.',
 			disabled: true,
 		});
 		return;
@@ -283,20 +497,7 @@ function renderRowRepairButton(host: DashboardHost, td: HTMLElement, row: Search
 		title: row.cls === 'orphans'
 			? 'Delete this orphaned path from the search index (confirm required).'
 			: 'Enqueue a re-index job for this path.',
-		onClick: btn => {
-			void (async () => {
-				btn.disabled = true;
-				try {
-					const outcome = await enqueueSearchRepairs(host.plugin, targets);
-					new Notice(singleRepairNotice(outcome));
-					if (!outcome.orphansDeclined) onRepaired();
-				} catch (e) {
-					new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
-				} finally {
-					btn.disabled = false;
-				}
-			})();
-		},
+		onClick: btn => void runReconcileAction(btn, host, targets, onRepaired),
 	});
 }
 
@@ -311,44 +512,4 @@ function singleRepairNotice(outcome: ReconcileEnqueueSummaryInput): string {
 	}
 	if (parts.length === 0) return 'Repair: nothing enqueued.';
 	return `Repair: ${parts.join('; ')}. Re-run the search audit to refresh — this result is now stale.`;
-}
-
-// Per-class bulk repair (brief: "reading the cached full result, never the rendered table" — the
-// 200-row `DEFAULT_TABLE_ROW_LIMIT` cap the table itself may be showing). Reuses
-// `enqueueSearchRepairs`/`isReconcileTargetClean`/`formatReconcile*Summary` verbatim — the exact
-// shape `search-reconcile-index` already uses, so a bulk repair from here can never disagree with
-// what the command would enqueue for the same result.
-function renderBulkRepairButton(
-	host: DashboardHost,
-	container: HTMLElement,
-	getResult: () => SearchAuditResult | null,
-	onRepaired: () => void,
-): void {
-	const btn = container.createEl('button', { text: 'Repair all' });
-	btn.addEventListener('click', () => {
-		void (async () => {
-			const result = getResult();
-			if (!result) {
-				new Notice('Run the search audit first.');
-				return;
-			}
-			if (isReconcileTargetClean(result)) {
-				new Notice(formatReconcileNothingToDoSummary(result));
-				return;
-			}
-			btn.disabled = true;
-			try {
-				const outcome = await enqueueSearchRepairs(host.plugin, {
-					upsertPaths: [...result.missing, ...result.stale],
-					orphanPaths: result.orphans,
-				});
-				new Notice(formatReconcileCompletedSummary(result, outcome));
-				onRepaired();
-			} catch (e) {
-				new Notice(`Repair failed: ${e instanceof Error ? e.message : String(e)}`);
-			} finally {
-				btn.disabled = false;
-			}
-		})();
-	});
 }
