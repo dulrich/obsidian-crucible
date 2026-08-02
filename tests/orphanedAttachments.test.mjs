@@ -1,7 +1,7 @@
 // WP-PF1: computeOrphanedAttachmentRows had no test file of its own (same gap
 // missingAttachments.test.mjs's header note calls out for its sibling module). Covers the
 // pre-existing resolvedLinks-only behavior plus the fix this WP adds: unioning
-// getFileCache(f).frontmatterLinks targets into the referenced set (root AGENTS.md's
+// getFileCache(f).frontmatterLinks targets into the referenced set (src/ingestion/AGENTS.md's
 // documented Orphaned-Attachments gap — a managed attachment referenced only from a
 // frontmatter property, e.g. `cover:`, was falsely flagged orphaned). Same stub pattern as
 // tests/missingAttachments.test.mjs: a real node_modules/obsidian so `App`/`TFile` line up

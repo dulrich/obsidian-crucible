@@ -130,7 +130,7 @@ export function normalizeEmbedding(value: unknown): number[] {
 // Deliberately strict rather than degrading: a missing `results` array, a non-numeric score, an
 // out-of-range/duplicate `index`, or a result count that doesn't match `documentCount` all throw
 // instead of silently truncating or half-applying the response. Silent truncation is exactly the
-// failure this repo has been bitten by before (see the banned-diagnostics/raw-NUL AGENTS.md
+// failure this repo has been bitten by before (see the banned-diagnostics/raw-NUL root AGENTS.md
 // quirks for the general pattern of "a partial-looking success is worse than a loud failure") — a caller
 // that receives fewer results than documents has no principled way to guess which document went
 // missing, so guessing is not an option.
