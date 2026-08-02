@@ -1,0 +1,77 @@
+# Plan G — Live-validation remediation: sticky-header clamp, audit truth, queue recency, lint stall, palette cost
+
+Repo: **obsidian-crucible** · slug `live-validation-remediation` · follows Plan F (closed at `d37c03a`).
+
+*Recommended model/effort — Claude: Sonnet/medium workers G1–G5, orchestrator (Fable) closes G6 direct; Codex: Terra/medium workers, Sol/medium orchestrator.*
+
+## Context
+
+Plan F live validation surfaced five defects; three parallel investigators root-caused all of them this session, with live `jobs.sqlite` evidence and user DevTools probes:
+
+1. **Sticky header (F1.1 regression-in-place):** F1's measure-at-mount worked perfectly (probes: props set 12px tab / 48px modal) yet zero visual change — because (a) equal margin/padding compensation is a visual no-op by construction, and (b) the band is a `position: sticky` **containing-block clamp**: sticky `top:0` pins at the scrollport edge, but the element is clamped inside the scroller's *content box*, which starts `padding-top` lower. No margin value can move the clamp. Band == scroller padding-top exactly (12px tab / 48px modal, user-verified).
+2. **Reconcile "repairs nothing" (F3.4):** all 28 jobs ran and settled `done` (DB-verified burst at 05:22Z) — 26 wrote 0 chunks. Two structural causes: **(A)** audit stale = `mtime > indexed.mtime` (`audit.ts:106`) but upsert's write gate is contentHash (`SearchManager.ts:459`), and a no-op never advances stored mtime → mtime-only drift (git-symlinked INITIATIVE.mds, byte-identical lint passes) is **permanently stale, re-reported forever**. **(B)** frontmatter-only/empty-body notes produce zero chunks → no request is ever sent → the path can never appear in `/v1/paths` → **permanent phantom "missing"** (X tombstones, `_custom/Settings.md`…). Aggravator: workflow notes say `Indexed <path>: 0 chunks` for both skipped-unchanged and zero-chunk.
+3. **Done-bucket blindness (user observation):** `Orchestrator.listJobs` reuses claim-order `ORDER BY lane_rank, priority_rank, created ASC LIMIT 100` (`SqliteJobStore.ts:231`) — the done view shows the 100 *oldest* retained settled jobs; recent settlements (the reconcile burst, 46 settled `search_upsert_batch`) are invisible.
+4. **Lint stall on missing frontmatter:** the `updateFrontmatter` barrier's asymmetric case (cache claims a frontmatter block, raw content has none) dead-waits the full 2000ms for a `metadataCache.on('changed')` that nothing will fire (`frontmatter.ts:137,145`), then relies on timeout+verify. Uncapped serial loops (`lintVault`, `renamePropertyInVault`) multiply it. Bonus latent risk: `processFrontMatter` against that stale cache can mis-splice.
+5. **Palette lag (NOT a red herring):** the Crucible command palette (user has `crucibleCommandPaletteEnabled` + `ShowUniqueString` on, both default-off) recomputes unique-hints **per open with a cold per-instance cache**: up to 2× 20,000-node DFS × ~84 competitor subsequence/fuzzy evaluations per row × ~85 rows, synchronously (`commandPalette.ts:36-38,113`, `commandPaletteHints.ts:107-214`). No `this.limit` (contrast `fileOpenPalette.ts:36`). Post-clip contention amplifies it; the selection correlation is a genuine red herring. Incidental bug found: `clearCommandRegistryGroup` (`main.ts:552-557`) never `removeCommand`s from `app.commands` — deleted chains/captures linger as silent no-op palette entries until reload.
+
+Plus one UI-standards item: the job-detail modal's copy control is a bare text button (`queueMonitor.ts:325-330`); standard is `copy` icon + "Copy" label via `.crucible-icon-label-btn` (the `copy` glyph is already reserved for exactly this — `iconLanguageConsistencyGuard.test.mjs:8-9`).
+
+## Decisions locked
+
+- All five items accepted for this plan (user's validation feedback). Months-facet boost remains deferred.
+- Sticky fix approach: **opaque cover strip**, not scroller-padding restructuring — pure CSS on top of F1's already-correct measured props; does not fight the clamp, does not mutate Obsidian-owned modal elements. (`top: -pad` over-pinning is rejected: likely defeated by the same containing-block clamp.)
+- Audit/reconcile fixes stay inside the standing constraints: audit read-only (vault reads allowed), reconcile mutates only via existing job types, no new job types.
+
+## Summary
+
+Five dispatched WPs with disjoint file scopes (parallel-safe in any mix): (G1) paint the sticky band with a `::before` cover strip using the measured custom props, correct the misleading styles.css comment; (G2) make audit verify mtime-suspects by content hash and classify zero-chunk files as "unindexable" instead of missing, and make upsert job notes distinguish written/skipped/zero-chunk; (G3) settled queue buckets ordered by recency + the Copy button standards fix; (G4) eliminate the frontmatter barrier dead-wait by routing the cache-says-block/raw-has-none case through the existing splice-creation path; (G5) palette hint-cost fixes (persistent cache, row limit) + stale-command cleanup. Orchestrator closes (G6).
+
+## Key Changes
+
+**WP-G1 — sticky header: cover-strip fix (both surfaces).**
+*~0.08 kSLOC · ~140k tokens · ~11 min wall · mid (Claude Sonnet/medium; Codex Terra/medium) · Claude: subagent; Codex: subagent · parallel-safe*
+styles.css: add `.crucible-settings-sticky-header::before` — `content:''; position:absolute; top: calc(-1 * var(--crucible-sticky-pad-top, 16px)); left:0; right:0; height: var(--crucible-sticky-pad-top, 16px); background: var(--background-primary);` (the header is already a positioning context via `position: sticky`). Keep F1's negative margins/padding (they give full-bleed width and correct at-rest layout) and the measured props (they now size the strip). Fix the wrong comment at styles.css:107-108 (sticky pins at the scrollport/padding-box edge; the band is the containing-block clamp — cite the probe numbers). Verify no clipping: the strip spans the scroller's padding-box area, which scroll containers do not clip. `applyStickyHeaderPadding` unchanged (it works — probes prove it). Extend `tests/settingsStickyHeaderGuard.test.mjs` with a structural pin for the `::before` rule. Deliverable: rerun packet (tab + modal, scrolled + at-rest, expect band visually closed; DevTools check that the ::before rect covers `[scrollerTop, headerTop]`). Files: `styles.css`, tests. NOT in scope: settings.ts changes, scroller padding mutation, `top` offset changes.
+
+**WP-G2 — audit truth: hash-verified staleness, unindexable class, honest job notes.**
+*~0.35 kSLOC · ~230k tokens · ~18 min wall · mid (Claude Sonnet/medium; Codex Terra/medium) · Claude: subagent; Codex: subagent · parallel-safe*
+(a) **Stale:** in the audit computation (src/search/audit.ts + its caller in commands.ts), for each mtime-newer candidate, read the file and compare its computed content hash (reuse the exact hash the index uses — the `prepared.contentHash` path in SearchManager; do NOT invent a second hash) against `/v1/paths`' `contentHash`. Equal → not stale; count separately as `mtimeOnly` (report line: "N files had newer mtimes with unchanged content — index is current"). This kills the permanent-stale loop at the source; reconcile logic unchanged. (b) **Missing:** for each missing candidate, detect the zero-chunk case using the real chunker (`buildSearchChunks` on the file content — exactness over heuristics) and classify as `unindexable` (report: "N files have no indexable content (frontmatter-only) — nothing to index"), excluded from missing and from reconcile's enqueue set. (c) **Notes:** `SearchManager.indexFiles` returns per-file outcome (written N chunks / skipped-unchanged / zero-chunks) — smallest viable shape change — and `SearchIndexWorkflow.ts:143` notes say which (`Indexed …: 3 chunks` / `Unchanged (hash match), skipped` / `No indexable content`). (d) Update the audit report's Repair section text for the two new classes (no command needed — they are not defects) and `src/search/AGENTS.md`'s "mtime false-positive is harmless" claim (it was harmless to the index, not to the audit). Perf note: hash verification reads only the mtime-suspect subset (21 files in the live case), not the vault. Tests: extend `tests/searchAudit.test.mjs` (mtimeOnly + unindexable classification, report text), workflow-note cases. Files: `src/search/audit.ts`, `src/commands.ts`, `src/search/SearchManager.ts`, `src/orchestration/workflows/SearchIndexWorkflow.ts`, `src/search/AGENTS.md`, tests. NOT in scope: companion/schema changes, presence markers, new job types, embedding-gap semantics.
+
+**WP-G3 — queue monitor recency + Copy button.**
+*~0.15 kSLOC · ~150k tokens · ~12 min wall · mid (Claude Sonnet/medium; Codex Terra/medium) · Claude: subagent; Codex: subagent · parallel-safe*
+(a) Settled buckets (done/failed/cancelled) list **newest first**: extend the store's list query (SqliteJobStore.ts:231 region) with an order mode — claim order stays for queued/running (it is dispatch truth), settled statuses order by settlement recency (use the store's finished/updated timestamp column if one exists, else `created DESC`; worker verifies schema first and states which). Thread through `Orchestrator.listJobs` → `queueMonitor` fetch plan. (b) Meta line gains the total: "showing 100 of N" via the existing `countJobs` (the current `rows.length > LIMIT` check can never fire — rows arrive pre-limited). (c) Job-detail modal Copy control → `.crucible-icon-label-btn` + `setIcon(btn,'copy')` + span "Copy" (exemplar: `sourceEvalDashboard.ts:113-115`; add `setIcon` to the obsidian import). Tests: ordering unit test on the store query (fixture DB rows), structural pin for the Copy button. Files: `src/orchestration/db/SqliteJobStore.ts`, `src/orchestration/Orchestrator.ts`, `src/ingestion/sections/queueMonitor.ts`, tests. NOT in scope: retention policy, pagination.
+
+**WP-G4 — frontmatter barrier: no dead-wait on the block-deleted case.**
+*~0.1 kSLOC · ~130k tokens · ~10 min wall · mid — this is the note-lock/write-barrier chokepoint, review with care (Claude Sonnet/medium; Codex Terra/medium) · Claude: subagent; Codex: subagent · parallel-safe*
+In `src/frontmatter.ts`: when raw content has **no** frontmatter block but the cache still claims one (the asymmetric branch at :145), do not wait for a cache event that nothing will fire and do not hand `processFrontMatter` a stale position it could mis-splice with — route directly to the existing index-based splice-creation path (`repairFrontmatterViaContentSplice` at :95-101, which already handles create + BOM) under the same lock/materializing wrapping, then verify landed keys via the existing re-read helper. The both-absent case (:145 returning true) stays as is — it is already fast and correct. Keep `FRONTMATTER_CACHE_BARRIER_TIMEOUT_MS` for the genuine stale-position case (block exists in both, offsets disagree) — that wait is load-bearing. Document in the root frontmatter quirk (one sentence appended). Tests: extend the frontmatter barrier tests — asymmetric case completes without consuming the 2s window and produces a valid created block. Files: `src/frontmatter.ts`, root `AGENTS.md` (one line), tests. NOT in scope: lock-acquire timeouts (mechanism #1/#3 from the investigation — real but unbounded-by-Obsidian; noted as a candidate follow-up), fresh-path post-write verification (perf tradeoff, deliberately not added), lintVault progress UX.
+
+**WP-G5 — palette cost + stale-command cleanup.**
+*~0.2 kSLOC · ~170k tokens · ~13 min wall · mid (Claude Sonnet/medium; Codex Terra/medium) · Claude: subagent; Codex: subagent · parallel-safe*
+(a) Hint cache becomes module-level, keyed by a signature of the command-name list (order-insensitive hash), so reopening the palette with an unchanged command set pays zero hint recomputation; invalidate on signature change. (b) Set `this.limit` (mirror `fileOpenPalette.ts:36`, comparable constant) so an empty query renders a bounded row set. (c) Reuse the `getItems()` result captured at `commandPalette.ts:113` instead of double-sweeping. (d) `clearCommandRegistryGroup` also calls `app.commands.removeCommand(id)` (guarded — verify the API on installed obsidian typings; if untyped, use the established guarded-augmentation pattern in `src/types.ts`) so deleted chains/captures/shortcuts leave the native palette immediately; mirror the cleanup `registerChains` already does for internal ids. Hint functions are pure — extend tests for cache-key behavior; structural pin for removeCommand. Files: `src/commandPalette.ts`, `src/commandPaletteHints.ts`, `src/main.ts`, tests. NOT in scope: async/idle-time hint precompute, palette redesign, changing hint settings defaults.
+
+**WP-G6 — close (orchestrator-direct).**
+*~0.05 kSLOC docs · ~30k tokens · ~5 min wall · top (orchestrator) · Claude: direct (must-direct: integration/gates/commit duty); Codex: direct (same)*
+Completion blockquote; deregister from `pending-plans`; ledger actuals per WP; close message with the G1 rerun packet and the G2 expected-audit-numbers check (re-audit should report ~19 mtimeOnly + ~7 unindexable, stale/missing near zero).
+
+## Public Interfaces
+
+No settings keys, commands, or job types added. `SearchManager.indexFiles` return type gains per-file outcome detail (internal). `listJobs` gains an internal ordering mode. Report/Notice text changes.
+
+## Execution
+
+All five WPs have disjoint file scopes — parallel-safe in any combination; dispatch mix is the user's call per wave. Worker worktrees branch from local master tip; workers never commit; orchestrator reviews the full diff, re-runs all six gates verbatim, commits `(subagent g-N)`, ff-merges. Ask the user which subagents to spawn before each dispatch. On approval: plan doc → `plans/live-validation-remediation.md` + registered in `INITIATIVE.md` `pending-plans` (docs-only commit) before any source edit.
+
+## Test Plan / Verification
+
+Six crucible gates verbatim per landing (test floor **1767/139**, count only grows). Live validation: settings tab + modal show no band above the pinned strip at rest or scrolled (G1 rerun packet); re-running audit reports mtime-only and unindexable classes with stale/missing collapsing to genuinely dirty files; reconcile enqueues only those; done bucket shows the newest settlements first with "showing K of N"; a no-frontmatter note lints instantly; palette reopen is instant with hints unchanged; deleting a chain removes its palette entry without reload.
+
+## Critical Files
+
+`styles.css`, `src/search/audit.ts`, `src/search/SearchManager.ts`, `src/orchestration/workflows/SearchIndexWorkflow.ts`, `src/orchestration/db/SqliteJobStore.ts`, `src/ingestion/sections/queueMonitor.ts`, `src/frontmatter.ts`, `src/commandPalette.ts`, `src/commandPaletteHints.ts`, `src/main.ts`, tests.
+
+## Assumptions
+
+- The scroller does not clip the ::before strip (it lives inside the padding box — standard overflow clipping is at the padding box edge); the G1 rerun packet is the check.
+- `/v1/paths` `contentHash` is comparable to the plugin-side computed hash for current content (same algorithm — G2 worker verifies by tracing `prepared.contentHash` provenance before writing code; if the companion hash differs, stop and report, don't approximate).
+- The jobs store has a usable settlement timestamp; if only `created` exists, `created DESC` is an acceptable recency proxy for settled buckets (settlement order ≈ creation order at current queue depths).
+
+**Total ≈ 0.93 kSLOC, ~850k raw tokens; ~590k Claude-path / ~475k Codex-path Opus/Sol-equivalent tokens.**
