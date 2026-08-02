@@ -25,7 +25,14 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { computeSearchAudit, isCleanAudit, formatAuditReport } = await import(pathToFileURL(outfile));
+const {
+	computeSearchAudit,
+	isCleanAudit,
+	isReconcileTargetClean,
+	formatAuditReport,
+	formatReconcileNothingToDoSummary,
+	formatReconcileCompletedSummary,
+} = await import(pathToFileURL(outfile));
 
 function indexedRow(overrides = {}) {
 	return { path: 'a.md', mtime: 100, chunkCount: 1, embeddedCount: 1, ...overrides };
@@ -203,4 +210,170 @@ test('formatAuditReport is a pure function of its inputs — same result, same o
 	const a = formatAuditReport(result, 'fixed-timestamp');
 	const b = formatAuditReport(result, 'fixed-timestamp');
 	assert.equal(a, b);
+});
+
+// WP-F3: formatAuditReport names the exact repair command per non-zero class.
+
+test('formatAuditReport has no "## Repair" section on a fully clean audit', () => {
+	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
+	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
+	assert.doesNotMatch(report, /## Repair/);
+});
+
+test('formatAuditReport names "Search: reconcile index" for missing, stale, and orphans', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'missing.md', mtime: 1 }, { path: 'stale.md', mtime: 500 }],
+		indexedPaths: [indexedRow({ path: 'orphan.md' }), indexedRow({ path: 'stale.md', mtime: 100 })],
+		images: [],
+		semanticEnabled: true,
+	});
+	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
+	assert.match(report, /## Repair/);
+	assert.match(report, /- Missing: Run "Search: reconcile index"/);
+	assert.match(report, /- Stale: Run "Search: reconcile index"/);
+	assert.match(report, /- Orphans: Run "Search: reconcile index"/);
+	assert.match(report, /Re-run "Search: audit index" after repairing/);
+});
+
+test('formatAuditReport names "Search: embed missing vectors" for embedding gaps only', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
+		images: [],
+		semanticEnabled: true,
+	});
+	const report = formatAuditReport(result, '2026-08-01T00:00:00.000Z');
+	assert.match(report, /## Repair/);
+	assert.match(report, /- Embedding gaps: Run "Search: embed missing vectors"/);
+	assert.doesNotMatch(report, /- Missing:/);
+	assert.doesNotMatch(report, /- Orphans:/);
+});
+
+test('formatAuditReport names describe/retry commands for pending and failed image coverage independently', () => {
+	const pendingOnly = formatAuditReport(computeSearchAudit({
+		vaultFiles: [], indexedPaths: [], images: [{ md5: 'p1', status: 'pending' }], semanticEnabled: true,
+	}), 'ts');
+	assert.match(pendingOnly, /- Image coverage \(pending\): Run "Search: describe vault images"/);
+	assert.doesNotMatch(pendingOnly, /retry failed image descriptions/);
+
+	const failedOnly = formatAuditReport(computeSearchAudit({
+		vaultFiles: [], indexedPaths: [], images: [{ md5: 'f1', status: 'failed' }], semanticEnabled: true,
+	}), 'ts');
+	assert.match(failedOnly, /- Image coverage \(failed\): Run "Search: retry failed image descriptions"/);
+	assert.doesNotMatch(failedOnly, /describe vault images"/);
+});
+
+// WP-F3: `isReconcileTargetClean` — narrower than `isCleanAudit`, ignores embeddingGaps/imageCoverage.
+
+test('isReconcileTargetClean is true when missing/stale/orphans are empty, even with embedding gaps or image gaps', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
+		images: [{ md5: 'p1', status: 'pending' }, { md5: 'f1', status: 'failed' }],
+		semanticEnabled: true,
+	});
+	assert.equal(isReconcileTargetClean(result), true);
+	assert.equal(isCleanAudit(result), false, 'isCleanAudit must still flag this dirty — that asymmetry is the point');
+});
+
+test('isReconcileTargetClean is false when missing, stale, or orphans is non-empty', () => {
+	assert.equal(isReconcileTargetClean(computeSearchAudit({
+		vaultFiles: [{ path: 'new.md', mtime: 1 }], indexedPaths: [], images: [], semanticEnabled: true,
+	})), false);
+	assert.equal(isReconcileTargetClean(computeSearchAudit({
+		vaultFiles: [], indexedPaths: [indexedRow({ path: 'orphan.md' })], images: [], semanticEnabled: true,
+	})), false);
+	assert.equal(isReconcileTargetClean(computeSearchAudit({
+		vaultFiles: [{ path: 'edited.md', mtime: 500 }],
+		indexedPaths: [indexedRow({ path: 'edited.md', mtime: 100 })],
+		images: [], semanticEnabled: true,
+	})), false);
+});
+
+// WP-F3: the reconcile Notice-text pure helpers.
+
+test('formatReconcileNothingToDoSummary reads as fully clean when every axis (including embedding/image) is zero', () => {
+	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
+	assert.equal(formatReconcileNothingToDoSummary(result), 'Search: reconcile index — already matches the vault. Nothing to do.');
+});
+
+test('formatReconcileNothingToDoSummary names embedding-gap and image-coverage commands instead of claiming full health', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
+		images: [{ md5: 'p1', status: 'pending' }],
+		semanticEnabled: true,
+	});
+	const summary = formatReconcileNothingToDoSummary(result);
+	assert.doesNotMatch(summary, /already matches the vault\. Nothing to do\./);
+	assert.match(summary, /nothing to enqueue/i);
+	assert.match(summary, /embedding gap/);
+	assert.match(summary, /Search: embed missing vectors/);
+	assert.match(summary, /Search: describe vault images/);
+});
+
+test('formatReconcileCompletedSummary reports new-vs-deduped counts for upserts and deletes separately', () => {
+	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
+	const summary = formatReconcileCompletedSummary(result, {
+		upserts: { newCount: 3, dedupedCount: 1 },
+		deletes: { newCount: 0, dedupedCount: 2 },
+		orphansDeclined: false,
+	});
+	assert.match(summary, /3 upserts newly enqueued \(\+1 already queued\)/);
+	assert.match(summary, /0 deletes newly enqueued \(\+2 already queued\)/);
+	assert.match(summary, /Queue Monitor/);
+	assert.match(summary, /"done" status filter/);
+});
+
+test('formatReconcileCompletedSummary omits a segment entirely when its total (new + deduped) is zero', () => {
+	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
+	const summary = formatReconcileCompletedSummary(result, {
+		upserts: { newCount: 5, dedupedCount: 0 },
+		deletes: { newCount: 0, dedupedCount: 0 },
+		orphansDeclined: false,
+	});
+	assert.match(summary, /5 upserts newly enqueued/);
+	assert.doesNotMatch(summary, /delete/);
+});
+
+test('formatReconcileCompletedSummary singularizes a count of exactly one', () => {
+	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
+	const summary = formatReconcileCompletedSummary(result, {
+		upserts: { newCount: 1, dedupedCount: 0 },
+		deletes: { newCount: 1, dedupedCount: 0 },
+		orphansDeclined: false,
+	});
+	assert.match(summary, /1 upsert newly enqueued/);
+	assert.doesNotMatch(summary, /1 upserts/);
+	assert.match(summary, /1 delete newly enqueued/);
+	assert.doesNotMatch(summary, /1 deletes/);
+});
+
+test('formatReconcileCompletedSummary says "nothing enqueued" and notes a declined orphan confirm when both totals are zero', () => {
+	const result = computeSearchAudit({ vaultFiles: [], indexedPaths: [], images: [], semanticEnabled: true });
+	const summary = formatReconcileCompletedSummary(result, {
+		upserts: { newCount: 0, dedupedCount: 0 },
+		deletes: { newCount: 0, dedupedCount: 0 },
+		orphansDeclined: true,
+	});
+	assert.match(summary, /nothing enqueued/i);
+	assert.match(summary, /declined/i);
+});
+
+test('formatReconcileCompletedSummary names unhandled embedding/image classes alongside a real enqueue result', () => {
+	const result = computeSearchAudit({
+		vaultFiles: [{ path: 'partial.md', mtime: 10 }],
+		indexedPaths: [indexedRow({ path: 'partial.md', mtime: 10, chunkCount: 4, embeddedCount: 2 })],
+		images: [{ md5: 'f1', status: 'failed' }],
+		semanticEnabled: true,
+	});
+	const summary = formatReconcileCompletedSummary(result, {
+		upserts: { newCount: 2, dedupedCount: 0 },
+		deletes: { newCount: 0, dedupedCount: 0 },
+		orphansDeclined: false,
+	});
+	assert.match(summary, /2 upserts newly enqueued/);
+	assert.match(summary, /Not handled by reconcile/);
+	assert.match(summary, /embedding gap/);
+	assert.match(summary, /Search: retry failed image descriptions/);
 });

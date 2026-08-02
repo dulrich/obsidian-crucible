@@ -8,7 +8,16 @@ import type CruciblePlugin from './main';
 import { VaultSearchModal } from './search/SearchModal';
 import { isSearchIndexablePath } from './search/chunker';
 import { SEARCH_QUERY_EXPORT_FILENAME, buildQueryExport, serializeQueryExport } from './search/queryLog';
-import { AuditImage, computeSearchAudit, formatAuditReport, isCleanAudit, SearchAuditResult } from './search/audit';
+import {
+	AuditImage,
+	computeSearchAudit,
+	formatAuditReport,
+	formatReconcileCompletedSummary,
+	formatReconcileNothingToDoSummary,
+	isCleanAudit,
+	isReconcileTargetClean,
+	SearchAuditResult,
+} from './search/audit';
 import { computeReferencedImagePaths } from './orchestration/utils/imageDescribe';
 import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
@@ -622,7 +631,8 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 			new Notice(
 				`Search: audit index — missing ${result.missing.length}, orphans ${result.orphans.length}, `
 				+ `stale ${result.stale.length}, embedding gaps ${result.embeddingGaps.length}, images `
-				+ `${result.imageCoverage.pending} pending / ${result.imageCoverage.failed} failed. Report: ${path}.`,
+				+ `${result.imageCoverage.pending} pending / ${result.imageCoverage.failed} failed. `
+				+ `Repair commands: see the report. Report: ${path}.`,
 			);
 		},
 	});
@@ -641,18 +651,31 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		mutating: false,
 		run: async () => {
 			const result = await runSearchAudit(plugin);
-			if (isCleanAudit(result)) {
-				new Notice('Search: reconcile index — already matches the vault. Nothing to do.');
+			if (isReconcileTargetClean(result)) {
+				new Notice(formatReconcileNothingToDoSummary(result));
 				return;
 			}
 
-			let upserted = 0;
+			// Dedupe-hit detection: `DbJobBackend.enqueue` returns the EXISTING job (its
+			// original `created` stamp) on a dedupe hit, and a freshly minted job's `created`
+			// is stamped via `nowIso()` at insert time — so any job whose `created` is at or
+			// after this reconcile run's own start timestamp was newly minted, and anything
+			// older was already queued. Both are ISO-8601 (`nowIso()`), so lexicographic
+			// comparison is chronological comparison. Cheaper and more robust than tracking
+			// `countJobs` deltas (which would race concurrent auto-sources) or diffing ids.
+			const startedAt = new Date().toISOString();
+
+			let upsertNew = 0;
+			let upsertDeduped = 0;
 			for (const path of [...result.missing, ...result.stale]) {
 				const job = await plugin.orchestrator.enqueue('search_upsert_file', { path }, { priority: 'low', lane: 'user', inputPaths: [path] });
-				if (job) upserted++;
+				if (!job) continue;
+				if (job.created >= startedAt) upsertNew++; else upsertDeduped++;
 			}
 
-			let deleted = 0;
+			let deleteNew = 0;
+			let deleteDeduped = 0;
+			let orphansDeclined = false;
 			if (result.orphans.length > 0) {
 				const preview = result.orphans.slice(0, 10).map(p => `- ${p}`);
 				if (result.orphans.length > preview.length) preview.push(`- …and ${result.orphans.length - preview.length} more`);
@@ -664,12 +687,19 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 				if (confirmed) {
 					for (const path of result.orphans) {
 						const job = await plugin.orchestrator.enqueue('search_delete_path', { path }, { priority: 'low', lane: 'user' });
-						if (job) deleted++;
+						if (!job) continue;
+						if (job.created >= startedAt) deleteNew++; else deleteDeduped++;
 					}
+				} else {
+					orphansDeclined = true;
 				}
 			}
 
-			new Notice(`Search: reconcile index — enqueued ${upserted} upsert${upserted === 1 ? '' : 's'} and ${deleted} delete${deleted === 1 ? '' : 's'}.`);
+			new Notice(formatReconcileCompletedSummary(result, {
+				upserts: { newCount: upsertNew, dedupedCount: upsertDeduped },
+				deletes: { newCount: deleteNew, dedupedCount: deleteDeduped },
+				orphansDeclined,
+			}));
 		},
 	});
 }
