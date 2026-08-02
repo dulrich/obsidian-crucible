@@ -21,6 +21,7 @@ const ROUTINE_NOTICE_JOB_TYPES: JobType[] = [
 	'blogs_tracker_consolidate',
 	'transcript_refine',
 	'link_scan',
+	'note_link_enrich',
 	'youtube_metadata_fetch',
 	'x_metadata_fetch',
 	'x_post_discover',

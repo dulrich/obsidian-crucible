@@ -449,6 +449,7 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 			case 'blogs_tracker': return s.orchestrationBlogsTrackerEnabled;
 			case 'blogs_tracker_consolidate': return s.orchestrationBlogsTrackerEnabled;
 			case 'link_scan': return s.orchestrationLinkScanEnabled;
+			case 'note_link_enrich': return s.orchestrationNoteLinkEnrichEnabled;
 			case 'transcript_refine': return s.orchestrationTranscriptRefineEnabled;
 			case 'image_describe_note':
 			case 'image_describe_backfill':

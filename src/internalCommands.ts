@@ -72,6 +72,7 @@ export function registerInternalCommands(plugin: CruciblePlugin): void {
 	}, { mutating: false, lockTarget: 'none' });
 	register('youtube-fetch-video-metadata', async (_a, _p, _e, tf) => await fetchYoutubeMetadataForActiveNote(plugin, tf));
 	register('x-discover-post-links', async (_a, _p, _e, tf) => await discoverXPostLinksForActiveNote(plugin, tf), { mutating: false, lockTarget: 'none' });
+	register('link-enrich-note', async (_a, _p, _e, tf) => await enrichNoteLinksForActiveNote(plugin, tf), { mutating: false, lockTarget: 'none' });
 	register('youtube-ignore-video', async (args, _p, _e, tf) => await ignoreYoutubeVideoCommand(plugin, args, tf), {
 		lockTarget: 'none',
 		schema: [
@@ -340,6 +341,23 @@ export async function discoverXPostLinksForActiveNote(plugin: CruciblePlugin, ta
 	}
 	await plugin.orchestrator.enqueue('x_post_discover', { targetPath: file.path }, { priority: 'high', lane: 'user' });
 	new Notice(`Queued X post-link discovery for ${file.basename}`);
+	return true;
+}
+
+// Enqueues a `note_link_enrich` pass for `targetFile` (defaults to the active note).
+// Same high/user priority as `discoverXPostLinksForActiveNote` — an explicit command
+// invocation is the user asking for it now, not a background trigger. Returns whether
+// a note was found and the job was enqueued — doesn't itself mutate the note (the
+// workflow does its own reads, registry writes, and downstream enqueues), so this is
+// safe to run without the note lock.
+export async function enrichNoteLinksForActiveNote(plugin: CruciblePlugin, targetFile?: TFile): Promise<boolean> {
+	const file = targetFile ?? plugin.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+	if (!file) {
+		new Notice('No active note');
+		return false;
+	}
+	await plugin.orchestrator.enqueue('note_link_enrich', { targetPath: file.path }, { priority: 'high', lane: 'user' });
+	new Notice(`Queued link enrichment for ${file.basename}`);
 	return true;
 }
 

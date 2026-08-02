@@ -25,6 +25,7 @@ import {
 } from './orchestration/workflows/FeedTrackerWorkflow';
 import { coerceVideoId, isYtMetadataLinked } from './orchestration/utils/youtubeApi';
 import { LinkScanWorkflow } from './orchestration/workflows/LinkScanWorkflow';
+import { LinkNoteEnrichWorkflow } from './orchestration/workflows/LinkNoteEnrichWorkflow';
 import { YoutubeMetadataFetchWorkflow } from './orchestration/workflows/YoutubeMetadataFetchWorkflow';
 import { YoutubeChannelEnrichWorkflow } from './orchestration/workflows/YoutubeChannelEnrichWorkflow';
 import { YoutubeChannelEnrichSweepWorkflow } from './orchestration/workflows/YoutubeChannelEnrichSweepWorkflow';
@@ -40,7 +41,7 @@ import { NoteLockManager } from './orchestration/NoteLockManager';
 import { NoteLockOverlay } from './noteLockOverlay';
 import { migrateJobTypeControls, readTypeAutorun, setTypeControl } from './orchestration/autorunGate';
 import { maybeShowArchiveNotice } from './orchestration/archiveNotice';
-import { ENRICHMENT_JOB_TYPE, chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, xMetadataBackfillJobConfig, xMetadataFetchJobConfig, xPostDiscoverJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
+import { ENRICHMENT_JOB_TYPE, chainRunJobConfig, commandRunJobConfig, imageDescribeBackfillJobConfig, imageDescribeBatchJobConfig, imageDescribeNoteJobConfig, noteLinkEnrichJobConfig, searchBatchJobConfig, searchEmbedMissingJobConfig, searchFileJobConfig, searchRebuildJobConfig, searchSweepJobConfig, transcriptRefineJobConfig, xMetadataBackfillJobConfig, xMetadataFetchJobConfig, xPostDiscoverJobConfig, youtubeChannelEnrichJobConfig, youtubeChannelEnrichSweepJobConfig, youtubeMetadataJobConfig, youtubeTrackerJobConfig } from './orchestration/jobTypeConfig';
 import { ServiceHealthRegistry } from './orchestration/serviceHealth';
 import { ChainRunWorkflow } from './orchestration/workflows/ChainRunWorkflow';
 import { CommandRunWorkflow } from './orchestration/workflows/CommandRunWorkflow';
@@ -819,6 +820,7 @@ export default class CruciblePlugin extends Plugin {
 		this.orchestrator.register('blogs_tracker', new BlogsTrackerWorkflow());
 		this.orchestrator.register('blogs_tracker_consolidate', new BlogsTrackerConsolidateWorkflow());
 		this.orchestrator.register('link_scan', new LinkScanWorkflow());
+		this.orchestrator.register('note_link_enrich', new LinkNoteEnrichWorkflow(), noteLinkEnrichJobConfig());
 		this.orchestrator.register('youtube_metadata_fetch', new YoutubeMetadataFetchWorkflow(), youtubeMetadataJobConfig(this));
 		this.orchestrator.register('youtube_channel_enrich', new YoutubeChannelEnrichWorkflow(), youtubeChannelEnrichJobConfig(this));
 		this.orchestrator.register('youtube_channel_enrich_sweep', new YoutubeChannelEnrichSweepWorkflow(), youtubeChannelEnrichSweepJobConfig());

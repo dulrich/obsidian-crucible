@@ -228,6 +228,7 @@ export function jobTitle(job: OrchestrationJob): string {
 		case 'x_metadata_fetch': return xMetadataTitle(job);
 		case 'x_post_discover': return typeof job.params?.targetPath === 'string' ? `X link discovery: ${job.params.targetPath.split('/').pop()}` : 'X link discovery';
 		case 'x_metadata_backfill': return 'X metadata backfill';
+		case 'note_link_enrich': return typeof job.params?.targetPath === 'string' ? `Link enrich: ${job.params.targetPath.split('/').pop()}` : 'Link enrich note';
 		case 'image_describe_note': return typeof job.params?.targetPath === 'string' ? `Image descriptions: ${job.params.targetPath.split('/').pop()}` : 'Image descriptions';
 		case 'image_describe_backfill': return 'Image description backfill';
 		case 'image_describe_batch': return imageDescribeBatchTitle(job);
