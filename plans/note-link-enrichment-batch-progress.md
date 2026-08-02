@@ -65,3 +65,14 @@ Six crucible gates verbatim per landing (floor **1894 tests / 148 files**, count
 - Registry `source_notes` merge stays append-only; stale-source retraction remains a future audit concern, unchanged by this plan.
 
 **Total ≈ 1.36 kSLOC, ~855k raw tokens; ~796k Claude-path / ~630k Codex-path Opus/Sol-equivalent tokens.**
+
+---
+
+> **CLOSED 2026-08-02.** All five WPs landed on master:
+> - `e38c245` WP-J4 (subagent j-4): `NO_REFRESH_SECTIONS` opt-out in `buildSection`; the Search Audit header carries "Run audit" only, all other sections' Refresh byte-identical.
+> - `dc8748c` WP-J2 (subagent j-2): `yt-metadata` list contract (`appendYtMetadataLink`, entry [0] load-bearing, per-video bail), referenced-video mode selected by the explicit `referencedVideo: true` flag via `referencedVideoJobParams` (composite key `note:<path>:video:<id>`), `created`-only enqueue-only channel chaining. **Deviation from plan accepted:** the mode discriminator is the explicit flag, not "`targetPath` AND `videoId` both present" — all three legacy per-note enqueue sites already pass both, so the inferred mode would have re-keyed every legacy job.
+> - `dd341a3` WP-J1 (subagent j-1): required `reportProgress` on `WorkflowContext` (backend-supplied closure, 6th `runWorkflowWithTimeout` param); wired into image batch/note (`onTiming`), `link_scan` (both passes), `search_sweep`; `SearchJobProgress` migrated off the `plugin.orchestrator` reach-through, message format byte-identical. **Plan assumption corrected:** queueMonitor has no `computeRowSignature` skip — it always re-renders on dirty flush; pinned as-is instead of "fixed".
+> - `ecaa862` WP-J3 (subagent j-3): `note_link_enrich` workflow + verbatim `linkRegistry.ts` lift (vault `link_scan` byte-identical) + full registration checklist (`orchestrationNoteLinkEnrichEnabled` default off) + `link-enrich-note` internal command and palette twin; refusal guards (metadata/registry roots, `type: link-record`, `source_command` secondary), enrichment-only self-guard, stamped-membership probe, X half = one `x_post_discover` enqueue.
+> - WP-J5 (orchestrator-direct): this closeout.
+>
+> Gates at close: 1975 tests / 153 files, 0 failures (floor was 1938/151); lint, tsc, production build, console sweep, NUL sweep all clean. Ledger rows j-1..j-3 recorded (j-4 landed pre-compaction with wave 1). Deferred by design: on-clip trigger for `note_link_enrich` (await live validation), incremental vault scan, stale-source registry retraction.
