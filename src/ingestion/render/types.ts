@@ -101,6 +101,10 @@ export interface Column<T> {
 	sortable?: boolean;
 	sortKey?: (row: T) => string | number;
 	render: (row: T, td: HTMLElement) => void;
+	// WP-DP1: applied to the <th> only — the render fn applies the matching class to
+	// its own <td> directly (there is no generic per-cell class hook), e.g. the
+	// Publish Date column's nowrap treatment on both the header and its cells.
+	headerCls?: string;
 }
 
 export interface ClippingRow {
@@ -195,10 +199,17 @@ export interface UncapturedPostRow {
 }
 
 // WP-IC2: the Ignored Posts row — mirrors UncapturedPostRow's readable fields, minus
-// `authors`/`categories`/`hasBody`/`audioUrl` (not shown by the Ignored section; see
+// `authors`/`categories`/`audioUrl` (not shown by the Ignored section; see
 // renderIgnoredPosts in sections/ignored.ts for the exact column set), degrading to
 // null when the post is still ignored yet no longer appears in any scanned tracker
-// run (aged out of retention).
+// run (aged out of retention). A degrade row's `hasBody` is `false` (see
+// degradeIgnoredPostRow in data/ignored.ts) — there is no body to clip either way,
+// and the Clip button's own degrade-title override (WP-DP1: "No tracker data (aged
+// out)") takes precedence over `blogClipBlockedTitle`'s reading of it.
+//
+// WP-DP1: `hasBody` was added so the Ignored Posts Clip button can share
+// `blogClipBlockedTitle` (blogsApi.ts) with Uncaptured Posts — the same precondition
+// check, not a parallel one.
 export interface IgnoredPostRow {
 	id: string;
 	title: string | null;
@@ -207,6 +218,7 @@ export interface IgnoredPostRow {
 	url: string | null;
 	kind: 'article' | 'podcast' | null;
 	wordCount: number | null;
+	hasBody: boolean;
 	metadataFile: TFile | null;
 }
 

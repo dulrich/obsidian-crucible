@@ -51,6 +51,9 @@ export async function computeIgnoredPostRows(app: App, plugin: CruciblePlugin): 
 				url: metadata.url ?? post.url,
 				kind: metadata.kind ?? post.kind,
 				wordCount: metadata.wordCount ?? post.wordCount,
+				// WP-DP1: mirrors computeUncapturedPostRows' hasBody derivation — the Clip
+				// button's precondition (blogClipBlockedTitle) needs it here too.
+				hasBody: metadata.hasBody ?? post.hasBody,
 				metadataFile,
 			});
 		}
@@ -60,7 +63,7 @@ export async function computeIgnoredPostRows(app: App, plugin: CruciblePlugin): 
 }
 
 function degradeIgnoredPostRow(id: string): IgnoredPostRow {
-	return { id, title: null, blogName: null, publishedAt: null, url: null, kind: null, wordCount: null, metadataFile: null };
+	return { id, title: null, blogName: null, publishedAt: null, url: null, kind: null, wordCount: null, hasBody: false, metadataFile: null };
 }
 
 // Ignored YouTube videos row-compute (WP-IC2) — same recipe as

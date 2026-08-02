@@ -152,6 +152,7 @@ function renderHeader<T>(thead: HTMLElement, columns: Column<T>[], ctx: TableSta
 	const headerRow = thead.createEl('tr');
 	for (const col of columns) {
 		const th = headerRow.createEl('th', { text: col.label });
+		if (col.headerCls) th.addClass(col.headerCls);
 		if (col.sortable) {
 			th.addClass('is-sortable');
 			if (sort && sort.column === col.key) {

@@ -3,7 +3,6 @@ import type CruciblePlugin from '../../main';
 import { ensureFolder, slugify } from '../../utils';
 import { walkMarkdown } from '../../vaultWalk';
 import { yamlString } from '../../frontmatterValues';
-import type { UncapturedPostRow } from '../../ingestion/render/types';
 import type { BlogPostKind, RemotePost } from './blogs';
 
 export const DEFAULT_BLOGS_METADATA_ROOT = '_blog_metadata';
@@ -91,7 +90,11 @@ export async function ensureBlogMetadataNote(plugin: CruciblePlugin, post: Remot
 	});
 }
 
-export async function runBlogIngestCommand(plugin: CruciblePlugin, row: UncapturedPostRow): Promise<BlogIngestCommandResult> {
+// `row` only needs `metadataFile` — the command runs against the metadata note as
+// `targetFile`. Deliberately narrower than `UncapturedPostRow` (WP-DP1) so the Ignored
+// Posts action cell (`IgnoredPostRow`, no `authors`/`categories`/`hasBody`/`audioUrl`)
+// can share this call site without a fake full row.
+export async function runBlogIngestCommand(plugin: CruciblePlugin, row: { metadataFile: TFile | null }): Promise<BlogIngestCommandResult> {
 	const configuredId = (plugin.settings.orchestrationBlogsIngestCommandId || '').trim();
 	const commandId = resolveInternalCommandId(plugin, configuredId);
 	const metadataPath = row.metadataFile?.path ?? null;
@@ -113,6 +116,21 @@ function resolveInternalCommandId(plugin: CruciblePlugin, commandId: string): st
 	if (plugin.chainManager.hasInternalCommand(pluginId)) return pluginId;
 	const crucibleId = `crucible:${commandId}`;
 	if (plugin.chainManager.hasInternalCommand(crucibleId)) return crucibleId;
+	return null;
+}
+
+// WP-DP1: the Clip button's precondition check, pure (no vault write) so both
+// Uncaptured Posts and Ignored Posts can compute the muted/disabled state before
+// ever attempting `runBlogIngestCommand` — "muted, never absent" needs to know the
+// reason ahead of a click, not just report it after one fails. Precedence matches
+// the order a click would actually fail in: no body to clip, then no metadata note
+// (the `missing-metadata` branch above), then no configured/resolvable command (the
+// `missing-command` branch above).
+export function blogClipBlockedTitle(plugin: CruciblePlugin, row: { hasBody: boolean; metadataFile: TFile | null }): string | null {
+	if (!row.hasBody) return 'No post body captured';
+	if (!row.metadataFile) return 'No blog metadata note';
+	const configuredId = (plugin.settings.orchestrationBlogsIngestCommandId || '').trim();
+	if (!resolveInternalCommandId(plugin, configuredId)) return 'No ingest command configured (see Orchestrator settings)';
 	return null;
 }
 
