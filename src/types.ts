@@ -659,6 +659,10 @@ export interface CrucibleSettings {
 	orchestrationLinkRegistryRoot: string;
 	orchestrationLinkScanExclusions: string[];
 	orchestrationTrackedSourcesNote: string;
+	// Workflow: note_link_enrich (WP-J3) — note-level companion to link_scan; off by
+	// default like every other new-workflow toggle (source-enable stays separate from
+	// this per-type execution-enable gate).
+	orchestrationNoteLinkEnrichEnabled: boolean;
 	// Workflow: transcript_refine
 	orchestrationTranscriptRefineEnabled: boolean;
 	orchestrationTranscriptRefineChainName: string;
@@ -882,6 +886,7 @@ export const DEFAULT_SETTINGS: CrucibleSettings = {
 	orchestrationLinkRegistryRoot: '_crucible/link_registry',
 	orchestrationLinkScanExclusions: ['_crucible'],
 	orchestrationTrackedSourcesNote: 'Sources/Tracked Sources.md',
+	orchestrationNoteLinkEnrichEnabled: false,
 	orchestrationTranscriptRefineEnabled: true,
 	orchestrationTranscriptRefineChainName: 'Refine Transcript',
 	orchestrationTriggersEnabled: {},

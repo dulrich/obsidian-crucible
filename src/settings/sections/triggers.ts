@@ -18,6 +18,7 @@ const TRIGGER_WORKFLOW_LABELS: Partial<Record<JobType, string>> = {
 	youtube_tracker: 'YouTube tracker',
 	blogs_tracker: 'Blogs/RSS tracker',
 	link_scan: 'Link scan',
+	note_link_enrich: 'Link enrich note',
 	transcript_refine: 'Refine transcript',
 	youtube_metadata_fetch: 'Fetch YouTube metadata',
 	x_metadata_fetch: 'Fetch X post metadata',

@@ -15,6 +15,7 @@ export type JobType =
 	| 'blogs_tracker_consolidate'
 	| 'transcript_refine'
 	| 'link_scan'
+	| 'note_link_enrich'
 	| 'youtube_metadata_fetch'
 	| 'youtube_channel_enrich'
 	| 'youtube_channel_enrich_sweep'

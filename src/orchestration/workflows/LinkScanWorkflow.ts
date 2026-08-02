@@ -1,16 +1,11 @@
-import { TFile, normalizePath } from 'obsidian';
+import { normalizePath } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
 import { ensureFolder } from '../../utils';
-import { updateFrontmatter } from '../../frontmatter';
 import { extractUrls } from '../utils/urlExtract';
-import { CanonicalizedUrl, canonicalizeUrl, shortHash } from '../utils/urlCanonicalize';
-
-interface AggregateEntry {
-	canon: CanonicalizedUrl;
-	sourceWikilinks: Set<string>;
-}
+import { canonicalizeUrl } from '../utils/urlCanonicalize';
+import { AggregateEntry, applyLinkToRegistry, isExcluded, normalizeExclusions, wikilinkFor } from '../utils/linkRegistry';
 
 /** WP-J1: same "every Nth item, plus the final one" convention `SearchManager.indexFiles`
  * uses for its own `onProgress` (`SEARCH_PROGRESS_EVERY_FILES` = 10) — fast enough to keep
@@ -73,7 +68,7 @@ export class LinkScanWorkflow implements Workflow {
 			const urls = extractUrls(content);
 			if (urls.length === 0) continue;
 
-			const wikilink = `[[${stripMdExt(file.path)}]]`;
+			const wikilink = wikilinkFor(file.path);
 
 			for (const u of urls) {
 				const canon = canonicalizeUrl(u.raw);
@@ -96,7 +91,7 @@ export class LinkScanWorkflow implements Workflow {
 		let entriesProcessed = 0;
 		for (const entry of aggregate.values()) {
 			ctx.throwIfAborted();
-			const result = await this.applyToRegistry(plugin, registryRoot, today, entry);
+			const result = await applyLinkToRegistry(plugin, registryRoot, today, entry);
 			if (result.created) created++;
 			else updated++;
 			if (result.candidateFlagged) candidatesFlagged++;
@@ -117,151 +112,4 @@ export class LinkScanWorkflow implements Workflow {
 			notes,
 		};
 	}
-
-	private async applyToRegistry(
-		plugin: WorkflowContext['plugin'],
-		root: string,
-		today: string,
-		entry: AggregateEntry,
-	): Promise<{ path: string; created: boolean; candidateFlagged: boolean }> {
-		const app = plugin.app;
-		const targetPath = await this.resolveTargetPath(app, root, entry.canon);
-
-		const existing = app.vault.getAbstractFileByPath(targetPath);
-		if (existing instanceof TFile) {
-			let candidateFlagged = false;
-			await updateFrontmatter(app, existing, (fm) => {
-				const merged = mergeSourceNotes(fm['source_notes'], entry.sourceWikilinks);
-				fm['type'] = 'link-record';
-				fm['url'] = entry.canon.url;
-				fm['canonical_url'] = entry.canon.canonical;
-				fm['domain'] = entry.canon.domain;
-				fm['source_notes'] = merged;
-				if (typeof fm['first_seen'] !== 'string' || !fm['first_seen']) fm['first_seen'] = today;
-				fm['last_seen'] = today;
-				if (typeof fm['state'] !== 'string' || !fm['state']) fm['state'] = 'pending';
-				if (typeof fm['discovery_method'] !== 'string' || !fm['discovery_method']) fm['discovery_method'] = 'scan';
-				ensureNullableKeys(fm);
-				if (entry.canon.youtubeVideoId) {
-					const current = fm['yt-video-id'];
-					if (typeof current !== 'string' || !current) fm['yt-video-id'] = entry.canon.youtubeVideoId;
-				}
-				if (entry.canon.xStatusId) {
-					const current = fm['x-status-id'];
-					if (typeof current !== 'string' || !current) fm['x-status-id'] = entry.canon.xStatusId;
-				}
-				if (entry.canon.trackedSource) {
-					if (fm['tracked_source'] === false || fm['tracked_source'] === undefined || fm['tracked_source'] === null) {
-						fm['tracked_source'] = 'candidate';
-						fm['tracked_source_type'] = entry.canon.trackedSource.type;
-						candidateFlagged = true;
-					}
-				}
-			});
-			return { path: targetPath, created: false, candidateFlagged };
-		}
-
-		const stub = `# Link: ${entry.canon.url}\n\n## Notes\n`;
-		const file = await app.vault.create(targetPath, stub);
-		let candidateFlagged = false;
-		await updateFrontmatter(app, file, (fm) => {
-			fm['type'] = 'link-record';
-			fm['url'] = entry.canon.url;
-			fm['canonical_url'] = entry.canon.canonical;
-			fm['domain'] = entry.canon.domain;
-			fm['state'] = 'pending';
-			fm['source_notes'] = Array.from(entry.sourceWikilinks);
-			fm['first_seen'] = today;
-			fm['last_seen'] = today;
-			fm['discovery_method'] = 'scan';
-			fm['tracked_source'] = false;
-			fm['tracked_source_type'] = null;
-			fm['tracked_source_note'] = null;
-			fm['referred_material'] = null;
-			fm['decision_reason'] = null;
-			fm['yt-video-id'] = entry.canon.youtubeVideoId ?? null;
-			fm['x-status-id'] = entry.canon.xStatusId ?? null;
-			if (entry.canon.trackedSource) {
-				fm['tracked_source'] = 'candidate';
-				fm['tracked_source_type'] = entry.canon.trackedSource.type;
-				candidateFlagged = true;
-			}
-		});
-		return { path: targetPath, created: true, candidateFlagged };
-	}
-
-	private async resolveTargetPath(
-		app: WorkflowContext['plugin']['app'],
-		root: string,
-		canon: CanonicalizedUrl,
-	): Promise<string> {
-		const baseSlug = canon.filename;
-		let candidate = `${root}/${baseSlug}.md`;
-		const existing = app.vault.getAbstractFileByPath(candidate);
-		if (!(existing instanceof TFile)) return candidate;
-
-		const fm = app.metadataCache.getFileCache(existing)?.frontmatter;
-		const existingCanonical = typeof fm?.['canonical_url'] === 'string' ? fm['canonical_url'] : '';
-		if (existingCanonical === canon.canonical) return candidate;
-
-		const suffix = shortHash(canon.canonical);
-		candidate = `${root}/${baseSlug}-${suffix}.md`;
-		return candidate;
-	}
-}
-
-function normalizeExclusions(raw: string[], registryRoot: string): string[] {
-	const out = new Set<string>();
-	for (const item of raw) {
-		const trimmed = item.trim().replace(/\/+$/, '');
-		if (trimmed) out.add(trimmed);
-	}
-	out.add(registryRoot.replace(/\/+$/, ''));
-	return Array.from(out);
-}
-
-function isExcluded(path: string, exclusions: string[]): boolean {
-	for (const excl of exclusions) {
-		if (path === excl) return true;
-		if (path.startsWith(`${excl}/`)) return true;
-	}
-	return false;
-}
-
-function stripMdExt(path: string): string {
-	return path.endsWith('.md') ? path.slice(0, -3) : path;
-}
-
-function mergeSourceNotes(existing: unknown, additions: Set<string>): string[] {
-	const out: string[] = [];
-	const seen = new Set<string>();
-	if (Array.isArray(existing)) {
-		for (const v of existing) {
-			if (typeof v === 'string' && v.trim() && !seen.has(v)) {
-				seen.add(v);
-				out.push(v);
-			}
-		}
-	} else if (typeof existing === 'string' && existing.trim()) {
-		seen.add(existing);
-		out.push(existing);
-	}
-	for (const v of additions) {
-		if (!seen.has(v)) {
-			seen.add(v);
-			out.push(v);
-		}
-	}
-	return out;
-}
-
-function ensureNullableKeys(fm: Record<string, unknown>): void {
-	const nullable = ['tracked_source_note', 'referred_material', 'decision_reason'];
-	for (const key of nullable) {
-		if (!(key in fm)) fm[key] = null;
-	}
-	if (!('tracked_source' in fm)) fm['tracked_source'] = false;
-	if (!('tracked_source_type' in fm)) fm['tracked_source_type'] = null;
-	if (!('yt-video-id' in fm)) fm['yt-video-id'] = null;
-	if (!('x-status-id' in fm)) fm['x-status-id'] = null;
 }

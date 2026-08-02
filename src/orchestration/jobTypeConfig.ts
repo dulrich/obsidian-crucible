@@ -418,6 +418,16 @@ export function xPostDiscoverJobConfig(): JobTypeConfig {
 	return durableJobConfig((p) => (typeof p.targetPath === 'string' && p.targetPath ? `note:${p.targetPath}` : ''));
 }
 
+// WP-J3: the note-level companion to `link_scan`/`x_post_discover` — one job per NOTE
+// (same `note:<path>` shape as `xPostDiscoverJobConfig`, deliberately: a repeat request
+// for the same note collapses onto the one active scan). No `services` entry: this
+// workflow only reads the target note, writes the local link registry, and enqueues
+// other jobs — it never talks to an external API itself (the jobs it mints declare
+// their own service dependencies).
+export function noteLinkEnrichJobConfig(): JobTypeConfig {
+	return durableJobConfig((p) => (typeof p.targetPath === 'string' && p.targetPath ? `note:${p.targetPath}` : ''));
+}
+
 // Registry-backfill fan-out: walks the link registry and enqueues x_metadata_fetch
 // per not-yet-materialized status. Fixed dedupe key (there's only ever one backfill
 // sweep in flight) and no `services` — like image-describe-backfill, it only reads
