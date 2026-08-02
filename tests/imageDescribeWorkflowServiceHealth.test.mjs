@@ -146,9 +146,13 @@ function makePlugin({ files = new Map(), storeSeed = new Map(), providerManager,
 	};
 }
 
-function makeCtx(plugin) {
+// WP-J1: both image-describe workflows now report progress per image via the seam
+// (`onTiming` -> `ctx.reportProgress`), so a hand-built ctx that omits it throws the
+// moment a describe outcome settles. `onProgress` defaults to a no-op; tests that care
+// about the message shape pass a collector.
+function makeCtx(plugin, onProgress = () => {}) {
 	const signal = new AbortController().signal;
-	return { plugin, signal, throwIfAborted: () => signal.throwIfAborted() };
+	return { plugin, signal, throwIfAborted: () => signal.throwIfAborted(), reportProgress: onProgress };
 }
 
 // ── ImageDescribeNoteWorkflow ─────────────────────────────────────────────────
@@ -189,13 +193,16 @@ test('ImageDescribeNoteWorkflow: a normal successful describe stays status:\'don
 	plugin.app.metadataCache.getFileCache = file => (file.path === noteFile.path ? { embeds: [{ link: 'img.png' }] } : {});
 	plugin.app.metadataCache.getFirstLinkpathDest = () => new TFile(imgPath);
 
+	const messages = [];
 	const result = await new ImageDescribeNoteWorkflow().run(
 		{ id: 'job-2', params: { targetPath: noteFile.path } },
-		makeCtx(plugin),
+		makeCtx(plugin, m => messages.push(m)),
 	);
 
 	assert.equal(result.status, 'done');
 	assert.equal(result.serviceUnhealthy, undefined);
+	// Note-scoped jobs skip the "batch N / M:" prefix — no batchIndex/batchCount to name.
+	assert.deepEqual(messages, ['1 / 1 images']);
 });
 
 // ── ImageDescribeBatchWorkflow ────────────────────────────────────────────────
@@ -215,9 +222,10 @@ test('ImageDescribeBatchWorkflow: 3 consecutive timeouts defer with serviceUnhea
 	const providerManager = createFailingProviderManager(() => true, 'image description (narrative pass) timed out after 120000ms');
 	const plugin = makePlugin({ files, providerManager });
 
+	const messages = [];
 	const result = await new ImageDescribeBatchWorkflow().run(
 		{ id: 'job-3', params: { paths, backfillId: 'run-1', batchIndex: 0, batchCount: 1 } },
-		makeCtx(plugin),
+		makeCtx(plugin, m => messages.push(m)),
 	);
 
 	assert.equal(result.status, 'deferred');
@@ -226,6 +234,13 @@ test('ImageDescribeBatchWorkflow: 3 consecutive timeouts defer with serviceUnhea
 	assert.match(result.error, /3 consecutive image description timeouts/);
 	assert.equal(plugin.imageDescriptions.has(md5s[0]), true, 'timeout failures are recorded — transient, will re-describe');
 	assert.equal(plugin.imageDescriptions.has(md5s[3]), false, 'the 4th image was never attempted');
+	// One reportProgress per attempted outcome (the aborted 4th image never fires
+	// onTiming), each carrying the batch prefix from batchIndex/batchCount.
+	assert.deepEqual(messages, [
+		'batch 1 / 1: 1 / 4 images',
+		'batch 1 / 1: 2 / 4 images',
+		'batch 1 / 1: 3 / 4 images',
+	]);
 });
 
 // ── ImageDescribeBackfillWorkflow ─────────────────────────────────────────────

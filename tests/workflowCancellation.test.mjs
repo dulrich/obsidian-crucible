@@ -531,7 +531,7 @@ test('runWorkflowWithTimeout refuses to start a workflow cancelled before dispat
 	const controller = new AbortController();
 	controller.abort(new JobCancelledError('cancelled before dispatch'));
 
-	const result = await runWorkflowWithTimeout(makePlugin(), workflow, { id: 'j', type: TEST_TYPE }, 0, controller.signal);
+	const result = await runWorkflowWithTimeout(makePlugin(), workflow, { id: 'j', type: TEST_TYPE }, 0, controller.signal, () => {});
 	assert.equal(result.status, 'cancelled');
 	assert.equal(started, false, 'every workflow gets an entry checkpoint for free');
 });

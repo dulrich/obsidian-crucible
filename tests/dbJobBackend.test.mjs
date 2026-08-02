@@ -752,3 +752,47 @@ test('list/count/setProgress answer for this type only', async () => {
 	mine.setProgress(first.id, 'indexing 12/100');
 	assert.equal(store.get(first.id).progress, 'indexing 12/100');
 });
+
+// --- 10. WP-J1: the ctx.reportProgress seam ----------------------------------------
+
+// `execute()` builds `runWorkflowWithTimeout`'s `reportProgress` argument as a closure
+// over `this.setProgress(job.id, message)` — the same `setProgress` the WP-7 seam test
+// above exercises directly. This pins the OTHER direction: a workflow that calls
+// `ctx.reportProgress` during a run gets a working write-through, with no reach back
+// through `plugin.orchestrator`.
+test('runNext supplies ctx.reportProgress as a closure over this job\'s own row', async () => {
+	const seen = [];
+	const workflow = {
+		async run(job, ctx) {
+			seen.push(typeof ctx.reportProgress);
+			ctx.reportProgress('batch 1 / 1: 1 / 1 images');
+			return { status: 'done' };
+		},
+	};
+	const { backend, store } = backendFor(workflow);
+	const job = await backend.enqueue({});
+
+	assert.equal(await backend.runNext(), 'ran');
+
+	assert.deepEqual(seen, ['function']);
+	assert.equal(store.get(job.id).progress, 'batch 1 / 1: 1 / 1 images');
+});
+
+// Two DbJobBackends over the same store (two job types) must each wire the closure to
+// THEIR OWN job's id — a progress write from one type's run must never land on a
+// same-store row of a different type.
+test('ctx.reportProgress writes to the running job\'s own row, not a same-store job of another type', async () => {
+	const store = newStore();
+	const plugin = makePlugin();
+	const reporting = { async run(_job, ctx) { ctx.reportProgress('mine'); return { status: 'done' }; } };
+	const mine = new DbJobBackend(plugin, store, 'command_run', dbConfig(), reporting);
+	const other = new DbJobBackend(plugin, store, 'chain_run', dbConfig(), inertWorkflow);
+
+	const mineJob = await mine.enqueue({});
+	const otherJob = await other.enqueue({});
+
+	assert.equal(await mine.runNext(), 'ran');
+
+	assert.equal(store.get(mineJob.id).progress, 'mine');
+	assert.equal(store.get(otherJob.id).progress, undefined);
+});

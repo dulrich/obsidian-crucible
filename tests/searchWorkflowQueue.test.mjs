@@ -52,6 +52,7 @@ const {
 	SearchUpsertFileWorkflow,
 	SearchUpsertBatchWorkflow,
 	SearchDeletePathWorkflow,
+	SearchSweepWorkflow,
 	SearchServiceUnavailableError,
 	SearchEmbeddingUnavailableError,
 	SearchEmbeddingMismatchError,
@@ -97,10 +98,12 @@ function makePlugin(overrides = {}) {
 }
 
 // The full WorkflowContext shape. Cancellation widened it beyond `{ plugin }`, and
-// the search workflows now checkpoint through it, so a partial stub throws.
-// `runWorkflowWithTimeout` is what builds this in production.
-function makeCtx(plugin, signal = new AbortController().signal) {
-	return { plugin, signal, throwIfAborted: () => signal.throwIfAborted() };
+// WP-J1's `reportProgress` widened it again — the search workflows now checkpoint
+// AND report progress through it, so a partial stub throws or silently drops writes.
+// `runWorkflowWithTimeout` is what builds this in production; a test that cares about
+// the messages passes its own `onProgress` collector.
+function makeCtx(plugin, signal = new AbortController().signal, onProgress = () => {}) {
+	return { plugin, signal, throwIfAborted: () => signal.throwIfAborted(), reportProgress: onProgress };
 }
 
 test('SearchRebuildWorkflow enqueues low-priority batch jobs instead of indexing inline', async () => {
@@ -293,6 +296,48 @@ test('a plain index whose embedder returns a width mismatch fails outright rathe
 	assert.equal(result.status, 'failed');
 	assert.match(result.error, /dimensions but returned/);
 	assert.equal(result.serviceUnhealthy, undefined);
+});
+
+// WP-J1: SearchJobProgress migrated off `plugin.orchestrator.setJobProgress` onto
+// `ctx.reportProgress` — the message format (`SearchJobProgress`'s `${label}: ${done} /
+// ${files.length} files indexed, ${chunkCount} chunks`) is pinned byte-identical.
+test('SearchUpsertBatchWorkflow reports progress through ctx.reportProgress, byte-identical to the pinned message shape', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			indexFiles: async (files, onProgress) => {
+				await onProgress(40, 512);
+				return { files: 100, chunks: 512, outcomes: new Map() };
+			},
+		},
+	});
+	plugin.app.vault.getAbstractFileByPath = fakeFile;
+	const messages = [];
+	const result = await new SearchUpsertBatchWorkflow().run(
+		{ id: 'batch-3', params: { paths: ['note.md'], batchIndex: 2, batchCount: 10 } },
+		makeCtx(plugin, undefined, m => messages.push(m)),
+	);
+
+	assert.equal(result.status, 'done');
+	assert.deepEqual(messages, ['batch 3 / 10: 40 / 1 files indexed, 512 chunks']);
+});
+
+// A search_sweep job isn't a multi-item loop like the other three loopers, but it still
+// gets one progress write so the queue monitor doesn't show a frozen Progress cell for
+// however long the sweep round trip takes.
+test('SearchSweepWorkflow reports one progress line before running the sweep', async () => {
+	const plugin = makePlugin({
+		searchManager: {
+			sweep: async () => ({ total: 3, results: [], mode: 'fts' }),
+		},
+	});
+	const messages = [];
+	const result = await new SearchSweepWorkflow().run(
+		{ id: 'sweep-1', params: { description: 'orphan pages' } },
+		makeCtx(plugin, undefined, m => messages.push(m)),
+	);
+
+	assert.equal(result.status, 'done');
+	assert.deepEqual(messages, ['sweep: orphan pages']);
 });
 
 // WP-G2: honest per-file job notes — formatUpsertFileNotes is the pure function behind
