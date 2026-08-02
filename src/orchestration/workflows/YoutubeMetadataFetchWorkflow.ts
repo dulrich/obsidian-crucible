@@ -1,26 +1,41 @@
 import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
+import { YOUTUBE_REFERENCED_VIDEO_PARAM } from '../jobTypeConfig';
+import { logWarn } from '../../log';
 import {
+	IngestResult,
 	YoutubeApiUnavailableError,
 	coerceVideoId,
 	enrichYoutubeMetadataStandalone,
+	findExistingChannelAboutNote,
 	ingestYoutubeVideoMetadata,
 	youtubeApiDeferredResult,
+	youtubeMetadataRoot,
 } from '../utils/youtubeApi';
 
 // One job per note (durable since thq WP-8 — this was the last `memory` type). With
-// params.targetPath it links the video's metadata note onto
-// that note — fetching via the Data API only when the metadata note doesn't exist
+// params.targetPath it appends the video's metadata note onto that note's `yt-metadata`
+// list — fetching via the Data API only when the metadata note doesn't exist
 // yet (link-first; see ingestYoutubeVideoMetadata for the lock choreography).
 // Without a targetPath it runs standalone (the enrichment path for videos not yet
 // captured as a vault note): ensure the metadata note exists, no link write.
+//
+// A third shape sits on top of the per-note one (WP-J2): the **referenced-video** mode,
+// `{targetPath, videoId, referencedVideo: true}` (mint it with `referencedVideoJobParams`),
+// for a video cited in a note's BODY rather than the video the note itself captures. Its
+// execution path is deliberately identical to the per-note one — `yt-metadata` is a list
+// and `ingestYoutubeVideoMetadata`'s bail is per-target, so "append this video's stamp"
+// is already the right primitive. The flag buys two things and nothing else: its own
+// dedupe key (`note:<path>:video:<id>`, so N referenced videos on one note don't collapse
+// onto each other or onto the note's primary job) and a distinguishable job label.
 export class YoutubeMetadataFetchWorkflow implements Workflow {
 	async run(job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
 		const params = job.params ?? {};
 		const targetPath = typeof params.targetPath === 'string' ? params.targetPath : '';
 		const paramVideoId = typeof params.videoId === 'string' ? params.videoId.trim() : '';
+		const referenced = targetPath !== '' && paramVideoId !== '' && params[YOUTUBE_REFERENCED_VIDEO_PARAM] === true;
 
 		try {
 			// Standalone: no target note to link, just fetch + save the metadata note.
@@ -29,7 +44,8 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 					return { status: 'failed', error: 'Missing params.videoId' };
 				}
 				const result = await enrichYoutubeMetadataStandalone(plugin, paramVideoId);
-				return this.emitEnriched(plugin, this.toResult(result, paramVideoId), paramVideoId, '');
+				const chained = await this.maybeChainChannelEnrich(plugin, result);
+				return this.emitEnriched(plugin, this.toResult(result, paramVideoId, chained), paramVideoId, '');
 			}
 
 			const file = plugin.app.vault.getAbstractFileByPath(targetPath);
@@ -44,7 +60,9 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 			}
 
 			const result = await ingestYoutubeVideoMetadata(plugin, file, videoId);
-			return this.emitEnriched(plugin, this.toResult(result, targetPath), videoId, targetPath);
+			const chained = await this.maybeChainChannelEnrich(plugin, result);
+			const label = referenced ? `${targetPath} (referenced video ${videoId})` : targetPath;
+			return this.emitEnriched(plugin, this.toResult(result, label, chained), videoId, targetPath);
 		} catch (e) {
 			// The Data API itself is down/throttled — a service-level deferral, not a
 			// per-job failure. See the class doc on YoutubeApiUnavailableError.
@@ -92,13 +110,59 @@ export class YoutubeMetadataFetchWorkflow implements Workflow {
 		return result;
 	}
 
+	/**
+	 * Video → channel chaining (WP-J2). A freshly *created* metadata note is the one
+	 * moment we know a channel exists and hold its id for free (`IngestResult.channelId`
+	 * rides the fetch payload), so a channel with no about note yet gets one
+	 * `youtube_channel_enrich` job minted here.
+	 *
+	 * Deliberately `created`-only. An `exists` result never called the API, so chaining
+	 * there would mean re-reading the metadata note for its `channelId` and re-probing
+	 * the about note on every rerun of every per-note job — noise for a channel that was
+	 * already seen when its first video was materialized. `youtube_channel_enrich_sweep`
+	 * is the backfill for anything this misses.
+	 *
+	 * Enqueue-only, and gated on `orchestrationYoutubeChannelEnrichEnabled` — the same
+	 * source-enable toggle the scheduled sweep trigger reads. Whether the minted job
+	 * ever *runs* stays the separate per-type auto-run axis (source-enable ≠
+	 * execution-enable). The job fails typed `no-api-key` rather than deferring when no
+	 * key is set; that is the channel workflow's own contract, not worked around here.
+	 *
+	 * A failure to enqueue never fails this job: the metadata note is already written and
+	 * the chain is a bonus.
+	 */
+	private async maybeChainChannelEnrich(
+		plugin: WorkflowContext['plugin'],
+		result: IngestResult,
+	): Promise<string> {
+		if (result.status !== 'created') return '';
+		const channelId = result.channelId.trim();
+		if (!channelId) return '';
+		if (!plugin.settings.orchestrationYoutubeChannelEnrichEnabled) return '';
+		if (findExistingChannelAboutNote(plugin.app, youtubeMetadataRoot(plugin), channelId)) return '';
+
+		try {
+			const job = await plugin.orchestrator?.enqueue(
+				'youtube_channel_enrich',
+				{ channelId },
+				{ priority: 'normal', lane: 'background' },
+			);
+			return job ? channelId : '';
+		} catch (e) {
+			logWarn(`failed to chain youtube_channel_enrich for channel ${channelId}`, e);
+			return '';
+		}
+	}
+
 	private toResult(
-		result: Awaited<ReturnType<typeof ingestYoutubeVideoMetadata>>,
+		result: IngestResult,
 		label: string,
+		chainedChannelId: string,
 	): WorkflowResult {
+		const chainNote = chainedChannelId ? ` Enqueued channel enrichment for ${chainedChannelId}.` : '';
 		switch (result.status) {
 			case 'created':
-				return { status: 'done', outputPaths: [result.metadataPath], notes: `Created metadata for ${label}` };
+				return { status: 'done', outputPaths: [result.metadataPath], notes: `Created metadata for ${label}${chainNote}` };
 			case 'exists':
 				return { status: 'done', outputPaths: [result.metadataPath], notes: `Linked existing metadata for ${label}` };
 			case 'no-video-id':

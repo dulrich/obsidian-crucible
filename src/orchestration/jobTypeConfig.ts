@@ -121,15 +121,57 @@ export function transcriptRefineJobConfig(): JobTypeConfig {
 	return durableJobConfig((p) => (typeof p.targetPath === 'string' ? p.targetPath : ''));
 }
 
+/**
+ * Marks the referenced-video mode of `youtube_metadata_fetch` (WP-J2): a video found in
+ * a note's BODY rather than the video the note itself captures. Set it via
+ * `referencedVideoJobParams` — never hand-roll the param, or the job silently collapses
+ * onto the note's primary metadata job.
+ *
+ * It exists because the mode cannot be inferred from `{targetPath, videoId}` being both
+ * present: every pre-existing per-note enqueue site already passes both (the
+ * `yt-metadata-on-capture` trigger, the dashboard's per-row Enqueue and Enqueue-all), so
+ * keying on that pair would have re-shaped every legacy key and broken the one-job-per-
+ * note contract. An explicit flag leaves every existing key byte-identical.
+ */
+export const YOUTUBE_REFERENCED_VIDEO_PARAM = 'referencedVideo';
+
+/**
+ * The params a referenced-video `youtube_metadata_fetch` job must carry. `title` drives
+ * the queue monitor's row label (`youtubeMetadataTitle`); omit it to fall back to the
+ * video id.
+ */
+export function referencedVideoJobParams(
+	targetPath: string,
+	videoId: string,
+	title?: string,
+): Record<string, unknown> {
+	return {
+		targetPath,
+		videoId,
+		[YOUTUBE_REFERENCED_VIDEO_PARAM]: true,
+		...(title ? { title } : {}),
+	};
+}
+
 // One queue entry per NOTE, not per video: a per-note job (params.targetPath set)
 // keys on the note path so duplicate captures sharing a yt-video-id each get their
 // own job (each links its own note; only the first fetches — see ensureMetadataNote).
 // Standalone enrichment (no vault note yet) keys on the video id. Exported so every
 // enqueue path (dashboard buttons, the auto-source refill, the capture trigger)
 // computes the exact same key the backend dedupes on.
+//
+// The referenced-video mode is the one exception, and it needs its own key shape: one
+// note can cite N videos in its body, and `note:<path>` would collapse them all onto a
+// single job (and onto the note's own primary metadata job besides). Only a job that
+// explicitly flags itself referenced gets the composite key — every other param shape,
+// including the legacy `{targetPath, videoId}` pair, keys exactly as it always has.
 export function youtubeMetadataDedupeKey(p: Record<string, unknown>): string {
-	if (typeof p.targetPath === 'string' && p.targetPath) return `note:${p.targetPath}`;
+	const targetPath = typeof p.targetPath === 'string' ? p.targetPath : '';
 	const videoId = coerceVideoId(p.videoId);
+	if (targetPath && videoId && p[YOUTUBE_REFERENCED_VIDEO_PARAM] === true) {
+		return `note:${targetPath}:video:${videoId}`;
+	}
+	if (targetPath) return `note:${targetPath}`;
 	return videoId ? `video:${videoId}` : '';
 }
 
