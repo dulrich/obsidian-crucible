@@ -297,6 +297,7 @@ export class DbJobBackend implements JobBackend, JobQuerySeam {
 		try {
 			const result = await runWorkflowWithTimeout(
 				this.plugin, this.workflow, job, resolveTimeoutMs(this.plugin, this.config), run.signal,
+				message => this.setProgress(job.id, message),
 			);
 			if (result.outputPaths && result.outputPaths.length > 0) {
 				this.store.setOutputPaths(job.id, result.outputPaths);

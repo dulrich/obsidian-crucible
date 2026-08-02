@@ -78,7 +78,16 @@ export class ImageDescribeNoteWorkflow implements Workflow {
 		}
 
 		ctx.throwIfAborted();
-		const result = await describeMd5Images(plugin, resolved.provider, resolved.modelId, images, { signal: ctx.signal });
+		// Note-scoped jobs skip the batch prefix (no batchIndex/batchCount to name) —
+		// just "described so far / total" for this note's images.
+		let imagesReported = 0;
+		const result = await describeMd5Images(plugin, resolved.provider, resolved.modelId, images, {
+			signal: ctx.signal,
+			onTiming: () => {
+				imagesReported++;
+				ctx.reportProgress(`${imagesReported} / ${images.length} images`);
+			},
+		});
 
 		const reindexNote = await reindexNotes(plugin, [file]);
 		plugin.ingestionEvents?.emit('image-described', { md5Count: result.describedCount, notePaths: reindexNote.indexed });
@@ -188,8 +197,19 @@ export class ImageDescribeBatchWorkflow implements Workflow {
 			if (info) images.push(info);
 		}
 
+		const batchIndex = numberParam(job, 'batchIndex');
+		const batchCount = numberParam(job, 'batchCount');
+		const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
+
 		ctx.throwIfAborted();
-		const result = await describeMd5Images(plugin, resolved.provider, resolved.modelId, images, { signal: ctx.signal });
+		let imagesReported = 0;
+		const result = await describeMd5Images(plugin, resolved.provider, resolved.modelId, images, {
+			signal: ctx.signal,
+			onTiming: () => {
+				imagesReported++;
+				ctx.reportProgress(`${label}: ${imagesReported} / ${images.length} images`);
+			},
+		});
 
 		// Recomputed fresh, not carried from enqueue time: paths drift between when the backfill
 		// enumerated this batch and when it actually runs (a note can move or gain/lose an embed).
@@ -201,9 +221,6 @@ export class ImageDescribeBatchWorkflow implements Workflow {
 
 		plugin.ingestionEvents?.emit('image-described', { md5Count: result.describedCount, notePaths: reindexed.indexed });
 
-		const batchIndex = numberParam(job, 'batchIndex');
-		const batchCount = numberParam(job, 'batchCount');
-		const label = batchIndex >= 0 && batchCount > 0 ? `batch ${batchIndex + 1} / ${batchCount}` : 'batch';
 		const baseNotes = `Described ${label}: ${result.describedCount} new, ${result.skippedCount} already described, `
 			+ `${result.missingCount} missing, ${result.failedCount} failed; reindexed ${reindexed.indexed.length} note(s).`
 			+ (reindexed.note ? ` ${reindexed.note}` : '');
