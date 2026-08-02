@@ -4,7 +4,7 @@ import { OrchestrationJob, WorkflowResult } from '../types';
 
 // Runs a Crucible command as a queue job: params.commandId must resolve to a
 // chain-INTERNAL command (the awaited, target-file-aware registry — see the
-// chain-step quirk in AGENTS.md), so the command runs on params.targetPath under
+// chain-step quirk in src/AGENTS.md), so the command runs on params.targetPath under
 // its own note-lock choreography instead of fire-and-forget on the active note.
 // This is the contract for commands invoked by triggers/orchestration workflows:
 // they get queue semantics (dedupe, timeout, pacing) for free.

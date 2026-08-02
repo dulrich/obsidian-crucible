@@ -18,7 +18,7 @@ import { canonicalXStatusUrl } from '../utils/xPost';
 // YoutubeMetadataFetchWorkflow: no constructor, everything reached via
 // `ctx.plugin`.
 //
-// Lock ordering (root AGENTS.md): note lock BEFORE resource lock, never the
+// Lock ordering (src/orchestration/AGENTS.md): note lock BEFORE resource lock, never the
 // reverse. `ensureXMetadataNote` takes the resource lock and its promise has
 // fully resolved — releasing it — before any note lock below is acquired.
 // Stamping is sequential after that await, never nested inside it.

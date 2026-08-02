@@ -3,7 +3,7 @@
 // scripts/embedding-quality.mjs — ground-truth embedding quality across runtimes/quantizations.
 //
 // Diagnostic tooling, not plugin code — it lives outside `src/`, so the `console.*` ban
-// (see AGENTS.md Quirks) does not apply here.
+// (see root AGENTS.md Quirks) does not apply here.
 //
 // WHY THIS EXISTS, given scripts/embedding-agreement.mjs already compares runtimes.
 // Agreement can only say whether two servers produce the SAME ranking. It cannot say whether

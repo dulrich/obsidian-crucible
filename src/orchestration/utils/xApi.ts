@@ -242,7 +242,7 @@ export type XEnsureResult =
 /**
  * Find-or-fetch-create the metadata note for `statusId`, serialized under the
  * `x-post::<statusId>` resource lock — mirrors `ensureMetadataNote`
- * (`youtubeApi.ts`). Per the lock-ordering rule (root `AGENTS.md`: note lock
+ * (`youtubeApi.ts`). Per the lock-ordering rule (`src/orchestration/AGENTS.md`: note lock
  * BEFORE resource lock), this function acquires no note lock at all, and must
  * be called with none held that it would need to re-enter.
  *
