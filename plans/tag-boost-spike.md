@@ -1,5 +1,20 @@
 # Plan E — Tag-boost spike (measure, then ship the winning lever)
 
+> **STATUS: COMPLETE (2026-08-01).** TB1 landed in eval-harness
+> (`local-inference-bench/measurements/tag-boost-arm-2026-08-01/`, commit `a58daae`):
+> weight 0.005 rescued RC1/RC3 to rank 1 with zero regressions across 52 graded
+> queries; RC2 confirmed absent from the pool even at limit 200, so the client-side
+> acceptance criterion for RC2 was formally dropped as structural (the server-side
+> post-fusion pre-truncation hook in `ranking.mjs` is the documented follow-up lever,
+> deliberately not built here); the rerank-replica arm closed v3 Finding 3
+> (wrong-document-text ruled out; pool composition survives as the live explanation).
+> TB2 landed on crucible master (`9a6b435`): `searchTagBoost{Enabled,Tags,Weight}`
+> default off / `["gold"]` / 0.005, applied in `boostSearchResponse` via the pure
+> `src/search/tagBoost.ts` leaf, `attribution.boosts.tag`, byte-identical when off.
+> TB3 (this commit): findings distilled into `src/search/AGENTS.md`'s tag-boost quirk;
+> rerank reaffirmed as a manual action. Live spot-check of the four RC queries with the
+> boost enabled remains a user validation item.
+
 Repo: **obsidian-crucible** (plan + implementation) · measurement artifacts in
 **eval-harness** · slug `tag-boost-spike`
 
