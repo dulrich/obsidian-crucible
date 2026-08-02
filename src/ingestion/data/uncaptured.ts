@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import type CruciblePlugin from '../../main';
-import { coerceVideoId } from '../../orchestration/utils/youtubeApi';
+import { coerceVideoId, isYtMetadataLinked } from '../../orchestration/utils/youtubeApi';
 import { loadIgnoredVideoIds } from '../../orchestration/utils/ignoredIds';
 import type { UncapturedPostRow, UncapturedVideoRow, YoutubeNoMetadataRow } from '../render/types';
 import { computeBlogIntakeRows, computeYoutubeIntakeRows } from './intakeSnapshot';
@@ -34,19 +34,13 @@ export async function computeYoutubeNoMetadataRows(app: App): Promise<YoutubeNoM
 		const videoId = coerceVideoId(fm['yt-video-id']);
 		if (!videoId) continue;
 		if (ignored.has(videoId)) continue;
+		// A note with any `yt-metadata` entry is out of the backlog. The predicate is
+		// imported, not re-inlined: WP-J2 made the key list-valued, and a second local
+		// copy of the shape check is exactly how the two would drift.
 		if (isYtMetadataLinked(fm['yt-metadata'])) continue;
 		const createdRaw: unknown = fm['created'];
 		const created = typeof createdRaw === 'string' ? Date.parse(createdRaw) || file.stat.ctime : file.stat.ctime;
 		out.push({ file, title: file.basename, created, videoId });
 	}
 	return out;
-}
-
-// True when `yt-metadata` already carries a link (a non-empty string, or an
-// array with at least one non-empty entry). Such notes are excluded from the
-// backlog.
-function isYtMetadataLinked(value: unknown): boolean {
-	if (typeof value === 'string') return value.trim().length > 0;
-	if (Array.isArray(value)) return value.some(v => typeof v === 'string' && v.trim().length > 0);
-	return false;
 }

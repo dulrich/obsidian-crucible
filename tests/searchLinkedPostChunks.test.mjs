@@ -191,6 +191,25 @@ test('a legacy scalar x-metadata value (not yet a list) still resolves', async (
 	assert.deepEqual(linkedHeadings(chunks), [`${LINKED_POST_HEADING_PREFIX}one`]);
 });
 
+// WP-J2 made `yt-metadata` list-valued (mirroring `x-metadata`): a capture note now
+// carries its own video's stamp at [0] plus one entry per video referenced in its body,
+// and every entry must contribute a linked-post chunk.
+test('a list-valued yt-metadata resolves every entry, in order', async () => {
+	const notes = new Map([
+		[NOTE, { frontmatter: { 'yt-metadata': ['[[yt_metadata/vid1]]', '[[yt_metadata/vid2]]'] }, content: BARE_CONTENT }],
+		['yt_metadata/vid1.md', { frontmatter: {}, content: 'The captured video summary.' }],
+		['yt_metadata/vid2.md', { frontmatter: {}, content: 'A referenced video summary.' }],
+	]);
+	const resolve = new Map([['yt_metadata/vid1', 'yt_metadata/vid1.md'], ['yt_metadata/vid2', 'yt_metadata/vid2.md']]);
+	const manager = makeManager({ notes, resolve });
+
+	const chunks = await manager.buildFileChunks(makeFile(NOTE));
+	assert.deepEqual(linkedHeadings(chunks), [
+		`${LINKED_POST_HEADING_PREFIX}vid1`,
+		`${LINKED_POST_HEADING_PREFIX}vid2`,
+	]);
+});
+
 test('a scalar yt-metadata value resolves', async () => {
 	const notes = new Map([
 		[NOTE, { frontmatter: { 'yt-metadata': '[[yt_metadata/vid1]]' }, content: BARE_CONTENT }],

@@ -51,7 +51,11 @@ export const moment = () => {};
 	logLevel: 'silent',
 });
 
-const { youtubeMetadataDedupeKey } = await import(pathToFileURL(outfile).href);
+const {
+	youtubeMetadataDedupeKey,
+	referencedVideoJobParams,
+	YOUTUBE_REFERENCED_VIDEO_PARAM,
+} = await import(pathToFileURL(outfile).href);
 
 // ── youtubeMetadataDedupeKey ─────────────────────────────────────────────────
 
@@ -76,4 +80,53 @@ test('two params with same videoId but different targetPaths produce different k
 	assert.notEqual(key1, key2, 'different targetPaths → different keys');
 	assert.equal(key1, 'note:notes/a.md');
 	assert.equal(key2, 'note:notes/b.md');
+});
+
+// ── referenced-video mode (WP-J2) ────────────────────────────────────────────
+//
+// The flag, not the {targetPath, videoId} pair, is what selects the composite key:
+// every legacy per-note enqueue site already passes both params, so inferring the mode
+// from their presence would have re-keyed all of them.
+
+test('referencedVideo flag → key is note:<path>:video:<id>', () => {
+	const key = youtubeMetadataDedupeKey(referencedVideoJobParams('notes/a.md', 'v1'));
+	assert.equal(key, 'note:notes/a.md:video:v1');
+});
+
+test('N referenced videos on ONE note each get their own key (they must not collapse)', () => {
+	const key1 = youtubeMetadataDedupeKey(referencedVideoJobParams('notes/a.md', 'v1'));
+	const key2 = youtubeMetadataDedupeKey(referencedVideoJobParams('notes/a.md', 'v2'));
+	assert.notEqual(key1, key2);
+	assert.equal(key2, 'note:notes/a.md:video:v2');
+});
+
+test("a referenced job never collapses onto the note's own primary metadata job", () => {
+	const primary = youtubeMetadataDedupeKey({ targetPath: 'notes/a.md', videoId: 'own1' });
+	const referenced = youtubeMetadataDedupeKey(referencedVideoJobParams('notes/a.md', 'own1'));
+	assert.equal(primary, 'note:notes/a.md');
+	assert.notEqual(referenced, primary);
+});
+
+test('the referenced flag alone (no videoId) does not mint a composite key', () => {
+	const key = youtubeMetadataDedupeKey({ targetPath: 'notes/a.md', [YOUTUBE_REFERENCED_VIDEO_PARAM]: true });
+	assert.equal(key, 'note:notes/a.md', 'falls back to the per-note shape');
+});
+
+test('a truthy-but-not-true flag value does not select referenced mode', () => {
+	const key = youtubeMetadataDedupeKey({ targetPath: 'notes/a.md', videoId: 'v1', [YOUTUBE_REFERENCED_VIDEO_PARAM]: 'yes' });
+	assert.equal(key, 'note:notes/a.md');
+});
+
+test('referencedVideoJobParams carries the flag and an optional title', () => {
+	assert.deepEqual(referencedVideoJobParams('notes/a.md', 'v1'), {
+		targetPath: 'notes/a.md',
+		videoId: 'v1',
+		[YOUTUBE_REFERENCED_VIDEO_PARAM]: true,
+	});
+	assert.deepEqual(referencedVideoJobParams('notes/a.md', 'v1', 'A title'), {
+		targetPath: 'notes/a.md',
+		videoId: 'v1',
+		[YOUTUBE_REFERENCED_VIDEO_PARAM]: true,
+		title: 'A title',
+	});
 });
