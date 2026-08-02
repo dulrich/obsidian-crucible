@@ -8,6 +8,10 @@ import esbuild from 'esbuild';
 
 const outdir = path.join(tmpdir(), 'obsidian-crucible-localize-tests');
 const outfile = path.join(outdir, 'localizeAttachments.mjs');
+// The pure ref/repair domain lives in its own module (src/attachmentRepair.ts) — no
+// 'obsidian' import at all, so it bundles without the stub below. localizeAttachments.ts
+// keeps only the vault/download/write coordinator plus the content-MD5 hash.
+const repairOutfile = path.join(outdir, 'attachmentRepair.mjs');
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
@@ -41,9 +45,22 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
+await esbuild.build({
+	entryPoints: ['src/attachmentRepair.ts'],
+	bundle: true,
+	platform: 'node',
+	format: 'esm',
+	target: 'es2020',
+	outfile: repairOutfile,
+	logLevel: 'silent',
+});
+
 const {
 	clampImageQuality,
 	md5HexForBytes,
+} = await import(pathToFileURL(outfile));
+
+const {
 	rewriteLocalizedAttachmentRefs,
 	stripDataUriImagePlaceholders,
 	repointAttachmentFolderPrefix,
@@ -56,7 +73,7 @@ const {
 	formatLink,
 	formatRef,
 	parseAttachmentRefsFromCache,
-} = await import(pathToFileURL(outfile));
+} = await import(pathToFileURL(repairOutfile));
 
 test('rewriteLocalizedAttachmentRefs only replaces full markdown image ranges', () => {
 	const content = [
@@ -206,7 +223,7 @@ test('hasOtherAttachmentReferrer ignores zero-count entries and empty maps', () 
 
 /* --------------------------------------------- resolveLocalAttachmentRepair: truncated-ref recovery (WP-VF-2d) */
 
-test('PREFIX_REPAIR_MIN_STEM_LENGTH is 8 (32 bits of the content hash — see the doc comment in localizeAttachments.ts)', () => {
+test('PREFIX_REPAIR_MIN_STEM_LENGTH is 8 (32 bits of the content hash — see the doc comment in attachmentRepair.ts)', () => {
 	assert.equal(PREFIX_REPAIR_MIN_STEM_LENGTH, 8);
 });
 

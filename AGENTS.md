@@ -155,7 +155,8 @@ A valid rerun packet includes:
     frontmatter.ts      # updateFrontmatter — the ONLY sanctioned frontmatter write path
     materialize.ts      # Day/Week/Month note and folder creation
     lint.ts             # Linting engine (word count, YAML formatting, date mgmt)
-    localizeAttachments.ts  # Attachment download/localize/repair
+    localizeAttachments.ts  # Attachment download/localize/repair (vault I/O coordinator)
+    attachmentRepair.ts # Pure attachment ref parsing/formatting, path index, repair resolution
     captures.ts         # Capture execution logic and prompt modals
     chains.ts           # ChainManager: guarded, locked, multi-step command sequences
     sections.ts         # Markdown section helpers — shared between captures and workflows

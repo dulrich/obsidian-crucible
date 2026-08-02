@@ -21,7 +21,7 @@ the reviewable filesystem contract.
 | simplification-misses | 2 | 0 |
 | spaghetti | 0 | 0 |
 | boundary-type-contracts | 0 | 0 |
-| file-size | 2 | 0 |
+| file-size | 1 | 1 |
 | modularity | 0 | 0 |
 | legibility | 0 | 0 |
 
