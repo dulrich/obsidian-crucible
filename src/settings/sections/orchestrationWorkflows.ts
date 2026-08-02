@@ -375,4 +375,14 @@ export function renderEditLinkScanWorkflow(tab: CrucibleSettingTab, containerEl:
 		set: (v) => { s.orchestrationTrackedSourcesNote = v.trim() || 'Sources/Tracked Sources.md'; },
 		suggest: (el) => { new FileSuggest(tab.app, el); },
 	}, save);
+
+	bindToggle(containerEl, {
+		name: 'Enable note-level link enrichment',
+		desc: 'Lets the "Link enrich note" command scan one note\'s links: merges them into the '
+			+ 'registry above, enqueues X post-link discovery when the note cites any X status, and '
+			+ 'enqueues YouTube metadata fetches for referenced videos (excluding the note\'s own '
+			+ 'video and any video it already links). Off by default.',
+		get: () => s.orchestrationNoteLinkEnrichEnabled === true,
+		set: (v) => { s.orchestrationNoteLinkEnrichEnabled = v; },
+	}, save);
 }

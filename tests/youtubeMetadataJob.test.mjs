@@ -55,6 +55,7 @@ const {
 	youtubeMetadataDedupeKey,
 	referencedVideoJobParams,
 	YOUTUBE_REFERENCED_VIDEO_PARAM,
+	noteLinkEnrichJobConfig,
 } = await import(pathToFileURL(outfile).href);
 
 // ── youtubeMetadataDedupeKey ─────────────────────────────────────────────────
@@ -129,4 +130,29 @@ test('referencedVideoJobParams carries the flag and an optional title', () => {
 		[YOUTUBE_REFERENCED_VIDEO_PARAM]: true,
 		title: 'A title',
 	});
+});
+
+// ── WP-J3: noteLinkEnrichJobConfig's dedupe key — same note:<path> shape as
+// xPostDiscoverJobConfig, deliberately: a repeat request for the same note collapses
+// onto the one active scan. ──────────────────────────────────────────────────────
+
+test('noteLinkEnrichJobConfig: targetPath present -> key is note:<targetPath>', () => {
+	const key = noteLinkEnrichJobConfig().dedupeKey({ targetPath: 'notes/a.md' });
+	assert.equal(key, 'note:notes/a.md');
+});
+
+test('noteLinkEnrichJobConfig: empty/absent targetPath -> empty string (no dedupe)', () => {
+	assert.equal(noteLinkEnrichJobConfig().dedupeKey({}), '');
+	assert.equal(noteLinkEnrichJobConfig().dedupeKey({ targetPath: '' }), '');
+	assert.equal(noteLinkEnrichJobConfig().dedupeKey({ targetPath: 42 }), '');
+});
+
+test('noteLinkEnrichJobConfig: two different notes never collapse onto one key', () => {
+	const a = noteLinkEnrichJobConfig().dedupeKey({ targetPath: 'notes/a.md' });
+	const b = noteLinkEnrichJobConfig().dedupeKey({ targetPath: 'notes/b.md' });
+	assert.notEqual(a, b);
+});
+
+test('noteLinkEnrichJobConfig: declares no services (enqueue-only, no external dependency of its own)', () => {
+	assert.equal(noteLinkEnrichJobConfig().services, undefined);
 });

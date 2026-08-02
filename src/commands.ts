@@ -417,6 +417,18 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:x-discover-post-links`, {}),
 	});
 
+	// Also registered as a chain-internal command (internalCommands.ts) — same
+	// reasoning as x-discover-post-links above: a note-related chain step needs the
+	// awaited internal registry, not fire-and-forget executeCommandById. Enqueueing
+	// doesn't mutate the note itself, so mutating:false is correct.
+	plugin.registerCrucibleCommand({
+		id: 'link-enrich-note',
+		name: 'Orchestrate: enrich links in active note',
+		group: 'Orchestrations',
+		mutating: false,
+		run: () => plugin.chainManager.executeInternalCommand(`${prefix}:link-enrich-note`, {}),
+	});
+
 	// Retroactive repair for a service-outage cohort in failed/ (see
 	// failedJobRepair.ts). Not `mutating`: it moves queue job files, not the active
 	// note — same reasoning as every other Orchestrate command in this group.
