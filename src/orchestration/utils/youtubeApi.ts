@@ -27,6 +27,25 @@ export class YoutubeApiUnavailableError extends Error {
 	}
 }
 
+/** Why a specific video is permanently unavailable. A union (of one member today) so
+ * a future reason doesn't force a shape change — mirrors `XPostUnavailableReason`
+ * (`xApi.ts`). */
+export type YoutubeVideoUnavailableReason = 'deleted-or-private';
+
+/**
+ * A specific YouTube video is gone (deleted or private) — a per-video, permanent
+ * outcome, deliberately NOT a `YoutubeApiUnavailableError`: it must never open the
+ * `youtube-api` breaker (a dead video is not an outage), and `ensureMetadataNote`
+ * converts it into a durable tombstone note rather than retrying. Mirrors
+ * `XPostUnavailableError` (`xApi.ts`).
+ */
+export class YoutubeVideoUnavailableError extends Error {
+	constructor(message: string, public readonly reason: YoutubeVideoUnavailableReason) {
+		super(message);
+		this.name = 'YoutubeVideoUnavailableError';
+	}
+}
+
 /**
  * The YouTube Data API gives no `Retry-After` for a quota rejection (unlike its 429
  * rate-limit response, which sometimes does) — quota resets at midnight Pacific, so
@@ -85,10 +104,13 @@ function retryAfterMsFromHeaders(headers: Record<string, string> | undefined): n
  * it. A network-level failure, a 5xx, a 429, or a 403 quota rejection are all "the
  * service is down/throttled", not a bug in what we asked for, so they throw
  * `YoutubeApiUnavailableError` and the caller's workflow can defer the whole job
- * instead of misreporting a service outage as a permanent per-job failure. Everything
- * else (404, bad-key 403, a non-2xx status this function doesn't otherwise recognize)
- * is left as a plain Error — a job-level problem the caller keeps handling as it
- * always has.
+ * instead of misreporting a service outage as a permanent per-job failure. A 404 is
+ * `YoutubeVideoUnavailableError` for symmetry with the live not-found shape (a 200
+ * with `items: []` — see `fetchYoutubeVideo`), though it is dead in practice: the
+ * Data API answers a missing video with the empty-items 200, not a 404. Everything
+ * else (bad-key 403, a non-2xx status this function doesn't otherwise recognize) is
+ * left as a plain Error — a job-level problem the caller keeps handling as it always
+ * has.
  *
  * `requestUrl` is passed `throw: false`: without it, Obsidian throws on any HTTP 400+
  * status itself and the status branches below never see it, only the network-error
@@ -121,7 +143,7 @@ async function requestYoutubeApi(url: string, notFoundMessage: string): Promise<
 		throw new Error(`YouTube Data API: forbidden (HTTP 403). Check the API key and Data API enablement.`);
 	}
 	if (res.status === 404) {
-		throw new Error(notFoundMessage);
+		throw new YoutubeVideoUnavailableError(notFoundMessage, 'deleted-or-private');
 	}
 	if (res.status >= 500) {
 		throw new YoutubeApiUnavailableError(`YouTube Data API: HTTP ${res.status}`, 'server-error');
@@ -176,6 +198,7 @@ export interface YoutubeVideoMetadata {
 export type IngestResult =
 	| { status: 'created';     metadataPath: string; channelId: string }
 	| { status: 'exists';      metadataPath: string }
+	| { status: 'tombstoned';  metadataPath: string }
 	| { status: 'no-video-id'; metadataPath: null }
 	| { status: 'no-api-key';  metadataPath: null };
 
@@ -220,7 +243,9 @@ export async function fetchYoutubeVideo(apiKey: string, videoId: string): Promis
 
 	const item = payload.items?.[0];
 	if (!item) {
-		throw new Error(`YouTube Data API: video ${videoId} not found`);
+		// The live not-found shape: HTTP 200 with `items: []` (a deleted/private
+		// video), not a 404 — see `requestYoutubeApi`'s doc comment.
+		throw new YoutubeVideoUnavailableError(`YouTube Data API: video ${videoId} not found`, 'deleted-or-private');
 	}
 
 	const duration = item.contentDetails?.duration ?? '';
@@ -416,11 +441,45 @@ export async function writeYoutubeMetadataNote(app: App, path: string, meta: You
 	return await app.vault.create(path, body);
 }
 
+/** The canonical watch URL for a video id — the single form the tombstone (and every
+ * other YT-URL-producing site in this file) writes. */
+export function youtubeWatchUrl(videoId: string): string {
+	return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+/** Frontmatter-only tombstone body — no fetched payload to carry, and none invented.
+ * Mirrors `buildXTombstoneNoteBody` (`xApi.ts`): `yt-video-id` (not `videoId` —
+ * matches the source-note frontmatter key, not the live metadata note's field name),
+ * `state: unavailable`, `unavailable-reason`, `fetched_at`, `source_command`. */
+export function buildYoutubeTombstoneNoteBody(
+	videoId: string,
+	url: string,
+	reason: YoutubeVideoUnavailableReason,
+): string {
+	const fm: string[] = ['---'];
+	fm.push(`yt-video-id: ${yamlString(videoId)}`);
+	fm.push(`url: ${url}`);
+	fm.push(`state: unavailable`);
+	fm.push(`unavailable-reason: ${yamlString(reason)}`);
+	fm.push(`fetched_at: ${new Date().toISOString()}`);
+	fm.push(`source_command: youtube-fetch-video-metadata`);
+	fm.push('---', '');
+	return fm.join('\n');
+}
+
 // Find-or-fetch-create the metadata note for `videoId`, serialized under the
 // `yt-video::<id>` resource lock: per-note jobs sharing a video id would otherwise
 // both miss findExistingMetadataNote and double-fetch/double-create. Per the lock
 // ordering rule (AGENTS.md), call this with the note lock already held (or with no
 // note lock at all) — never acquire a note lock from inside it.
+//
+// A caught `YoutubeVideoUnavailableError` (X-pipeline port, WP-K1) is converted into
+// a durable tombstone under `<root>/_unavailable/<videoId>.md` rather than retrying —
+// snapshot semantics, no refetch, and the probe above finds it on every later call
+// (it's a child folder like any other), so a repeat job reports `exists`, not another
+// `tombstoned`. Any other thrown error (notably `YoutubeApiUnavailableError`) rethrows
+// untouched — this layer stays transport-honest and leaves the deferred-job
+// conversion to the workflow (`youtubeApiDeferredResult`).
 export async function ensureMetadataNote(plugin: CruciblePlugin, videoId: string): Promise<IngestResult> {
 	const app = plugin.app;
 	const trimmedId = videoId.trim();
@@ -437,7 +496,23 @@ export async function ensureMetadataNote(plugin: CruciblePlugin, videoId: string
 		const apiKey = await loadYoutubeApiKey(plugin);
 		if (!apiKey) return { status: 'no-api-key', metadataPath: null };
 
-		const meta = await fetchYoutubeVideo(apiKey, trimmedId);
+		let meta: YoutubeVideoMetadata;
+		try {
+			meta = await fetchYoutubeVideo(apiKey, trimmedId);
+		} catch (e) {
+			if (e instanceof YoutubeVideoUnavailableError) {
+				const path = normalizePath(`${root}/_unavailable/${trimmedId}.md`);
+				const collision = app.vault.getAbstractFileByPath(path);
+				if (collision instanceof TFile) {
+					return { status: 'tombstoned', metadataPath: path };
+				}
+				await ensureFolder(app, `${root}/_unavailable`);
+				await app.vault.create(path, buildYoutubeTombstoneNoteBody(trimmedId, youtubeWatchUrl(trimmedId), e.reason));
+				return { status: 'tombstoned', metadataPath: path };
+			}
+			throw e;
+		}
+
 		const channelFolder = await resolveChannelFolder(app, plugin, meta.channelId, meta.channelTitle);
 		const path = youtubeMetadataNotePath(root, channelFolder, trimmedId);
 

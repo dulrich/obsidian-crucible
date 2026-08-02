@@ -203,6 +203,23 @@ test('parseYtMetadataChannelFromLink extracts the channel folder under the metad
 	assert.equal(parseYtMetadataChannelFromLink('[[Other Root/UC123/videoabc1234]]', '_yt_metadata'), '');
 });
 
+// WP-K1: `_unavailable` is the reserved tombstone child folder (youtubeApi.ts's
+// ensureMetadataNote), not a channel. A note whose yt-metadata[0] is a tombstone must
+// decline attribution here — buildYoutubeVideoChannelMap already misses it (no
+// channelId), so without this guard the fallback would mint a phantom "_unavailable"
+// channel.
+test('parseYtMetadataChannelFromLink returns empty for a tombstoned (_unavailable) link', () => {
+	assert.equal(
+		parseYtMetadataChannelFromLink('[[_yt_metadata/_unavailable/deadvideo01|Video]]', '_yt_metadata'),
+		'',
+	);
+	assert.equal(
+		parseYtMetadataChannelFromLink(['[[_yt_metadata/_unavailable/deadvideo01]]'], '_yt_metadata'),
+		'',
+		'also declines when the tombstone is the (only) entry of a yt-metadata LIST',
+	);
+});
+
 // WP-J2 ordering pin: `yt-metadata` is list-valued, and capture attribution reads entry
 // [0] (firstFrontmatterLink). `appendYtMetadataLink` is append-only precisely so a
 // referenced-video stamp can never displace the capture's own video from the head.
@@ -249,6 +266,35 @@ test('computeCaptureIndex attributes a multi-entry yt-metadata list to the FIRST
 	const records = await computeCaptureIndex(app, plugin);
 	const record = records.find(r => r.file.path === capture.path);
 	assert.equal(record.source, 'youtube:UC_OWN');
+});
+
+// WP-K1: a capture whose own video was taken down (yt-metadata[0] is the tombstone
+// link) must not attribute to a phantom "youtube:_unavailable" channel — no channel
+// map entry exists (the tombstone carries no channelId) and the captureIndex.ts guard
+// declines the folder-name fallback too, so the record's source is null rather than a
+// made-up channel key.
+test('computeCaptureIndex attributes null, not a phantom channel, for a tombstoned yt-metadata entry', async () => {
+	const registry = file('core/Tracked Blogs.md', [
+		'| Name | Link | Method | Tags | Priority |',
+		'|------|------|--------|------|----------|',
+		'| Acme | https://acme.example/feed.xml | RSS | tech | normal |',
+	].join('\n'));
+	const capture = file('daily/day/2026-01-01/Dead video.md', '', {
+		'yt-video-id': 'deadvideo01',
+		'yt-metadata': '[[_yt_metadata/_unavailable/deadvideo01]]',
+	}, { tags: ['#clippings'] });
+	const app = mockApp([registry, capture]);
+	const plugin = {
+		settings: {
+			dailyFolder: 'daily/day',
+			orchestrationYoutubeMetadataRoot: '_yt_metadata',
+			orchestrationBlogsNote: 'core/Tracked Blogs.md',
+		},
+	};
+
+	const records = await computeCaptureIndex(app, plugin);
+	const record = records.find(r => r.file.path === capture.path);
+	assert.equal(record.source, null);
 });
 
 test('scanObservationSignals counts monthly observation links and indented quote bullets', async () => {

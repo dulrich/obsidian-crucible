@@ -79,6 +79,7 @@ const CHANNEL_FOLDER = 'test-channel';
 const OWN_VIDEO = 'ownvideo001';
 const REF_VIDEO = 'refvideo001';
 const REF_VIDEO_2 = 'refvideo002';
+const DEAD_VIDEO = 'deadvideo01';
 
 const metaPathFor = id => `${ROOT}/${CHANNEL_FOLDER}/${id}.md`;
 const linkFor = id => `[[${ROOT}/${CHANNEL_FOLDER}/${id}]]`;
@@ -106,6 +107,40 @@ function serveVideosList({ channelId = CHANNEL_ID, channelTitle = 'Test Channel'
 						description: 'A description.',
 						channelId,
 						channelTitle,
+						publishedAt: '2026-01-01T00:00:00Z',
+						categoryId: '22',
+						liveBroadcastContent: 'none',
+					},
+					contentDetails: { duration: 'PT5M' },
+					statistics: { viewCount: '10', likeCount: '1', commentCount: '0' },
+				}],
+			}),
+		};
+	};
+}
+
+// WP-K1: like serveVideosList, but any videoId in `deadIds` gets the live not-found
+// shape (HTTP 200, items: []) instead of a normal item — the rest of the fixed
+// channel's videos still fetch normally.
+function serveVideosListWithDeadIds(deadIds) {
+	fetchCount = 0;
+	globalThis.__youtubeApiRespond = async options => {
+		fetchCount++;
+		const id = new URL(options.url).searchParams.get('id') ?? '';
+		if (deadIds.has(id)) {
+			return { status: 200, headers: {}, text: JSON.stringify({ items: [] }) };
+		}
+		return {
+			status: 200,
+			headers: {},
+			text: JSON.stringify({
+				items: [{
+					id,
+					snippet: {
+						title: `Video ${id}`,
+						description: 'A description.',
+						channelId: CHANNEL_ID,
+						channelTitle: 'Test Channel',
 						publishedAt: '2026-01-01T00:00:00Z',
 						categoryId: '22',
 						liveBroadcastContent: 'none',
@@ -591,4 +626,88 @@ test('a throwing enqueue never fails the job — the metadata note is already wr
 	assert.equal(result.status, 'done');
 	assert.doesNotMatch(result.notes, /Enqueued channel enrichment/);
 	assert.deepEqual(fmOf(plugin, CAPTURE_NOTE)['yt-metadata'], [linkFor(OWN_VIDEO)]);
+});
+
+// ── WP-K1: taken-down tombstones, driven end to end through the real workflow ──────
+
+const tombstoneLinkFor = id => `[[${ROOT}/_unavailable/${id}]]`;
+const tombstonePathFor = id => `${ROOT}/_unavailable/${id}.md`;
+
+test('a taken-down video settles done, tombstones once, and links onto yt-metadata like any other note', async () => {
+	serveVideosListWithDeadIds(new Set([DEAD_VIDEO]));
+	const plugin = makePlugin();
+	const note = 'clips/dead-capture.md';
+	plugin._vault.seed(note, `---\ntitle: Dead\nyt-video-id: ${DEAD_VIDEO}\ncreated: 2026-01-01\n---\n\nBody.`);
+
+	const result = await run(plugin, { targetPath: note, videoId: DEAD_VIDEO });
+	assert.equal(result.status, 'done', 'a taken-down video is done, not failed or deferred');
+	assert.equal(result.serviceUnhealthy, undefined, 'never opens the youtube-api breaker');
+	assert.match(result.notes, /Video unavailable — tombstoned/);
+	assert.equal(result.outputPaths[0], tombstonePathFor(DEAD_VIDEO));
+	assert.equal(fetchCount, 1);
+
+	// Linked exactly like a real metadata note — this is what removes it from
+	// computeYoutubeNoMetadataRows and silences the yt-metadata-on-capture trigger,
+	// both of which gate on isYtMetadataLinked (src/orchestration/utils/youtubeApi.ts).
+	assert.deepEqual(fmOf(plugin, note)['yt-metadata'], [tombstoneLinkFor(DEAD_VIDEO)]);
+	assert.equal(isYtMetadataLinked(fmOf(plugin, note)['yt-metadata']), true);
+
+	const body = plugin._vault.bodyAt(result.outputPaths[0]);
+	assert.match(body, /state: unavailable/);
+	assert.match(body, /unavailable-reason: "deleted-or-private"/);
+});
+
+test('the metadata-enriched event still fires for a tombstoned outcome', async () => {
+	serveVideosListWithDeadIds(new Set([DEAD_VIDEO]));
+	const plugin = makePlugin();
+	const note = 'clips/dead-capture.md';
+	plugin._vault.seed(note, `---\ntitle: Dead\nyt-video-id: ${DEAD_VIDEO}\ncreated: 2026-01-01\n---\n\nBody.`);
+
+	await run(plugin, { targetPath: note, videoId: DEAD_VIDEO });
+	const enriched = plugin._emitted.find(e => e.event === 'metadata-enriched');
+	assert.ok(enriched, 'the dashboard refresh / trigger hook must still see a tombstoned outcome');
+	assert.equal(enriched.payload.videoId, DEAD_VIDEO);
+});
+
+test('a rerun on the same tombstoned video reports exists (already tombstoned) with no second fetch, and never chains', async () => {
+	serveVideosListWithDeadIds(new Set([DEAD_VIDEO]));
+	const plugin = makePlugin(); // channel-enrich ON — proves tombstoning never chains
+	const noteA = 'clips/dead-a.md';
+	const noteB = 'clips/dead-b.md';
+	plugin._vault.seed(noteA, `---\ntitle: A\nyt-video-id: ${DEAD_VIDEO}\ncreated: 2026-01-01\n---\n\nBody.`);
+	plugin._vault.seed(noteB, '---\ntitle: B\n---\n\nBody.');
+
+	const first = await run(plugin, { targetPath: noteA, videoId: DEAD_VIDEO }, 'job-1');
+	assert.equal(first.status, 'done');
+	assert.equal(fetchCount, 1);
+	assert.equal(plugin._enqueued.length, 0, 'tombstoned is never created — channel chaining stays created-only');
+
+	const second = await run(plugin, referencedVideoJobParams(noteB, DEAD_VIDEO), 'job-2');
+	assert.equal(second.status, 'done');
+	assert.match(second.notes, /Video unavailable — already tombstoned/);
+	assert.equal(second.outputPaths[0], tombstonePathFor(DEAD_VIDEO));
+	assert.equal(fetchCount, 1, 'the probe finds the tombstone — no second API call');
+	assert.equal(plugin._enqueued.length, 0);
+	assert.deepEqual(fmOf(plugin, noteB)['yt-metadata'], [tombstoneLinkFor(DEAD_VIDEO)]);
+});
+
+test('referenced-video mode tombstones identically to the per-note path (same tombstone path, composite dedupe key elsewhere)', async () => {
+	serveVideosListWithDeadIds(new Set([DEAD_VIDEO]));
+	const plugin = makePlugin();
+	plugin._vault.seed(CAPTURE_NOTE, captureBody());
+
+	// The capture note already stamps its OWN video first...
+	serveVideosList();
+	await run(plugin, { targetPath: CAPTURE_NOTE, videoId: OWN_VIDEO }, 'job-1');
+	assert.deepEqual(fmOf(plugin, CAPTURE_NOTE)['yt-metadata'], [linkFor(OWN_VIDEO)]);
+
+	// ...then a REFERENCED video cited in the body turns out to be taken down.
+	serveVideosListWithDeadIds(new Set([DEAD_VIDEO]));
+	const referenced = await run(plugin, referencedVideoJobParams(CAPTURE_NOTE, DEAD_VIDEO, 'Ref'), 'job-2');
+
+	assert.equal(referenced.status, 'done');
+	assert.match(referenced.notes, /Video unavailable — tombstoned/);
+	assert.equal(referenced.outputPaths[0], tombstonePathFor(DEAD_VIDEO));
+	// Append-only: the capture's own video stays entry [0], the tombstone lands after it.
+	assert.deepEqual(fmOf(plugin, CAPTURE_NOTE)['yt-metadata'], [linkFor(OWN_VIDEO), tombstoneLinkFor(DEAD_VIDEO)]);
 });
