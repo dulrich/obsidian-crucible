@@ -12,7 +12,7 @@ initiative-status: active
 initiative-cadence: as-needed
 review-after-commits: 50
 review-after-lines: 15000
-snyk-tracking: track
+security-tracking: track
 ---
 
 ---
