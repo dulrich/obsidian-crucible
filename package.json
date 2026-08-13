@@ -13,7 +13,8 @@
 		"search:agreement": "node scripts/embedding-agreement.mjs",
 		"search:quality": "node scripts/embedding-quality.mjs",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
-		"lint": "eslint . && stylelint \"**/*.css\""
+		"lint": "eslint . && stylelint \"**/*.css\"",
+		"test:security": "trivy fs --scanners vuln,misconfig --skip-db-update --skip-check-update --exit-code 1 --severity CRITICAL,HIGH ."
 	},
 	"keywords": [],
 	"license": "MIT",

@@ -18,4 +18,6 @@ ENV CRUCIBLE_SEARCH_PORT=4801 \
     CRUCIBLE_SEARCH_DB=/data/search.sqlite
 EXPOSE 4801
 VOLUME ["/data"]
+RUN groupadd -g 1001 app && useradd -m -u 1001 -g app app
+USER app
 CMD ["node", "scripts/search-companion.mjs"]
