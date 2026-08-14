@@ -5,6 +5,10 @@ FROM node:24-slim
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=${GIT_SHA}
 WORKDIR /app
+# Base debian security refresh: the node:24-slim base image lags fixed-version
+# debian point releases — pull those in at build time rather than waiting on
+# upstream.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 # Two COPYs, not one: `search-companion.mjs` is the executable + re-export facade and
 # `search-companion/` is the implementation it re-exports (WP-rem-R3 split the former
 # single file into that directory). Both are still dependency-free — there is deliberately
@@ -13,6 +17,12 @@ WORKDIR /app
 # allowlist carries the matching pair of entries.
 COPY scripts/search-companion.mjs ./scripts/search-companion.mjs
 COPY scripts/search-companion/ ./scripts/search-companion/
+# The server imports only Node builtins (see header comment) — npm never runs in
+# this image. Strip the bundled npm/corepack node-pkg tree (verified: it's the sole
+# source of the tar/undici/brace-expansion/ip-address findings, all under
+# /usr/local/lib/node_modules/npm) rather than carry vulnerable packages nothing uses.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 ENV CRUCIBLE_SEARCH_PORT=4801 \
     CRUCIBLE_SEARCH_HOST=0.0.0.0 \
     CRUCIBLE_SEARCH_DB=/data/search.sqlite
