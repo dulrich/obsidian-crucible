@@ -20,7 +20,7 @@ export interface Currency {
 }
 
 export async function fetchCurrencies(): Promise<Currency[]> {
-	const url = 'https://api.frankfurter.app/currencies';
+	const url = 'https://api.frankfurter.dev/v1/currencies';
 	const res = await requestUrl({ url, method: 'GET', throw: false });
 	if (res.status !== 200) {
 		throw new Error(`Frankfurter currencies: HTTP ${res.status}`);
@@ -32,8 +32,12 @@ export async function fetchCurrencies(): Promise<Currency[]> {
 }
 
 export async function fetchFxRate(base: string, quote: string): Promise<FxRate> {
-	const url = `https://api.frankfurter.app/latest?from=${encodeURIComponent(base)}&to=${encodeURIComponent(quote)}`;
-	const res = await requestUrl({ url, method: 'GET', throw: false });
+	// Frankfurter serves /latest with `cache-control: max-age=86400`, and the old
+	// api.frankfurter.app host answers with a (cacheable) 301 to .dev. requestUrl
+	// rides Electron's HTTP cache, so a plain URL replayed yesterday's rate for up
+	// to 24h. Hit the canonical host and bust the cache with a per-call param.
+	const url = `https://api.frankfurter.dev/v1/latest?from=${encodeURIComponent(base)}&to=${encodeURIComponent(quote)}&_=${Date.now()}`;
+	const res = await requestUrl({ url, method: 'GET', throw: false, headers: { 'Cache-Control': 'no-cache' } });
 	if (res.status !== 200) {
 		throw new Error(`Frankfurter ${base}/${quote}: HTTP ${res.status}`);
 	}
