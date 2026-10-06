@@ -28,7 +28,12 @@ import {
 	SearchResult,
 } from './types';
 import { logWarn } from '../log';
+import type { SearchHealthProbe } from './types';
+import { summarizeHealthProbe } from './searchFailureCause';
 import { isPathExcluded } from '../exclusions';
+
+/** Search-latency-durability WP-3: the post-failure cause probe's budget (brief: <= 1000ms). */
+export const SEARCH_CAUSE_PROBE_TIMEOUT_MS = 1000;
 
 // Flush the upsert buffer once it reaches this many chunks. Each flush is one HTTP
 // request and one SQLite transaction on the companion, so batching across files keeps
@@ -671,10 +676,19 @@ export class SearchManager {
 			// exact echo of it — good enough for a debug breadcrumb, not a ranking input. WP-3
 			// adds `embedMs` so a first-run report doesn't require guessing whether a cold
 			// embedder ate the wall clock ahead of the (unaffected) timed window.
+			const elapsedMs = Date.now() - startedAt;
+			// Search-latency-durability WP-3: on a timeout or 5xx, ONE short health probe straight
+			// through the client — deliberately NOT `companionAvailable()`/the availability gate, so
+			// it cannot latch the companion offline or change any availability state. The result
+			// rides on the original error (kind/message/instanceof untouched) for the modal to name
+			// a cause. An abort (SearchAbortedError) is never this class, so it never probes.
+			if (e instanceof SearchServiceUnavailableError && (e.kind === 'timeout' || e.kind === 'server-error') && !signal?.aborted) {
+				e.healthProbe = await this.probeHealthForCause();
+			}
 			if (e instanceof SearchServiceUnavailableError && e.kind === 'timeout') {
-				const elapsedMs = Date.now() - startedAt;
 				const termCount = query.trim().split(/\s+/).filter(Boolean).length;
-				logWarn('search', `interactive search timed out after ${elapsedMs}ms (${termCount} terms, embed ${embedMs}ms)`);
+				const snapshot = e.healthProbe ? ` · health: ${summarizeHealthProbe(e.healthProbe)}` : '';
+				logWarn('search', `interactive search timed out after ${elapsedMs}ms (${termCount} terms, embed ${embedMs}ms)${snapshot}`);
 			}
 			throw e;
 		}
@@ -684,6 +698,15 @@ export class SearchManager {
 		// genuinely dead companion.
 		this.availability.noteInteractiveSearchResponse();
 		return this.boostSearchResponse(response);
+	}
+
+	/** WP-3 cause probe budget — short, so a failed search does not wait long for its explanation. */
+	private async probeHealthForCause(): Promise<SearchHealthProbe> {
+		try {
+			return { answered: true, health: await this.client().health(SEARCH_CAUSE_PROBE_TIMEOUT_MS) };
+		} catch (probeError) {
+			return { answered: false, error: probeError instanceof Error ? probeError.message : String(probeError) };
+		}
 	}
 
 	// Client-side link-adjacency boost (WP-6): reorders the companion's own results using
