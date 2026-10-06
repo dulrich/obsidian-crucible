@@ -92,7 +92,8 @@ SELECT rowid, id, vault_id, path, title, heading, text, entities FROM chunks`;
 // chunks re-embeds. A migration that instead left the column NULL — or wrote a new default —
 // would silently invalidate every vector in the index and trigger a full re-embed.
 //
-// Run on every startup rather than only when the ALTER fires, because a *client* older than
+// Run once per database file (see runEmbeddingSpaceBackfillOnce) rather than only when the
+// ALTER fires, because a *client* older than
 // schema 4 talking to a schema-4 companion writes rows with a model and no space; this heals
 // them under the same rule instead of leaving them permanently unattributed. Writes are also
 // defaulted at insert time (see prepareChunkEmbedding), so this only ever catches rows that
@@ -170,7 +171,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	// author; they populate on the next upsert, which the client's contentHash fold guarantees
 	// happens on the first indexing sweep after the upgrade (see hashSearchContent).
 	if (!chunkColumns.includes('entities')) db.exec("ALTER TABLE chunks ADD COLUMN entities TEXT NOT NULL DEFAULT ''");
-	db.exec(BACKFILL_EMBEDDING_SPACE_SQL);
+	runEmbeddingSpaceBackfillOnce(db);
 	db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_vault_path_hash ON chunks(vault_id, path, content_hash)');
 	// Order matters: the additive ALTERs above must have run first, or the rebuild's
 	// INSERT ... SELECT would name columns a schema-1 table does not have yet. The PK rebuild
@@ -187,6 +188,34 @@ CREATE INDEX IF NOT EXISTS idx_chunks_vault_path ON chunks(vault_id, path);
 	// would only re-pay the (measured ~2.7s at 53k chunks) cost for nothing.
 	const entitiesMigrated = migrateFtsEntitiesColumn(db, { alreadyRebuilt: pkMigrated || ftsMigrated || rowidMigrated });
 	return pkMigrated || ftsMigrated || rowidMigrated || entitiesMigrated;
+}
+
+// The embedding-space backfill is an unindexed UPDATE over the whole `chunks` table — measured
+// 8.9s cold at 100k chunks / 719MB, paid on EVERY boot while nothing (not even /health)
+// answers. Once it has run against this database file, no NULL-space row with a model can
+// reappear: the running binary defaults `embedding_space` at insert time (prepareChunkEmbedding),
+// so only rows written by a pre-schema-4 binary into this file ever needed it. A one-row
+// marker in `companion_meta` records that the backfill ran; it is deliberately not a
+// `user_version` bump (that cookie carries SCHEMA_VERSION semantics the client pairs with).
+// A fresh database and a database that predates the marker both run it exactly once. The
+// marker write shares the backfill's transaction, so a crash between them re-runs the
+// (idempotent) backfill rather than skipping it.
+export const EMBEDDING_SPACE_BACKFILL_MARKER = 'embedding_space_backfill_v1';
+
+function runEmbeddingSpaceBackfillOnce(db) {
+	db.exec('CREATE TABLE IF NOT EXISTS companion_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+	const done = db.prepare('SELECT 1 AS done FROM companion_meta WHERE key = ?').get(EMBEDDING_SPACE_BACKFILL_MARKER);
+	if (done) return false;
+	db.exec('BEGIN');
+	try {
+		db.exec(BACKFILL_EMBEDDING_SPACE_SQL);
+		db.prepare('INSERT OR REPLACE INTO companion_meta (key, value) VALUES (?, ?)').run(EMBEDDING_SPACE_BACKFILL_MARKER, new Date().toISOString());
+		db.exec('COMMIT');
+	} catch (error) {
+		db.exec('ROLLBACK');
+		throw error;
+	}
+	return true;
 }
 
 // `PRAGMA user_version` is a 4-byte integer SQLite persists in the database file header for

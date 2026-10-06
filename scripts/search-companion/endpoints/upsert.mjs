@@ -288,7 +288,25 @@ export function createUpsertEndpoint({ db, statements, vectors, now, delay, stat
 			// discards real data, it only forces the next read to rebuild from whatever is
 			// actually on disk.)
 			for (const vault of touchedVaults) vectors.invalidate(vault);
+			checkpointWal(db);
 		}
 		return json(res, 200, { ok: true, count: chunks.length });
 	};
+}
+
+// Bounded WAL (search-latency-durability WP-1): the live WAL reached 404MB because nothing ever
+// forced a checkpoint past SQLite's opportunistic auto-checkpoint, which a concurrently reading
+// search keeps from completing. Once per flush, after every sub-batch has committed:
+// `wal_checkpoint(TRUNCATE)` — copies the WAL back into the database and truncates the file
+// to zero bytes, so disk and page-cache footprint stay bounded. It cannot deadlock or wait on
+// a writer here (this process is the only writer, and node:sqlite is synchronous so no other
+// statement of ours is mid-flight); if a reader still pins the WAL tail it simply returns
+// busy=1 and the next flush retries. Never thrown into the response path: the flush already
+// succeeded, and a failed checkpoint only means the WAL stays large one flush longer.
+function checkpointWal(db) {
+	try {
+		db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+	} catch {
+		// Deliberately swallowed — see above.
+	}
 }
