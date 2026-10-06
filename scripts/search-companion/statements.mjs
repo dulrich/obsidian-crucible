@@ -1,4 +1,4 @@
-import { COVERAGE_SQL, HYDRATE_CHUNK_SQL, SEARCH_SQL } from './search.mjs';
+import { COVERAGE_SQL, HYDRATE_CHUNK_SQL, SEARCH_HYDRATE_SQL, SEARCH_POOL_SQL } from './search.mjs';
 
 // Every prepared statement the request handler owns, compiled once per handler instance.
 // Split out of the single-file companion (WP-rem-R3) so the endpoint modules can be handed
@@ -94,7 +94,9 @@ ORDER BY chunk_count DESC
 LIMIT 1
 `);
 	const resetChunks = db.prepare('DELETE FROM chunks WHERE vault_id = ?');
-	const searchStatement = db.prepare(SEARCH_SQL);
+	const searchStatement = db.prepare(SEARCH_POOL_SQL);
+	// Phase 2 of the two-phase pooled search: display columns + snippet for the pooled ids only.
+	const searchHydrateStatement = db.prepare(SEARCH_HYDRATE_SQL);
 	// Prepared alongside the search statement even though only a non-default `rankingMode`
 	// ever runs it — preparing is cheap and once, whereas preparing per request would put a
 	// compile on the hot path of the mode we may be about to make the default.
@@ -139,6 +141,7 @@ ORDER BY path
 		selectStateByPath,
 		resetChunks,
 		searchStatement,
+		searchHydrateStatement,
 		coverageStatement,
 		selectPathsByVault,
 	};

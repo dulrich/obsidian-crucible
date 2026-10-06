@@ -4,7 +4,7 @@ import { COVERAGE_MIN_TERMS, DEFAULT_RANKING_MODE, blendPooledRows, buildFtsQuer
 // query, the vector leg, the coverage leg, and runSearch — which owns every cooperative
 // deadline checkpoint. Split out of the single-file companion (WP-rem-R3).
 //
-// The three SQL constants are exported so `./statements.mjs` can prepare them once per
+// The SQL constants are exported so `./statements.mjs` can prepare them once per
 // handler instead of per request; the statements themselves are still passed *in* to
 // runSearch, so this module stays callable against a bare db handle in tests.
 
@@ -43,59 +43,94 @@ const SEARCH_POOL_MIN = 40;
 // into this vault's results — a cross-vault content leak, not merely a wrong snippet.
 export const HYDRATE_CHUNK_SQL = 'SELECT id, path, title, heading, text, entities, metadata_json FROM chunks WHERE vault_id = ? AND id = ?';
 
-// One pooled query replaces the old two-query shape (ranked chunks + a second full
-// `COUNT(*) MATCH` just for `total`, which doubled FTS work on every search):
-//   * `matched` scores raw chunks with weighted bm25;
-//   * `pooled` collapses to one row per path via MIN(score_text) — best chunk wins. SQLite
-//     guarantees the bare columns (id/heading/snippet/...) come from the row that produced
-//     the min when the query has exactly one min()/max() aggregate, so the winning chunk's
-//     snippet and heading ride along for free;
-//   * COUNT(*) OVER () is evaluated before LIMIT, so `total` is the distinct-path match
+const BM25_SQL = `bm25(chunks_fts, ${BM25_WEIGHTS.map(weight => weight.toFixed(1)).join(', ')})`;
+
+// Two-phase pooled search (search-latency-durability WP-1). The old single statement computed
+// snippet() and joined `chunks` for EVERY matched chunk inside the CTE, then threw all but one
+// per path away — the zero-hit loose-OR rescue measured 0.36-1.97s warm on the 100k-chunk index.
+//
+// Phase 1, SEARCH_POOL_SQL — scoring and pooling over `chunks_fts` alone:
+//   * `matched` scores raw chunks with weighted bm25 and nothing else;
+//   * the outer query collapses to one row per path via MIN(score_text) — best chunk wins.
+//     SQLite guarantees the bare columns (id, fts_rowid) come from the row that produced the
+//     min when the query has exactly one min()/max() aggregate. The input row sequence is the
+//     same FTS scan the old statement saw, so the representative chunk (tied minimums
+//     included) is the same one the old statement picked — pinned by
+//     tests/searchCompanionLeanScoring.test.mjs against the old SQL as an oracle;
+//   * COUNT(*) OVER () is evaluated before LIMIT, so `total_paths` is the distinct-path match
 //     count without a second MATCH.
 // `MATERIALIZED` is load-bearing, not a hint: without it SQLite flattens `matched` into the
-// aggregate query and bm25()/snippet() throw "unable to use function bm25 in the requested
-// context" — FTS5 auxiliary functions are illegal in an aggregate context.
-export const SEARCH_SQL = `
+// aggregate query and bm25() throws "unable to use function bm25 in the requested context" —
+// FTS5 auxiliary functions are illegal in an aggregate context.
+export const SEARCH_POOL_SQL = `
 WITH matched AS MATERIALIZED (
-  SELECT c.id AS id,
-         c.path AS path,
-         c.title AS title,
-         c.heading AS heading,
-         c.entities AS entities,
-         c.metadata_json AS metadata_json,
-         snippet(chunks_fts, 5, '', '', '...', 18) AS snippet,
-         bm25(chunks_fts, ${BM25_WEIGHTS.map(weight => weight.toFixed(1)).join(', ')}) AS score_text
+  SELECT id, rowid AS fts_rowid, path, ${BM25_SQL} AS score_text
   FROM chunks_fts
-  JOIN chunks c ON c.id = chunks_fts.id AND c.vault_id = chunks_fts.vault_id
-  WHERE chunks_fts.vault_id = ? AND chunks_fts MATCH ?
-),
-pooled AS (
-  SELECT path,
-         id,
-         title,
-         heading,
-         entities,
-         metadata_json,
-         snippet,
-         MIN(score_text) AS score_text,
-         COUNT(*) AS pooled_chunks
-  FROM matched
-  GROUP BY path
+  WHERE vault_id = ? AND chunks_fts MATCH ?
 )
-SELECT id, path, title, heading, entities, metadata_json, snippet, score_text, pooled_chunks,
+SELECT id, fts_rowid, path, MIN(score_text) AS score_text, COUNT(*) AS pooled_chunks,
        COUNT(*) OVER () AS total_paths
-FROM pooled
+FROM matched
+GROUP BY path
 ORDER BY score_text, path
 LIMIT ?
 `;
 
+// Phase 2, SEARCH_HYDRATE_SQL — display columns and the snippet for only the <= poolSize
+// representative chunks phase 1 returned. snippet() needs the FTS MATCH context, so this is a
+// second MATCH restricted to an explicit rowid set (a JSON array, so one prepared statement
+// serves any pool size); FTS5 seeks each rowid rather than rescanning the match set. No
+// aggregate here, so no MATERIALIZED CTE is needed. The `chunks` join is keyed exactly like the
+// old statement's: `(vault_id, id)`.
+export const SEARCH_HYDRATE_SQL = `
+SELECT f.rowid AS fts_rowid, c.title AS title, c.heading AS heading, c.entities AS entities,
+       c.metadata_json AS metadata_json,
+       snippet(chunks_fts, 5, '', '', '...', 18) AS snippet
+FROM json_each(?) AS want
+CROSS JOIN chunks_fts AS f
+JOIN chunks c ON c.id = f.id AND c.vault_id = f.vault_id
+WHERE f.rowid = want.value AND f.vault_id = ? AND chunks_fts MATCH ?
+`;
+
+// Runs both phases and returns rows in exactly the old SEARCH_SQL shape and order:
+// id, path, title, heading, entities, metadata_json, snippet, score_text, pooled_chunks,
+// total_paths.
+export function runPooledSearch(statements, vaultId, match, poolSize) {
+	const pooled = statements.pool.all(vaultId, match, poolSize);
+	if (pooled.length === 0) return [];
+	const hydrated = new Map();
+	for (const row of statements.hydrate.iterate(JSON.stringify(pooled.map(row => row.fts_rowid)), vaultId, match)) {
+		hydrated.set(row.fts_rowid, row);
+	}
+	const out = [];
+	for (const row of pooled) {
+		const extra = hydrated.get(row.fts_rowid);
+		// A chunks_fts row with no owning chunks row was excluded by the old inner join; keep
+		// that behaviour rather than emitting a half-hydrated row.
+		if (!extra) continue;
+		out.push({
+			id: row.id,
+			path: row.path,
+			title: extra.title,
+			heading: extra.heading,
+			entities: extra.entities,
+			metadata_json: extra.metadata_json,
+			snippet: extra.snippet,
+			score_text: row.score_text,
+			pooled_chunks: row.pooled_chunks,
+			total_paths: row.total_paths,
+		});
+	}
+	return out;
+}
+
 // The document-level term-coverage leg's one statement, run once per query term (rankingMode
 // 'coverage'/'blend+coverage' only — it is never prepared-and-run on the default path).
 //
-// Deliberately NOT the pooled SEARCH_SQL: coverage asks a presence question, not a scoring one,
+// Deliberately NOT the pooled SEARCH_POOL_SQL: coverage asks a presence question, not a scoring one,
 // so it must not pay for bm25() or snippet() — and because it selects no FTS5 auxiliary
 // function it needs neither the MATERIALIZED CTE nor the single-min() aggregate rule that hold
-// SEARCH_SQL together. It also takes no LIMIT: a truncated per-term path list would be a
+// SEARCH_POOL_SQL together. It also takes no LIMIT: a truncated per-term path list would be a
 // *wrong* coverage count (silently, and biased by FTS rowid order), not a cheaper one. The
 // truncation that bounds the leg happens after counting, on the ranked list.
 export const COVERAGE_SQL = 'SELECT id, path FROM chunks_fts WHERE vault_id = ? AND chunks_fts MATCH ?';
@@ -383,7 +418,11 @@ function runCoverageLeg(db, options) {
 export function runSearch(db, options) {
 	const vaultId = options.vaultId;
 	const limit = clampLimit(options.limit);
-	const statement = options.statement ?? db.prepare(SEARCH_SQL);
+	const searchStatements = {
+		pool: options.statement ?? db.prepare(SEARCH_POOL_SQL),
+		hydrate: options.hydrateStatement ?? db.prepare(SEARCH_HYDRATE_SQL),
+	};
+	const pooledSearch = expression => runPooledSearch(searchStatements, vaultId, expression, poolSize);
 	const built = buildFtsQuery(options.query);
 	const poolSize = Math.max(limit * SEARCH_POOL_FACTOR, SEARCH_POOL_MIN);
 	const ranking = rankingModeFlags(options.rankingMode ?? DEFAULT_RANKING_MODE);
@@ -413,7 +452,7 @@ export function runSearch(db, options) {
 		degraded = true;
 		rows = [];
 	} else {
-		rows = statement.all(vaultId, match, poolSize);
+		rows = pooledSearch(match);
 	}
 	// `fallbackUsed` reports what actually contributed to this response, and that reading is
 	// the same in both branches — it just cannot be observed the same way. Under 'current' the
@@ -435,7 +474,7 @@ export function runSearch(db, options) {
 			degraded = true;
 		} else {
 			matchFallback = built.fallback;
-			const fallbackRows = statement.all(vaultId, matchFallback, poolSize);
+			const fallbackRows = pooledSearch(matchFallback);
 			const blended = blendPooledRows(rows, fallbackRows);
 			rows = blended.rows;
 			fallbackUsed = blended.added > 0;
@@ -459,7 +498,7 @@ export function runSearch(db, options) {
 		} else {
 			match = built.fallback;
 			fallbackUsed = true;
-			rows = statement.all(vaultId, match, poolSize);
+			rows = pooledSearch(match);
 		}
 	}
 

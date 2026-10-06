@@ -127,7 +127,10 @@ export function createVectorBackend(db) {
 		const paths = [];
 		let row = 0;
 		const filter = spaceKey(space);
-		for (const record of selectVectors.all(vaultId, filter, filter)) {
+		// `.iterate()`, not `.all()`: `.all()` held every embedding blob alive at once beside the
+		// Float32Array it was being copied into (measured 992MB -> 477MB peak RSS, 1.68s -> 0.71s
+		// at 99k vectors).
+		for (const record of selectVectors.iterate(vaultId, filter, filter)) {
 			const blob = record.embedding;
 			if (!blob || blob.length !== dim * 4 || Number(record.embedding_dim) !== dim) continue;
 			writeEmbeddingInto(matrix, row * dim, blob instanceof Uint8Array ? blob : new Uint8Array(blob), dim);

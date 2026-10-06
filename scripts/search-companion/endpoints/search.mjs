@@ -39,7 +39,7 @@ function supersededResponse() {
 // `receivedAt` stamp into this module: doing so would restore exactly the blindness WP-3
 // removed, because by the time a route handler is selected the queue wait has already happened.
 export function createSearchEndpoint({ db, statements, vectors, now, state }) {
-	const { coverageStatement, hydrateChunk, searchStatement } = statements;
+	const { coverageStatement, hydrateChunk, searchHydrateStatement, searchStatement } = statements;
 	return async (req, res, request) => {
 		// WP-SS2: registered before `readJson` below (which yields to the event loop at least
 		// once, and potentially many times for a slow-arriving body), so an abort that lands
@@ -96,6 +96,7 @@ export function createSearchEndpoint({ db, statements, vectors, now, state }) {
 			query,
 			limit: body.limit,
 			statement: searchStatement,
+			hydrateStatement: searchHydrateStatement,
 			vectors,
 			// Read at last: the client has been sending this field since the search
 			// modal shipped and the companion has been dropping it on the floor.
