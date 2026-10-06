@@ -14,14 +14,20 @@ export function createResetEndpoint({ db, statements, vectors }) {
 	return async (req, res) => {
 		const body = await readJson(req);
 		const vaultId = requireString(body.vaultId, 'vaultId');
+		// WP-2 (search-latency-tail): journal rowid removals; published only after COMMIT.
+		const journal = statements.coverageMap?.begin();
 		db.exec('BEGIN');
 		try {
 			// Rowids are read from `chunks` (vault_id-indexed via idx_chunks_vault_path)
 			// *before* resetChunks deletes them — chunks_fts carries no independent record
 			// of which rowids belonged to this vault, only chunks does.
-			for (const row of selectRowidsByVault.all(vaultId)) deleteFtsByRowid.run(row.rowid);
+			for (const row of selectRowidsByVault.all(vaultId)) {
+				deleteFtsByRowid.run(row.rowid);
+				journal?.delete(row.rowid);
+			}
 			resetChunks.run(vaultId);
 			db.exec('COMMIT');
+			statements.coverageMap?.commit(journal);
 		} catch (e) {
 			db.exec('ROLLBACK');
 			throw e;

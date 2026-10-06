@@ -1,4 +1,5 @@
-import { COVERAGE_SQL, HYDRATE_CHUNK_SQL, SEARCH_HYDRATE_SQL, SEARCH_POOL_SQL } from './search.mjs';
+import { createCoverageMap } from './coverageMap.mjs';
+import { COVERAGE_ROWID_SQL, COVERAGE_SQL, HYDRATE_CHUNK_SQL, SEARCH_HYDRATE_SQL, SEARCH_POOL_SQL } from './search.mjs';
 
 // Every prepared statement the request handler owns, compiled once per handler instance.
 // Split out of the single-file companion (WP-rem-R3) so the endpoint modules can be handed
@@ -101,6 +102,12 @@ LIMIT 1
 	// ever runs it — preparing is cheap and once, whereas preparing per request would put a
 	// compile on the hot path of the mode we may be about to make the default.
 	const coverageStatement = db.prepare(COVERAGE_SQL);
+	// search-latency-tail WP-2: the lean rowid-only coverage scan and the map it resolves
+	// through. The map lives with the statements because every endpoint that writes `chunks`
+	// already receives `statements` — each one journals its rowid changes and publishes them
+	// after its own COMMIT (see ./coverageMap.mjs for the invariant).
+	const coverageRowidStatement = db.prepare(COVERAGE_ROWID_SQL);
+	const coverageMap = createCoverageMap(db);
 	// WP-SA1: every indexed path for a vault, one row each, in one aggregate query — the
 	// `/v1/paths` endpoint's whole job, so no application-code loop over paths exists here.
 	// Same "dominant content-hash group" precedent as `selectStateByPath` above (a path
@@ -143,6 +150,8 @@ ORDER BY path
 		searchStatement,
 		searchHydrateStatement,
 		coverageStatement,
+		coverageRowidStatement,
+		coverageMap,
 		selectPathsByVault,
 	};
 }

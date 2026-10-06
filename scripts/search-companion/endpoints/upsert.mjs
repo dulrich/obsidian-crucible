@@ -166,6 +166,11 @@ export function createUpsertEndpoint({ db, statements, vectors, now, delay, stat
 		try {
 		for (let batchIndex = 0; batchIndex < subBatches.length; batchIndex++) {
 			const subBatch = subBatches[batchIndex];
+			// WP-2 (search-latency-tail): this sub-batch's rowid changes, published to the
+			// coverage map only after THIS sub-batch's COMMIT — each committed sub-batch is
+			// visible to a search that runs during the yield below, and a sub-batch that rolls
+			// back drops its journal (never the flush-level vector invalidation's job).
+			const journal = statements.coverageMap?.begin();
 			db.exec('BEGIN');
 			try {
 				for (const chunk of subBatch) {
@@ -187,7 +192,10 @@ export function createUpsertEndpoint({ db, statements, vectors, now, delay, stat
 					// The first chunk seen for a (vaultId, path) clears every existing row
 					// for that path: an upsert is a full replace, not a merge.
 					if (!clearedPaths.has(pathKey)) {
-						for (const row of selectRowidsByPath.all(vaultId, path)) deleteFtsByRowid.run(row.rowid);
+						for (const row of selectRowidsByPath.all(vaultId, path)) {
+							deleteFtsByRowid.run(row.rowid);
+							journal?.delete(row.rowid);
+						}
 						deleteByPath.run(vaultId, path);
 						clearedPaths.add(pathKey);
 					}
@@ -243,8 +251,10 @@ export function createUpsertEndpoint({ db, statements, vectors, now, delay, stat
 					);
 					deleteFtsByRowid.run(rowid);
 					insertFts.run(rowid, id, vaultId, path, title, heading, text, entities);
+					journal?.set(rowid, id, vaultId, path);
 				}
 				db.exec('COMMIT');
+				statements.coverageMap?.commit(journal);
 			} catch (e) {
 				db.exec('ROLLBACK');
 				throw e;

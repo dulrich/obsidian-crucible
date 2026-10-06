@@ -89,7 +89,7 @@ function defaultLog(line) {
 }
 
 export function createSearchEndpoint({ db, statements, vectors, now, state, timer, log = defaultLog }) {
-	const { coverageStatement, hydrateChunk, searchHydrateStatement, searchStatement } = statements;
+	const { coverageMap, coverageRowidStatement, coverageStatement, hydrateChunk, searchHydrateStatement, searchStatement } = statements;
 	return async (req, res, request) => {
 		// WP-SS2: registered before `readJson` below (which yields to the event loop at least
 		// once, and potentially many times for a slow-arriving body), so an abort that lands
@@ -165,6 +165,8 @@ export function createSearchEndpoint({ db, statements, vectors, now, state, time
 			rankingMode: parseRankingMode(body.rankingMode),
 			hydrate: hydrateChunk,
 			coverageStatement,
+			coverageRowidStatement,
+			coverageMap,
 			deadlineAt,
 			// Same injected clock as receivedAt above, so every overBudget() checkpoint
 			// inside runSearch reads the same (real, or test-controlled) time source.
