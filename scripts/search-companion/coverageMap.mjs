@@ -46,6 +46,12 @@ export function createCoverageMap(db, options = {}) {
 
 	function buildSlices(gen, after) {
 		if (gen !== generation) return; // superseded by invalidate(); that call rescheduled
+		// Graceful shutdown (server.mjs) closes the DB once handlers drain; a slice already
+		// queued on setImmediate must not run against the closed handle.
+		if (!db.isOpen) {
+			building = false;
+			return;
+		}
 		let last = after;
 		let n = 0;
 		for (const row of sliceStatement.all(after, sliceRows)) {
