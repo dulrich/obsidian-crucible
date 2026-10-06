@@ -48,11 +48,11 @@ export * from './search-companion/server.mjs';
 export * from './search-companion/statements.mjs';
 export * from './search-companion/vectors.mjs';
 
-import { isMainModule, parseArgs, startServer } from './search-companion/server.mjs';
+import { installSignalHandlers, isMainModule, parseArgs, startServer } from './search-companion/server.mjs';
 
 // The server bootstrap runs only when this file is the entry point. `isMainModule` takes this
 // module's own `import.meta.url` because the entry point is this facade, not the module the
 // function now lives in — the argv[1]/realpath comparison it makes is otherwise unchanged.
 if (isMainModule(import.meta.url)) {
-	startServer(parseArgs(process.argv));
+	installSignalHandlers(startServer(parseArgs(process.argv)));
 }

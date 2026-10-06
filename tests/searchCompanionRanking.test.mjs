@@ -589,8 +589,10 @@ CREATE TABLE chunks (
   PRIMARY KEY (vault_id, id)
 );
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
-  id UNINDEXED, vault_id UNINDEXED, path UNINDEXED, title, heading, text, prefix='2 3'
+  id UNINDEXED, vault_id UNINDEXED, path UNINDEXED, title, heading, text, prefix='1 2 3'
 );
+-- prefix='1 2 3' (not the historical '2 3'): since search-latency-tail WP-1 a '2 3' table
+-- re-triggers migrateFtsSchema, which would mask the rowid-pinning gap this test isolates.
 -- An extra, permanent row before 'a', not deleted, so 'a' lands at chunks.rowid 2 while its
 -- chunks_fts counterpart (inserted alone, below) auto-assigns rowid 1 — a genuine mismatch to
 -- migrate, not a coincidental match because each table happens to hold exactly one row.
