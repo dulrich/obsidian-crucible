@@ -1,3 +1,5 @@
+import { stdout } from 'node:process';
+
 import { clampSearchBudgetMs, resolveSearchDeadlineStart } from '../deadline.mjs';
 import { json, readJson, requireString } from '../http.mjs';
 import { DEFAULT_RANKING_MODE, parseRankingMode } from '../ranking.mjs';
@@ -38,7 +40,55 @@ function supersededResponse() {
 // runSearch, which is where every `overBudget()` checkpoint lives. Do not move the
 // `receivedAt` stamp into this module: doing so would restore exactly the blindness WP-3
 // removed, because by the time a route handler is selected the queue wait has already happened.
-export function createSearchEndpoint({ db, statements, vectors, now, state }) {
+// WP-2: a search slower than this (end to end, receivedAt → response) gets a stdout line.
+export const SLOW_SEARCH_LOG_MS = 1000;
+// WP-2: how many recent searches /health's `recentSearch` summarizes.
+export const RECENT_SEARCH_WINDOW = 50;
+
+// Records one served search into the handler-scoped rolling window /health reads.
+export function recordRecentSearch(state, totalMs, degraded) {
+	if (!state) return;
+	if (!Array.isArray(state.recentSearches)) state.recentSearches = [];
+	state.recentSearches.push({ ms: totalMs, degraded: Boolean(degraded) });
+	if (state.recentSearches.length > RECENT_SEARCH_WINDOW) state.recentSearches.splice(0, state.recentSearches.length - RECENT_SEARCH_WINDOW);
+}
+
+// WP-2: one line per slow / degraded / superseded / vector-pending search. Built from numbers
+// and booleans ONLY — the query text (and the vault id, a filesystem-derived name) never
+// reaches stdout. Exported so a test can pin exactly that.
+export function formatSearchLogLine(entry) {
+	const fields = {
+		event: 'search',
+		totalMs: roundMs(entry.totalMs),
+		queueMs: entry.queueMs === null || entry.queueMs === undefined ? null : roundMs(entry.queueMs),
+		primaryMs: roundMs(entry.timings?.primaryMs),
+		rescueMs: roundMs(entry.timings?.rescueMs),
+		vectorMs: roundMs(entry.timings?.vectorMs),
+		coverageMs: roundMs(entry.timings?.coverageMs),
+		terms: Array.isArray(entry.terms) ? entry.terms.length : Number(entry.terms ?? 0),
+		degraded: Boolean(entry.degraded),
+		superseded: Boolean(entry.superseded),
+		vectorPending: Boolean(entry.vectorPending),
+		fallbackUsed: Boolean(entry.fallbackUsed),
+		vectorUsed: Boolean(entry.vectorUsed),
+	};
+	return `[crucible-search] ${JSON.stringify(fields)}`;
+}
+
+function roundMs(value) {
+	const ms = Number(value);
+	return Number.isFinite(ms) ? Math.round(ms * 10) / 10 : 0;
+}
+
+export function shouldLogSearch(entry) {
+	return Boolean(entry.degraded || entry.superseded || entry.vectorPending) || Number(entry.totalMs) > SLOW_SEARCH_LOG_MS;
+}
+
+function defaultLog(line) {
+	stdout.write(`${line}\n`);
+}
+
+export function createSearchEndpoint({ db, statements, vectors, now, state, timer, log = defaultLog }) {
 	const { coverageStatement, hydrateChunk, searchHydrateStatement, searchStatement } = statements;
 	return async (req, res, request) => {
 		// WP-SS2: registered before `readJson` below (which yields to the event loop at least
@@ -76,6 +126,7 @@ export function createSearchEndpoint({ db, statements, vectors, now, state }) {
 		// `state.searchClients.isSuperseded` — so this never changes behavior for a request that
 		// never opted in.
 		if (state.searchClients.isSuperseded(body.clientId, body.seq)) {
+			log(formatSearchLogLine({ superseded: true, degraded: true, totalMs: now() - request.receivedAt, queueMs: null, timings: null, terms: 0 }));
 			return json(res, 200, supersededResponse());
 		}
 		// WP-5: the client's own cooperative-deadline hint (~80% of its own interactive
@@ -90,7 +141,10 @@ export function createSearchEndpoint({ db, statements, vectors, now, state }) {
 		// very first statement of the request handler, so it already reflects the queue
 		// wait ahead of `readJson`; `sentAt` reaches further back, past the wait for that
 		// handler to start running at all.
-		const deadlineAt = resolveSearchDeadlineStart(body.sentAt, request.receivedAt, budgetMs) + budgetMs;
+		const deadlineStart = resolveSearchDeadlineStart(body.sentAt, request.receivedAt, budgetMs);
+		const deadlineAt = deadlineStart + budgetMs;
+		// WP-2: queue time is only reported when the client's sentAt passed the skew guard.
+		const queueMs = Number.isFinite(Number(body.sentAt)) && deadlineStart === Number(body.sentAt) ? request.receivedAt - deadlineStart : null;
 		const outcome = runSearch(db, {
 			vaultId,
 			query,
@@ -115,6 +169,7 @@ export function createSearchEndpoint({ db, statements, vectors, now, state }) {
 			// Same injected clock as receivedAt above, so every overBudget() checkpoint
 			// inside runSearch reads the same (real, or test-controlled) time source.
 			now,
+			timer,
 		});
 		const response = {
 			// Computed from state, not hardcoded: 'hybrid' means a query embedding
@@ -149,7 +204,23 @@ export function createSearchEndpoint({ db, statements, vectors, now, state }) {
 		// interactive-priority gap — see INTERACTIVE_YIELD_MS. `state` is handler-scoped
 		// rather than request-scoped precisely because the flush that reads it is always a
 		// *different* request than the search that writes it.
-		state.lastInteractiveSearchAt = now();
+		const servedAt = now();
+		state.lastInteractiveSearchAt = servedAt;
+		// WP-2: additive diagnostics. `vectorPending` only when true (absence = not pending), so
+		// a response that has nothing pending gains only the `timings` object.
+		if (outcome.vectorPending) response.vectorPending = true;
+		const totalMs = servedAt - request.receivedAt;
+		response.timings = {
+			queueMs,
+			primaryMs: roundMs(outcome.timings?.primaryMs),
+			rescueMs: roundMs(outcome.timings?.rescueMs),
+			vectorMs: roundMs(outcome.timings?.vectorMs),
+			coverageMs: roundMs(outcome.timings?.coverageMs),
+			totalMs,
+		};
+		recordRecentSearch(state, totalMs, outcome.degraded);
+		const entry = { ...outcome, totalMs, queueMs, terms: outcome.terms?.length ?? 0 };
+		if (shouldLogSearch(entry)) log(formatSearchLogLine(entry));
 		return json(res, 200, response);
 	};
 }

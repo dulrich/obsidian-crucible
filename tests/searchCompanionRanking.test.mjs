@@ -453,12 +453,16 @@ test('POST /v1/search carries rankingMode through, and a 200 default response ke
 		// The default response still gains no keys: `rankingMode`, `coverageUsed` and
 		// `matchFallback` exist only for a caller who opted out of the default — the key set is
 		// pinned to the pre-rankingMode payload even though the default ranking moved.
-		assert.deepEqual(Object.keys(unflagged.json), ['mode', 'semanticAvailable', 'schemaVersion', 'match', 'fallbackUsed', 'total', 'hasMore', 'results']);
+		// WP-2 (search-latency-durability) appends exactly one additive diagnostic key,
+		// `timings`, after every pre-existing key — the old keys keep their order and values.
+		assert.deepEqual(Object.keys(unflagged.json), ['mode', 'semanticAvailable', 'schemaVersion', 'match', 'fallbackUsed', 'total', 'hasMore', 'results', 'timings']);
 
 		const explicit = await post({ ...base, rankingMode: 'coverage' });
 		assert.equal(explicit.status, 200);
 		assert.equal(explicit.json.rankingMode, undefined, 'naming the default must not change the payload either');
-		assert.equal(JSON.stringify(explicit.json), JSON.stringify(unflagged.json));
+		// `timings` (WP-2) is wall-clock diagnostics and differs per request; everything else is byte-identical.
+		const withoutTimings = ({ timings, ...rest }) => (assert.equal(typeof timings, 'object'), rest);
+		assert.equal(JSON.stringify(withoutTimings(explicit.json)), JSON.stringify(withoutTimings(unflagged.json)));
 
 		// The demoted baseline is the non-default now: it grows the opt-out keys and reproduces
 		// the pre-flip ranking (the decoy alone — the split-terms target unreachable).
