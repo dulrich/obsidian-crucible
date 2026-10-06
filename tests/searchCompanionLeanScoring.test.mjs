@@ -89,7 +89,7 @@ function leanStatements(db) {
 
 const QUERIES = ['mourning the craft of software development', 'craft software', 'river stone lamp', 'software', 'the', 'romantic ideal craft building', 'nothingmatchesthis'];
 
-test('lean pooled search returns complete rows identical to the oracle, primary and fallback', () => {
+test('lean pooled search returns complete rows identical to the oracle, primary and fallback', async () => {
 	const db = makeDb();
 	const oracle = db.prepare(ORACLE_SEARCH_SQL);
 	const lean = leanStatements(db);
@@ -108,7 +108,7 @@ test('lean pooled search returns complete rows identical to the oracle, primary 
 	assert.ok(compared > 20, 'the fixture must actually exercise matches');
 });
 
-test('the tied-minimum path picks the same representative chunk, heading and snippet as the oracle', () => {
+test('the tied-minimum path picks the same representative chunk, heading and snippet as the oracle', async () => {
 	const db = makeDb();
 	const scores = db.prepare("SELECT heading, bm25(chunks_fts, 0.0, 0.0, 0.0, 10.0, 5.0, 1.0, 8.0) AS s FROM chunks_fts WHERE vault_id = ? AND chunks_fts MATCH ? AND path = 'notes/tied.md'").all(VAULT, '"river"');
 	const tied = scores.filter(row => row.s === scores[0].s);
@@ -122,15 +122,15 @@ test('the tied-minimum path picks the same representative chunk, heading and sni
 	}
 });
 
-test('runSearch over the default prepared path still returns the oracle-ranked results (zero-hit rescue included)', () => {
+test('runSearch over the default prepared path still returns the oracle-ranked results (zero-hit rescue included)', async () => {
 	const db = makeDb();
-	const outcome = runSearch(db, { vaultId: VAULT, query: 'mourning zzzunmatched', limit: 5 });
+	const outcome = await runSearch(db, { vaultId: VAULT, query: 'mourning zzzunmatched', limit: 5 });
 	assert.equal(outcome.fallbackUsed, true);
 	const expected = db.prepare(ORACLE_SEARCH_SQL).all(VAULT, buildFtsQuery('mourning zzzunmatched').fallback, 40);
 	assert.deepEqual(outcome.results.map(row => row.path).sort(), expected.slice(0, 5).map(row => row.path).sort());
 });
 
-test('the embedding-space backfill runs once per database file, then is skipped', () => {
+test('the embedding-space backfill runs once per database file, then is skipped', async () => {
 	const db = new DatabaseSync(':memory:');
 	createSchema(db);
 	assert.ok(db.prepare('SELECT 1 FROM companion_meta WHERE key = ?').get(EMBEDDING_SPACE_BACKFILL_MARKER), 'a fresh database records the marker');

@@ -1,11 +1,13 @@
+import process from 'node:process';
 import { setImmediate } from 'node:timers';
+import { Worker } from 'node:worker_threads';
 
 import { HttpError } from './http.mjs';
 import { normalizeEmbedding, writeEmbeddingInto } from './chunks.mjs';
 
 // The vector backend seam. Split out of the single-file companion (WP-rem-R3) — which is a
 // file move, not a widening: the contract is still exactly
-// `{ name, stats(vaultId?, space?), knn(vaultId, queryVector, k, space?), invalidate(vaultId?) }`
+// `{ name, stats(vaultId?, space?), knn(vaultId, queryVector, k, space?) → Promise, invalidate(vaultId?) }`
 // and nothing outside `createVectorBackend` may assume a flat array or an in-process scan.
 // That is what keeps the two documented escape hatches (a vec0/sqlite-vec backend, a
 // worker-sharded backend) a swap of this factory rather than a rewrite of runSearch.
@@ -16,14 +18,14 @@ import { normalizeEmbedding, writeEmbeddingInto } from './chunks.mjs';
 // assume a flat array or an in-process scan. That is what makes the documented escape
 // hatches a swap rather than a rewrite: a `vec0` (sqlite-vec) backend becomes a `knn` that
 // runs `SELECT ... MATCH` instead of a loop, and the worker-sharded variant becomes a `knn`
-// that fans the same matrix — already one flat Float32Array — over a SharedArrayBuffer.
-// Neither touches the search handler.
+// that fans the same matrix — one flat Float32Array over a SharedArrayBuffer — across worker
+// threads (implemented: WP-3 below). Neither touches the search handler.
 //
 // Contract:
 //   name                                   → string, which backend is answering (/health)
 //   stats(vaultId?, space?)                → { count, dim, model, spaces, unlabelledCount };
 //                                            cheap, never builds a matrix
-//   knn(vaultId, queryVector, k, space?)   → [{ id, path, score }] descending, length ≤ k
+//   knn(vaultId, queryVector, k, space?)   → Promise<[{ id, path, score }]> descending, length ≤ k
 //   invalidate(vaultId?)                   → drop cached state (every vault when omitted)
 //
 // `space` narrows both to one embedding space; omitted means "every vector in the vault", which
@@ -48,7 +50,111 @@ import { normalizeEmbedding, writeEmbeddingInto } from './chunks.mjs';
 // re-checks it before every batch and at publish; a mismatch restarts the task from rowid 0,
 // so a published matrix can never mix pre- and post-invalidation rows. Below the limit
 // (every unit test, small vaults) the behaviour is exactly the old synchronous lazy build.
+//
+// search-latency-tail WP-3 — sharded scan. `knn` is ASYNC: it returns a Promise of the same
+// `[{ id, path, score }]`. Every matrix is allocated over a SharedArrayBuffer, so a fixed pool
+// of `workers` threads (default 4, env CRUCIBLE_SEARCH_VECTOR_WORKERS, `options.workers`; 0
+// disables) can read it without a copy. Above `inlineRowLimit` matrix rows the scan is split
+// into contiguous row ranges, one per worker (vectorShardWorker.mjs); each runs the unchanged
+// per-row loop and returns its local top-k as (row, score), and the main thread merges by
+// score descending, then row ascending — exactly the inline scan's encounter order among equal
+// scores — and resolves ids/paths from the row indices. At or below the limit, or when the pool
+// could not start, the scan runs inline with identical results. The pool starts lazily on the
+// first sharded scan and its threads are unref'd; `stop()` terminates it.
+//
+// Failure shape: a shard error or a worker exit rejects the scan with a `vectorPending` error
+// (runVectorLeg turns that into keywords-only + `vectorPending: true`, never a 500), and the
+// pool is torn down to be recreated by the next sharded scan. A scan whose matrix was
+// invalidated (or replaced) while the workers held the old SharedArrayBuffer is rejected the
+// same way on completion — its hits are never returned as fresh.
 export const DEFAULT_INLINE_ROW_LIMIT = 5000;
+const DEFAULT_WORKERS = 4;
+
+// Thrown (as a rejection) when the sharded scan cannot produce a fresh answer right now: a shard
+// failed, or the matrix generation moved underneath an in-flight scan. Callers degrade to
+// keywords-only with `vectorPending`, exactly like a matrix that is still being rebuilt.
+export class VectorScanPendingError extends Error {
+	constructor(message) {
+		super(message);
+		this.name = 'VectorScanPendingError';
+		this.vectorPending = true;
+	}
+}
+
+const sharedMatrix = length => new Float32Array(new SharedArrayBuffer(length * Float32Array.BYTES_PER_ELEMENT));
+
+function resolveWorkerCount(option) {
+	const raw = option ?? process.env.CRUCIBLE_SEARCH_VECTOR_WORKERS;
+	if (raw === undefined || raw === '') return DEFAULT_WORKERS;
+	const n = Math.floor(Number(raw));
+	return Number.isFinite(n) && n >= 0 ? Math.min(n, 64) : DEFAULT_WORKERS;
+}
+
+// The worker pool. One in-flight message per (worker, scan); a worker that errors or exits
+// fails every scan it was part of and the pool reports itself dead so the backend drops it.
+function createShardPool(size) {
+	const workers = [];
+	const pending = new Map();
+	const busy = new Map();
+	let nextId = 0;
+	let dead = false;
+	const failAll = reason => {
+		if (dead) return;
+		dead = true;
+		for (const entry of pending.values()) entry.reject(new VectorScanPendingError(reason));
+		pending.clear();
+		for (const worker of workers) worker.terminate().catch(() => {});
+	};
+	for (let i = 0; i < size; i++) {
+		const worker = new Worker(new URL('./vectorShardWorker.mjs', import.meta.url));
+		worker.unref();
+		// Re-assert on 'online': an unref() issued before the thread is up does not stick for
+		// its message port (measured: a never-used worker held a test process open).
+		worker.once('online', () => {
+			if (!busy.has(worker)) worker.unref();
+		});
+		worker.on('message', message => {
+			const entry = pending.get(message.id);
+			if (!entry) return;
+			pending.delete(message.id);
+			// Idle threads are unref'd so they never hold a process open; a thread is ref'd only
+			// while it owes an answer, so an awaited scan cannot be abandoned by loop exit.
+			const owed = (busy.get(worker) ?? 1) - 1;
+			if (owed > 0) busy.set(worker, owed);
+			else {
+				busy.delete(worker);
+				worker.unref();
+			}
+			if (message.error) {
+				entry.reject(new VectorScanPendingError(`vector shard failed: ${message.error}`));
+				failAll(`vector shard failed: ${message.error}`);
+			} else entry.resolve(message);
+		});
+		worker.on('error', e => failAll(`vector shard worker crashed: ${e instanceof Error ? e.message : String(e)}`));
+		worker.on('exit', () => failAll('vector shard worker exited'));
+		workers.push(worker);
+	}
+	return {
+		size,
+		workers,
+		get dead() {
+			return dead;
+		},
+		run(index, payload) {
+			if (dead) return Promise.reject(new VectorScanPendingError('vector shard pool is down'));
+			const id = nextId++;
+			return new Promise((resolve, reject) => {
+				pending.set(id, { resolve, reject });
+				busy.set(workers[index], (busy.get(workers[index]) ?? 0) + 1);
+				workers[index].ref();
+				workers[index].postMessage({ ...payload, id });
+			});
+		},
+		terminate() {
+			failAll('vector shard pool stopped');
+		},
+	};
+}
 const DEFAULT_SLICE_MS = 40;
 const STATS_BATCH_ROWS = 2000;
 const MATRIX_BATCH_ROWS = 500;
@@ -60,6 +166,12 @@ export function createVectorBackend(db, options = {}) {
 	const sliceMs = options.sliceMs ?? DEFAULT_SLICE_MS;
 	const scheduleSlice = options.schedule ?? (fn => setImmediate(fn));
 	const clock = options.clock ?? (() => performance.now());
+	const workerCount = resolveWorkerCount(options.workers);
+	// Test seam: ask the next shard of each scan to fail inside the worker.
+	let injectShardFault = false;
+	let pool = null;
+	let poolFailed = false;
+	let shardedScans = 0;
 	// `(? IS NULL OR embedding_space = ?)` is the space filter on every statement below: bind
 	// null and the statement is the vault-wide form it was before schema 4, bind a space and it
 	// is scoped, with no second prepared statement to keep in sync.
@@ -212,7 +324,7 @@ export function createVectorBackend(db, options = {}) {
 		const stats = readStats(vaultId, space);
 		if (stats.count === 0 || !stats.dim) return { count: 0, dim: 0, ids: [], paths: [], matrix: null, model: null };
 		const dim = stats.dim;
-		const matrix = new Float32Array(stats.count * dim);
+		const matrix = sharedMatrix(stats.count * dim);
 		const ids = [];
 		const paths = [];
 		let row = 0;
@@ -242,7 +354,7 @@ export function createVectorBackend(db, options = {}) {
 		}
 		if (stats.count === 0 || !stats.dim) return { count: 0, dim: 0, ids: [], paths: [], matrix: null, model: null };
 		const dim = stats.dim;
-		const matrix = new Float32Array(stats.count * dim);
+		const matrix = sharedMatrix(stats.count * dim);
 		const ids = [];
 		const paths = [];
 		let row = 0;
@@ -355,6 +467,78 @@ export function createVectorBackend(db, options = {}) {
 		return cached(matrixCache, vaultId, space, () => buildMatrix(vaultId, space));
 	}
 
+	function acquirePool() {
+		if (stopped || poolFailed || workerCount < 1) return null;
+		if (pool && !pool.dead) return pool;
+		try {
+			pool = createShardPool(workerCount);
+		} catch {
+			// Could not start threads at all: inline for the life of this backend.
+			pool = null;
+			poolFailed = true;
+		}
+		return pool;
+	}
+
+	// The reference scan. Both sides are unit vectors, so the dot product *is* the cosine; the
+	// clamp only absorbs float32 rounding at the ±1 ends. Strict `<` in the insertion keeps
+	// encounter order among equal scores — the ordering the sharded merge reproduces.
+	function scanInline(state, query, wanted) {
+		const dim = state.dim;
+		const matrix = state.matrix;
+		const best = [];
+		let worst = -Infinity;
+		for (let row = 0; row < state.count; row++) {
+			const offset = row * dim;
+			let sum = 0;
+			for (let d = 0; d < dim; d++) sum += matrix[offset + d] * query[d];
+			if (best.length === wanted && sum <= worst) continue;
+			const entry = { id: state.ids[row], path: state.paths[row], score: Math.max(-1, Math.min(1, sum)) };
+			let index = best.length - 1;
+			best.push(entry);
+			while (index >= 0 && best[index].score < entry.score) {
+				best[index + 1] = best[index];
+				index--;
+			}
+			best[index + 1] = entry;
+			if (best.length > wanted) best.pop();
+			worst = best[best.length - 1].score;
+		}
+		return best;
+	}
+
+	async function scanSharded(shardPool, state, query, wanted, vaultId, space) {
+		shardedScans++;
+		const crash = injectShardFault;
+		injectShardFault = false;
+		const shards = Math.min(shardPool.size, state.count);
+		const per = Math.ceil(state.count / shards);
+		const jobs = [];
+		for (let i = 0; i < shards; i++) {
+			const start = i * per;
+			const end = Math.min(state.count, start + per);
+			if (start >= end) break;
+			jobs.push(shardPool.run(i, { buffer: state.matrix.buffer, dim: state.dim, start, end, k: wanted, query, crash: crash && i === 0 }));
+		}
+		let parts;
+		try {
+			parts = await Promise.all(jobs);
+		} catch (e) {
+			if (pool === shardPool && shardPool.dead) pool = null;
+			throw e instanceof VectorScanPendingError ? e : new VectorScanPendingError(String(e));
+		}
+		// Generation check: the workers scored the SharedArrayBuffer they were handed. If an
+		// invalidate (or a rebuild) replaced this matrix meanwhile, the answer is stale.
+		if (stopped || peek(matrixCache, vaultId, space) !== state) {
+			throw new VectorScanPendingError('vector matrix changed during the scan');
+		}
+		const merged = [];
+		for (const part of parts) for (let i = 0; i < part.rows.length; i++) merged.push({ row: part.rows[i], score: part.scores[i] });
+		merged.sort((a, b) => (b.score - a.score) || (a.row - b.row));
+		const best = merged.slice(0, wanted);
+		return best.map(({ row, score }) => ({ id: state.ids[row], path: state.paths[row], score }));
+	}
+
 	function retire(vault) {
 		const inner = statsCache.get(vault);
 		if (inner) {
@@ -400,6 +584,16 @@ export function createVectorBackend(db, options = {}) {
 			queue.length = 0;
 			queuedKeys.clear();
 			current = null;
+			if (pool) pool.terminate();
+			pool = null;
+		},
+		// WP-3 test/diagnostic readout of the shard pool (no side effects).
+		shardStatus() {
+			return { workers: workerCount, alive: pool && !pool.dead ? pool.workers : [], shardedScans, poolFailed };
+		},
+		// WP-3 test seam: the next sharded scan's shards fail inside the worker.
+		injectShardFault() {
+			injectShardFault = true;
 		},
 		// WP-2 /health readout. Cheap: Map lookups only.
 		status() {
@@ -429,9 +623,10 @@ export function createVectorBackend(db, options = {}) {
 		// pool. Reranking FTS candidates by vector similarity cannot surface a note that
 		// shares no keywords with the query, which is the entire reason this leg exists.
 		// Measured 13ms at 384d / 33ms at 1024d over 52,257 chunks; the interactive ceiling
-		// is ~250k chunks, past which the move is worker sharding (see the plan), not int8 —
+		// was ~250k chunks single-threaded; above inlineRowLimit rows the scan is now sharded over
+		// the worker pool (WP-3: 64ms -> 14ms at 100k x 1024d with 4 workers). Not int8 —
 		// int8 measured *slower* in scalar JS at this size, 19.6ms vs 12.4ms at 384d.
-		knn(vaultId, queryVector, k, space) {
+		async knn(vaultId, queryVector, k, space) {
 			const state = ensureMatrix(vaultId, space);
 			if (state.count === 0) return [];
 			const dim = state.dim;
@@ -440,28 +635,9 @@ export function createVectorBackend(db, options = {}) {
 			}
 			const query = normalizeEmbedding(queryVector);
 			const wanted = Math.max(1, Math.min(Math.floor(Number(k) || 1), state.count));
-			const matrix = state.matrix;
-			const best = [];
-			let worst = -Infinity;
-			for (let row = 0; row < state.count; row++) {
-				const offset = row * dim;
-				let sum = 0;
-				for (let d = 0; d < dim; d++) sum += matrix[offset + d] * query[d];
-				if (best.length === wanted && sum <= worst) continue;
-				// Both sides are unit vectors, so the dot product *is* the cosine; the clamp
-				// only absorbs float32 rounding at the ±1 ends.
-				const entry = { id: state.ids[row], path: state.paths[row], score: Math.max(-1, Math.min(1, sum)) };
-				let index = best.length - 1;
-				best.push(entry);
-				while (index >= 0 && best[index].score < entry.score) {
-					best[index + 1] = best[index];
-					index--;
-				}
-				best[index + 1] = entry;
-				if (best.length > wanted) best.pop();
-				worst = best[best.length - 1].score;
-			}
-			return best;
+			const shardPool = state.count > inlineRowLimit ? acquirePool() : null;
+			if (!shardPool) return scanInline(state, query, wanted);
+			return scanSharded(shardPool, state, query, wanted, vaultId, space);
 		},
 	};
 }

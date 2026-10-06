@@ -145,7 +145,7 @@ export function createSearchEndpoint({ db, statements, vectors, now, state, time
 		const deadlineAt = deadlineStart + budgetMs;
 		// WP-2: queue time is only reported when the client's sentAt passed the skew guard.
 		const queueMs = Number.isFinite(Number(body.sentAt)) && deadlineStart === Number(body.sentAt) ? request.receivedAt - deadlineStart : null;
-		const outcome = runSearch(db, {
+		const outcome = await runSearch(db, {
 			vaultId,
 			query,
 			limit: body.limit,

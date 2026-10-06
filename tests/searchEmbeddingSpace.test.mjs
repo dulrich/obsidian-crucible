@@ -712,13 +712,13 @@ test('the vector scan returns only the querying space, even though the other spa
 	db.close();
 });
 
-test('the backend filters in SQL, so vectors from another space never enter the matrix at all', () => {
+test('the backend filters in SQL, so vectors from another space never enter the matrix at all', async () => {
 	const db = makeMixedSpaceDb();
 	const backend = createVectorBackend(db);
-	assert.deepEqual(backend.knn(VAULT, axisVector(0), 10, 'bge-m3/fp32').map(hit => hit.id), ['fp32-a']);
-	assert.deepEqual(backend.knn(VAULT, axisVector(0), 10, 'bge-m3/q4_k_m').map(hit => hit.id), ['q4-a']);
+	assert.deepEqual((await backend.knn(VAULT, axisVector(0), 10, 'bge-m3/fp32')).map(hit => hit.id), ['fp32-a']);
+	assert.deepEqual((await backend.knn(VAULT, axisVector(0), 10, 'bge-m3/q4_k_m')).map(hit => hit.id), ['q4-a']);
 	// Unfiltered is still the whole vault — the filter is a caller's decision, not the backend's.
-	assert.equal(backend.knn(VAULT, axisVector(0), 10).length, 2);
+	assert.equal((await backend.knn(VAULT, axisVector(0), 10)).length, 2);
 	const stats = backend.stats(VAULT);
 	assert.deepEqual(stats.spaces, ['bge-m3/fp32', 'bge-m3/q4_k_m']);
 	assert.equal(stats.count, 2);

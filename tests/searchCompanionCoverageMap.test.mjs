@@ -54,8 +54,8 @@ function stripTimings(outcome) {
 	return rest;
 }
 
-function search(db, vaultId, query, extra = {}) {
-	return stripTimings(runSearch(db, { vaultId, query, limit: 50, rankingMode: 'coverage', ...extra }));
+async function search(db, vaultId, query, extra = {}) {
+	return stripTimings(await runSearch(db, { vaultId, query, limit: 50, rankingMode: 'coverage', ...extra }));
 }
 
 function assertMapMatchesChunks(db, map) {
@@ -65,14 +65,14 @@ function assertMapMatchesChunks(db, map) {
 	assert.deepEqual(new Map([...rows].map(([k, v]) => [k, { ...v }])), expected);
 }
 
-test('rowid-map coverage output is identical to the COVERAGE_SQL form, per vault, across query shapes', () => {
+test('rowid-map coverage output is identical to the COVERAGE_SQL form, per vault, across query shapes', async () => {
 	const db = makeDb();
 	const coverageMap = createCoverageMap(db);
 	let used = 0;
 	for (const vaultId of [VAULT_A, VAULT_B]) {
 		for (const query of QUERIES) {
-			const oracle = search(db, vaultId, query, { coverageStatement: db.prepare(COVERAGE_SQL) });
-			const lean = search(db, vaultId, query, { coverageMap });
+			const oracle = await search(db, vaultId, query, { coverageStatement: db.prepare(COVERAGE_SQL) });
+			const lean = await search(db, vaultId, query, { coverageMap });
 			assert.deepEqual(lean, oracle, `${vaultId} / ${query}`);
 			if (lean.coverageUsed) used++;
 		}
@@ -81,22 +81,22 @@ test('rowid-map coverage output is identical to the COVERAGE_SQL form, per vault
 	assert.equal(coverageMap.status().ready, true);
 });
 
-test('the map never leaks another vault\'s chunk: results only carry the requested vault\'s rows', () => {
+test('the map never leaks another vault\'s chunk: results only carry the requested vault\'s rows', async () => {
 	const db = makeDb(ROWS.filter(row => row.vault === VAULT_B || row.path === 'notes/p0.md'));
 	const coverageMap = createCoverageMap(db);
-	const a = search(db, VAULT_A, 'alpha bravo charlie delta echo', { coverageMap });
+	const a = await search(db, VAULT_A, 'alpha bravo charlie delta echo', { coverageMap });
 	assert.ok(a.results.every(row => row.path === 'notes/p0.md'));
-	assert.deepEqual(a, search(db, VAULT_A, 'alpha bravo charlie delta echo'));
+	assert.deepEqual(a, await search(db, VAULT_A, 'alpha bravo charlie delta echo'));
 });
 
-test('a not-ready map falls back to COVERAGE_SQL (never "no coverage") and builds off the request path above the inline limit', () => {
+test('a not-ready map falls back to COVERAGE_SQL (never "no coverage") and builds off the request path above the inline limit', async () => {
 	const db = makeDb();
 	const scheduled = [];
 	const coverageMap = createCoverageMap(db, { inlineRowLimit: 10, sliceRows: 30, schedule: fn => scheduled.push(fn) });
 	const query = 'alpha bravo charlie delta';
-	const oracle = search(db, VAULT_A, query);
+	const oracle = await search(db, VAULT_A, query);
 	assert.equal(oracle.coverageUsed, true);
-	assert.deepEqual(search(db, VAULT_A, query, { coverageMap }), oracle);
+	assert.deepEqual(await search(db, VAULT_A, query, { coverageMap }), oracle);
 	assert.equal(coverageMap.status().ready, false);
 	assert.equal(scheduled.length, 1, 'the build is scheduled, not run inline');
 	// A journal committed mid-build lands in the partial map too.
@@ -145,8 +145,8 @@ test('the map tracks upsert, chunk delete and reset through the HTTP endpoints',
 		// Re-upsert of a path (supersede: delete-by-path + reinsert, fewer chunks).
 		assert.equal((await post('/v1/chunks/upsert', { vaultId: VAULT_A, chunks: [chunk('a.md', 0, 'delta echo')] })).status, 200);
 		assertMapMatchesChunks(db, statements.coverageMap);
-		const after = search(db, VAULT_A, 'alpha charlie', { coverageMap: statements.coverageMap });
-		assert.deepEqual(after, search(db, VAULT_A, 'alpha charlie'));
+		const after = await search(db, VAULT_A, 'alpha charlie', { coverageMap: statements.coverageMap });
+		assert.deepEqual(after, await search(db, VAULT_A, 'alpha charlie'));
 		assert.equal((await post('/v1/chunks/delete', { vaultId: VAULT_A, paths: ['b.md'] })).status, 200);
 		assertMapMatchesChunks(db, statements.coverageMap);
 		assert.equal((await post('/v1/index/reset', { vaultId: VAULT_B })).status, 200);
@@ -171,16 +171,16 @@ test('each committed upsert sub-batch is visible mid-flush; a later sub-batch th
 		const first = Array.from({ length: 100 }, (_, i) => chunk('big.md', i, i === 0 ? 'oscar papa' : `quebec${i}`));
 		// Sub-batch 2 replaces keep.md (deleting its rows) and then throws on a missing text.
 		const second = [chunk('keep.md', 0, 'romeo'), { id: 'keep.md#1', path: 'keep.md', contentHash: 'h' }];
-		probe = () => {
+		probe = async () => {
 			assertMapMatchesChunks(db, statements.coverageMap);
-			return search(db, VAULT_A, 'oscar papa', { coverageMap: statements.coverageMap });
+			return await search(db, VAULT_A, 'oscar papa', { coverageMap: statements.coverageMap });
 		};
 		const response = await post('/v1/chunks/upsert', { vaultId: VAULT_A, chunks: [...first, ...second] });
 		assert.equal(response.status, 400);
 	});
 	assert.equal(probes.length, 1, 'exactly one inter-sub-batch probe');
-	assert.ok(probes[0].results.some(row => row.path === 'big.md'), 'the first committed sub-batch is searchable mid-flush');
+	assert.ok((await probes[0]).results.some(row => row.path === 'big.md'), 'the first committed sub-batch is searchable mid-flush');
 	assertMapMatchesChunks(db, statements.coverageMap);
 	assert.equal(db.prepare("SELECT COUNT(*) AS n FROM chunks WHERE path = 'keep.md'").get().n, 2, 'rolled-back sub-batch kept keep.md');
-	assert.deepEqual(search(db, VAULT_A, 'kilo mike', { coverageMap: statements.coverageMap }), search(db, VAULT_A, 'kilo mike'));
+	assert.deepEqual(await search(db, VAULT_A, 'kilo mike', { coverageMap: statements.coverageMap }), await search(db, VAULT_A, 'kilo mike'));
 });

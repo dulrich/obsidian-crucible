@@ -50,7 +50,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`);
 	return db;
 }
 
-test('clampSearchBudgetMs falls back to the default for a non-finite value and clamps to [500, 20000]', () => {
+test('clampSearchBudgetMs falls back to the default for a non-finite value and clamps to [500, 20000]', async () => {
 	assert.equal(clampSearchBudgetMs(undefined), 3200);
 	assert.equal(clampSearchBudgetMs(NaN), 3200);
 	assert.equal(clampSearchBudgetMs('not a number'), 3200);
@@ -69,7 +69,7 @@ test('clampSearchBudgetMs falls back to the default for a non-finite value and c
 // to make the guard distrust sentAt and restart the deadline from receivedAt, which granted a
 // full fresh budget to exactly the requests that had been queued/abandoned longest. These tests
 // pin the K=5 boundary in both directions.
-test('resolveSearchDeadlineStart honors a sentAt within [receivedAt - budget, receivedAt]', () => {
+test('resolveSearchDeadlineStart honors a sentAt within [receivedAt - budget, receivedAt]', async () => {
 	const receivedAt = 10_000;
 	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(receivedAt - 500, receivedAt, budgetMs), receivedAt - 500, 'a sentAt comfortably inside the window is used as-is, starting the deadline earlier than receipt');
@@ -79,7 +79,7 @@ test('resolveSearchDeadlineStart honors a sentAt within [receivedAt - budget, re
 
 // WP-SS2 (a): a sentAt reporting 2 budgets' worth of queuing delay is now trusted (K=5), where
 // before this change it would have fallen back to receivedAt and granted a fresh budget.
-test('resolveSearchDeadlineStart (WP-SS2): a sentAt several budgets old but within K=5 is still trusted', () => {
+test('resolveSearchDeadlineStart (WP-SS2): a sentAt several budgets old but within K=5 is still trusted', async () => {
 	const receivedAt = 10_000;
 	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(receivedAt - 2 * budgetMs, receivedAt, budgetMs), receivedAt - 2 * budgetMs, 'two budgets of queuing delay is plausible queuing evidence, not skew, and must be honored');
@@ -88,7 +88,7 @@ test('resolveSearchDeadlineStart (WP-SS2): a sentAt several budgets old but with
 
 // WP-SS2 (b): older than K budgets is still untrustworthy skew, not queuing evidence — the
 // widening has a floor, it did not remove the guard.
-test('resolveSearchDeadlineStart falls back to receivedAt for skew outside the K=5-budget window', () => {
+test('resolveSearchDeadlineStart falls back to receivedAt for skew outside the K=5-budget window', async () => {
 	const receivedAt = 10_000;
 	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(receivedAt - 5 * budgetMs - 1, receivedAt, budgetMs), receivedAt, 'more than K=5 budgets into the past is untrustworthy skew, not queuing evidence');
@@ -97,14 +97,14 @@ test('resolveSearchDeadlineStart falls back to receivedAt for skew outside the K
 
 // WP-SS2 (c): the future direction is unaffected by widening K — a sentAt claiming to be after
 // receivedAt is impossible regardless of how the past-direction bound moved.
-test('resolveSearchDeadlineStart falls back to receivedAt for a future sentAt (unchanged by the K widening)', () => {
+test('resolveSearchDeadlineStart falls back to receivedAt for a future sentAt (unchanged by the K widening)', async () => {
 	const receivedAt = 10_000;
 	const budgetMs = 3200;
 	assert.equal(resolveSearchDeadlineStart(receivedAt + 1, receivedAt, budgetMs), receivedAt, 'a sentAt claiming to be AFTER receivedAt is impossible and falls back');
 	assert.equal(resolveSearchDeadlineStart(receivedAt + 50_000, receivedAt, budgetMs), receivedAt, 'an absurd future sentAt falls back the same way');
 });
 
-test('resolveSearchDeadlineStart falls back to receivedAt when sentAt is absent or non-numeric', () => {
+test('resolveSearchDeadlineStart falls back to receivedAt when sentAt is absent or non-numeric', async () => {
 	// WP-SS2 note: `receivedAt` here is deliberately a realistic epoch-scale magnitude (as every
 	// other real-clock test in this file already uses, e.g. the `receivedAt = 1_000_000` wire
 	// tests below), not the tiny `10_000` this test used pre-widening. `Number(null)` coerces to
@@ -127,12 +127,12 @@ test('resolveSearchDeadlineStart falls back to receivedAt when sentAt is absent 
 // it. Injecting a `statement` stub that throws if ever called proves the pre-flight checkpoint
 // actually prevents the call, not just that the response ends up looking degraded for some other
 // reason.
-test('pre-flight over-budget checkpoint: an already-doomed request skips the primary FTS scan entirely', () => {
+test('pre-flight over-budget checkpoint: an already-doomed request skips the primary FTS scan entirely', async () => {
 	const db = makeDb([{ path: 'Alpha.md', title: 'Alpha', text: 'alpha content here' }]);
 	const statement = {
 		all: () => { throw new Error('the primary FTS scan must not run once the deadline has already passed'); },
 	};
-	const outcome = runSearch(db, { vaultId: VAULT, query: 'alpha', limit: 10, vectors: vectorsFor(db), statement, deadlineAt: 0 });
+	const outcome = await runSearch(db, { vaultId: VAULT, query: 'alpha', limit: 10, vectors: vectorsFor(db), statement, deadlineAt: 0 });
 	assert.equal(outcome.degraded, true);
 	assert.equal(outcome.results.length, 0);
 	assert.equal(outcome.total, 0);
@@ -140,45 +140,45 @@ test('pre-flight over-budget checkpoint: an already-doomed request skips the pri
 	assert.equal(outcome.match, buildFtsQuery('alpha').primary, 'match still reports the (unrun) strict-AND primary query text');
 });
 
-test('omitting deadlineAt (every pre-WP-5 call site) never degrades: the rescue still runs to completion', () => {
+test('omitting deadlineAt (every pre-WP-5 call site) never degrades: the rescue still runs to completion', async () => {
 	const db = makeDb([
 		{ path: 'Alpha.md', title: 'Alpha', text: 'alpha stands alone' },
 		{ path: 'Beta.md', title: 'Beta', text: 'beta stands alone' },
 	]);
-	const outcome = runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db) });
+	const outcome = await runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db) });
 	assert.equal(outcome.degraded, false);
 	assert.equal(outcome.fallbackUsed, true);
 	assert.equal(outcome.results.length, 2);
 });
 
-test('over budget before the zero-hit rescue: the rescue is skipped and the response is marked degraded', () => {
+test('over budget before the zero-hit rescue: the rescue is skipped and the response is marked degraded', async () => {
 	const db = makeDb([
 		{ path: 'Alpha.md', title: 'Alpha', text: 'alpha stands alone' },
 		{ path: 'Beta.md', title: 'Beta', text: 'beta stands alone' },
 	]);
 	// deadlineAt: 0 is always in the past against the real Date.now() default clock, so this
 	// forces every checkpoint over budget without needing a fake `now`.
-	const outcome = runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db), deadlineAt: 0 });
+	const outcome = await runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db), deadlineAt: 0 });
 	assert.equal(outcome.degraded, true);
 	assert.equal(outcome.fallbackUsed, false, 'the rescue must not run once the deadline has already passed');
 	assert.equal(outcome.match, buildFtsQuery('alpha beta').primary, 'match stays the (unrun) strict-AND primary, never the skipped loose-OR fallback');
 	assert.equal(outcome.results.length, 0, 'whatever the strict-AND primary produced (nothing) is returned as-is, not blocked on for the rescue');
 });
 
-test('a request that finishes inside budget is byte-identical to one with no deadline at all', () => {
+test('a request that finishes inside budget is byte-identical to one with no deadline at all', async () => {
 	const db = makeDb([
 		{ path: 'Alpha.md', title: 'Alpha', text: 'alpha stands alone' },
 		{ path: 'Beta.md', title: 'Beta', text: 'beta stands alone' },
 	]);
-	const noDeadline = runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db) });
-	const generousDeadline = runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db), deadlineAt: Date.now() + 60_000 });
+	const noDeadline = await runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db) });
+	const generousDeadline = await runSearch(db, { vaultId: VAULT, query: 'alpha beta', limit: 10, vectors: vectorsFor(db), deadlineAt: Date.now() + 60_000 });
 	assert.equal(generousDeadline.degraded, false);
 	assert.equal(JSON.stringify(generousDeadline.results), JSON.stringify(noDeadline.results));
 	assert.equal(generousDeadline.fallbackUsed, noDeadline.fallbackUsed);
 	assert.equal(generousDeadline.total, noDeadline.total);
 });
 
-test('vector leg is skipped once the deadline has already passed, degrading gracefully to the FTS results already in hand', () => {
+test('vector leg is skipped once the deadline has already passed, degrading gracefully to the FTS results already in hand', async () => {
 	const db = makeDb([{ path: 'Alpha.md', title: 'Alpha', text: 'alpha content here' }]);
 	// WP-3 added its own pre-flight checkpoint in front of the primary scan (a plain
 	// `deadlineAt: 0` now trips THAT one too — see its own test above). This test is
@@ -188,7 +188,7 @@ test('vector leg is skipped once the deadline has already passed, degrading grac
 	let calls = 0;
 	const deadlineAt = 1000;
 	const now = () => { calls++; return calls === 1 ? 0 : 2000; };
-	const outcome = runSearch(db, { vaultId: VAULT, query: 'alpha', limit: 10, vectors: vectorsFor(db), now, deadlineAt });
+	const outcome = await runSearch(db, { vaultId: VAULT, query: 'alpha', limit: 10, vectors: vectorsFor(db), now, deadlineAt });
 	assert.equal(outcome.degraded, true);
 	assert.equal(outcome.vectorUsed, false);
 	assert.equal(outcome.results.length, 1, 'the primary FTS match still returns in full — only the (never-populated, in this fixture) vector leg is skipped');
@@ -206,7 +206,7 @@ function makeSplitTermsDb() {
 	]);
 }
 
-test('coverage leg: a checkpoint BETWEEN term scans stops scanning further terms, degrading rather than rescuing the split-terms target', () => {
+test('coverage leg: a checkpoint BETWEEN term scans stops scanning further terms, degrading rather than rescuing the split-terms target', async () => {
 	const db = makeSplitTermsDb();
 	// The query tokenizes to 4 terms: matt, pocock, context, skills. Decoy.md matches every term
 	// in one chunk, so the strict-AND primary already returns a row — the rescue/vector
@@ -216,7 +216,7 @@ test('coverage leg: a checkpoint BETWEEN term scans stops scanning further terms
 	let calls = 0;
 	const deadlineAt = 1000;
 	const now = () => { calls++; return calls <= 1 ? 0 : 2000; };
-	const outcome = runSearch(db, {
+	const outcome = await runSearch(db, {
 		vaultId: VAULT,
 		query: 'matt pocock context skills',
 		limit: 10,
@@ -235,9 +235,9 @@ test('coverage leg: a checkpoint BETWEEN term scans stops scanning further terms
 	assert.equal(calls >= 2, true, 'the checkpoint must have been consulted more than once (i.e. actually mid-loop, not only once on entry)');
 });
 
-test('coverage leg: with a deadline that never expires, the split-terms target is still rescued exactly as before', () => {
+test('coverage leg: with a deadline that never expires, the split-terms target is still rescued exactly as before', async () => {
 	const db = makeSplitTermsDb();
-	const outcome = runSearch(db, {
+	const outcome = await runSearch(db, {
 		vaultId: VAULT,
 		query: 'matt pocock context skills',
 		limit: 10,

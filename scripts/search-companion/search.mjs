@@ -223,7 +223,7 @@ export function resolveScanSpace(stats, requested) {
 // instead, because scoring across two vector spaces is exactly the confidently-wrong
 // failure this feature has to avoid, while failing the whole search over it would be worse
 // than answering with keywords.
-function runVectorLeg(db, options) {
+async function runVectorLeg(db, options) {
 	const outcome = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null, pending: false };
 	const vectors = options.vectors;
 	if (!vectors) return outcome;
@@ -269,8 +269,15 @@ function runVectorLeg(db, options) {
 
 	let hits;
 	try {
-		hits = vectors.knn(options.vaultId, queryEmbedding, options.poolSize, resolved.space);
+		hits = await vectors.knn(options.vaultId, queryEmbedding, options.poolSize, resolved.space);
 	} catch (e) {
+		// WP-3: a failed shard or a scan whose matrix was invalidated mid-flight is not a
+		// mismatch — it is "no fresh semantic answer right now", the same keywords-only shape
+		// as a matrix still rebuilding.
+		if (e && e.vectorPending) {
+			outcome.pending = true;
+			return outcome;
+		}
 		outcome.note = `${e instanceof Error ? e.message : String(e)}; semantic ranking skipped`;
 		return outcome;
 	}
@@ -454,7 +461,8 @@ function runCoverageLeg(db, options) {
 	return outcome;
 }
 
-export function runSearch(db, options) {
+// Async since search-latency-tail WP-3: the vector leg awaits the (possibly sharded) scan.
+export async function runSearch(db, options) {
 	const vaultId = options.vaultId;
 	const limit = clampLimit(options.limit);
 	const searchStatements = {
@@ -484,6 +492,14 @@ export function runSearch(db, options) {
 		const startedAt = timer();
 		try {
 			return fn();
+		} finally {
+			timings[phase] += timer() - startedAt;
+		}
+	};
+	const timedAsync = async (phase, fn) => {
+		const startedAt = timer();
+		try {
+			return await fn();
 		} finally {
 			timings[phase] += timer() - startedAt;
 		}
@@ -563,7 +579,7 @@ export function runSearch(db, options) {
 	if (overBudget()) {
 		degraded = true;
 	} else {
-		vector = timed('vectorMs', () => runVectorLeg(db, {
+		vector = await timedAsync('vectorMs', () => runVectorLeg(db, {
 			vaultId,
 			vectors: options.vectors,
 			queryEmbedding: options.queryEmbedding,
