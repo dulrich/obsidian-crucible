@@ -28,6 +28,7 @@
 // free; adding one anywhere else is not.
 
 export * from './search-companion/chunks.mjs';
+export * from './search-companion/coverageMap.mjs';
 export * from './search-companion/deadline.mjs';
 export * from './search-companion/dispatch.mjs';
 export * from './search-companion/endpoints/chunksDelete.mjs';

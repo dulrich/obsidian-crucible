@@ -135,6 +135,12 @@ export function runPooledSearch(statements, vaultId, match, poolSize) {
 // truncation that bounds the leg happens after counting, on the ranked list.
 export const COVERAGE_SQL = 'SELECT id, path FROM chunks_fts WHERE vault_id = ? AND chunks_fts MATCH ?';
 
+// search-latency-tail WP-2: the lean form. Rowids only — no UNINDEXED content-column read per
+// hit — resolved through the in-memory map (./coverageMap.mjs), which also carries the vault
+// filter. COVERAGE_SQL above stays as the fallback while the map is not ready. A SQL JOIN to
+// `chunks` on rowid was measured and is NOT faster (p90 339→348ms); do not reintroduce one.
+export const COVERAGE_ROWID_SQL = 'SELECT rowid AS r FROM chunks_fts WHERE chunks_fts MATCH ?';
+
 // Which embedding space — if any — this request's vector scan may cover.
 //
 // The rule the whole feature turns on: a query vector may only ever be scored against vectors
@@ -344,7 +350,24 @@ function runCoverageLeg(db, options) {
 	// that single term — the FTS pool already holds every path this leg could name.
 	if (terms.length < COVERAGE_MIN_TERMS || expanded.length !== terms.length) return outcome;
 
-	const statement = options.statement ?? db.prepare(COVERAGE_SQL);
+	// WP-2 (search-latency-tail): rowid-only scan through the coverage map when it is ready;
+	// otherwise today's COVERAGE_SQL. Both yield `{ id, path }` rows for this vault in FTS
+	// rowid order, so everything below is unchanged and the output identical.
+	const rowidMap = options.coverageMap ? options.coverageMap.lookup() : null;
+	let termRows;
+	if (rowidMap) {
+		const rowidStatement = options.rowidStatement ?? db.prepare(COVERAGE_ROWID_SQL);
+		const vaultId = options.vaultId;
+		termRows = function* (expression) {
+			for (const { r } of rowidStatement.iterate(expression)) {
+				const entry = rowidMap.get(r);
+				if (entry !== undefined && entry.vaultId === vaultId) yield entry;
+			}
+		};
+	} else {
+		const statement = options.statement ?? db.prepare(COVERAGE_SQL);
+		termRows = expression => statement.all(options.vaultId, expression);
+	}
 	// WP-5: the deadline this leg's own comment already called out as the real cost risk (up to
 	// MAX_QUERY_TERMS FTS scans, measured +580ms at 9+ terms) — checked BETWEEN term scans, never
 	// inside one. `now`/`deadlineAt` default to a real clock / no deadline so every pre-WP-5 call
@@ -370,7 +393,7 @@ function runCoverageLeg(db, options) {
 		// term rather than by-hit, which is what "how many of the query's terms" means.
 		const seenPaths = new Set();
 		const seenChunks = new Set();
-		for (const row of statement.all(options.vaultId, expression)) {
+		for (const row of termRows(expression)) {
 			if (!seenPaths.has(row.path)) {
 				seenPaths.add(row.path);
 				pathTerms.set(row.path, (pathTerms.get(row.path) ?? 0) + 1);
@@ -562,6 +585,8 @@ export function runSearch(db, options) {
 				expanded: built.expanded,
 				poolSize,
 				statement: options.coverageStatement,
+				rowidStatement: options.coverageRowidStatement,
+				coverageMap: options.coverageMap,
 				hydrate: options.hydrate,
 				// Both already-present sets, so one path never enters the fusion twice.
 				knownPaths: new Set([...rows.map(row => row.path), ...vector.rows.map(row => row.path)]),

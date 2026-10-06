@@ -13,13 +13,19 @@ export function createChunksDeleteEndpoint({ db, statements, vectors }) {
 		const body = await readJson(req);
 		const vaultId = requireString(body.vaultId, 'vaultId');
 		const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
+		// WP-2 (search-latency-tail): journal rowid removals; published only after COMMIT.
+		const journal = statements.coverageMap?.begin();
 		db.exec('BEGIN');
 		try {
 			for (const path of paths) {
-				for (const row of selectRowidsByPath.all(vaultId, path)) deleteFtsByRowid.run(row.rowid);
+				for (const row of selectRowidsByPath.all(vaultId, path)) {
+					deleteFtsByRowid.run(row.rowid);
+					journal?.delete(row.rowid);
+				}
 				deleteByPath.run(vaultId, path);
 			}
 			db.exec('COMMIT');
+			statements.coverageMap?.commit(journal);
 		} catch (e) {
 			db.exec('ROLLBACK');
 			throw e;
