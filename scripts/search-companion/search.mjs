@@ -218,18 +218,22 @@ export function resolveScanSpace(stats, requested) {
 // failure this feature has to avoid, while failing the whole search over it would be worse
 // than answering with keywords.
 function runVectorLeg(db, options) {
-	const outcome = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null };
+	const outcome = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null, pending: false };
 	const vectors = options.vectors;
 	if (!vectors) return outcome;
 	const stats = vectors.stats(options.vaultId);
 	outcome.dim = stats.dim;
 	outcome.model = stats.model;
 	outcome.available = stats.count > 0 && Boolean(stats.dim);
-	if (!outcome.available) return outcome;
-
 	const queryEmbedding = options.queryEmbedding;
-	if (!Array.isArray(queryEmbedding) && !ArrayBuffer.isView(queryEmbedding)) return outcome;
-	if (queryEmbedding.length === 0) return outcome;
+	const hasQueryEmbedding = (Array.isArray(queryEmbedding) || ArrayBuffer.isView(queryEmbedding)) && queryEmbedding.length > 0;
+	// WP-2: cold stats in the deferred regime (no last-known value yet) — availability is
+	// unknown, not false; a search that brought an embedding is told the leg is pending.
+	if (!outcome.available) {
+		if (stats.pending && hasQueryEmbedding) outcome.pending = true;
+		return outcome;
+	}
+	if (!hasQueryEmbedding) return outcome;
 
 	// Space before width: a mixed index can hold a space this query has no business scanning at
 	// all, and the width it would be compared against is the *scanned* space's, not the vault's.
@@ -242,6 +246,18 @@ function runVectorLeg(db, options) {
 
 	if (queryEmbedding.length !== scanStats.dim) {
 		outcome.note = `query embedding is ${queryEmbedding.length}-dimensional but this vault is indexed at ${scanStats.dim}; semantic ranking skipped`;
+		return outcome;
+	}
+
+	// WP-2: never build the matrix (or a cold stats aggregate) on the search's own stack. A
+	// backend that implements `prepare` answers false when the matrix for this vault/space is
+	// missing or stale and it has scheduled the off-request rebuild; this search answers from
+	// FTS (+ coverage) and says so with `vectorPending`. A backend without `prepare` (a test
+	// double, an older seam implementation) keeps the old inline behaviour.
+	// `prepare` runs first so the matrix rebuild is queued even while the stats are still pending.
+	const matrixReady = typeof vectors.prepare === 'function' ? vectors.prepare(options.vaultId, resolved.space) : true;
+	if (!matrixReady || stats.pending || scanStats.pending) {
+		outcome.pending = true;
 		return outcome;
 	}
 
@@ -436,6 +452,19 @@ export function runSearch(db, options) {
 	const deadlineAt = options.deadlineAt ?? Infinity;
 	let degraded = false;
 	const overBudget = () => now() >= deadlineAt;
+	// WP-2 phase timings. A separate monotonic `timer` seam, deliberately NOT `now`: the
+	// deadline tests drive `now` as a call-counting clock, so an extra now() read here would
+	// shift which checkpoint trips. Timings are diagnostics only and never feed a decision.
+	const timer = options.timer ?? (() => performance.now());
+	const timings = { primaryMs: 0, rescueMs: 0, vectorMs: 0, coverageMs: 0 };
+	const timed = (phase, fn) => {
+		const startedAt = timer();
+		try {
+			return fn();
+		} finally {
+			timings[phase] += timer() - startedAt;
+		}
+	};
 
 	let match = built.primary;
 	let matchFallback = null;
@@ -452,7 +481,7 @@ export function runSearch(db, options) {
 		degraded = true;
 		rows = [];
 	} else {
-		rows = pooledSearch(match);
+		rows = timed('primaryMs', () => pooledSearch(match));
 	}
 	// `fallbackUsed` reports what actually contributed to this response, and that reading is
 	// the same in both branches — it just cannot be observed the same way. Under 'current' the
@@ -474,7 +503,7 @@ export function runSearch(db, options) {
 			degraded = true;
 		} else {
 			matchFallback = built.fallback;
-			const fallbackRows = pooledSearch(matchFallback);
+			const fallbackRows = timed('rescueMs', () => pooledSearch(matchFallback));
 			const blended = blendPooledRows(rows, fallbackRows);
 			rows = blended.rows;
 			fallbackUsed = blended.added > 0;
@@ -498,7 +527,7 @@ export function runSearch(db, options) {
 		} else {
 			match = built.fallback;
 			fallbackUsed = true;
-			rows = pooledSearch(match);
+			rows = timed('rescueMs', () => pooledSearch(match));
 		}
 	}
 
@@ -507,11 +536,11 @@ export function runSearch(db, options) {
 	// rather than degrading it internally — like the rescue, it is not worth a partial-scan
 	// checkpoint on its own, and a search missing its semantic leg is exactly the existing
 	// FTS-only degrade path (`vector.available: false`), not a new failure shape.
-	let vector = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null };
+	let vector = { used: false, available: false, scores: null, rows: [], note: null, dim: null, model: null, space: null, pending: false };
 	if (overBudget()) {
 		degraded = true;
 	} else {
-		vector = runVectorLeg(db, {
+		vector = timed('vectorMs', () => runVectorLeg(db, {
 			vaultId,
 			vectors: options.vectors,
 			queryEmbedding: options.queryEmbedding,
@@ -519,7 +548,7 @@ export function runSearch(db, options) {
 			poolSize,
 			hydrate: options.hydrate,
 			knownPaths: new Set(rows.map(row => row.path)),
-		});
+		}));
 	}
 
 	let coverage = { used: false, scores: null, rows: [], degraded: false };
@@ -527,7 +556,7 @@ export function runSearch(db, options) {
 		if (overBudget()) {
 			degraded = true;
 		} else {
-			coverage = runCoverageLeg(db, {
+			coverage = timed('coverageMs', () => runCoverageLeg(db, {
 				vaultId,
 				terms: built.terms,
 				expanded: built.expanded,
@@ -538,7 +567,7 @@ export function runSearch(db, options) {
 				knownPaths: new Set([...rows.map(row => row.path), ...vector.rows.map(row => row.path)]),
 				now,
 				deadlineAt,
-			});
+			}));
 			if (coverage.degraded) degraded = true;
 		}
 	}
@@ -574,6 +603,8 @@ export function runSearch(db, options) {
 		embeddingSpace: vector.space,
 		note: vector.note,
 		degraded,
+		vectorPending: vector.pending,
+		timings,
 	};
 }
 

@@ -161,6 +161,8 @@ export function createUpsertEndpoint({ db, statements, vectors, now, delay, stat
 		// /v1/chunks/upsert request, so the cap never carries over between flushes.
 		const flushStartedAt = now();
 		let cumulativeDeferMs = 0;
+		// WP-2: surfaced on GET /health as `indexing.flushActive` / `indexing.lastFlushMs`.
+		state.flushActive = true;
 		try {
 		for (let batchIndex = 0; batchIndex < subBatches.length; batchIndex++) {
 			const subBatch = subBatches[batchIndex];
@@ -289,6 +291,8 @@ export function createUpsertEndpoint({ db, statements, vectors, now, delay, stat
 			// actually on disk.)
 			for (const vault of touchedVaults) vectors.invalidate(vault);
 			checkpointWal(db);
+			state.flushActive = false;
+			state.lastFlushMs = now() - flushStartedAt;
 		}
 		return json(res, 200, { ok: true, count: chunks.length });
 	};

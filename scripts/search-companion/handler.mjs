@@ -55,7 +55,20 @@ export function createRequestHandler(db, options = {}) {
 	// WP-SS2: `searchClients` is the same handler-scoped-holder pattern for a different
 	// consumer — the search endpoint's own supersede check, not the upsert flush's yield gate —
 	// so it lives on the same `state` object rather than a second parallel holder.
-	const state = { lastInteractiveSearchAt: -Infinity, searchClients: createSearchClientTracker() };
+	// WP-2: `flushActive`/`lastFlushMs` (written by the upsert flush) and `recentSearches`
+	// (written by the search route) are what GET /health reports as `indexing`/`recentSearch`.
+	const state = {
+		lastInteractiveSearchAt: -Infinity,
+		searchClients: createSearchClientTracker(),
+		flushActive: false,
+		lastFlushMs: null,
+		recentSearches: [],
+	};
+	// WP-2: phase-timing clock (monotonic, diagnostics only — see runSearch's `timer`) and the
+	// slow-search log sink; both injectable so tests stay deterministic and quiet.
+	const timer = options.timer;
+	const searchLog = options.searchLog;
+	const startedAt = options.startedAt ?? new Date().toISOString();
 	// One prepare pass per handler instance, exactly as before. Injectable for the same reason
 	// `vectors` is: a test can hand in doubles without a real database.
 	const statements = options.statements ?? createStatements(db);
@@ -64,12 +77,12 @@ export function createRequestHandler(db, options = {}) {
 	// dependencies are named here, at the one place that knows all of them — an endpoint module
 	// imports no ambient singleton, only its own pure helpers.
 	const dispatch = createDispatcher({
-		'GET /health': createHealthEndpoint({ vectors }),
+		'GET /health': createHealthEndpoint({ vectors, state, startedAt, cgroupRoot: options.cgroupRoot }),
 		'POST /v1/index/reset': createResetEndpoint({ db, statements, vectors }),
 		'POST /v1/chunks/delete': createChunksDeleteEndpoint({ db, statements, vectors }),
 		'POST /v1/files/state': createFilesStateEndpoint({ statements }),
 		'POST /v1/chunks/upsert': createUpsertEndpoint({ db, statements, vectors, now, delay, state }),
-		'POST /v1/search': createSearchEndpoint({ db, statements, vectors, now, state }),
+		'POST /v1/search': createSearchEndpoint({ db, statements, vectors, now, state, timer, ...(searchLog ? { log: searchLog } : {}) }),
 		'POST /v1/paths': createPathsEndpoint({ statements }),
 	});
 
