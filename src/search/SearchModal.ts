@@ -4,6 +4,7 @@ import { isImageChunkHeading } from './chunker';
 import { SEARCH_TYPEAHEAD_DEBOUNCE_MS, SEARCH_TYPEAHEAD_MIN_QUERY_LENGTH, shouldAutoSearch } from './debounce';
 import type { SearchRerankOutcome } from './SearchManager';
 import { SearchAbortedError, SearchResult, SearchScoreAttribution } from './types';
+import { describePartialResponse, describeSearchFailure } from './searchFailureCause';
 
 export class VaultSearchModal extends Modal {
 	private inputEl: HTMLInputElement;
@@ -173,15 +174,19 @@ export class VaultSearchModal extends Modal {
 			// because the request arrived queued behind an embedding backfill sub-batch) — not a
 			// failure and not a complete result set, so it needs its own distinct treatment
 			// rather than reading as either.
-			const degraded = response.degraded === true;
-			this.statusEl.setText(formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false, response.rebuildRequired === true, degraded));
+			// Search-latency-durability WP-3: `vectorPending` (semantic leg still rebuilding) is a
+			// partial result too; the reason goes into the status text AND its title.
+			const partial = describePartialResponse(response);
+			const degraded = partial.reason !== null;
+			this.statusEl.setText(partial.prefix + formatSearchStatus(response.results.length, response.total, response.mode, response.semanticAvailable === false, response.rebuildRequired === true));
 			this.statusEl.toggleClass('is-degraded', degraded);
 			// The full reason rides along as a tooltip so the status line stays short but no
 			// degradation is silent. This is not only the rebuild-required case: WP-1 also sets
 			// `message` (without `rebuildRequired`) when a query embedding's width disagrees
 			// with the vault's — e.g. mid-model-switch — and that condition deserves the same
 			// visibility, or semantic silently drops to FTS with no explanation on screen.
-			this.statusEl.setAttr('title', response.message || null);
+			const titleParts = [partial.reason, response.message].filter((part): part is string => !!part);
+			this.statusEl.setAttr('title', titleParts.length > 0 ? titleParts.join(' — ') : null);
 			// A fresh search invalidates any prior rerank annotation — it described a result set
 			// that no longer exists on screen.
 			this.rerankRowMeta = null;
@@ -210,10 +215,13 @@ export class VaultSearchModal extends Modal {
 			// relying on it alone.
 			if (e instanceof SearchAbortedError) return;
 			if (generation !== this.searchGeneration) return;
-			const message = e instanceof Error ? e.message : String(e);
-			this.statusEl.setText('Search failed');
+			// Search-latency-durability WP-3: never a bare "Search failed" — the cause comes from
+			// the health probe SearchManager attached, falling back to the original error text.
+			const failure = describeSearchFailure(e);
+			this.statusEl.setText(failure.status);
+			this.statusEl.setAttr('title', failure.title);
 			this.statusEl.toggleClass('is-degraded', false);
-			new Notice(`Search failed: ${message}`);
+			new Notice(failure.notice);
 		}
 	}
 

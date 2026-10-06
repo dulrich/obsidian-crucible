@@ -789,3 +789,81 @@ test('a fetch TypeError does not affect non-search endpoints, which were never r
 	assert.equal(globalThis.__searchClientFetchRequests.length, 0, 'fileStates never touches fetch');
 	assert.equal(globalThis.__searchClientRequests.length, 1);
 });
+
+// Search-latency-durability WP-3: WP-2's additive /health and /v1/search fields, each normalized
+// independently — present → typed, absent or malformed → undefined (never a coerced value).
+test('SearchServiceClient.health() normalizes WP-2 fields when present', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: {
+			ok: true, schemaVersion: 7,
+			startedAt: '2026-10-06T10:00:00.000Z',
+			vector: { status: 'building' },
+			indexing: { flushActive: true, lastFlushMs: 420 },
+			recentSearch: { count: 3, p50Ms: 12, p90Ms: 80, maxMs: 90, degraded: 1 },
+			memory: { limitBytes: 4294967296, currentBytes: 1000, swapBytes: 2048, peakBytes: null, maxEvents: 2, pressure: 'pressure' },
+		},
+	};
+	const health = await new SearchServiceClient('http://search.local', 'vault').health();
+	assert.equal(health.startedAt, '2026-10-06T10:00:00.000Z');
+	assert.deepEqual(health.vector, { status: 'building' });
+	assert.deepEqual(health.indexing, { flushActive: true, lastFlushMs: 420 });
+	assert.deepEqual(health.recentSearch, { count: 3, p50Ms: 12, p90Ms: 80, maxMs: 90, degraded: 1 });
+	assert.deepEqual(health.memory, { limitBytes: 4294967296, currentBytes: 1000, swapBytes: 2048, peakBytes: null, maxEvents: 2, pressure: 'pressure' });
+});
+
+test('SearchServiceClient.health() maps absent WP-2 fields (old companion) to undefined', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = { status: 200, json: { ok: true, schemaVersion: 7 } };
+	const health = await new SearchServiceClient('http://search.local', 'vault').health();
+	for (const key of ['startedAt', 'vector', 'indexing', 'recentSearch', 'memory']) {
+		assert.equal(health[key], undefined, `${key} must be undefined when absent`);
+	}
+});
+
+test('SearchServiceClient.health() maps each malformed WP-2 field to undefined independently', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: {
+			ok: true, schemaVersion: 7,
+			startedAt: 12345,
+			vector: { status: 'exploded' },
+			indexing: { flushActive: 'yes' },
+			recentSearch: { count: 'many' },
+			memory: { currentBytes: 10, pressure: 'meltdown' },
+		},
+	};
+	const health = await new SearchServiceClient('http://search.local', 'vault').health();
+	for (const key of ['startedAt', 'vector', 'indexing', 'recentSearch', 'memory']) {
+		assert.equal(health[key], undefined, `${key} must be undefined when malformed`);
+	}
+	globalThis.__searchClientResponse = { status: 200, json: { ok: true, schemaVersion: 7, vector: 'ready', indexing: { flushActive: false, lastFlushMs: 'x' }, memory: { pressure: 'ok' } } };
+	const mixed = await new SearchServiceClient('http://search.local', 'vault').health();
+	assert.equal(mixed.vector, undefined);
+	assert.deepEqual(mixed.indexing, { flushActive: false, lastFlushMs: null });
+	assert.equal(mixed.memory, undefined, 'a memory snapshot without currentBytes is dropped whole');
+});
+
+test('SearchServiceClient.search() normalizes vectorPending and timings; absent/malformed → undefined', async () => {
+	resetGlobals();
+	globalThis.__searchClientResponse = {
+		status: 200,
+		json: { results: [], vectorPending: true, timings: { queueMs: null, primaryMs: 4, rescueMs: 0, vectorMs: 0, coverageMs: 2, totalMs: 7 } },
+	};
+	const client = new SearchServiceClient('http://search.local', 'vault');
+	const present = await client.search({ query: 'needle' });
+	assert.equal(present.vectorPending, true);
+	assert.deepEqual(present.timings, { queueMs: null, primaryMs: 4, rescueMs: 0, vectorMs: 0, coverageMs: 2, totalMs: 7 });
+
+	globalThis.__searchClientResponse = { status: 200, json: { results: [] } };
+	const absent = await client.search({ query: 'needle' });
+	assert.equal(absent.vectorPending, undefined);
+	assert.equal(absent.timings, undefined);
+
+	globalThis.__searchClientResponse = { status: 200, json: { results: [], vectorPending: 'true', timings: 'fast' } };
+	const malformed = await client.search({ query: 'needle' });
+	assert.equal(malformed.vectorPending, undefined);
+	assert.equal(malformed.timings, undefined);
+});

@@ -29,7 +29,7 @@ await esbuild.build({
 	stdin: {
 		contents: `
 			export { SearchManager } from './src/search/SearchManager';
-			export { SearchServiceUnavailableError } from './src/search/client';
+			export { SearchServiceUnavailableError, SearchAbortedError } from './src/search/client';
 		`,
 		resolveDir: process.cwd(),
 		loader: 'ts',
@@ -63,7 +63,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { SearchManager, SearchServiceUnavailableError } = await import(pathToFileURL(outfile));
+const { SearchManager, SearchServiceUnavailableError, SearchAbortedError } = await import(pathToFileURL(outfile));
 
 function settings(overrides = {}) {
 	return {
@@ -236,5 +236,115 @@ test('SearchManager.search() breadcrumb reports embedMs, measured outside the ti
 		console.warn = originalWarn;
 		globalThis.__CRUCIBLE_DEBUG__ = false;
 		Date.now = realNow;
+	}
+});
+
+// Search-latency-durability WP-3: the post-failure cause probe. One direct client().health()
+// call (<= 1000ms) on timeout/5xx, never through companionAvailable()/the availability gate.
+function spyAvailability(manager) {
+	const calls = [];
+	const real = manager.availability;
+	manager.availability = new Proxy(real, {
+		get(target, prop) {
+			const value = target[prop];
+			if (typeof value !== 'function') return value;
+			return (...args) => { calls.push(String(prop)); return value.apply(target, args); };
+		},
+	});
+	manager.companionAvailable = async () => { calls.push('companionAvailable'); return true; };
+	return calls;
+}
+
+for (const [kind, message] of [['timeout', 'Search service /v1/search timed out after 4000ms'], ['server-error', 'Search service /v1/search returned 503']]) {
+	test(`SearchManager.search() on ${kind}: exactly one health probe <= 1000ms, attached to the original error, gate untouched`, async () => {
+		const manager = makeManager();
+		const gateCalls = spyAvailability(manager);
+		const healthCalls = [];
+		const health = { ok: true, vector: { status: 'building' } };
+		manager.client = () => ({
+			search: async () => { throw new SearchServiceUnavailableError(message, kind); },
+			health: async (timeoutMs) => { healthCalls.push(timeoutMs); return health; },
+		});
+
+		const error = await manager.search('needle').then(() => null, e => e);
+		assert.ok(error instanceof SearchServiceUnavailableError, 'original class preserved');
+		assert.equal(error.kind, kind, 'original kind preserved');
+		assert.equal(error.message, message, 'original message preserved');
+		assert.equal(healthCalls.length, 1, 'exactly one probe');
+		assert.ok(healthCalls[0] <= 1000, `probe budget ${healthCalls[0]} must be <= 1000ms`);
+		assert.deepEqual(error.healthProbe, { answered: true, health });
+		assert.deepEqual(gateCalls, [], 'the availability gate must not be touched by the cause probe');
+	});
+}
+
+test('SearchManager.search(): a probe that does not answer is recorded as not answered, not thrown', async () => {
+	const manager = makeManager();
+	const gateCalls = spyAvailability(manager);
+	manager.client = () => ({
+		search: async () => { throw new SearchServiceUnavailableError('timed out', 'timeout'); },
+		health: async () => { throw new SearchServiceUnavailableError('Search service /health timed out after 1000ms', 'timeout'); },
+	});
+	const error = await manager.search('needle').then(() => null, e => e);
+	assert.equal(error.message, 'timed out');
+	assert.deepEqual(error.healthProbe, { answered: false, error: 'Search service /health timed out after 1000ms' });
+	assert.deepEqual(gateCalls, []);
+});
+
+test('SearchManager.search(): an aborted search never probes', async () => {
+	const manager = makeManager();
+	let probes = 0;
+	const controller = new AbortController();
+	controller.abort();
+	manager.client = () => ({
+		search: async () => { throw new SearchAbortedError(); },
+		health: async () => { probes++; return { ok: true }; },
+	});
+	await assert.rejects(manager.search('needle', undefined, controller.signal));
+	assert.equal(probes, 0, 'an abort is never a cause-probe trigger');
+
+	// Belt and braces: even a timeout-kind error raced by an already-aborted signal does not probe.
+	manager.client = () => ({
+		search: async () => { throw new SearchServiceUnavailableError('timed out', 'timeout'); },
+		health: async () => { probes++; return { ok: true }; },
+	});
+	await assert.rejects(manager.search('needle', undefined, controller.signal));
+	assert.equal(probes, 0);
+});
+
+test('SearchManager.search(): a refused search does not probe (only timeout/5xx do)', async () => {
+	const manager = makeManager();
+	let probes = 0;
+	manager.client = () => ({
+		search: async () => { throw new SearchServiceUnavailableError('connection refused', 'refused'); },
+		health: async () => { probes++; return { ok: true }; },
+	});
+	await assert.rejects(manager.search('needle'));
+	assert.equal(probes, 0);
+});
+
+test('SearchManager.search(): the timeout breadcrumb carries the health snapshot summary', async () => {
+	globalThis.__CRUCIBLE_DEBUG__ = true;
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (...args) => { warnings.push(args); };
+	try {
+		const manager = makeManager();
+		manager.client = () => ({
+			search: async () => { throw new SearchServiceUnavailableError('timed out', 'timeout'); },
+			health: async () => ({
+				ok: true,
+				vector: { status: 'stale' },
+				indexing: { flushActive: true, lastFlushMs: 10 },
+				memory: { limitBytes: 4 * 1024 ** 3, currentBytes: 1, swapBytes: 512 * 1024 ** 2, peakBytes: null, maxEvents: 0, pressure: 'pressure' },
+			}),
+		});
+		await assert.rejects(manager.search('needle'));
+		const logged = warnings.map(w => w.join(' ')).join('\n');
+		assert.match(logged, /vector stale/);
+		assert.match(logged, /flushActive true/);
+		assert.match(logged, /memory pressure \(swap 512\.0 MiB, limit 4\.0 GiB\)/);
+	} finally {
+		console.warn = originalWarn;
+		globalThis.__CRUCIBLE_DEBUG__ = false;
 	}
 });

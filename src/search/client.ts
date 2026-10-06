@@ -7,6 +7,9 @@ import {
 	SearchFileState,
 	SearchHealth,
 	SearchIndexedPath,
+	SearchMemorySnapshot,
+	SearchRecentSummary,
+	SearchTimings,
 	SearchPathsResponse,
 	SearchQueryOptions,
 	SearchResponse,
@@ -394,7 +397,80 @@ function normalizeHealth(value: unknown): SearchHealth {
 		// dropped to undefined rather than coerced.
 		embeddingSpace: typeof raw.embeddingSpace === 'string' ? raw.embeddingSpace : (raw.embeddingSpace === null ? null : undefined),
 		unattributedEmbeddedChunks: numberField(raw.unattributedEmbeddedChunks),
+		// Search-latency-durability WP-3: WP-2's additive fields, each read independently.
+		startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : undefined,
+		vector: normalizeVectorStatus(raw.vector),
+		indexing: normalizeIndexing(raw.indexing),
+		recentSearch: normalizeRecentSearch(raw.recentSearch),
+		memory: normalizeMemory(raw.memory),
 	};
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function nullableNumber(value: unknown): number | null | undefined {
+	return value === null ? null : numberField(value);
+}
+
+function normalizeVectorStatus(value: unknown): SearchHealth['vector'] {
+	const status = asRecord(value)?.status;
+	return status === 'ready' || status === 'stale' || status === 'building' || status === 'absent'
+		? { status }
+		: undefined;
+}
+
+function normalizeIndexing(value: unknown): SearchHealth['indexing'] {
+	const raw = asRecord(value);
+	if (!raw || typeof raw.flushActive !== 'boolean') return undefined;
+	return { flushActive: raw.flushActive, lastFlushMs: nullableNumber(raw.lastFlushMs) ?? null };
+}
+
+function normalizeRecentSearch(value: unknown): SearchRecentSummary | undefined {
+	const raw = asRecord(value);
+	const count = numberField(raw?.count);
+	if (!raw || count === undefined) return undefined;
+	return {
+		count,
+		p50Ms: nullableNumber(raw.p50Ms) ?? null,
+		p90Ms: nullableNumber(raw.p90Ms) ?? null,
+		maxMs: nullableNumber(raw.maxMs) ?? null,
+		degraded: numberField(raw.degraded) ?? 0,
+	};
+}
+
+// Memory is only trusted whole: a snapshot without a recognised `pressure` or a readable
+// `currentBytes` is dropped rather than half-reported (the modal names a cause from it).
+function normalizeMemory(value: unknown): SearchMemorySnapshot | undefined {
+	const raw = asRecord(value);
+	if (!raw) return undefined;
+	const pressure = raw.pressure;
+	if (pressure !== 'ok' && pressure !== 'pressure' && pressure !== 'exhausted') return undefined;
+	const currentBytes = numberField(raw.currentBytes);
+	if (currentBytes === undefined) return undefined;
+	return {
+		limitBytes: nullableNumber(raw.limitBytes) ?? null,
+		currentBytes,
+		swapBytes: numberField(raw.swapBytes) ?? 0,
+		peakBytes: nullableNumber(raw.peakBytes) ?? null,
+		maxEvents: numberField(raw.maxEvents) ?? 0,
+		pressure,
+	};
+}
+
+function normalizeTimings(value: unknown): SearchTimings | undefined {
+	const raw = asRecord(value);
+	if (!raw) return undefined;
+	const timings: SearchTimings = {
+		queueMs: nullableNumber(raw.queueMs) ?? null,
+		primaryMs: numberField(raw.primaryMs),
+		rescueMs: numberField(raw.rescueMs),
+		vectorMs: numberField(raw.vectorMs),
+		coverageMs: numberField(raw.coverageMs),
+		totalMs: numberField(raw.totalMs),
+	};
+	return Object.values(timings).some(entry => entry !== undefined && entry !== null) ? timings : undefined;
 }
 
 // WP-SA2: normalizes `POST /v1/paths` (WP-SA1's response contract — `ok: true` alongside
@@ -498,6 +574,9 @@ function normalizeSearchResponse(value: unknown): SearchResponse {
 		// in-budget response from a current one) simply omits it, which must normalize to
 		// `undefined`, not a coerced `false` — `degraded === true` is the only meaningful state.
 		degraded: raw.degraded === true ? true : undefined,
+		// WP-2: `vectorPending` is only ever sent as `true`; anything else normalizes to absent.
+		vectorPending: raw.vectorPending === true ? true : undefined,
+		timings: normalizeTimings(raw.timings),
 	};
 }
 

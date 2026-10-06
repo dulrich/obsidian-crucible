@@ -21,11 +21,28 @@ export class SearchServiceUnavailableError extends Error {
 	// but a default keeps any other (test, future) call site conservative — refused is the
 	// kind that earns the immediate confirmed-outage latch, which is the safe assumption for
 	// an unclassified failure.
+	/**
+	 * Search-latency-durability WP-3: set by `SearchManager.search()` on an interactive search
+	 * timeout or 5xx — the result of ONE short `/health` probe taken right after the failure, so
+	 * the modal can name a cause. Attached to the original error (not a wrapping class) so every
+	 * `instanceof`/`kind` branch downstream is unaffected. Absent on every other path.
+	 */
+	healthProbe?: SearchHealthProbe;
+
 	constructor(message: string, public readonly kind: SearchServiceUnavailableErrorKind = 'refused') {
 		super(message);
 		this.name = 'SearchServiceUnavailableError';
 	}
 }
+
+/**
+ * The outcome of the post-failure cause probe. `answered: false` is NOT proof the companion is
+ * down — a probe timeout is equally consistent with a companion still starting or blocked mid-
+ * flush, so it only ever maps to the honest "starting or unavailable".
+ */
+export type SearchHealthProbe =
+	| { answered: true; health: SearchHealth }
+	| { answered: false; error: string };
 
 /**
  * The embedder did not produce the vectors an operation required.
@@ -355,6 +372,46 @@ export interface SearchHealth {
 	/** The single space in use, or `null` when spaces are mixed/unlabelled/absent — mirrors the companion's own tri-state. */
 	embeddingSpace?: string | null;
 	unattributedEmbeddedChunks?: number;
+	/**
+	 * Search-latency-durability WP-2 additive fields, normalized defensively in WP-3. Each is
+	 * `undefined` when an older companion omits it (or sends it malformed) — consumers must never
+	 * infer a cause from absence.
+	 */
+	startedAt?: string;
+	vector?: { status: SearchVectorStatus };
+	indexing?: { flushActive: boolean; lastFlushMs: number | null };
+	recentSearch?: SearchRecentSummary;
+	/** Present only when the companion could read its cgroup memory files. */
+	memory?: SearchMemorySnapshot;
+}
+
+export type SearchVectorStatus = 'ready' | 'stale' | 'building' | 'absent';
+export type SearchMemoryPressure = 'ok' | 'pressure' | 'exhausted';
+
+export interface SearchRecentSummary {
+	count: number;
+	p50Ms: number | null;
+	p90Ms: number | null;
+	maxMs: number | null;
+	degraded: number;
+}
+
+export interface SearchMemorySnapshot {
+	limitBytes: number | null;
+	currentBytes: number;
+	swapBytes: number;
+	peakBytes: number | null;
+	maxEvents: number;
+	pressure: SearchMemoryPressure;
+}
+
+export interface SearchTimings {
+	queueMs: number | null;
+	primaryMs?: number;
+	rescueMs?: number;
+	vectorMs?: number;
+	coverageMs?: number;
+	totalMs?: number;
 }
 
 // Per-stage score attribution: the base score, every boost that fired, and the fused value,
@@ -409,6 +466,10 @@ export interface SearchResponse {
 	 * vector contribution.
 	 */
 	degraded?: boolean;
+	/** WP-2: the vector leg is still pending (index building/stale). Only ever `true` or absent. */
+	vectorPending?: boolean;
+	/** WP-2: per-leg companion timings, for diagnostics only. */
+	timings?: SearchTimings;
 }
 
 export interface SearchFileState {
