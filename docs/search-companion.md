@@ -42,13 +42,15 @@ The bundled companion script implements local SQLite FTS5/BM25 plus a vector leg
 
 | chunks | ≈ notes | scan | resident |
 |---|---|---|---|
-| 52,257 (today) | 5,455 | 33ms | 0.21 GB |
-| 100,000 | 10,400 | 63ms | 0.41 GB |
+| 52,257 (2026-07) | 5,455 | 33ms | 0.21 GB |
+| 100,000 (≈ today: 99,309 measured 63ms, 2026-10) | 10,400 | 63ms | 0.41 GB |
 | 250,000 | 26,100 | **158ms** | 1.02 GB |
 | 500,000 | 52,200 | 316ms | 2.05 GB |
 | 1,000,000 | 104,400 | 631ms | 4.10 GB |
 
 Type-ahead has a 200ms debounce and the companion answers a 3-character FTS query in ~27ms today, so +33ms is invisible and +158ms starts to bite — the **interactive ceiling is ~250k chunks (~26,000 notes)**. Past that, the dependency-free escape hatches, in order, are: (1) shard the scan across `node:worker_threads` over a `SharedArrayBuffer` (the matrix is already one flat `Float32Array`), which buys roughly the same constant factor SIMD would; then (2), if resident memory becomes binding first (it does, around the same point), `int8` quantization with a float32 rescore of the top ~1000 cuts residency 4×. See the AGENTS.md quirk on the vector leg for the rest of the reasoning (dimension-agnostic contract, the full-matrix-scan requirement, why `int8` isn't used yet at this size) and `plans/semantic-vector-leg-and-reranker.md`'s "Why not `sqlite-vec` now" section for the full argument as originally worked through.
+
+**Container memory sizing.** The matrix is not the whole working set: SQLite performs only when the whole database file stays page-cached. Budget about 150MB of Node/SQLite baseline plus ~16KB per chunk (11.8KB of database + 4.1KB of 1024d matrix). The compose files set `mem_limit: 4g`, which holds about 240k chunks, close to the vector ceiling above. At 99,309 chunks the live peak measured 1.91GB, or 2.32GB during a re-index. Under 1g the companion swapped and every search paid page faults. When the index outgrows the limit, `GET /health`'s `memory.pressure` and the Command Center Fleet view flag it first. Next limit = 150MB + target chunks × 16KB.
 
 ### Schema and operational surface
 
@@ -269,3 +271,4 @@ capped at ~15s total per flush) so follow-up queries land in an open window; and
 in-memory vector matrix is invalidated once per completed flush rather than after every
 sub-batch, so mid-backfill searches read a warm matrix (new chunks become
 vector-searchable when the flush completes).
+Above 5,000 chunks the matrix is rebuilt off the request path. While it rebuilds, searches answer from full-text only and carry `vectorPending: true`, and the search modal says the semantic index is rebuilding.

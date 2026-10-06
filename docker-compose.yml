@@ -12,10 +12,13 @@ services:
         GIT_SHA: ${CRUCIBLE_GIT_SHA:-unknown}
     container_name: crucible-search
     restart: unless-stopped
-    # 1g, not 512m: the vector leg holds one Float32Array of chunks x dim. At 1024d over the
-    # current 52,257-chunk index that is ~214MB resident on top of the Node baseline and
-    # SQLite's page cache. See plans/semantic-vector-leg-and-reranker.md.
-    mem_limit: 1g
+    # 4g, sized by arithmetic (plans/search-latency-durability.md): working set ~=
+    # 150MB Node/SQLite baseline + chunks x (11.8KB DB, whole file page-cached + 4.1KB
+    # 1024d Float32 matrix row). 100k chunks (2026-10) ~= 1.75GB; 4g holds ~240k chunks,
+    # ~6 months at the measured ~680 chunks/day and near the ~250k brute-force vector-leg
+    # ceiling. Next bump: limit = 150MB + target_chunks x 16KB. /health memory.pressure and
+    # the Command Center Fleet view flag exhaustion before users feel it.
+    mem_limit: 4g
     ports:
       - "127.0.0.1:4801:4801"
     environment:
