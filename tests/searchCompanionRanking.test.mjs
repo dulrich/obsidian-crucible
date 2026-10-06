@@ -71,23 +71,23 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`);
 	return db;
 }
 
-function search(db, query, limit = 10) {
-	return runSearch(db, { vaultId: VAULT, query, limit, vectors: vectorsFor(db) });
+async function search(db, query, limit = 10) {
+	return await runSearch(db, { vaultId: VAULT, query, limit, vectors: vectorsFor(db) });
 }
 
-// The same call with a ranking mode named explicitly. `search()` above deliberately never
+// The same call with a ranking mode named explicitly. `await search()` above deliberately never
 // passes the field at all — that is the unflagged path every plugin call site takes, and the
 // byte-identity test below is exactly the comparison between the two.
-function searchMode(db, query, rankingMode, limit = 10) {
-	return runSearch(db, { vaultId: VAULT, query, limit, rankingMode, vectors: vectorsFor(db) });
+async function searchMode(db, query, rankingMode, limit = 10) {
+	return await runSearch(db, { vaultId: VAULT, query, limit, rankingMode, vectors: vectorsFor(db) });
 }
 
-test('title match outranks a body match for the same term', () => {
+test('title match outranks a body match for the same term', async () => {
 	const db = makeDb([
 		{ path: 'Notes/Widget Handbook.md', title: 'Widget Handbook', text: 'A guide to assembling things in general.' },
 		{ path: 'Notes/Daily.md', title: 'Daily log', text: 'the widget came up again, widget widget widget everywhere' },
 	]);
-	const outcome = search(db, 'widget');
+	const outcome = await search(db, 'widget');
 	assert.equal(outcome.results.length, 2);
 	assert.equal(outcome.results[0].path, 'Notes/Widget Handbook.md');
 	assert.ok(outcome.results[0].score > outcome.results[1].score);
@@ -97,7 +97,7 @@ test('title match outranks a body match for the same term', () => {
 	assert.equal(outcome.results[1].attribution.titleRank, null);
 });
 
-test('two-term queries use AND with a trailing prefix, not the old pure OR', () => {
+test('two-term queries use AND with a trailing prefix, not the old pure OR', async () => {
 	const built = buildFtsQuery('crucible search');
 	assert.equal(built.primary, '("crucible search") OR ("crucible" AND "search"*)');
 	assert.equal(built.fallback, '("crucible" OR "search"*)');
@@ -110,40 +110,40 @@ test('two-term queries use AND with a trailing prefix, not the old pure OR', () 
 		{ path: 'Both.md', title: 'Both', text: 'crucible and search live together here' },
 		{ path: 'OnlyOne.md', title: 'Only one', text: 'crucible appears alone in this note' },
 	]);
-	const outcome = search(db, 'crucible search');
+	const outcome = await search(db, 'crucible search');
 	assert.equal(outcome.fallbackUsed, false);
 	assert.deepEqual(outcome.results.map(row => row.path), ['Both.md']);
 });
 
-test('prefix expansion matches a partial word', () => {
+test('prefix expansion matches a partial word', async () => {
 	const db = makeDb([
 		{ path: 'Infra.md', title: 'Infra', text: 'kubernetes deployment strategy' },
 	]);
 	const built = buildFtsQuery('kubern');
 	assert.equal(built.primary, '("kubern") OR ("kubern"*)');
-	const outcome = search(db, 'kubern');
+	const outcome = await search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['Infra.md']);
 });
 
-test('non-ASCII terms survive tokenization', () => {
+test('non-ASCII terms survive tokenization', async () => {
 	assert.deepEqual(tokenizeQuery('crème brûlée'), ['crème', 'brûlée']);
 	assert.deepEqual(tokenizeQuery('日本語 テスト'), ['日本語', 'テスト']);
 	const db = makeDb([
 		{ path: 'Cafe.md', title: 'Café notes', text: 'crème brûlée, résumé, 日本語 テスト' },
 		{ path: 'Other.md', title: 'Other', text: 'nothing relevant here' },
 	]);
-	assert.deepEqual(search(db, 'brûlée').results.map(row => row.path), ['Cafe.md']);
-	assert.deepEqual(search(db, '日本語').results.map(row => row.path), ['Cafe.md']);
+	assert.deepEqual((await search(db, 'brûlée')).results.map(row => row.path), ['Cafe.md']);
+	assert.deepEqual((await search(db, '日本語')).results.map(row => row.path), ['Cafe.md']);
 });
 
-test('pooling returns exactly one row per path, scored on its best chunk', () => {
+test('pooling returns exactly one row per path, scored on its best chunk', async () => {
 	const db = makeDb([
 		{ id: 'a', path: 'Pool.md', title: 'Pool', heading: 'First', text: 'pooling mentioned once' },
 		{ id: 'b', path: 'Pool.md', title: 'Pool', heading: 'Second', text: 'pooling pooling pooling pooling pooling' },
 		{ id: 'c', path: 'Pool.md', title: 'Pool', heading: 'Third', text: 'pooling mentioned once again' },
 		{ id: 'd', path: 'Other.md', title: 'Other', heading: 'Only', text: 'pooling elsewhere' },
 	]);
-	const outcome = search(db, 'pooling');
+	const outcome = await search(db, 'pooling');
 	assert.deepEqual(outcome.results.map(row => row.path).sort(), ['Other.md', 'Pool.md']);
 	assert.equal(outcome.total, 2);
 	const pool = outcome.results.find(row => row.path === 'Pool.md');
@@ -153,20 +153,20 @@ test('pooling returns exactly one row per path, scored on its best chunk', () =>
 	assert.equal(pool.chunkId, 'b');
 });
 
-test('total counts every matching path, not just the returned page', () => {
+test('total counts every matching path, not just the returned page', async () => {
 	const rows = [];
 	for (let i = 0; i < 25; i++) rows.push({ path: `Note-${i}.md`, title: `Note ${i}`, text: 'shared needle term' });
-	const outcome = search(makeDb(rows), 'needle', 5);
+	const outcome = await search(makeDb(rows), 'needle', 5);
 	assert.equal(outcome.results.length, 5);
 	assert.equal(outcome.total, 25);
 });
 
-test('the OR fallback fires when the AND form yields nothing', () => {
+test('the OR fallback fires when the AND form yields nothing', async () => {
 	const db = makeDb([
 		{ path: 'Alpha.md', title: 'Alpha', text: 'alpha stands alone' },
 		{ path: 'Beta.md', title: 'Beta', text: 'beta stands alone' },
 	]);
-	const outcome = search(db, 'alpha beta');
+	const outcome = await search(db, 'alpha beta');
 	assert.equal(outcome.fallbackUsed, true);
 	assert.equal(outcome.match, '("alpha" OR "beta"*)');
 	assert.equal(outcome.results.length, 2);
@@ -174,36 +174,36 @@ test('the OR fallback fires when the AND form yields nothing', () => {
 	assert.equal(outcome.total, 2);
 });
 
-test('an unmatchable query returns no rows instead of an FTS5 syntax error', () => {
+test('an unmatchable query returns no rows instead of an FTS5 syntax error', async () => {
 	const db = makeDb([{ path: 'Alpha.md', title: 'Alpha', text: 'alpha stands alone' }]);
-	const outcome = search(db, '!!!');
+	const outcome = await search(db, '!!!');
 	assert.equal(outcome.results.length, 0);
 	assert.equal(outcome.total, 0);
 });
 
-test('quotes in a query are escaped rather than breaking the FTS expression', () => {
+test('quotes in a query are escaped rather than breaking the FTS expression', async () => {
 	const db = makeDb([{ path: 'Q.md', title: 'Q', text: 'say hello now' }]);
 	// Quotes are not term characters, so a quoted query still tokenizes to its words.
 	assert.deepEqual(buildFtsQuery('say "hello" now').terms, ['say', 'hello', 'now']);
-	assert.equal(search(db, 'say "hello" now').results.length, 1);
+	assert.equal((await search(db, 'say "hello" now')).results.length, 1);
 	// A query that tokenizes to nothing falls back to a quoted literal; the `""` escaping is
 	// what keeps that literal from becoming an FTS5 syntax error (which surfaces as a 500).
 	assert.equal(buildFtsQuery('"').primary, '""""');
-	assert.equal(search(db, '"').results.length, 0);
+	assert.equal((await search(db, '"')).results.length, 0);
 });
 
-test('the term cap survives', () => {
+test('the term cap survives', async () => {
 	const query = Array.from({ length: 40 }, (_, i) => `term${i}`).join(' ');
 	assert.equal(tokenizeQuery(query).length, 24);
 	assert.equal(buildFtsQuery(query).terms.length, 24);
 });
 
-test('score sign convention: every score is higher-is-better, and order follows it', () => {
+test('score sign convention: every score is higher-is-better, and order follows it', async () => {
 	const db = makeDb([
 		{ path: 'Needle.md', title: 'Needle', text: 'needle in the title and body' },
 		{ path: 'Haystack.md', title: 'Haystack', text: 'one needle buried in a lot of unrelated words here' },
 	]);
-	const outcome = search(db, 'needle');
+	const outcome = await search(db, 'needle');
 	for (const row of outcome.results) {
 		assert.ok(row.score > 0, 'score must be positive/higher-is-better');
 		assert.ok(row.scoreText > 0, 'scoreText must be the negated bm25 (higher-is-better)');
@@ -215,7 +215,7 @@ test('score sign convention: every score is higher-is-better, and order follows 
 	assert.deepEqual(scores, [...scores].sort((a, b) => b - a), 'results must arrive sorted by descending score');
 });
 
-test('RRF fusion promotes a title hit sitting below the bm25 leader', () => {
+test('RRF fusion promotes a title hit sitting below the bm25 leader', async () => {
 	const rows = [
 		{ id: 'a', path: 'Body.md', title: 'Unrelated body note', score_text: -9, pooled_chunks: 1 },
 		{ id: 'b', path: 'Other.md', title: 'Also unrelated', score_text: -8, pooled_chunks: 1 },
@@ -230,7 +230,7 @@ test('RRF fusion promotes a title hit sitting below the bm25 leader', () => {
 	assert.ok(fused.every(row => row.score > 0));
 });
 
-test('titleMatchScore ranks exact over prefix over substring over partial', () => {
+test('titleMatchScore ranks exact over prefix over substring over partial', async () => {
 	const exact = titleMatchScore(['widget'], { title: 'Widget', path: 'a/Widget.md' });
 	const prefix = titleMatchScore(['widget'], { title: 'Widget handbook', path: 'a/Widget handbook.md' });
 	const substring = titleMatchScore(['widget'], { title: 'The widget handbook', path: 'a/x.md' });
@@ -263,13 +263,13 @@ function makeSplitTermsDb() {
 	]);
 }
 
-test('coverage is the default, and naming it explicitly changes nothing', () => {
+test('coverage is the default, and naming it explicitly changes nothing', async () => {
 	assert.equal(DEFAULT_RANKING_MODE, 'coverage');
 	// Three shapes at once: a plain multi-term hit, a query the loose-OR rescue used to catch,
 	// and the split-terms fixture the flip exists for.
 	for (const query of [SPLIT_TERMS_QUERY, 'matt pocock', 'pocock onboarding', 'skills']) {
-		const unflagged = search(makeSplitTermsDb(), query);
-		const explicit = searchMode(makeSplitTermsDb(), query, 'coverage');
+		const unflagged = await search(makeSplitTermsDb(), query);
+		const explicit = await searchMode(makeSplitTermsDb(), query, 'coverage');
 		assert.equal(explicit.rankingMode, DEFAULT_RANKING_MODE);
 		assert.equal(explicit.match, unflagged.match, `match must not move for "${query}"`);
 		assert.equal(explicit.fallbackUsed, unflagged.fallbackUsed);
@@ -280,7 +280,7 @@ test('coverage is the default, and naming it explicitly changes nothing', () => 
 	}
 	// The regression the flip fixes, re-asserted on the winner: the split-terms target is now
 	// reachable by DEFAULT — no flag, no client change, exactly what an unmodified plugin sends.
-	const outcome = search(makeSplitTermsDb(), SPLIT_TERMS_QUERY);
+	const outcome = await search(makeSplitTermsDb(), SPLIT_TERMS_QUERY);
 	assert.equal(outcome.coverageUsed, true);
 	const paths = outcome.results.map(row => row.path);
 	assert.ok(paths.includes('Target.md'), 'the split-terms target must be reachable by default');
@@ -289,11 +289,11 @@ test('coverage is the default, and naming it explicitly changes nothing', () => 
 	assert.equal(paths.includes('Common.md'), false);
 });
 
-test("'current' still pins the pre-flip behavior, now only when asked for", () => {
+test("'current' still pins the pre-flip behavior, now only when asked for", async () => {
 	// The old default is not deleted, it is demoted: the bake-off baseline must stay
 	// reproducible per request, and its known failure shape stays pinned here so a future
 	// "simplify the modes" pass cannot silently redefine what 'current' meant.
-	const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'current');
+	const outcome = await searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'current');
 	assert.equal(outcome.rankingMode, 'current');
 	assert.equal(outcome.coverageUsed, false);
 	// The bug itself: under 'current' the target is unreachable because no single chunk
@@ -307,8 +307,8 @@ test("'current' still pins the pre-flip behavior, now only when asked for", () =
 	}
 });
 
-test('blend mode unions the loose-OR pool in, and the strict-AND rows keep the head of the text leg', () => {
-	const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'blend');
+test('blend mode unions the loose-OR pool in, and the strict-AND rows keep the head of the text leg', async () => {
+	const outcome = await searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'blend');
 	const paths = outcome.results.map(row => row.path);
 	assert.ok(paths.includes('Target.md'), 'the split-terms target must be reachable under blend');
 	assert.ok(paths.includes('Decoy.md'), 'the strict-AND decoy must still rank, not be displaced');
@@ -330,24 +330,24 @@ test('blend mode unions the loose-OR pool in, and the strict-AND rows keep the h
 	assert.equal(outcome.total, 3);
 });
 
-test('blend leaves a query the strict AND already answers alone', () => {
+test('blend leaves a query the strict AND already answers alone', async () => {
 	const db = makeSplitTermsDb();
 	// Both terms live in one chunk of the decoy and one of the target's, so the AND matches and
 	// the OR adds only Common.md — the head of the ranking must not move.
-	const current = searchMode(db, 'matt pocock', 'current');
-	const blended = searchMode(db, 'matt pocock', 'blend');
+	const current = await searchMode(db, 'matt pocock', 'current');
+	const blended = await searchMode(db, 'matt pocock', 'blend');
 	assert.equal(current.results[0].path, blended.results[0].path);
 	assert.equal(blended.results[0].attribution.textRank, 1);
 	// A single-term query's AND clause *is* that term, so the loose-OR form matches exactly the
 	// same set: blend is inert by construction and must not pay for a second FTS scan.
-	const single = searchMode(db, 'skills', 'blend');
+	const single = await searchMode(db, 'skills', 'blend');
 	assert.equal(single.matchFallback, null);
 	assert.equal(single.fallbackUsed, false);
-	assert.equal(JSON.stringify(single.results), JSON.stringify(searchMode(db, 'skills', 'current').results));
+	assert.equal(JSON.stringify(single.results), JSON.stringify((await searchMode(db, 'skills', 'current')).results));
 });
 
-test('coverage mode rescues a document whose terms are split across its own chunks', () => {
-	const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'coverage');
+test('coverage mode rescues a document whose terms are split across its own chunks', async () => {
+	const outcome = await searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'coverage');
 	const paths = outcome.results.map(row => row.path);
 	assert.ok(paths.includes('Target.md'), 'the split-terms target must be reachable under coverage');
 	assert.ok(paths.includes('Decoy.md'), 'the strict-AND decoy must still rank, not be excluded');
@@ -368,15 +368,15 @@ test('coverage mode rescues a document whose terms are split across its own chun
 	assert.equal(COVERAGE_MIN_TERMS, 2);
 });
 
-test('blend+coverage applies both, and every mode keeps the decoy ranked', () => {
+test('blend+coverage applies both, and every mode keeps the decoy ranked', async () => {
 	const reachable = {};
 	for (const mode of ['blend', 'coverage', 'blend+coverage']) {
-		const outcome = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, mode);
+		const outcome = await searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, mode);
 		reachable[mode] = outcome.results.map(row => row.path);
 		assert.ok(reachable[mode].includes('Target.md'), `${mode} must reach the split-terms target`);
 		assert.ok(reachable[mode].includes('Decoy.md'), `${mode} must keep the strict-AND decoy`);
 	}
-	const both = searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'blend+coverage');
+	const both = await searchMode(makeSplitTermsDb(), SPLIT_TERMS_QUERY, 'blend+coverage');
 	assert.equal(both.fallbackUsed, true);
 	assert.equal(both.coverageUsed, true);
 	assert.equal(both.matchFallback, buildFtsQuery(SPLIT_TERMS_QUERY).fallback);
@@ -388,17 +388,17 @@ test('blend+coverage applies both, and every mode keeps the decoy ranked', () =>
 	assert.equal(target.attribution.coverageScore, 1);
 });
 
-test('the coverage leg is inert below two terms and reports nothing when it does not run', () => {
+test('the coverage leg is inert below two terms and reports nothing when it does not run', async () => {
 	const db = makeSplitTermsDb();
-	const single = searchMode(db, 'skills', 'coverage');
+	const single = await searchMode(db, 'skills', 'coverage');
 	assert.equal(single.coverageUsed, false);
 	// Not merely "no rows": with no coverage list, the attribution keys are absent entirely, so
 	// a mode that could not contribute is indistinguishable in payload from one that never ran.
 	for (const row of single.results) assert.equal(Object.hasOwn(row.attribution, 'coverageRank'), false);
-	assert.equal(JSON.stringify(single.results), JSON.stringify(searchMode(db, 'skills', 'current').results));
+	assert.equal(JSON.stringify(single.results), JSON.stringify((await searchMode(db, 'skills', 'current')).results));
 });
 
-test('rankingMode parsing: absent means the default (coverage), unknown is a 400, not a silent degrade', () => {
+test('rankingMode parsing: absent means the default (coverage), unknown is a 400, not a silent degrade', async () => {
 	assert.deepEqual([...RANKING_MODES], ['current', 'blend', 'coverage', 'blend+coverage']);
 	// Absent/empty is every existing client — they get the measured winner, not the baseline.
 	assert.equal(parseRankingMode(undefined), 'coverage');
@@ -489,7 +489,7 @@ test('POST /v1/search carries rankingMode through, and a 200 default response ke
 	});
 });
 
-test('blendPooledRows keeps the primary row for a path both queries returned', () => {
+test('blendPooledRows keeps the primary row for a path both queries returned', async () => {
 	const primary = [
 		{ path: 'A.md', score_text: -9, from: 'primary' },
 		{ path: 'B.md', score_text: -8, from: 'primary' },
@@ -510,7 +510,7 @@ test('blendPooledRows keeps the primary row for a path both queries returned', (
 	assert.equal(nothing.rows, primary);
 });
 
-test('a schema-1 index migrates to the prefix FTS table, the embedding columns, and the composite key', () => {
+test('a schema-1 index migrates to the prefix FTS table, the embedding columns, and the composite key', async () => {
 	const db = new DatabaseSync(':memory:');
 	// The schema-1 bootstrap, verbatim: no prefix= option, and embeddings still in a JSON
 	// TEXT column.
@@ -554,7 +554,7 @@ INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 
 	assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'chunks_migrated'").get().n, 0);
 	assert.equal(db.prepare('SELECT COUNT(*) AS n FROM chunks').get().n, 1);
 	// Content is rebuilt losslessly from `chunks`, and prefix queries now work.
-	const outcome = search(db, 'kubern');
+	const outcome = await search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['Legacy.md']);
 	// Schema 6: a schema-1 database migrates through the whole chain (PK rebuild, then FTS
 	// prefix rebuild) in one `createSchema` call, and both of those rebuilds share
@@ -573,7 +573,7 @@ INSERT INTO chunks_fts VALUES ('legacy', '${VAULT}', 'Legacy.md', 'Legacy', '', 
 	assert.equal(SCHEMA_VERSION, 7);
 });
 
-test('a schema-5 index (composite key + FTS prefix already present) still gets the rowid-pinning rebuild', () => {
+test('a schema-5 index (composite key + FTS prefix already present) still gets the rowid-pinning rebuild', async () => {
 	// Simulates a real pre-6 database: `chunks` already has the composite PK, `chunks_fts`
 	// already has `prefix=`, so neither migrateChunksPrimaryKey nor migrateFtsSchema's
 	// structural triggers fire — the gap this test guards is exactly the one those two
@@ -617,7 +617,7 @@ INSERT INTO chunks_fts (id, vault_id, path, title, heading, text)
 	const ftsRow = db.prepare('SELECT rowid FROM chunks_fts WHERE id = ?').get('a');
 	assert.equal(ftsRow.rowid, chunkRow.rowid);
 	// Searchability survived the rebuild.
-	const outcome = search(db, 'kubern');
+	const outcome = await search(db, 'kubern');
 	assert.deepEqual(outcome.results.map(row => row.path), ['A.md']);
 });
 
@@ -657,7 +657,7 @@ test('the client sees the companion score convention unchanged (higher is better
 		{ path: 'Needle.md', title: 'Needle', text: 'needle in the title and body' },
 		{ path: 'Haystack.md', title: 'Haystack', text: 'one needle buried in a lot of unrelated words' },
 	]);
-	const outcome = search(db, 'needle');
+	const outcome = await search(db, 'needle');
 	// Both flags are taken from the outcome, never written as literals: a vault with no
 	// embeddings must *compute* its way to fts/false, and the day it stops doing that this
 	// assertion is what notices.

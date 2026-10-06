@@ -97,7 +97,7 @@ test('deferred regime: a search on a stale matrix answers FTS-only with vectorPe
 	}
 });
 
-test('an invalidation landing mid-build restarts the build, and the published matrix holds the post-invalidation rows', () => {
+test('an invalidation landing mid-build restarts the build, and the published matrix holds the post-invalidation rows', async () => {
 	const db = makeDb();
 	const insert = db.prepare('INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model, embedding_space, entities) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 3, ?, ?, ?)');
 	const blob = values => new Uint8Array(new Float32Array(values).buffer);
@@ -116,7 +116,7 @@ test('an invalidation landing mid-build restarts the build, and the published ma
 	scheduler.drain();
 	assert.ok(vectors.status().restarts >= 1, 'the in-flight build was discarded and restarted');
 	assert.equal(vectors.prepare(VAULT, null), true);
-	const hits = vectors.knn(VAULT, [0, 0, 1], 1);
+	const hits = await vectors.knn(VAULT, [0, 0, 1], 1);
 	assert.equal(hits[0].id, 'late', 'the post-invalidation row is in the published matrix');
 	assert.equal(vectors.stats(VAULT).count, 1201);
 });

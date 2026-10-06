@@ -88,7 +88,7 @@ test('cosine similarity is exactly the hand-computed value (a transposed matrix 
 	});
 
 	const backend = createVectorBackend(db);
-	const hits = backend.knn(VAULT, [1, 0, 0], 3);
+	const hits = await backend.knn(VAULT, [1, 0, 0], 3);
 	const byId = new Map(hits.map(hit => [hit.id, hit.score]));
 	// cos(query, [3,4,0]) = 3/5 = 0.6 ; cos(query, [0,0,2]) = 0 ; cos(query, [-3,-4,0]) = -0.6.
 	assert.ok(Math.abs(byId.get('a') - 0.6) < 1e-6, `expected 0.6, got ${byId.get('a')}`);
@@ -99,12 +99,12 @@ test('cosine similarity is exactly the hand-computed value (a transposed matrix 
 	assert.deepEqual(hits.map(hit => hit.id), ['a', 'b', 'c']);
 	assert.deepEqual(hits.map(hit => hit.path), ['A.md', 'B.md', 'C.md']);
 	// A query vector is normalised on the way in too, so its magnitude cannot change scores.
-	const scaled = backend.knn(VAULT, [17, 0, 0], 1);
+	const scaled = await backend.knn(VAULT, [17, 0, 0], 1);
 	assert.ok(Math.abs(scaled[0].score - 0.6) < 1e-6);
 	db.close();
 });
 
-test('normalizeEmbedding produces a unit vector and refuses the degenerate cases', () => {
+test('normalizeEmbedding produces a unit vector and refuses the degenerate cases', async () => {
 	const unit = normalizeEmbedding([3, 4, 0]);
 	assert.ok(Math.abs(Math.hypot(...unit) - 1) < 1e-6);
 	assert.throws(() => normalizeEmbedding([0, 0, 0]), /zero vector/);
@@ -331,7 +331,7 @@ test('/health reports the real dimension, model and backend instead of a hardcod
 
 // ── 5. BLOB round-trip ───────────────────────────────────────────────────────────────────
 
-test('an embedding BLOB round-trips bit-identically, including a negative and a denormal', () => {
+test('an embedding BLOB round-trips bit-identically, including a negative and a denormal', async () => {
 	const values = Float32Array.from([
 		0,
 		1,
@@ -367,7 +367,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 
 // ── RRF, invalidation, and the seam itself ───────────────────────────────────────────────
 
-test('three-list RRF fusion matches hand-computed 1/(k+r) arithmetic', () => {
+test('three-list RRF fusion matches hand-computed 1/(k+r) arithmetic', async () => {
 	const rows = [
 		{ id: 'a', path: 'Text.md', title: 'Unrelated body note', score_text: -9, pooled_chunks: 1 },
 		{ id: 'b', path: 'Other.md', title: 'Also unrelated', score_text: -8, pooled_chunks: 1 },
@@ -470,7 +470,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`)
 	db.close();
 });
 
-test('runSearch without a backend is the pre-vector code path, unchanged', () => {
+test('runSearch without a backend is the pre-vector code path, unchanged', async () => {
 	const db = makeDb();
 	db.prepare(`INSERT INTO chunks (id, vault_id, path, content_hash, title, heading, text, mtime, ordinal, metadata_json, embedding, embedding_dim, embedding_model)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`)
@@ -479,7 +479,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`)
 		.run('a', VAULT, 'A.md', 'A', '', 'needle in a haystack');
 	// No `vectors` option at all: nothing may throw, and the outcome must report itself as
 	// FTS-only rather than guessing.
-	const outcome = runSearch(db, { vaultId: VAULT, query: 'needle', limit: 10, queryEmbedding: [1, 0, 0] });
+	const outcome = await runSearch(db, { vaultId: VAULT, query: 'needle', limit: 10, queryEmbedding: [1, 0, 0] });
 	assert.deepEqual(outcome.results.map(row => row.path), ['A.md']);
 	assert.equal(outcome.vectorUsed, false);
 	assert.equal(outcome.semanticAvailable, false);
