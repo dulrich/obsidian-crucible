@@ -273,8 +273,13 @@ export function createVectorBackend(db, options = {}) {
 	let slicing = false;
 	let restarts = 0;
 	let builds = 0;
+	// Graceful shutdown: once stopped, nothing new is queued and an already-scheduled
+	// `setImmediate` slice returns without touching the database, so the DB can be closed
+	// right after stop() without a pending slice running against a closed handle.
+	let stopped = false;
 
 	function enqueue(kind, vaultId, space) {
+		if (stopped) return;
 		const vault = vaultKey(vaultId);
 		const scope = spaceKey(space);
 		const key = JSON.stringify([kind, vault, scope]);
@@ -293,6 +298,10 @@ export function createVectorBackend(db, options = {}) {
 	}
 
 	function runSlice() {
+		if (stopped) {
+			slicing = false;
+			return;
+		}
 		const startedAt = clock();
 		// At least one batch per slice, however slow the clock says the last one was.
 		let first = true;
@@ -383,6 +392,14 @@ export function createVectorBackend(db, options = {}) {
 			}
 			enqueue('matrix', vaultId, space);
 			return false;
+		},
+		// Graceful shutdown: drop the queue and the in-progress task; any slice already
+		// scheduled becomes a no-op. Idempotent.
+		stop() {
+			stopped = true;
+			queue.length = 0;
+			queuedKeys.clear();
+			current = null;
 		},
 		// WP-2 /health readout. Cheap: Map lookups only.
 		status() {

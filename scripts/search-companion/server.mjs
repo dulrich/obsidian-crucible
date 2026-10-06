@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createRequestHandler } from './handler.mjs';
 import { SCHEMA_VERSION, openDatabase } from './schema.mjs';
+import { createVectorBackend } from './vectors.mjs';
 
 // Process startup: argument/environment parsing, the listen call, and the entry-point test.
 // Split out of the single-file companion (WP-rem-R3).
@@ -15,15 +16,82 @@ import { SCHEMA_VERSION, openDatabase } from './schema.mjs';
 // module is one directory down. The facade passes `import.meta.url`; the comparison itself
 // — argv[1] resolved, then realpath'd — is unchanged.
 
-export function startServer({ port, host, dbPath }) {
+// Graceful shutdown bound: `docker stop` waits 10s before SIGKILL, so the whole close —
+// drain plus DB close — must finish well inside that.
+export const SHUTDOWN_TIMEOUT_MS = 4500;
+
+export function startServer({ port, host, dbPath }, options = {}) {
 	const db = openDatabase(dbPath);
-	const server = createServer(createRequestHandler(db));
+	// Created here rather than inside createRequestHandler (its `options.vectors` seam) so
+	// shutdown can stop the sliced rebuild runner before the DB closes.
+	const vectors = createVectorBackend(db, options.vectorOptions);
+	// In-flight request tracking keys on the handler's own promise, not on the socket: an
+	// upsert resumes after async yields and touches the DB in its finalizer even when the
+	// client has already gone, so the DB may close only once every handler has settled.
+	// `options.wrapHandler` is a test seam: it lets a test hold a request in flight (gated)
+	// and observe that shutdown waits for it before closing the DB.
+	const baseHandler = createRequestHandler(db, { vectors });
+	const handler = options.wrapHandler ? options.wrapHandler(baseHandler, db) : baseHandler;
+	const inFlight = new Set();
+	const server = createServer((req, res) => {
+		const p = Promise.resolve(handler(req, res)).catch(() => {});
+		inFlight.add(p);
+		p.finally(() => inFlight.delete(p));
+	});
+	const timeoutMs = options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS;
+	let shutdownPromise = null;
+	// Idempotent: a second call (or second signal) returns the same promise. Resolves
+	// `{ drained: true }` after the DB closed, or `{ drained: false }` when the bound expired
+	// with a handler still running — the DB is then deliberately left open (process exit
+	// releases it) rather than closed under a resumed upsert.
+	function shutdown() {
+		if (shutdownPromise) return shutdownPromise;
+		shutdownPromise = (async () => {
+			server.close();
+			server.closeIdleConnections?.();
+			vectors.stop();
+			let timer;
+			const expired = new Promise(resolveTimer => {
+				timer = setTimeout(() => resolveTimer(false), timeoutMs);
+				timer.unref?.();
+			});
+			const drain = (async () => {
+				while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+				return true;
+			})();
+			const drained = await Promise.race([drain, expired]);
+			clearTimeout(timer);
+			if (!drained) return { drained: false };
+			db.close();
+			return { drained: true };
+		})();
+		return shutdownPromise;
+	}
 	server.listen(port, host, () => {
 		process.stdout.write(`Crucible search companion listening on http://${host}:${port}\n`);
 		process.stdout.write(`SQLite database: ${dbPath}\n`);
 		process.stdout.write(`Schema version: ${SCHEMA_VERSION}\n`);
 	});
-	return { server, db };
+	return { server, db, vectors, shutdown };
+}
+
+// SIGTERM/SIGINT: `docker stop` used to wait its full 10s grace and SIGKILL. Graceful close,
+// then exit 0; an unref'd hard-exit timer bounds the whole thing at 5s. A second signal is a
+// no-op (shutdown() is idempotent and the timer is already armed).
+export function installSignalHandlers({ shutdown }) {
+	let armed = false;
+	const onSignal = () => {
+		if (armed) return;
+		armed = true;
+		const hard = setTimeout(() => process.exit(0), 5000);
+		hard.unref();
+		shutdown().then(
+			() => process.exit(0),
+			() => process.exit(0),
+		);
+	};
+	process.on('SIGTERM', onSignal);
+	process.on('SIGINT', onSignal);
 }
 
 // The listen host defaults to loopback everywhere except inside the container: the API is

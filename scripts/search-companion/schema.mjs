@@ -72,7 +72,7 @@ const FTS_TABLE_SQL = `CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   heading,
   text,
   entities,
-  prefix='2 3'
+  prefix='1 2 3'
 )`;
 
 // `rowid` rides across explicitly, pinning `chunks_fts.rowid` to the owning `chunks.rowid`.
@@ -297,10 +297,20 @@ export function migrateChunksPrimaryKey(db) {
 // column, so the FTS table is fully derivable: drop and refill it in one transaction. That
 // is lossless and deterministic, needs no user action, and leaves no window in which a
 // stale FTS table serves queries. Returns true when a migration actually ran.
+// The trigger keys on the stored prefix *spec*, not merely on `prefix=` being present: a table
+// built as `prefix='2 3'` (pre-2026-10) has no 1-char prefix index, so a 1-char trailing term
+// (`"w"*`) forces the hydrate phase to re-evaluate the MATCH per seeked rowid — measured
+// `"software w"` 1,358ms → 19ms primary after the rebuild, results byte-identical.
+export function ftsPrefixSpecHasOneChar(sql) {
+	const m = /prefix\s*=\s*['"]?([0-9\s]+)['"]?/i.exec(sql);
+	if (!m) return false;
+	return m[1].trim().split(/\s+/).includes('1');
+}
+
 export function migrateFtsSchema(db) {
 	const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'").get();
 	const sql = typeof row?.sql === 'string' ? row.sql : '';
-	if (!sql || /prefix\s*=/i.test(sql)) return false;
+	if (!sql || ftsPrefixSpecHasOneChar(sql)) return false;
 	db.exec('BEGIN');
 	try {
 		db.exec('DROP TABLE chunks_fts');
