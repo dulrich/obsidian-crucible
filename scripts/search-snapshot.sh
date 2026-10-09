@@ -7,9 +7,9 @@
 # container, which produces an atomic, consistent, self-contained, compacted snapshot with no
 # downtime and no WAL sidecar to carry along.
 #
-# The database lives in the Docker volume `fleet_crucible-search-data` (the
-# the fleet control repo fleet compose project's volume — NOT this repo's own docker-compose.yml,
-# which names a volume `crucible-search-data` that does not exist / is not what's running),
+# The database lives in the fleet compose project's `crucible-search-data` volume (prefixed
+# with that project's name — NOT this repo's own docker-compose.yml volume `crucible-search-data`
+# when the fleet stack is what's running),
 # mounted at /data/search.sqlite inside the container named `crucible-search`.
 #
 # Usage:

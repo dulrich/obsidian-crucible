@@ -1,2 +1,2 @@
-# 2026-10-08: braces@3.0.3 via micromatch, dev-only, no upstream fix — remove when braces ships one (plans: fleet-control dev-deps-trivy-remediation)
+# 2026-10-08: braces@3.0.3 via micromatch, dev-only, no upstream fix — remove when braces ships one (fleet plan: dev-deps-trivy-remediation)
 CVE-2026-93687
