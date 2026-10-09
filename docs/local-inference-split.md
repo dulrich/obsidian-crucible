@@ -89,7 +89,7 @@ for graduating to a shared service — (1) latency-sensitive online use, (2) thr
 proposal has to argue against that finding on its own terms, not around it.
 
 Two details in it are worth correcting for this record. **First, "this box, CPU-only (no GPU)" is
-a torch fact, not a hardware fact.** The footprint was measured on *this same host* — `the GPU host`,
+a torch fact, not a hardware fact.** The footprint was measured on *this same host* — the GPU host,
 24 logical cores, `mem_info_vram_total` 17,095,983,104 B, i.e. byte-identical to the figure in
 `config.yaml`'s fit math. `torch.cuda.is_available()` is False because the GPU is AMD gfx1201, and
 the fleet **forbids ROCm there** (`docker/llamacpp-vulkan/AGENTS.md`: invalid GPU programs are the
@@ -416,7 +416,7 @@ plugin's repo more widely under stricter hygiene rules.
    sprint, Stage 2 starts immediately and Stage 1 is nearly pointless. If it is a year out, this
    record should be re-read rather than executed.
 2. **Which repo would own the new initiative — a new one, or does it fold into the fleet control repo?**
-   the fleet control repo already owns the compose file, `SERVICES.md`, and the RDNA4 GPU reference. A
+   The fleet control repo already owns the compose file, `SERVICES.md`, and the RDNA4 GPU reference. A
    `fleet-control/inference/` subtree is a third option this record did not assume, and it is
    cheaper than a new repo while still getting the artifact out of the public plugin.
 3. **Does the entity sidecar serve Crucible over HTTP, or does the plugin stay entity-source-

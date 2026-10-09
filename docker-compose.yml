@@ -1,6 +1,6 @@
 # Standalone stack for the Crucible search companion. Mirrors the block enrolled in the
-# fleet-control home-compose fleet (the fleet compose file), so `docker compose up` here and
-# `home-compose up crucible-search` there bring up the same services.
+# fleet compose stack, so `docker compose up` here and the fleet's `up crucible-search`
+# there bring up the same services.
 #
 # JSON API only, no UI. Unauthenticated with full index write access, so every published
 # port is scoped to loopback rather than all interfaces.

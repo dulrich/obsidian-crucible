@@ -4,6 +4,8 @@ This is the root contract. Instructions here apply repo-wide. Area-local instruc
 child `AGENTS.md` files — **walk root → the nearest child before editing**, and when they
 disagree about gates or mechanics, the nearest child wins (fleet Rule 0).
 
+Machine-local fleet detail (sibling repo locations, the fleet compose stack, shared skills install) lives in `AGENTS.local.md` when present; it is private and never published.
+
 | Area | File | Covers |
 | --- | --- | --- |
 | Search + companion | `src/search/AGENTS.md` | FTS/vector legs, schema-version pairing, index lifecycle, latency + quality measurements |
@@ -13,7 +15,7 @@ disagree about gates or mechanics, the nearest child wins (fleet Rule 0).
 | Ingestion dashboard | `src/ingestion/AGENTS.md` | Derived ID keys, Orphaned Attachments, dashboard render/dirty-flush pipeline |
 | Settings UI | `src/settings/AGENTS.md` | Destructive-actions framework, AI/Orchestrate renderer split, settings-chrome UI standards |
 | Theme | `theme/AGENTS.md` | The surround axis, `theme.css` specificity law, token vendoring |
-| Inference services | `../inference-engine/` (own repo since 2026-07-26) | llama-swap router + GLiNER2 sidecar; Vulkan/GPU verification, capability probing live in its `llama/AGENTS.md` |
+| Inference services | the inference-engine repo (`../inference-engine/`, own repo since 2026-07-26) | llama-swap router + GLiNER2 sidecar; Vulkan/GPU verification, capability probing live in its `llama/AGENTS.md` |
 
 Five quirks are genuinely cross-cutting and stay in this file under [Quirks](#quirks): the
 NUL/`console.*` gate block, the `updateFrontmatter` stale-cache write barrier, the
@@ -92,7 +94,7 @@ A valid rerun packet includes:
 
 ## UI & UX Standards
 
-- **Crucible builds primarily against the N1 Console design system**, adapted where Obsidian's built-in UI requires it. The component specs live in the shared `signalworks-design` skill (`~/.claude/skills/signalworks-design/`, canonical source `the fleet skills source`) — consult them before inventing a treatment or copying a nearby ad-hoc rule. Two rules that look contradictory and are not:
+- **Crucible builds primarily against the N1 Console design system**, adapted where Obsidian's built-in UI requires it. The component specs live in the shared `signalworks-design` skill (`~/.claude/skills/signalworks-design/`) — consult them before inventing a treatment or copying a nearby ad-hoc rule. Two rules that look contradictory and are not:
   - **The design language comes from N1**: the pill taxonomy (status / tag / neutral), pill geometry, status semantics, and the fixed lucide icon mapping (one concept = one icon fleet-wide).
   - **The expression stays in Obsidian semantic vars**: write `var(--text-muted)`, never `var(--n1-muted)`. `theme/theme.css`'s adapter maps N1 tokens onto Obsidian's names, and that indirection is exactly what lets the theme reskin plugin views for free (see `theme/AGENTS.md`). **Never reach for an `--n1-*` token from `styles.css`.**
 - **Icon-mapping table (one concept = one icon, fleet-wide).** The single verb → lucide-glyph lookup. Adding a control means reusing a row or adding a new one — never a second icon for an existing concept, never a second concept on an existing icon.
@@ -227,7 +229,7 @@ Additional tokens available in **attachment** folder/name templates (`applyAttac
 The one-line hooks below say *where to walk*, not what to do — read the full entry before acting.
 
 **In this file (repo-wide / cross-cutting):**
-- Shared Claude Code skills are not vendored here — re-run `the fleet skills installer`.
+- Shared Claude Code skills are not vendored here — re-run the fleet skills installer (see `AGENTS.local.md`).
 - Measurement artifacts belong in the eval-harness repo; `runs/` is scrubbed and gitignored here.
 - `console.*` is banned outside `src/log.ts` — **and the gate needs `-a`** (three NUL incidents).
 - Obsidian replays `vault.on('create')` for every pre-existing file at startup — side-effecting create listeners register inside `onLayoutReady`.
@@ -253,7 +255,7 @@ The one-line hooks below say *where to walk*, not what to do — read the full e
 
 Non-obvious Obsidian/runtime behaviors that bit us once and would bite again. Add entries here when a fix turned out to hinge on something the API docs don't surface — and add them to the **nearest** `AGENTS.md`, not automatically this one.
 
-- **Shared Claude Code skills (tn-code-review, plan-workflow, tests-lint, project-setup, migrations-release-cleanup) are NOT in this repo.** They live canonically in `../the fleet skills source` and are installed machine-wide as symlinks into `~/.claude/skills/` by that repo's `skills/install.sh`. This repo's local `.claude/skills/tn-code-review` copy was deleted in favor of the shared one — if a skill seems missing, re-run `the fleet skills installer` rather than restoring a local copy (local copies drift).
+- **Shared Claude Code skills (tn-code-review, plan-workflow, tests-lint, project-setup, migrations-release-cleanup) are NOT in this repo.** They live canonically in the fleet control repo and are installed machine-wide as symlinks into `~/.claude/skills/` by its skills installer (location in `AGENTS.local.md`). This repo's local `.claude/skills/tn-code-review` copy was deleted in favor of the shared one — if a skill seems missing, re-run that installer rather than restoring a local copy (local copies drift).
 
 - **Measurement artifacts land in the eval-harness repo (`../eval-harness/local-inference-bench/`), never this repo.** `runs/` was scrubbed from this repo's git history on 2026-07-26 (it is public; one sample file carried vault-derived text) and is `.gitignore`d; the archive over there is the source of record for every measured number cited in `docs/local-inference.md` and `docs/search-companion.md`, including the per-claim validity memo. Future measurement runs get a new sibling dir under that archive's `measurements/`.
 
