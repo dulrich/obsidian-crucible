@@ -45,7 +45,7 @@ npm run lint           # ESLint (TypeScript) + Stylelint (CSS)
 npm test               # node --test tests/*.test.mjs
 npm run search:serve   # Run the search companion locally (loopback only)
 npm run search:quality # Ground-truth embedding quality measurement
-npm run test:security  # trivy fs --scanners vuln,misconfig --skip-db-update
+npm run test:security  # trivy fs --scanners vuln,misconfig --include-dev-deps --skip-db-update
                         #   --skip-check-update --exit-code 1 --severity CRITICAL,HIGH .
 ```
 
@@ -57,7 +57,7 @@ Before signaling task completion or reporting success, you MUST execute and pass
 2.  **Type Checking:** Run `npx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
 3.  **Tests:** Run `npm test`. Baseline is **949 tests across 79 files, 0 failures** — a drop in the count is a deleted test, not a pass.
 4.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
-5.  **Security scan:** Run `npm run test:security` — `trivy fs --scanners vuln,misconfig
+5.  **Security scan:** Run `npm run test:security` — `trivy fs --scanners vuln,misconfig --include-dev-deps
     --skip-db-update --skip-check-update --exit-code 1 --severity CRITICAL,HIGH .` (Docker/IaC
     form: this repo carries a Dockerfile). [added in gate-upgrades WP-3]
 6.  **Verification:** Confirm all processes exited with code 0.
