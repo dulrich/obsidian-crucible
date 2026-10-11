@@ -7,7 +7,7 @@
 // embedding models, which means several indexes over one identical corpus. Building them through
 // the plugin is not an option — Obsidian holds one embedding configuration at a time and each
 // rebuild would take the live index with it — so the corpus comes from a `VACUUM INTO` snapshot
-// (`npm run search:snapshot`) and the vectors are produced here.
+// (`bun run search:snapshot`) and the vectors are produced here.
 //
 // Three properties this design buys, each load-bearing for D:
 //
@@ -93,7 +93,7 @@ function findNewestSnapshot() {
 		.filter(f => f.endsWith('.sqlite'))
 		.map(f => ({ path: join(SNAPSHOT_DIR, f), mtime: statSync(join(SNAPSHOT_DIR, f)).mtimeMs }))
 		.sort((a, b) => b.mtime - a.mtime);
-	if (!files.length) throw new Error(`No .sqlite snapshot in ${SNAPSHOT_DIR} — run: npm run search:snapshot`);
+	if (!files.length) throw new Error(`No .sqlite snapshot in ${SNAPSHOT_DIR} — run: bun run search:snapshot`);
 	return files[0].path;
 }
 

@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import esbuild from 'esbuild';
 
 // rem-R1 (review finding F1): `WorkflowResult` is a discriminated union, not one bag of
-// optional fields. The union's real guarantees are COMPILE-time — `npx tsc -noEmit` is
+// optional fields. The union's real guarantees are COMPILE-time — `bunx tsc -noEmit` is
 // the gate that proves a `{status:'done', error}` or a `{status:'failed'}` with no error
 // cannot be written — so what a runtime suite can add is the other half: that the four
 // variants each settle correctly through the one backend, that the settlement is a single

@@ -261,7 +261,7 @@ Given §1, "it returns vectors" is not evidence. Four checks, in order of how mu
    with the original, so only a model that has actually encoded *meaning* will rank it first — a
    keyword-ish or broken embedding cannot fake it. `bge-m3` ranks it first 100% of the time
    (en→fr); the reranker-as-embedder from §1 manages 19.7%, and once put it dead last of 61.
-   `scripts/embedding-quality.mjs` (`npm run search:quality`) automates exactly this.
+   `scripts/embedding-quality.mjs` (`bun run search:quality`) automates exactly this.
 2. **Compare runtimes before you switch between them.** `scripts/embedding-agreement.mjs` embeds
    the same real chunks through two servers and reports minimum cosine and top-10 rank overlap.
    Run it whenever you change server, model file, quantization or llama.cpp build.

@@ -286,7 +286,7 @@ function searchDeferredResult(
 ): WorkflowDeferredResult {
 	const reason = plugin.searchManager.companionUnavailableReason();
 	const message = reason
-		?? `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)`;
+		?? `Search companion not reachable at ${plugin.settings.searchServiceUrl}. Start it with: home-compose up crucible-search (dev fallback: bun run search:serve)`;
 	return {
 		status: 'deferred',
 		error: detail ? `${message} (${detail})` : message,

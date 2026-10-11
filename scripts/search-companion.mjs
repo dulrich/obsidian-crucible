@@ -6,7 +6,7 @@
 // The implementation lives in `scripts/search-companion/`, decomposed from the single 2,319-line
 // module this file used to be (WP-rem-R3). This file stays two things and nothing else:
 //
-//   1. **The executable.** `npm run search:serve`, the Dockerfile CMD and `node
+//   1. **The executable.** `bun run search:serve`, the Dockerfile CMD and `node
 //      scripts/search-companion.mjs` all still start the server from here, via the
 //      `isMainModule()` guard at the bottom. Nothing above it has a side effect, so importing
 //      this file for a unit test neither opens a database nor binds a port — the module-shape
@@ -17,7 +17,7 @@
 //      this path is the contract.
 //
 // **Zero dependencies, still.** Every module under `search-companion/` imports only `node:*`
-// builtins — `node:sqlite` (which needs Node >= 23.4) most of all. There is no `npm install`
+// builtins — `node:sqlite` (which needs Node >= 23.4) most of all. There is no package-install step
 // step in the Dockerfile, so a single non-builtin import anywhere in the directory silently
 // breaks the container image.
 //

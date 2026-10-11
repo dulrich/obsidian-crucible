@@ -20,7 +20,7 @@ The volume starts **empty** — the schema self-creates on first boot, but it ho
 ### Standalone (dev fallback)
 
 ```bash
-npm run search:serve
+bun run search:serve
 ```
 
 Defaults:
@@ -38,7 +38,7 @@ Or via environment: `CRUCIBLE_SEARCH_PORT`, `CRUCIBLE_SEARCH_HOST`, `CRUCIBLE_SE
 
 The bundled companion script implements local SQLite FTS5/BM25 plus a vector leg: it stores embedding vectors as a `BLOB` (little-endian float32, not JSON — a BLOB reads straight into a `Float32Array` with zero parse, which matters once you're loading 52k+ chunks on wake) and ranks with them. `POST /v1/search` fuses three RRF lists — text, title, vector — rather than two, and `scoreVector`/`attribution.vectorRank` are populated whenever a query embedding arrives and the vault has vectors.
 
-**Why no `sqlite-vec` (or other vector extension), and why that's a measured decision, not a deferred TODO.** `sqlite-vec`'s `vec0` tables do exhaustive KNN — ANN indexing (IVF/HNSW) is roadmap, not shipped — so it would buy a large constant factor via SIMD/quantization, not a smaller complexity class, at the cost of the companion's most load-bearing invariant: dependency-free, one-file `COPY`, no `npm install`, no platform-and-arch-specific `.so`. Brute-force cosine over the full in-memory matrix already measures **13ms at 384d, 24ms at 768d, 33ms at 1024d** over 52,257 chunks (single-threaded JS, `Float32Array` full scan), and that scan is exactly linear:
+**Why no `sqlite-vec` (or other vector extension), and why that's a measured decision, not a deferred TODO.** `sqlite-vec`'s `vec0` tables do exhaustive KNN — ANN indexing (IVF/HNSW) is roadmap, not shipped — so it would buy a large constant factor via SIMD/quantization, not a smaller complexity class, at the cost of the companion's most load-bearing invariant: dependency-free, one-file `COPY`, no package-install step, no platform-and-arch-specific `.so`. Brute-force cosine over the full in-memory matrix already measures **13ms at 384d, 24ms at 768d, 33ms at 1024d** over 52,257 chunks (single-threaded JS, `Float32Array` full scan), and that scan is exactly linear:
 
 | chunks | ≈ notes | scan | resident |
 |---|---|---|---|

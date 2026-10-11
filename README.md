@@ -45,11 +45,11 @@ Clone this repository into your vault's plugin folder, install dependencies, and
 cd <Vault>/.obsidian/plugins
 git clone <repo-url> obsidian-crucible
 cd obsidian-crucible
-npm install
-npm run build
+bun install
+bun run build
 ```
 
-For local development, link the repository root into the vault plugin folder and run `npm run dev` in a separate terminal. Obsidian loads `main.js`, `manifest.json`, and `styles.css`.
+For local development, link the repository root into the vault plugin folder and run `bun run dev` in a separate terminal. Obsidian loads `main.js`, `manifest.json`, and `styles.css`.
 
 ## License
 
