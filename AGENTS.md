@@ -40,14 +40,14 @@ settings-UI mechanics — lives at its nearest child `AGENTS.md` per the table a
 ### Commands
 
 ```bash
-npm install            # Install dependencies
-npm run dev            # Watch for changes and hot-recompile
-npm run build          # tsc -noEmit -skipLibCheck && production bundle
-npm run lint           # ESLint (TypeScript) + biome lint (CSS: styles.css, theme/theme.css)
-npm test               # node --test tests/*.test.mjs
-npm run search:serve   # Run the search companion locally (loopback only)
-npm run search:quality # Ground-truth embedding quality measurement
-npm run test:security  # trivy fs --scanners vuln,misconfig --include-dev-deps --skip-db-update
+bun install            # Install dependencies
+bun run dev            # Watch for changes and hot-recompile
+bun run build          # tsc -noEmit -skipLibCheck && production bundle
+bun run lint           # ESLint (TypeScript) + biome lint (CSS: styles.css, theme/theme.css)
+bun run test           # node --test tests/*.test.mjs
+bun run search:serve   # Run the search companion locally (loopback only)
+bun run search:quality # Ground-truth embedding quality measurement
+bun run test:security  # trivy fs --scanners vuln,misconfig --include-dev-deps --skip-db-update
                         #   --skip-check-update --exit-code 1 --severity CRITICAL,HIGH .
 ```
 
@@ -55,16 +55,16 @@ npm run test:security  # trivy fs --scanners vuln,misconfig --include-dev-deps -
 
 Before signaling task completion or reporting success, you MUST execute and pass this sequence. **Run these commands sequentially (do not background them) so that output is immediately visible:**
 
-1.  **Linting:** Run `npm run lint`. This executes both ESLint (for TypeScript) and biome lint (CSS only — `styles.css` and `theme/theme.css`, per `biome.json`). All errors MUST be resolved.
-2.  **Type Checking:** Run `npx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
-3.  **Tests:** Run `npm test`. Baseline is **949 tests across 79 files, 0 failures** — a drop in the count is a deleted test, not a pass.
+1.  **Linting:** Run `bun run lint`. This executes both ESLint (for TypeScript) and biome lint (CSS only — `styles.css` and `theme/theme.css`, per `biome.json`). All errors MUST be resolved.
+2.  **Type Checking:** Run `bunx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
+3.  **Tests:** Run `bun run test`. Baseline is **2041 tests across 160 files, 0 failures** — a drop in the count is a deleted test, not a pass.
 4.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
-5.  **Security scan:** Run `npm run test:security` — `trivy fs --scanners vuln,misconfig --include-dev-deps
+5.  **Security scan:** Run `bun run test:security` — `trivy fs --scanners vuln,misconfig --include-dev-deps
     --skip-db-update --skip-check-update --exit-code 1 --severity CRITICAL,HIGH .` (Docker/IaC
     form: this repo carries a Dockerfile). [added in gate-upgrades WP-3]
 6.  **Verification:** Confirm all processes exited with code 0.
 
-(`npm run build` already chains steps 2 and 4; run them explicitly when you need the output separated.)
+(`bun run build` already chains steps 2 and 4; run them explicitly when you need the output separated.)
 
 Two gates are not commands and are easy to skip — run both on every file you create or touch:
 
@@ -217,7 +217,7 @@ Additional tokens available in **attachment** folder/name templates (`applyAttac
 
 ## Testing
 
-- **Hot reload watcher:** At the start of implementation or debugging work, remind the user to run `npm run dev` in a separate terminal. This watcher is for the user's Obsidian hot-reload workflow; without it, changes may compile only during the final build and can appear not to have taken effect in Obsidian. Do not run `npm run dev` automatically unless the user explicitly asks or the task specifically requires watching live build output. If you do run it, stop it before the full cleanup loop.
+- **Hot reload watcher:** At the start of implementation or debugging work, remind the user to run `bun run dev` in a separate terminal. This watcher is for the user's Obsidian hot-reload workflow; without it, changes may compile only during the final build and can appear not to have taken effect in Obsidian. Do not run `bun run dev` automatically unless the user explicitly asks or the task specifically requires watching live build output. If you do run it, stop it before the full cleanup loop.
 - Link the root directory to your vault:
   ```bash
   ln -s /path/to/plugin <Vault>/.obsidian/plugins/obsidian-crucible

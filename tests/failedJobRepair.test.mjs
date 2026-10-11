@@ -66,7 +66,7 @@ test('classifyFailedJob matches every outage signature in the pattern table', ()
 		'Search service /v1/index/upsert unreachable: TypeError: fetch failed: net::ERR_CONNECTION_REFUSED',
 		'connect ECONNREFUSED 127.0.0.1:4801',
 		// companion-unreachable
-		'Search companion not reachable at http://localhost:4801/health. Start it with: home-compose up crucible-search (dev fallback: npm run search:serve)',
+		'Search companion not reachable at http://localhost:4801/health. Start it with: home-compose up crucible-search (dev fallback: bun run search:serve)',
 		'Search service /v1/index/upsert unreachable: TypeError: fetch failed',
 		// companion-5xx
 		'Search service /v1/search returned 503: Service Unavailable',

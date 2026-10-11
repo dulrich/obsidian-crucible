@@ -1,6 +1,6 @@
 /**
  * Micro-benchmark for the file-open palette selection core. Deliberately NOT named
- * `*.test.mjs`, so `npm test` does not run it: it is a measurement, not a gate.
+ * `*.test.mjs`, so `bun run test` does not run it: it is a measurement, not a gate.
  *
  *   node tests/fileOpenPaletteBench.mjs
  *
