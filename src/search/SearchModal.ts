@@ -7,9 +7,9 @@ import { SearchAbortedError, SearchResult, SearchScoreAttribution } from './type
 import { describePartialResponse, describeSearchFailure } from './searchFailureCause';
 
 export class VaultSearchModal extends Modal {
-	private inputEl: HTMLInputElement;
-	private resultsEl: HTMLElement;
-	private statusEl: HTMLElement;
+	private inputEl!: HTMLInputElement;
+	private resultsEl!: HTMLElement;
+	private statusEl!: HTMLElement;
 	/**
 	 * Monotonic id of the most recently *issued* search. A response whose id is no longer the
 	 * current one is discarded on arrival.

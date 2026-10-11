@@ -103,9 +103,9 @@ export interface CrucibleCommandEntry {
 type CrucibleCommandRunner = () => Promise<unknown>;
 
 export default class CruciblePlugin extends Plugin {
-	settings: CrucibleSettings;
-	linter: Linter;
-	attachmentLocalizer: AttachmentLocalizer;
+	settings!: CrucibleSettings;
+	linter!: Linter;
+	attachmentLocalizer!: AttachmentLocalizer;
 	commandRegistry: CrucibleCommandEntry[] = [];
 	private commandRunners = new Map<string, CrucibleCommandRunner>();
 	// Widened from `private`: read/written by internalCommands.ts, captureCommands.ts
@@ -113,35 +113,35 @@ export default class CruciblePlugin extends Plugin {
 	// (see the commands.ts registration-hub pattern). TS visibility only —
 	// no runtime behavior change.
 	isMaterializing = false;
-	materializer: Materializer;
-	captureManager: CaptureManager;
-	chainManager: ChainManager;
-	providerManager: ProviderManager;
-	secretRegistry: SecretRegistry;
-	agentManager: AgentManager;
-	orchestrator: Orchestrator;
+	materializer!: Materializer;
+	captureManager!: CaptureManager;
+	chainManager!: ChainManager;
+	providerManager!: ProviderManager;
+	secretRegistry!: SecretRegistry;
+	agentManager!: AgentManager;
+	orchestrator!: Orchestrator;
 	/**
 	 * Per-dependency circuit breaker for the queue. Deliberately in-memory and NEVER
 	 * persisted: a breaker that survives a reload can wedge a service that recovered
 	 * while Obsidian was closed, and rebuilding the hysteresis costs at most three
 	 * deferrals with zero failures.
 	 */
-	serviceHealth: ServiceHealthRegistry;
-	ingestionEvents: IngestionEventBus;
-	noteLocks: NoteLockManager;
-	private noteLockOverlay: NoteLockOverlay;
-	searchManager: SearchManager;
+	serviceHealth!: ServiceHealthRegistry;
+	ingestionEvents!: IngestionEventBus;
+	noteLocks!: NoteLockManager;
+	private noteLockOverlay!: NoteLockOverlay;
+	searchManager!: SearchManager;
 	// Passive, bounded, local record of executed vault searches and which result was opened
 	// (src/search/queryLog.ts). Lives in the plugin's data dir, never in the vault's note tree.
-	searchQueryLog: SearchQueryLog;
+	searchQueryLog!: SearchQueryLog;
 	// The MD5-keyed image description store (src/search/imageDescriptionStore.ts,
 	// docs/multimodal-image-search.md Decision 2). Also lives in the plugin's data dir, outside
 	// the vault's note tree — WP-2/WP-3 read it at chunk-prep and enqueue time respectively.
-	imageDescriptions: ImageDescriptionStore;
-	searchIndexCoordinator: SearchIndexCoordinator;
-	fileOpenIndex: FileOpenIndex;
-	orchestrationAutoRunner: OrchestrationAutoRunner;
-	triggers: TriggerRegistry;
+	imageDescriptions!: ImageDescriptionStore;
+	searchIndexCoordinator!: SearchIndexCoordinator;
+	fileOpenIndex!: FileOpenIndex;
+	orchestrationAutoRunner!: OrchestrationAutoRunner;
+	triggers!: TriggerRegistry;
 	// Latched true on the metadata cache's first full 'resolved' after load, never
 	// reset. The orphaned-attachments scan trusts `metadataCache.resolvedLinks`;
 	// computing it before this latch flips reported 3,323 false orphans of 5,284
@@ -153,13 +153,13 @@ export default class CruciblePlugin extends Plugin {
 	// The single native-settings-modal instance (registered via addSettingTab in onload).
 	// Kept as a field — rather than only living inside the anonymous addSettingTab(new ...)
 	// call — so openSettingsToTab() can deep-link it even while the modal isn't open.
-	private settingTab: CrucibleSettingTab;
+	private settingTab!: CrucibleSettingTab;
 	private tocComponent: TableOfContentsUI | null = null;
 	// Chain-internal command ids registered for each "Chain: X" command, so a chain
 	// can be used as an (awaited, target-file-aware) step inside another chain.
 	// Cleared and rebuilt on every registerChains() so renames/deletes don't leak.
 	private registeredChainInternalIds = new Set<string>();
-	private autoLocalizeScheduler: AutoLocalizeScheduler;
+	private autoLocalizeScheduler!: AutoLocalizeScheduler;
 
 	async onload() {
 		await this.loadSettings();
