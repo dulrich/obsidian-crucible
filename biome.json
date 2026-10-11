@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": ["styles.css", "theme/theme.css", "!vault", "!node_modules", "!.claude"]
+  },
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "javascript": { "linter": { "enabled": false } },
+  "json": { "linter": { "enabled": false } },
+  "css": { "linter": { "enabled": true } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "style": {
+        "noDescendingSpecificity": "off"
+      }
+    }
+  }
+}
