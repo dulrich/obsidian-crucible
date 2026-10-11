@@ -26,7 +26,9 @@ export function renderAgentBindingEditor(tab: CrucibleSettingTab, containerEl: H
 			 .addOption('constrained', 'Constrained: pick from an allowlist at run time')
 			 .addOption('runtime', 'Runtime: pick from all configured models at run time')
 			 .setValue(binding.mode)
-			 .onChange(async (v: AgentBindingMode) => {
+			 .onChange(async (raw: string) => {
+				 if (raw !== 'pinned' && raw !== 'constrained' && raw !== 'runtime') return;
+				 const v: AgentBindingMode = raw;
 				 // Whole-variant replacement, not a mode-tag mutation: switching away from Pinned
 				 // must not leave the old pinned ref persisted under a mode that never reads it.
 				 agent.modelBinding = bindingForMode(v);

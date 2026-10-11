@@ -186,7 +186,9 @@ export function renderEditAgent(tab: CrucibleSettingTab, containerEl: HTMLElemen
 				d.addOption('text', 'Text')
 				 .addOption('file', 'Vault file')
 				 .setValue(getSource())
-				 .onChange(async (v: AgentPromptSource) => {
+				 .onChange(async (raw: string) => {
+					 if (raw !== 'text' && raw !== 'file') return;
+					 const v: AgentPromptSource = raw;
 					 await setSource(v);
 					 tab.display();
 				 });
