@@ -1,7 +1,7 @@
 # Crucible Search companion — headless JSON API (SQLite FTS5) for the Obsidian plugin.
 # No dependency install: the server imports only Node builtins. node:sqlite is unflagged
 # from Node 23.4, so the base image must stay >= 24.
-FROM node:24-slim
+FROM node:24-trixie-slim
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision=${GIT_SHA}
 WORKDIR /app
