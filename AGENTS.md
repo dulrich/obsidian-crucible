@@ -43,7 +43,7 @@ settings-UI mechanics — lives at its nearest child `AGENTS.md` per the table a
 npm install            # Install dependencies
 npm run dev            # Watch for changes and hot-recompile
 npm run build          # tsc -noEmit -skipLibCheck && production bundle
-npm run lint           # ESLint (TypeScript) + Stylelint (CSS)
+npm run lint           # ESLint (TypeScript) + biome lint (CSS: styles.css, theme/theme.css)
 npm test               # node --test tests/*.test.mjs
 npm run search:serve   # Run the search companion locally (loopback only)
 npm run search:quality # Ground-truth embedding quality measurement
@@ -55,7 +55,7 @@ npm run test:security  # trivy fs --scanners vuln,misconfig --include-dev-deps -
 
 Before signaling task completion or reporting success, you MUST execute and pass this sequence. **Run these commands sequentially (do not background them) so that output is immediately visible:**
 
-1.  **Linting:** Run `npm run lint`. This executes both ESLint (for TypeScript) and Stylelint (for CSS). All errors MUST be resolved.
+1.  **Linting:** Run `npm run lint`. This executes both ESLint (for TypeScript) and biome lint (CSS only — `styles.css` and `theme/theme.css`, per `biome.json`). All errors MUST be resolved.
 2.  **Type Checking:** Run `npx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
 3.  **Tests:** Run `npm test`. Baseline is **949 tests across 79 files, 0 failures** — a drop in the count is a deleted test, not a pass.
 4.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.

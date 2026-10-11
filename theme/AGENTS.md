@@ -5,8 +5,8 @@ what is only true here. `theme/` is a **separate Obsidian artifact from the plug
 + `manifest.json`, raw CSS, NOT bundled by esbuild) — it ships in-repo because the third
 light/dark axis needs plugin JS to drive it.
 
-Gates: the root Full Cleanup Loop applies. `npm run lint` runs Stylelint over `**/*.css`, which
-includes `theme/theme.css`.
+Gates: the root Full Cleanup Loop applies. `npm run lint` runs biome lint (CSS only) over the
+files `biome.json` includes: `styles.css` and `theme/theme.css`.
 
 ## Quirks index
 
