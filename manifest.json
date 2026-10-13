@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-crucible",
 	"name": "Crucible",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"minAppVersion": "0.15.0",
 	"description": "An agentic second brain for Obsidian. Orchestrate your workflows, capture your reading, and synthesize insights.",
 	"author": "dulrich",
