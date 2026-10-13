@@ -694,3 +694,23 @@ test('resolveLocalAttachmentRepair: a #fragment-suffixed ref with tier-2 MD5 dup
 	assert.equal(result.target, 'a/dup_MD5.png', 'suffix stripped -> basename is a managed name -> identical-content pick (equal length, lexicographic)');
 	assert.equal(result.reason, null);
 });
+
+// A linked image — `[![](img)](href)`, common in newsletter clips — nests the embed inside
+// a markdown link. The link alternative of MARKDOWN_ATTACHMENT_REF_RE used to match from
+// the outer `[` through the image's `)`, swallowing the embed; the span was then skipped
+// as an unmanaged link, so the localized replacement never landed (re-downloaded on every
+// edit, orphaning the _MD5 file) and a moved note's nested embed was never repointed.
+
+test('rewriteLocalizedAttachmentRefs replaces an image nested inside a markdown link', () => {
+	const img = '![](https://example.com/uploads/logo-1200x628-1.jpg)';
+	const content = `Before\n[${img}](https://link.example.com/click/abc)\nAfter`;
+	const result = rewriteLocalizedAttachmentRefs(content, [{ from: img, to: '![](_resources/n/dd8e_MD5.webp)' }]);
+	assert.deepEqual(result.appliedFrom, [img]);
+	assert.equal(result.content, 'Before\n[![](_resources/n/dd8e_MD5.webp)](https://link.example.com/click/abc)\nAfter');
+});
+
+test('repointAttachmentFolderPrefix repoints an embed nested inside a markdown link and leaves the outer href alone', () => {
+	const content = '[![](_resources/Clippings/note/dd8e_MD5.webp)](https://link.example.com/click/abc)';
+	const updated = repointAttachmentFolderPrefix(content, '_resources/Clippings/note', '_resources/daily/day/2026-10-13/note');
+	assert.equal(updated, '[![](_resources/daily/day/2026-10-13/note/dd8e_MD5.webp)](https://link.example.com/click/abc)');
+});

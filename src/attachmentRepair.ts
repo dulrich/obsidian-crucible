@@ -52,7 +52,11 @@ export interface AttachmentReplacement {
 // the two non-embed (link) alternatives are new and MUST be gated by
 // isManagedAttachmentLink() before either function acts on them, so an ordinary note link
 // (`[[Some Note]]`, `[text](Other Note.md)`) can never be touched.
-const MARKDOWN_ATTACHMENT_REF_RE = /!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\n]+\)|\[\[[^\]\n]+\]\]|\[[^\]\n]*\]\([^)\n]+\)/g;
+// The markdown-link alternative's text excludes `[`: a linked image `[![](img)](href)` would
+// otherwise match from the outer `[` through the image's `)` as one unmanaged "link",
+// swallowing the nested embed so it was never rewritten (localize re-downloaded it on every
+// edit) — with `[` excluded the outer bracket fails here and the scan reaches the embed.
+const MARKDOWN_ATTACHMENT_REF_RE = /!\[\[[^\]\n]+\]\]|!\[[^\]\n]*\]\([^)\n]+\)|\[\[[^\]\n]+\]\]|\[[^[\]\n]*\]\([^)\n]+\)/g;
 
 // Pulls the raw link/href token out of a matched ref span — works for embed and link,
 // wiki and markdown forms alike. Returns null for anything that doesn't parse as one of
