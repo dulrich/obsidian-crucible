@@ -352,8 +352,8 @@ export function renderEditLinkScanWorkflow(tab: CrucibleSettingTab, containerEl:
 	const save = () => tab.plugin.saveSettings();
 
 	bindText(containerEl, {
-		name: 'Registry root',
-		desc: 'Vault folder where one note per canonical URL is stored.',
+		name: 'Legacy registry folder',
+		desc: 'Vault folder of the old one-note-per-URL link registry. Only used as the source for the one-time legacy import command; link records now live in the plugin database.',
 		placeholder: '_crucible/link_registry',
 		get: () => s.orchestrationLinkRegistryRoot,
 		set: (v) => { s.orchestrationLinkRegistryRoot = v.trim() || '_crucible/link_registry'; },
@@ -361,7 +361,7 @@ export function renderEditLinkScanWorkflow(tab: CrucibleSettingTab, containerEl:
 
 	bindTextArea(containerEl, {
 		name: 'Scan exclusions',
-		desc: 'Folders to skip during link scan (one path per line). The link registry root is always excluded.',
+		desc: 'Folders to skip during link scan (one path per line). The legacy registry folder is always excluded.',
 		placeholder: '_crucible',
 		get: () => s.orchestrationLinkScanExclusions.join('\n'),
 		set: (v) => { s.orchestrationLinkScanExclusions = v.split('\n').map(x => x.trim()).filter(x => x.length > 0); },
