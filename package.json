@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-crucible",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "An agentic second brain for Obsidian. Orchestrate your workflows, capture your reading, and synthesize insights.",
 	"main": "main.js",
 	"type": "module",
