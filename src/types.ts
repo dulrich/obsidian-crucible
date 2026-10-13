@@ -22,7 +22,7 @@ export interface Shortcut {
 	file: string;
 }
 
-export type CaptureTarget = 'daily' | 'weekly' | 'monthly' | 'selected' | 'active';
+export type CaptureTarget = 'daily' | 'daily-next' | 'weekly' | 'monthly' | 'selected' | 'active';
 export type CaptureSource = 'dialog' | 'line' | 'line-fallback' | 'selection' | 'selection-fallback';
 export type CaptureTargetSectionMode = 'fixed' | 'source';
 export type CaptureWriteMode = 'append' | 'prepend' | 'replace';

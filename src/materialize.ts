@@ -3,6 +3,10 @@ import { CrucibleSettings } from './types';
 import { ensureFolder, applyTemplateString } from './utils';
 import { PeriodId, getPeriodConfig, periodDisabledMessage } from './periods';
 
+export interface MaterializeOptions {
+	open?: boolean;
+}
+
 export class Materializer {
 	app: App;
 	settings: CrucibleSettings;
@@ -14,8 +18,12 @@ export class Materializer {
 		this.setMaterializing = setMaterializing;
 	}
 
-	async materializeDay(date: moment.Moment): Promise<boolean> {
-		return await this.materializePeriod('daily', date);
+	/**
+	 * `open: false` creates/fills the note without touching any workspace leaf (used by the
+	 * `daily-next` capture target). Default opens, as every existing command expects.
+	 */
+	async materializeDay(date: moment.Moment, options: MaterializeOptions = {}): Promise<boolean> {
+		return await this.materializePeriod('daily', date, options);
 	}
 
 	async materializeWeek(date: moment.Moment): Promise<boolean> {
@@ -26,7 +34,7 @@ export class Materializer {
 		return await this.materializePeriod('monthly', date);
 	}
 
-	private async materializePeriod(period: PeriodId, date: moment.Moment): Promise<boolean> {
+	private async materializePeriod(period: PeriodId, date: moment.Moment, options: MaterializeOptions = {}): Promise<boolean> {
 		const config = getPeriodConfig(this.settings, period);
 		if (!config.enabled) {
 			new Notice(periodDisabledMessage(period));
@@ -53,7 +61,7 @@ export class Materializer {
 			}
 
 			const file = this.app.vault.getAbstractFileByPath(filePath);
-			if (file instanceof TFile) {
+			if (options.open !== false && file instanceof TFile) {
 				await this.app.workspace.getLeaf().openFile(file);
 			}
 			return true;
