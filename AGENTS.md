@@ -57,7 +57,7 @@ Before signaling task completion or reporting success, you MUST execute and pass
 
 1.  **Linting:** Run `bun run lint`. This executes both ESLint (for TypeScript) and biome lint (CSS only — `styles.css` and `theme/theme.css`, per `biome.json`). All errors MUST be resolved.
 2.  **Type Checking:** Run `bunx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
-3.  **Tests:** Run `bun run test`. Baseline is **2057 tests across 163 files, 0 failures** — a drop in the count is a deleted test, not a pass.
+3.  **Tests:** Run `bun run test`. Baseline is **2067 tests across 164 files, 0 failures** — a drop in the count is a deleted test, not a pass.
 4.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
 5.  **Security scan:** Run `bun run test:security` — `trivy fs --scanners vuln,misconfig --include-dev-deps
     --skip-db-update --skip-check-update --exit-code 1 --severity CRITICAL,HIGH .` (Docker/IaC
