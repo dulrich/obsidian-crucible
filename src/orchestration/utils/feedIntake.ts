@@ -120,7 +120,6 @@ export function buildFeedSeenIdSet<Entry, Item>(
 }
 
 export function feedSeenExtraSkipPrefixes<Entry, Item>(plugin: CruciblePlugin, source: FeedSource<Entry, Item>): string[] {
-	const linkRegistryRoot = plugin.settings.orchestrationLinkRegistryRoot || '_crucible/link_registry';
 	const metadataRoot = source.kind === 'youtube'
 		? plugin.settings.orchestrationYoutubeMetadataRoot || '_yt_metadata'
 		: plugin.settings.orchestrationBlogsMetadataRoot || '_blog_metadata';
@@ -128,7 +127,7 @@ export function feedSeenExtraSkipPrefixes<Entry, Item>(plugin: CruciblePlugin, s
 	// treatment, orchestration AGENTS.md), and that's true for both feed kinds —
 	// a blog/YT seen-set scan must skip them the same as its own metadata root.
 	const xMetadataRoot = plugin.settings.orchestrationXMetadataRoot || '_x_metadata';
-	return [linkRegistryRoot, metadataRoot, xMetadataRoot];
+	return [metadataRoot, xMetadataRoot];
 }
 
 export async function loadConfiguredFeedEntries<Entry, Item>(

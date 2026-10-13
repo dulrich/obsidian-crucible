@@ -354,10 +354,9 @@ export class IngestionDashboardUI {
 				this.markDirty('youtubeWithoutMetadata');
 				this.markDirty('orphanedAttachments');
 				this.markDirty('missingAttachments');
-				// Registry paths (under _crucible/link_registry) have no dedicated
-				// path-prefix branch above — a new link-record note fans out through
-				// this unconditional structural branch instead, same as every other
-				// scan section here.
+				// xPosts also merges `_x_metadata` notes, which have no dedicated
+				// path-prefix branch above; registry writes (link_records rows) refresh
+				// it via the `link-registry-changed` event instead.
 				this.markDirty('xPosts');
 				return;
 			}

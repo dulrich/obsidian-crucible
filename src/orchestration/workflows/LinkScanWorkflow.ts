@@ -1,4 +1,3 @@
-import { normalizePath } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
@@ -33,16 +32,15 @@ export function formatLinkScanRegistryProgress(processed: number, total: number)
 export class LinkScanWorkflow implements Workflow {
 	// Two loops, both instrumented: a vault-wide read pass and a registry write pass.
 	// The read pass is pure aggregation into a local Map, so stopping in it costs
-	// nothing beyond the reads already done; the write pass creates/updates one
-	// link-record note per URL, and each is independent, so a partial pass is a
-	// consistent vault that the next run simply completes.
+	// nothing beyond the reads already done; the write pass upserts one
+	// link_records row per URL, and each is independent, so a partial pass is a
+	// consistent store that the next run simply completes.
 	async run(_job: OrchestrationJob, ctx: WorkflowContext): Promise<WorkflowResult> {
 		const { plugin } = ctx;
 		const app = plugin.app;
 		const settings = plugin.settings;
 
-		const registryRoot = normalizePath(settings.orchestrationLinkRegistryRoot);
-		const exclusions = normalizeExclusions(settings.orchestrationLinkScanExclusions, registryRoot);
+		const exclusions = normalizeExclusions(settings.orchestrationLinkScanExclusions);
 		const today = todayInTz(settings.orchestrationTimezone);
 
 

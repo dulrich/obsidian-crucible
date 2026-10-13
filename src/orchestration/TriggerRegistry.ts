@@ -90,7 +90,7 @@ export class TriggerRegistry {
 	}
 
 	// Job files under the orchestration queue root, and anything under the plugin's
-	// internal folder more broadly (link_registry, source_eval, cli-runs, debug.md,
+	// internal folder more broadly (source_eval, cli-runs, debug.md,
 	// intake staging), are plugin-managed churn — not user note activity — and must
 	// never reach a trigger. This is the fix for the trigger-storm incident: a queue
 	// job's own create wrote a new job, which wrote a new job, unbounded. Deliberately

@@ -83,7 +83,6 @@ test('YouTube seen set counts real captures and ignored seed ids only', () => {
 test('feedSeenExtraSkipPrefixes follows YouTube settings roots, plus the X metadata root (default) for both source kinds', () => {
 	const plugin = {
 		settings: {
-			orchestrationLinkRegistryRoot: 'Links/Registry',
 			orchestrationYoutubeMetadataRoot: 'Metadata/YouTube',
 			orchestrationBlogsMetadataRoot: 'Metadata/Blogs',
 		},
@@ -93,18 +92,17 @@ test('feedSeenExtraSkipPrefixes follows YouTube settings roots, plus the X metad
 	// `_blog_metadata` (orchestration AGENTS.md) — so both feed kinds skip the X root too.
 	assert.deepEqual(
 		feedSeenExtraSkipPrefixes(plugin, { kind: 'youtube' }),
-		['Links/Registry', 'Metadata/YouTube', '_x_metadata'],
+		['Metadata/YouTube', '_x_metadata'],
 	);
 	assert.deepEqual(
 		feedSeenExtraSkipPrefixes(plugin, { kind: 'blogs' }),
-		['Links/Registry', 'Metadata/Blogs', '_x_metadata'],
+		['Metadata/Blogs', '_x_metadata'],
 	);
 });
 
 test('feedSeenExtraSkipPrefixes uses an explicitly configured X metadata root', () => {
 	const plugin = {
 		settings: {
-			orchestrationLinkRegistryRoot: 'Links/Registry',
 			orchestrationYoutubeMetadataRoot: 'Metadata/YouTube',
 			orchestrationXMetadataRoot: 'Metadata/X',
 		},
@@ -112,6 +110,6 @@ test('feedSeenExtraSkipPrefixes uses an explicitly configured X metadata root', 
 
 	assert.deepEqual(
 		feedSeenExtraSkipPrefixes(plugin, { kind: 'youtube' }),
-		['Links/Registry', 'Metadata/YouTube', 'Metadata/X'],
+		['Metadata/YouTube', 'Metadata/X'],
 	);
 });

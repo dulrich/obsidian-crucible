@@ -63,16 +63,15 @@ export function emitLinkRegistryChanged(plugin: WorkflowContext['plugin'], chang
 	plugin.ingestionEvents?.emit('link-registry-changed', { changed });
 }
 
-/** Normalizes a raw exclusion-folder list (trims, drops empties/trailing slashes) and
- * always folds in `registryRoot` itself — the registry must never scan its own
- * records. Verbatim lift from `LinkScanWorkflow`. */
-export function normalizeExclusions(raw: string[], registryRoot: string): string[] {
+/** Normalizes a raw exclusion-folder list (trims, drops empties/trailing slashes).
+ * Records live in the `link_records` table, not the vault, so there is no registry
+ * folder to self-exclude; a stray legacy stub is skipped by its `type: link-record`. */
+export function normalizeExclusions(raw: string[]): string[] {
 	const out = new Set<string>();
 	for (const item of raw) {
 		const trimmed = item.trim().replace(/\/+$/, '');
 		if (trimmed) out.add(trimmed);
 	}
-	out.add(registryRoot.replace(/\/+$/, ''));
 	return Array.from(out);
 }
 
