@@ -204,7 +204,7 @@ export default class CruciblePlugin extends Plugin {
 				: this.settings.localizeAttachmentsTriggerOnEdit,
 			localize: async file => await this.attachmentLocalizer.localizeNote(file, true),
 		});
-		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; });
+		this.captureManager = new CaptureManager(this.app, this.settings, (state: boolean) => { this.isMaterializing = state; }, this.materializer);
 		this.chainManager = new ChainManager(this.app, this.noteLocks);
 		this.secretRegistry = new SecretRegistry(this);
 		this.providerManager = new ProviderManager(this.app, this.secretRegistry);

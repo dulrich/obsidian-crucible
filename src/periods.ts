@@ -108,6 +108,7 @@ export function getPeriodConfigByTarget(targetType: string, settings: CrucibleSe
 	if (targetType === 'daily' || targetType === 'weekly' || targetType === 'monthly') {
 		return getPeriodConfig(settings, targetType);
 	}
+	if (targetType === 'daily-next') return getPeriodConfig(settings, 'daily');
 	return null;
 }
 

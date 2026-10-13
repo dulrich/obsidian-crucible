@@ -1,4 +1,5 @@
 import { App, Modal, Notice, TFile, TextComponent, moment } from 'obsidian';
+import type { Materializer } from './materialize';
 import { CrucibleSettings, Capture } from './types';
 import { applyTemplateString, FRONTMATTER_REGEX } from './utils';
 import { findSectionRange, insertIntoSection } from './sections';
@@ -13,11 +14,18 @@ export class CaptureManager {
 	app: App;
 	settings: CrucibleSettings;
 	setMaterializing: (state: boolean) => void;
+	materializer?: Pick<Materializer, 'materializeDay'>;
 
-	constructor(app: App, settings: CrucibleSettings, setMaterializing: (state: boolean) => void) {
+	constructor(
+		app: App,
+		settings: CrucibleSettings,
+		setMaterializing: (state: boolean) => void,
+		materializer?: Pick<Materializer, 'materializeDay'>,
+	) {
 		this.app = app;
 		this.settings = settings;
 		this.setMaterializing = setMaterializing;
+		this.materializer = materializer;
 	}
 
 	async executeCapture(
@@ -30,6 +38,9 @@ export class CaptureManager {
 		try {
 			let targetPath = '';
 			const now = moment();
+			// Date fed to {{date}}/{{datetime:...}}: the target note's date for 'daily-next',
+			// invocation time for every other target (unchanged).
+			let templateDate = now;
 			const periodConfig = getPeriodConfigByTarget(capture.targetType, this.settings);
 			if (periodConfig && !periodConfig.enabled) {
 				new Notice(periodDisabledMessage(periodConfig.id));
@@ -40,6 +51,23 @@ export class CaptureManager {
 				case 'daily':
 					targetPath = `${periodConfig!.folder}/${now.format(periodConfig!.dateFormat)}.md`;
 					break;
+				case 'daily-next': {
+					const source = context?.sourceFile ?? targetFile;
+					const date = resolveNextDailyDate(source?.basename, periodConfig!.dateFormat, now);
+					templateDate = date;
+					targetPath = `${periodConfig!.folder}/${date.format(periodConfig!.dateFormat)}.md`;
+					if (!(this.app.vault.getAbstractFileByPath(targetPath) instanceof TFile)) {
+						if (!this.materializer) {
+							new Notice(`Capture target file not found: ${targetPath}`);
+							return false;
+						}
+						await this.materializer.materializeDay(date, { open: false });
+						// materializePeriod's finally clears the shared flag; re-assert it so the
+						// target write below stays guarded. Our own finally clears it on exit.
+						this.setMaterializing(true);
+					}
+					break;
+				}
 				case 'weekly':
 					targetPath = `${periodConfig!.folder}/${now.format(periodConfig!.dateFormat)}.md`;
 					break;
@@ -68,7 +96,7 @@ export class CaptureManager {
 
 			const rawContent = await applyTemplateString(
 				capture.content,
-				now,
+				templateDate,
 				file.basename,
 				value,
 				getCaptureTemplateTokens(context),
@@ -137,6 +165,23 @@ export class CaptureManager {
 			this.setMaterializing(false);
 		}
 	}
+}
+
+/**
+ * Target date for the `daily-next` capture: the day after the source daily note, but never
+ * earlier than today. A source basename that doesn't strictly parse with `dateFormat` (or no
+ * source at all) counts as today, so the result is tomorrow.
+ */
+export function resolveNextDailyDate(
+	sourceBasename: string | undefined,
+	dateFormat: string,
+	now: moment.Moment,
+): moment.Moment {
+	const today = moment(now).startOf('day');
+	const parsed = sourceBasename ? moment(sourceBasename, dateFormat, true) : null;
+	const source = parsed && parsed.isValid() ? parsed.startOf('day') : today.clone();
+	const next = source.clone().add(1, 'day');
+	return next.isBefore(today) ? today : next;
 }
 
 function getCaptureTemplateTokens(context?: CaptureExecutionContext): Record<string, string> {

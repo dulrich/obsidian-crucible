@@ -2,6 +2,7 @@ import { Notice, TFile, Editor, MarkdownView } from 'obsidian';
 import type CruciblePlugin from './main';
 import { ChainCommandOptions } from './chains';
 import { TextInputModal } from './captures';
+import { markEditorLineForwarded } from './markForwarded';
 import { FRONTMATTER_REGEX } from './utils';
 import {
 	normalizeFrontmatterPropertyName,
@@ -132,19 +133,9 @@ export function registerInternalCommands(plugin: CruciblePlugin): void {
 		schema: [{ id: 'title', name: 'Title', type: 'text', description: 'Heading shown above the input box.' }],
 	});
 
-	register('mark-as-forwarded', async (_args, _prev, editor) => {
+	register('mark-as-forwarded', async (_args, _prev, editor, targetFile) => {
 		if (!editor) throw new Error('mark-as-forwarded requires edit mode');
-		const cursor = editor.getCursor();
-		const lineNum = cursor.line;
-		const line = editor.getLine(lineNum);
-		const checkboxRegex = /^(\s*[-*+]\s+\[) (\]\s+.*)$/;
-		if (checkboxRegex.test(line)) {
-			const newLine = line.replace(checkboxRegex, '$1>$2');
-			editor.setLine(lineNum, newLine);
-			editor.setCursor(cursor);
-			return true;
-		}
-		return false;
+		return await markEditorLineForwarded(plugin.app, editor, targetFile ?? plugin.app.workspace.getActiveFile());
 	});
 
 	register('upsert-tags', async (args, _p, _e, tf) => {

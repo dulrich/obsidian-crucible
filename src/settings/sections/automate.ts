@@ -142,6 +142,7 @@ function getCaptureWarning(tab: CrucibleSettingTab, capture: Capture): string | 
 
 function captureTargetLabel(capture: Capture): string {
 	if (capture.targetType === 'daily') return 'Daily note';
+	if (capture.targetType === 'daily-next') return 'Next daily note after source';
 	if (capture.targetType === 'weekly') return 'Weekly note';
 	if (capture.targetType === 'monthly') return 'Monthly note';
 	if (capture.targetType === 'active') return 'Active note';
@@ -614,7 +615,7 @@ function renderEditCapture(tab: CrucibleSettingTab, containerEl: HTMLElement) {
 	group.createEl('hr', { cls: 'crucible-row-divider' });
 	bindDropdown(group, {
 		name: 'Target note',
-		options: { daily: 'Daily note', weekly: 'Weekly note', monthly: 'Monthly note', active: 'Active note', selected: 'Specify note' },
+		options: { daily: 'Daily note', 'daily-next': 'Next daily note after source', weekly: 'Weekly note', monthly: 'Monthly note', active: 'Active note', selected: 'Specify note' },
 		get: () => capture.targetType,
 		set: (v) => { capture.targetType = v as CaptureTarget; },
 		after: () => tab.display(),
