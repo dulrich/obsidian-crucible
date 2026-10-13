@@ -15,6 +15,7 @@ import type { ServiceId } from './serviceHealth';
 import type { CancelJobOutcome, RemoveQueuedOutcome } from './cancellation';
 import { DbJobBackend, dbQueueCountsSource, dbRowToOrchestrationJob } from './DbJobBackend';
 import { SqliteJobStore } from './db/SqliteJobStore';
+import { LinkRegistryStore } from './db/LinkRegistryStore';
 import type { JobListOrder } from './db/types';
 import { SqliteUnavailableError, openJobsDb, resolveJobsDbPath } from './db/sqlite';
 import { logError } from '../log';
@@ -66,6 +67,11 @@ export class Orchestrator {
 	/** The one store every registered type shares, opened lazily on the first
 	 * registration — see `dbStoreOrThrow`. Null only before any type registers. */
 	private dbStore: SqliteJobStore | null = null;
+	/** Built lazily over `dbStore`'s handle by `linkRegistry()`. */
+	private linkRegistryStore: LinkRegistryStore | null = null;
+	/** Set by `dispose()`: the handle is closed and must never be reopened by a
+	 * late caller after unload. */
+	private disposed = false;
 	private readonly openDbStore: () => SqliteJobStore;
 	/** Per-type auto-ENQUEUE sources: the candidate set a type pulls in when its queue
 	 * drains empty. Registered at runtime (the enrichment source is dashboard-owned,
@@ -113,6 +119,7 @@ export class Orchestrator {
 	 */
 	private dbStoreOrThrow(): SqliteJobStore {
 		if (this.dbStore) return this.dbStore;
+		if (this.disposed) throw new SqliteUnavailableError('The orchestration jobs database was closed (plugin unloaded).');
 		try {
 			this.dbStore = this.openDbStore();
 		} catch (err) {
@@ -124,6 +131,34 @@ export class Orchestrator {
 				: new SqliteUnavailableError(`Could not open the orchestration jobs database: ${detail}`, err);
 		}
 		return this.dbStore;
+	}
+
+	/**
+	 * The link registry (link-registry-out-of-vault WP-1), over the SAME handle as the
+	 * job queue — never a second connection to `jobs.sqlite`. Surfaces/rethrows
+	 * `SqliteUnavailableError` exactly as `dbStoreOrThrow` does; callers fail their own
+	 * operation visibly and never fall back to vault notes.
+	 */
+	linkRegistry(): LinkRegistryStore {
+		if (this.linkRegistryStore) return this.linkRegistryStore;
+		this.linkRegistryStore = new LinkRegistryStore(this.dbStoreOrThrow().database);
+		return this.linkRegistryStore;
+	}
+
+	/** Closes the shared DB once, from `onunload` (after the drain loop is disposed).
+	 * Idempotent; any later DB access throws instead of reopening. */
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		const store = this.dbStore;
+		this.dbStore = null;
+		this.linkRegistryStore = null;
+		if (!store) return;
+		try {
+			store.close();
+		} catch (err) {
+			logError('failed to close the orchestration jobs database', err);
+		}
 	}
 
 	/** The counts behind the bulk `orchestration-queue-updated` emits. Answers zeros

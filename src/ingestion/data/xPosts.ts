@@ -6,23 +6,13 @@ interface RegistryEntry {
 	sourceCount: number;
 }
 
-// `source_notes` is normally an array of `[[<path>]]` wikilinks (LinkScanWorkflow's
-// shape — see also XBackfillWorkflow's wikilinksFromSourceNotes), but older/hand-
-// edited records can carry a single legacy string. This dashboard only needs a
-// count, not the wikilinks themselves, so a legacy string coerces to 1 rather than
-// being dropped.
-function coerceSourceCount(value: unknown): number {
-	if (Array.isArray(value)) return value.length;
-	if (typeof value === 'string' && value) return 1;
-	return 0;
-}
-
-function resolveRegistryUrl(fm: Record<string, unknown>): string {
-	const canonical = fm['canonical_url'];
-	if (typeof canonical === 'string' && canonical) return canonical;
-	const url = fm['url'];
-	if (typeof url === 'string' && url) return url;
-	return '';
+/** The slice of a `LinkRecord` (`orchestration/db/LinkRegistryStore.ts`) this pure
+ * function reads — structural, so tests can pass plain objects. */
+export interface XRegistryRecord {
+	canonicalUrl: string;
+	url: string;
+	sourceNotes: readonly string[];
+	xStatusId: string | null;
 }
 
 function resolveAuthor(fm: Record<string, unknown>): string | null {
@@ -51,8 +41,8 @@ function compareStatusIdDesc(a: string, b: string): number {
 /**
  * Pure row-compute for the "X posts" dashboard section (WP-XM4). Merges two
  * sources on statusId:
- *  - link-registry records under `registryRoot` (`type: 'link-record'` with a
- *    non-empty `x-status-id`) — the pending/candidate set;
+ *  - link-registry records (`link_records` rows with a non-empty x status id, read
+ *    by the caller via `LinkRegistryStore.listWithXStatus`) — the pending set;
  *  - materialized `_x_metadata` notes under `metadataRoot` (frontmatter
  *    `status-id`; `state: 'ok' | 'unavailable'`, per `buildXMetadataNoteBody`/
  *    `buildXTombstoneNoteBody` in `orchestration/utils/xApi.ts`) — both live posts
@@ -63,26 +53,21 @@ function compareStatusIdDesc(a: string, b: string): number {
  * manual-only, so a materialized post can easily outrun what's been scanned —
  * with `sourceCount: 0` since there is nothing to count.
  *
- * One vault-wide markdown scan classifies each file by root prefix (the two
- * roots are configured independently and are not expected to nest), so a file
- * under neither root is skipped in O(1) per file with no double scan.
+ * One vault-wide markdown scan finds the metadata notes by root prefix.
  */
-export function computeXPostRows(app: App, registryRoot: string, metadataRoot: string): XPostRow[] {
-	const registryPrefix = registryRoot ? `${registryRoot}/` : null;
+export function computeXPostRows(app: App, registryRecords: readonly XRegistryRecord[], metadataRoot: string): XPostRow[] {
 	const metadataPrefix = metadataRoot ? `${metadataRoot}/` : null;
 
 	const registry = new Map<string, RegistryEntry>();
 	const materialized = new Map<string, XPostRow>();
 
+	for (const record of registryRecords) {
+		const statusId = (record.xStatusId ?? '').trim();
+		if (!statusId) continue;
+		registry.set(statusId, { url: record.canonicalUrl || record.url || '', sourceCount: record.sourceNotes.length });
+	}
+
 	for (const file of app.vault.getMarkdownFiles()) {
-		if (registryPrefix && file.path.startsWith(registryPrefix)) {
-			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
-			if (!fm || fm['type'] !== 'link-record') continue;
-			const statusId = typeof fm['x-status-id'] === 'string' ? fm['x-status-id'].trim() : '';
-			if (!statusId) continue;
-			registry.set(statusId, { url: resolveRegistryUrl(fm), sourceCount: coerceSourceCount(fm['source_notes']) });
-			continue;
-		}
 		if (metadataPrefix && file.path.startsWith(metadataPrefix)) {
 			const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;

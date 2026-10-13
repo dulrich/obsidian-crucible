@@ -79,7 +79,7 @@ export function isSqliteAvailable(): boolean {
 // approach (`scripts/search-companion.mjs`) in spirit, not by importing it: same
 // "CREATE IF NOT EXISTS + version bump" shape, different storage for the version
 // cookie.
-export const JOBS_SCHEMA_VERSION = 1;
+export const JOBS_SCHEMA_VERSION = 2;
 
 // The `jobs` table per the WP-5 brief's item 1, plus two additions the brief itself
 // calls for elsewhere in the same doc:
@@ -135,6 +135,37 @@ const CREATE_INDEXES = [
 	'CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_key ON jobs (dedupe_key)',
 ];
 
+// v2 (link-registry-out-of-vault WP-1): the link registry moves out of vault notes
+// into this table, sharing the jobs DB connection (one handle per plugin load, owned
+// by `Orchestrator`). One row per canonical URL — the columns are exactly the fields
+// `applyLinkToRegistry` used to write as frontmatter. `source_notes` is a JSON array
+// of `[[path]]` wikilinks; `tracked_source` is a JSON-encoded scalar (`false`,
+// `"candidate"`, or whatever a user decision later sets) so the legacy frontmatter
+// value round-trips losslessly. `x_status_id` is indexed: XBackfill and the X-posts
+// dashboard both query on it.
+const CREATE_LINK_RECORDS_TABLE = `
+CREATE TABLE IF NOT EXISTS link_records (
+	canonical_url TEXT PRIMARY KEY,
+	url TEXT NOT NULL,
+	domain TEXT NOT NULL DEFAULT '',
+	source_notes TEXT NOT NULL DEFAULT '[]',
+	first_seen TEXT,
+	last_seen TEXT,
+	state TEXT NOT NULL DEFAULT 'pending',
+	discovery_method TEXT NOT NULL DEFAULT 'scan',
+	tracked_source TEXT NOT NULL DEFAULT 'false',
+	tracked_source_type TEXT,
+	tracked_source_note TEXT,
+	referred_material TEXT,
+	decision_reason TEXT,
+	yt_video_id TEXT,
+	x_status_id TEXT
+)`;
+
+const CREATE_LINK_RECORDS_INDEXES = [
+	'CREATE INDEX IF NOT EXISTS idx_link_records_x_status_id ON link_records (x_status_id)',
+];
+
 function readSchemaVersion(db: SqliteDatabase): number {
 	const row = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version');
 	if (!row) return 0;
@@ -150,7 +181,7 @@ function writeSchemaVersion(db: SqliteDatabase, version: number): void {
 
 /**
  * Self-migrating CREATE-IF-NOT-EXISTS + version-bump, run unconditionally by
- * `openJobsDb` on every open. Today there is exactly one version (1); the shape
+ * `openJobsDb` on every open. v1 = jobs, v2 = link_records; the shape
  * (`if (current < N) { ...; writeSchemaVersion(db, N); }`) is what a future migration
  * appends to, matching the search companion's `createSchema`/migration-chain pattern
  * in spirit (`scripts/search-companion.mjs`).
@@ -162,6 +193,11 @@ function migrate(db: SqliteDatabase): void {
 		db.exec(CREATE_JOBS_TABLE);
 		for (const sql of CREATE_INDEXES) db.exec(sql);
 		writeSchemaVersion(db, 1);
+	}
+	if (current < 2) {
+		db.exec(CREATE_LINK_RECORDS_TABLE);
+		for (const sql of CREATE_LINK_RECORDS_INDEXES) db.exec(sql);
+		writeSchemaVersion(db, 2);
 	}
 }
 
