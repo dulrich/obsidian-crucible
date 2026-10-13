@@ -342,7 +342,7 @@ test('refuses to scan a note under the blog metadata root', async () => {
 	assert.match(result.notes, /Refused:/);
 });
 
-test('refuses to scan a note under the link registry root', async () => {
+test('refuses a legacy stub left under the old registry root, by its link-record type', async () => {
 	const plugin = makePlugin();
 	plugin._vault.seed('_crucible/link_registry/some-link.md', '---\ntype: link-record\n---\n\nhttps://youtube.com/watch?v=abc');
 	const result = await new LinkNoteEnrichWorkflow().run(

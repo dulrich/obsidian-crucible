@@ -1,4 +1,4 @@
-import { TFile, normalizePath } from 'obsidian';
+import { TFile } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
@@ -74,14 +74,13 @@ export class LinkNoteEnrichWorkflow implements Workflow {
 			return { status: 'failed', error: `Target note not found: ${targetPath}` };
 		}
 
-		const registryRoot = normalizePath(settings.orchestrationLinkRegistryRoot);
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter;
 
 		// Refusal guards: never scan a note that IS enrichment machinery. YT metadata
 		// notes embed the full video description (a URL farm) and every YT capture
 		// self-references its own video at least twice — scanning them would flood the
 		// registry and mint garbage referenced-video jobs from a note's own description.
-		const machineryRoots = [youtubeMetadataRoot(plugin), xMetadataRoot(plugin), blogMetadataRoot(plugin), registryRoot];
+		const machineryRoots = [youtubeMetadataRoot(plugin), xMetadataRoot(plugin), blogMetadataRoot(plugin)];
 		const isMachineryNote =
 			isExcluded(targetPath, machineryRoots)
 			|| fm?.['type'] === 'link-record'
