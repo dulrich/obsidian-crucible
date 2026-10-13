@@ -7,6 +7,7 @@ export type IngestionEventName =
 	| 'tracker-run'
 	| 'metadata-enriched'
 	| 'x-metadata-enriched'
+	| 'link-registry-changed'
 	| 'orchestration-queue-updated'
 	| 'note-lock-changed'
 	| 'image-described';
@@ -21,6 +22,9 @@ export interface IngestionEventPayloads {
 	 * once `outputPaths[0]` resolves to a real `TFile`. `sourceFiles` covers every
 	 * clip note the job stamped with an `x-metadata` link, when any were given. */
 	'x-metadata-enriched': { statusId: string; metadataFile: TFile; sourceFiles?: TFile[] };
+	/** Fired once per link_scan / note_link_enrich run that changed ≥1 `link_records`
+	 * row (never once per URL). `changed` is the number of rows created or updated. */
+	'link-registry-changed': { changed: number };
 	'orchestration-queue-updated': { queued: number; running: number };
 	'note-lock-changed': { path: string; locked: boolean; label: string };
 	/** Fired once per image_describe_note/batch run (after the describe pass, whether or not

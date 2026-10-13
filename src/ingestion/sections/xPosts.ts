@@ -1,7 +1,8 @@
 import { Notice } from 'obsidian';
 import { computeRowSignature, renderTableSection, shouldRepaint } from '../render/section';
 import { renderFileLink } from '../render/cells';
-import { computeXPostRows } from '../data/xPosts';
+import { computeXPostRows, type XRegistryRecord } from '../data/xPosts';
+import { logWarn } from '../../log';
 import { xMetadataRoot } from '../../orchestration/utils/xApi';
 import type { DashboardHost, SectionContext, XPostRow } from '../render/types';
 
@@ -14,14 +15,28 @@ export interface XPostsSection {
 // Same factory shape as missingAttachments.ts (createMissingAttachmentsSection):
 // compute-then-signature-skip render, keyed table, a heading-level bulk action.
 // Unlike Repair All, "Backfill from registry" doesn't operate on this section's
-// own row set — XBackfillWorkflow re-walks the link registry itself — so there's
+// own row set — XBackfillWorkflow re-reads the link registry itself — so there's
 // no per-row cache to carry between render() and the button handler here.
 // Restorative/additive, not destructive: no confirmDestructive, no mod-warning.
 export function createXPostsSection(host: DashboardHost): XPostsSection {
 	function render(body: HTMLElement, ctx: SectionContext): void {
-		const registryRoot = host.plugin.settings.orchestrationLinkRegistryRoot;
 		const metadataRoot = xMetadataRoot(host.plugin);
-		const rows = computeXPostRows(host.app, registryRoot, metadataRoot);
+		// The registry lives in the jobs DB (link-registry-out-of-vault WP-1). When it
+		// can't be opened this section renders an explicit unavailable state — never a
+		// silent fallback to vault notes, and never a broken dashboard.
+		let records: XRegistryRecord[];
+		try {
+			records = host.plugin.orchestrator.linkRegistry().listWithXStatus();
+		} catch (err) {
+			logWarn('X posts section: link registry unavailable', err);
+			// Record a sentinel signature so a later recovery always repaints.
+			shouldRepaint(ctx, 'link-registry-unavailable');
+			body.empty();
+			body.createDiv({ cls: 'crucible-empty-state', text: `Link registry unavailable — ${err instanceof Error ? err.message : String(err)}` });
+			host.setSectionCount('xPosts', 0);
+			return;
+		}
+		const rows = computeXPostRows(host.app, records, metadataRoot);
 		// P5: skip the rebuild on an unchanged row set during an event-driven pass.
 		if (!shouldRepaint(ctx, computeRowSignature(rows))) return;
 		renderTableSection<XPostRow>({

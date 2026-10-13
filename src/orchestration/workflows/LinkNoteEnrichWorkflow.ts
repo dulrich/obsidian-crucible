@@ -2,10 +2,9 @@ import { TFile, normalizePath } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
-import { ensureFolder } from '../../utils';
 import { extractUrls } from '../utils/urlExtract';
 import { canonicalizeUrl } from '../utils/urlCanonicalize';
-import { AggregateEntry, applyLinkToRegistry, isExcluded, wikilinkFor } from '../utils/linkRegistry';
+import { AggregateEntry, applyLinkToRegistry, emitLinkRegistryChanged, isExcluded, wikilinkFor } from '../utils/linkRegistry';
 import { xMetadataRoot } from '../utils/xApi';
 import { blogMetadataRoot } from '../utils/blogsApi';
 import { coerceVideoId, findLinkedYtMetadataFile, youtubeMetadataRoot } from '../utils/youtubeApi';
@@ -100,7 +99,6 @@ export class LinkNoteEnrichWorkflow implements Workflow {
 		const content = await app.vault.cachedRead(file);
 		const urls = extractUrls(content);
 		const today = todayInTz(settings.orchestrationTimezone);
-		await ensureFolder(app, registryRoot);
 
 		const wikilink = wikilinkFor(targetPath);
 		const noteOwnVideoId = coerceVideoId(fm?.['yt-video-id']) || coerceVideoId(fm?.['videoId']);
@@ -134,20 +132,26 @@ export class LinkNoteEnrichWorkflow implements Workflow {
 		let registryCreated = 0;
 		let registryUpdated = 0;
 		let candidatesFlagged = 0;
-		const outputPaths: string[] = [];
+		let registryChanged = 0;
 		const totalEntries = aggregate.size;
 		let entriesProcessed = 0;
-		for (const entry of aggregate.values()) {
-			ctx.throwIfAborted();
-			const result = await applyLinkToRegistry(plugin, registryRoot, today, entry);
-			if (result.created) registryCreated++;
-			else registryUpdated++;
-			if (result.candidateFlagged) candidatesFlagged++;
-			outputPaths.push(result.path);
-			entriesProcessed++;
-			if (shouldReportLinkEnrichProgress(entriesProcessed, totalEntries)) {
-				ctx.reportProgress(formatLinkEnrichRegistryProgress(entriesProcessed, totalEntries));
+		// One registry-change notification per run (never per URL); `finally` so an
+		// abort mid-loop still announces the rows it already changed.
+		try {
+			for (const entry of aggregate.values()) {
+				ctx.throwIfAborted();
+				const result = applyLinkToRegistry(plugin, today, entry);
+				if (result.changed) registryChanged++;
+				if (result.created) registryCreated++;
+				else registryUpdated++;
+				if (result.candidateFlagged) candidatesFlagged++;
+				entriesProcessed++;
+				if (shouldReportLinkEnrichProgress(entriesProcessed, totalEntries)) {
+					ctx.reportProgress(formatLinkEnrichRegistryProgress(entriesProcessed, totalEntries));
+				}
 			}
+		} finally {
+			emitLinkRegistryChanged(plugin, registryChanged);
 		}
 
 		// X half: full reuse, no second path. One `x_post_discover` enqueue when the
@@ -206,7 +210,6 @@ export class LinkNoteEnrichWorkflow implements Workflow {
 
 		return {
 			status: 'done',
-			outputPaths,
 			notes,
 		};
 	}

@@ -123,13 +123,17 @@ test('LinkNoteEnrichWorkflow enqueues x_post_discover with only {targetPath} —
 
 test('LinkScanWorkflow imports the shared registry writer instead of a private applyToRegistry method', async () => {
 	const src = await readFile('src/orchestration/workflows/LinkScanWorkflow.ts', 'utf8');
-	assert.match(src, /import \{ AggregateEntry, applyLinkToRegistry, isExcluded, normalizeExclusions, wikilinkFor \} from '\.\.\/utils\/linkRegistry';/);
+	assert.match(src, /import \{ AggregateEntry, applyLinkToRegistry, emitLinkRegistryChanged, isExcluded, normalizeExclusions, wikilinkFor \} from '\.\.\/utils\/linkRegistry';/);
 	assert.doesNotMatch(src, /private async applyToRegistry/);
-	assert.match(src, /await applyLinkToRegistry\(plugin, registryRoot, today, entry\)/);
+	assert.match(src, /applyLinkToRegistry\(plugin, today, entry\)/);
+	assert.match(src, /\} finally \{\s*emitLinkRegistryChanged\(plugin, registryChanged\);/);
+	assert.doesNotMatch(src, /ensureFolder/, 'the registry no longer creates a vault folder');
 });
 
 test('LinkNoteEnrichWorkflow consumes the same shared registry writer', async () => {
 	const src = await readFile('src/orchestration/workflows/LinkNoteEnrichWorkflow.ts', 'utf8');
-	assert.match(src, /import \{ AggregateEntry, applyLinkToRegistry, isExcluded, wikilinkFor \} from '\.\.\/utils\/linkRegistry';/);
-	assert.match(src, /await applyLinkToRegistry\(plugin, registryRoot, today, entry\)/);
+	assert.match(src, /import \{ AggregateEntry, applyLinkToRegistry, emitLinkRegistryChanged, isExcluded, wikilinkFor \} from '\.\.\/utils\/linkRegistry';/);
+	assert.match(src, /applyLinkToRegistry\(plugin, today, entry\)/);
+	assert.match(src, /\} finally \{\s*emitLinkRegistryChanged\(plugin, registryChanged\);/);
+	assert.doesNotMatch(src, /ensureFolder/, 'the registry no longer creates a vault folder');
 });

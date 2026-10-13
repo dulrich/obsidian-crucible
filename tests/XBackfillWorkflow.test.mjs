@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +11,8 @@ import esbuild from 'esbuild';
 // xMetadataRoot — obsidian's TFolder/TFile/normalizePath, no network) and
 // xPost.ts (pure). Same esbuild-bundle + obsidian-stub pattern as
 // tests/xPostDiscoverWorkflow.test.mjs.
+
+globalThis.require = createRequire(import.meta.url);
 
 const outdir = path.join(tmpdir(), 'obsidian-crucible-x-backfill-workflow-tests');
 const outfile = path.join(outdir, 'XBackfillWorkflow.mjs');
@@ -22,6 +25,8 @@ await esbuild.build({
 		contents: [
 			"export { XBackfillWorkflow } from './src/orchestration/workflows/XBackfillWorkflow';",
 			"export { TFile, TFolder } from 'obsidian';",
+			"export { LinkRegistryStore } from './src/orchestration/db/LinkRegistryStore';",
+			"export { openJobsDb } from './src/orchestration/db/sqlite';",
 		].join('\n'),
 		resolveDir: '.',
 		sourcefile: 'x-backfill-workflow-test-entry.ts',
@@ -38,6 +43,7 @@ await esbuild.build({
 			build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
 				contents: [
 					'export class App {}',
+					'export class FileSystemAdapter {}',
 					'export class TFile { constructor() { this.path = ""; this.extension = "md"; } }',
 					'export class TFolder { constructor() { this.path = ""; this.children = []; } }',
 					'export function normalizePath(p) { return String(p ?? "").replace(/\\\\/g, "/").replace(/\\/+/g, "/"); }',
@@ -54,7 +60,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { XBackfillWorkflow, TFile, TFolder } = await import(pathToFileURL(outfile).href);
+const { XBackfillWorkflow, TFile, TFolder, LinkRegistryStore, openJobsDb } = await import(pathToFileURL(outfile).href);
 
 function normalizePath(p) {
 	return String(p ?? '').replace(/\\/g, '/').replace(/\/+/g, '/');
@@ -66,6 +72,7 @@ function normalizePath(p) {
 // getFirstLinkpathDest (the shorthand-link fallback).
 class FakeVault {
 	constructor() {
+		this.registry = new LinkRegistryStore(openJobsDb(':memory:'));
 		this.filesByPath = new Map();
 		this.foldersByPath = new Map();
 		this.frontmatterByPath = new Map();
@@ -79,15 +86,16 @@ class FakeVault {
 	getMarkdownFiles() {
 		return Array.from(this.filesByPath.values()).filter(f => f.extension === 'md');
 	}
-	// Seeds a link-registry record note with the given frontmatter.
-	seedRecord(p, frontmatter) {
-		const norm = normalizePath(p);
-		const file = new TFile();
-		file.path = norm;
-		file.extension = 'md';
-		this.filesByPath.set(norm, file);
-		this.frontmatterByPath.set(norm, frontmatter);
-		return file;
+	// Seeds a link_records row from legacy-frontmatter-shaped fields (the path is
+	// only a label now — records are no longer vault notes).
+	seedRecord(_p, fm) {
+		this.registry.upsert({
+			canonicalUrl: fm.canonical_url ?? fm.url,
+			url: fm.url ?? fm.canonical_url,
+			sourceNotes: fm.source_notes ?? [],
+			ytVideoId: fm['yt-video-id'] ?? null,
+			xStatusId: fm['x-status-id'] ?? null,
+		});
 	}
 	// Seeds a plain (non-registry) source note that a link record can cite.
 	seedSourceNote(p) {
@@ -138,6 +146,7 @@ function makePlugin(overrides = {}) {
 		app: { vault, metadataCache },
 		settings: { orchestrationLinkRegistryRoot: '_crucible/link_registry', orchestrationXMetadataRoot: '_x_metadata', ...overrides },
 		orchestrator: {
+			linkRegistry: () => vault.registry,
 			enqueue: async (type, params, options) => {
 				enqueued.push({ type, params, options });
 				return { id: `job-${enqueued.length}`, type, status: 'queued', priority: options?.priority ?? 'normal', lane: options?.lane ?? 'background' };
@@ -158,14 +167,6 @@ const ROOT = '_crucible/link_registry';
 
 // ── basic selection: link-record required, X-status required ────────────────────
 
-test('a non-link-record note under the registry root is ignored entirely', async () => {
-	const plugin = makePlugin();
-	plugin._vault.seedRecord(`${ROOT}/not-a-record.md`, { type: 'something-else', 'x-status-id': '111' });
-	const result = await new XBackfillWorkflow().run({ id: 'j1', params: {} }, makeCtx(plugin));
-	assert.equal(result.status, 'done');
-	assert.equal(plugin._enqueued.length, 0);
-	assert.match(result.notes, /Scanned 0 link-registry record/);
-});
 
 test('a link-record with no X identity (YT-only) is scanned but contributes no status', async () => {
 	const plugin = makePlugin();
@@ -203,17 +204,6 @@ test('a link-record with an explicit x-status-id enqueues x_metadata_fetch', asy
 	assert.equal(job.options.lane, 'background');
 });
 
-test('a link-record with no x-status-id falls back to extracting the status from canonical_url', async () => {
-	const plugin = makePlugin();
-	plugin._vault.seedRecord(`${ROOT}/x-record-2.md`, {
-		type: 'link-record',
-		url: 'https://twitter.com/PandaAshwinee/status/999999999999999201?s=20',
-		canonical_url: 'https://x.com/PandaAshwinee/status/999999999999999201',
-	});
-	await new XBackfillWorkflow().run({ id: 'j1', params: {} }, makeCtx(plugin));
-	assert.equal(plugin._enqueued.length, 1);
-	assert.equal(plugin._enqueued[0].params.statusId, '999999999999999201');
-});
 
 // ── skip already-materialized ────────────────────────────────────────────────────
 
@@ -266,20 +256,6 @@ test('the same status cited by two records collapses onto one job with unioned s
 	assert.match(result.notes, /1 X status\(es\) found/, 'two records citing the same status collapse onto one status');
 });
 
-// ── legacy scalar source_notes ───────────────────────────────────────────────────
-
-test('a legacy single-string source_notes value (not an array) still resolves', async () => {
-	const plugin = makePlugin();
-	const note = plugin._vault.seedSourceNote('clips/legacy.md');
-	plugin._vault.seedRecord(`${ROOT}/legacy-record.md`, {
-		type: 'link-record',
-		canonical_url: 'https://x.com/PandaAshwinee/status/2078296458122645635',
-		'x-status-id': '2078296458122645635',
-		source_notes: '[[clips/legacy]]',
-	});
-	await new XBackfillWorkflow().run({ id: 'j1', params: {} }, makeCtx(plugin));
-	assert.deepEqual(plugin._enqueued[0].params.sourcePaths, [note.path]);
-});
 
 // ── unresolvable source link: dropped and counted, never thrown ─────────────────
 
@@ -313,19 +289,26 @@ test('a source link that only resolves via getFirstLinkpathDest (shorthand fallb
 	assert.match(result.notes, /0 source link\(s\) dropped/);
 });
 
-// ── registry-root scoping ────────────────────────────────────────────────────────
+// ── DB unavailable: the run fails visibly, never falls back to vault notes ───────
 
-test('a link-record note outside the configured registry root is not scanned', async () => {
+test('an unavailable link registry fails the run with the error (no vault fallback)', async () => {
 	const plugin = makePlugin();
-	plugin._vault.seedRecord('elsewhere/not-in-registry.md', {
-		type: 'link-record',
-		canonical_url: 'https://x.com/PandaAshwinee/status/2078296458122645635',
-		'x-status-id': '2078296458122645635',
-	});
+	plugin.orchestrator.linkRegistry = () => { throw new Error('jobs database is unavailable'); };
+	await assert.rejects(
+		new XBackfillWorkflow().run({ id: 'j1', params: {} }, makeCtx(plugin)),
+		/jobs database is unavailable/,
+	);
+	assert.equal(plugin._enqueued.length, 0);
+});
+
+test('an empty registry scans 0 records and enqueues nothing', async () => {
+	const plugin = makePlugin();
 	const result = await new XBackfillWorkflow().run({ id: 'j1', params: {} }, makeCtx(plugin));
+	assert.equal(result.status, 'done');
 	assert.equal(plugin._enqueued.length, 0);
 	assert.match(result.notes, /Scanned 0 link-registry record/);
 });
+
 
 // ── pacing shape: chunked with a pause every ENQUEUE_CHUNK enqueues ─────────────
 

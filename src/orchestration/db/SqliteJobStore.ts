@@ -34,6 +34,12 @@ export class SqliteJobStore {
 		this.db.close();
 	}
 
+	/** The underlying handle, so `Orchestrator.linkRegistry()` can build the
+	 * `LinkRegistryStore` over the SAME connection (one connection per plugin load). */
+	get database(): SqliteDatabase {
+		return this.db;
+	}
+
 	// ---- Insert -----------------------------------------------------------------
 
 	/** Inserts a new `queued` row. `id`/`created` are minted by the caller

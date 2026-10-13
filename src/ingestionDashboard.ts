@@ -438,6 +438,7 @@ export class IngestionDashboardUI {
 			}));
 			this.disposers.push(bus.on('metadata-enriched', () => this.markDirty('uncapturedVideos')));
 			this.disposers.push(bus.on('x-metadata-enriched', () => this.markDirty('xPosts')));
+			this.disposers.push(bus.on('link-registry-changed', () => this.markDirty('xPosts')));
 			// thq WP-8: the separate 'enrichment-queue-updated' listener is gone with the
 			// memory queue that emitted it. Nothing is lost — metadata fetches are ordinary
 			// jobs now, so they emit 'orchestration-queue-updated', and that listener

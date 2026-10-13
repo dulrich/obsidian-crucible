@@ -34,10 +34,14 @@ test("STRUCTURAL: route() marks xPosts dirty from the orchestrationXMetadataRoot
 	);
 });
 
-test('STRUCTURAL: the structural (create/delete/rename) branch also marks xPosts dirty, covering registry-record creation', () => {
-	const structuralBlock = dashboardSrc.match(/if \(reason === 'structural'\) \{([\s\S]*?)return;\s*\}/);
-	assert.ok(structuralBlock, "the reason === 'structural' block must be found");
-	assert.match(structuralBlock[1], /this\.markDirty\('xPosts'\);/);
+test("STRUCTURAL: registry-record changes reach the dashboard via the 'link-registry-changed' bus event (records are DB rows, not vault files)", () => {
+	assert.match(
+		dashboardSrc,
+		/bus\.on\('link-registry-changed', \(\) => this\.markDirty\('xPosts'\)\)/,
+	);
+	const eventsSrc = readFileSync('src/orchestration/events.ts', 'utf8');
+	assert.match(eventsSrc, /\| 'link-registry-changed'/);
+	assert.match(eventsSrc, /'link-registry-changed': \{ changed: number \};/);
 });
 
 test("STRUCTURAL: the frontmatter-signature key list includes fm['x-metadata'] and fm['x-status-id']", () => {

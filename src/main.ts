@@ -433,6 +433,8 @@ export default class CruciblePlugin extends Plugin {
 		this.noteLockOverlay?.dispose();
 		this.triggers?.dispose();
 		this.orchestrationAutoRunner?.dispose();
+		// After the drain loop: closes the one jobs.sqlite connection (queue + link registry).
+		this.orchestrator?.dispose();
 		this.serviceHealth?.dispose();
 		this.ingestionEvents?.dispose();
 	}

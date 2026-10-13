@@ -2,10 +2,9 @@ import { normalizePath } from 'obsidian';
 import { Workflow, WorkflowContext } from './Workflow';
 import { OrchestrationJob, WorkflowResult } from '../types';
 import { todayInTz } from '../utils/dates';
-import { ensureFolder } from '../../utils';
 import { extractUrls } from '../utils/urlExtract';
 import { canonicalizeUrl } from '../utils/urlCanonicalize';
-import { AggregateEntry, applyLinkToRegistry, isExcluded, normalizeExclusions, wikilinkFor } from '../utils/linkRegistry';
+import { AggregateEntry, applyLinkToRegistry, emitLinkRegistryChanged, isExcluded, normalizeExclusions, wikilinkFor } from '../utils/linkRegistry';
 
 /** WP-J1: same "every Nth item, plus the final one" convention `SearchManager.indexFiles`
  * uses for its own `onProgress` (`SEARCH_PROGRESS_EVERY_FILES` = 10) — fast enough to keep
@@ -46,7 +45,6 @@ export class LinkScanWorkflow implements Workflow {
 		const exclusions = normalizeExclusions(settings.orchestrationLinkScanExclusions, registryRoot);
 		const today = todayInTz(settings.orchestrationTimezone);
 
-		await ensureFolder(app, registryRoot);
 
 		const aggregate = new Map<string, AggregateEntry>();
 		let scannedNotes = 0;
@@ -85,21 +83,27 @@ export class LinkScanWorkflow implements Workflow {
 		let created = 0;
 		let updated = 0;
 		let candidatesFlagged = 0;
-		const outputPaths: string[] = [];
 
+		let registryChanged = 0;
 		const totalEntries = aggregate.size;
 		let entriesProcessed = 0;
-		for (const entry of aggregate.values()) {
-			ctx.throwIfAborted();
-			const result = await applyLinkToRegistry(plugin, registryRoot, today, entry);
-			if (result.created) created++;
-			else updated++;
-			if (result.candidateFlagged) candidatesFlagged++;
-			outputPaths.push(result.path);
-			entriesProcessed++;
-			if (shouldReportLinkScanProgress(entriesProcessed, totalEntries)) {
-				ctx.reportProgress(formatLinkScanRegistryProgress(entriesProcessed, totalEntries));
+		// One registry-change notification per run (never per URL); `finally` so an
+		// abort mid-loop still announces the rows it already changed.
+		try {
+			for (const entry of aggregate.values()) {
+				ctx.throwIfAborted();
+				const result = applyLinkToRegistry(plugin, today, entry);
+				if (result.changed) registryChanged++;
+				if (result.created) created++;
+				else updated++;
+				if (result.candidateFlagged) candidatesFlagged++;
+				entriesProcessed++;
+				if (shouldReportLinkScanProgress(entriesProcessed, totalEntries)) {
+					ctx.reportProgress(formatLinkScanRegistryProgress(entriesProcessed, totalEntries));
+				}
 			}
+		} finally {
+			emitLinkRegistryChanged(plugin, registryChanged);
 		}
 
 		const notes =
@@ -108,7 +112,6 @@ export class LinkScanWorkflow implements Workflow {
 
 		return {
 			status: 'done',
-			outputPaths,
 			notes,
 		};
 	}

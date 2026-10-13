@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -14,6 +15,10 @@ import esbuild from 'esbuild';
 // esbuild-bundle + obsidian-stub + live-derived-metadataCache technique as
 // tests/youtubeMetadataListContract.test.mjs and tests/xMetadataFetchWorkflow.test.mjs.
 
+// node:sqlite is required lazily by src/orchestration/db/sqlite.ts; the ESM bundle
+// needs a global require (same as tests/sqliteJobStore.test.mjs).
+globalThis.require = createRequire(import.meta.url);
+
 const outdir = path.join(tmpdir(), 'obsidian-crucible-link-note-enrich-workflow-tests');
 const outfile = path.join(outdir, 'LinkNoteEnrichWorkflow.mjs');
 
@@ -25,6 +30,8 @@ await esbuild.build({
 		contents: [
 			"export { LinkNoteEnrichWorkflow } from './src/orchestration/workflows/LinkNoteEnrichWorkflow';",
 			"export { referencedVideoJobParams } from './src/orchestration/jobTypeConfig';",
+			"export { LinkRegistryStore } from './src/orchestration/db/LinkRegistryStore';",
+			"export { openJobsDb } from './src/orchestration/db/sqlite';",
 			"export { TFile, TFolder } from 'obsidian';",
 		].join('\n'),
 		resolveDir: '.',
@@ -42,6 +49,7 @@ await esbuild.build({
 			build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
 				contents: [
 					'export class App {}',
+					'export class FileSystemAdapter {}',
 					'export class TFile { constructor() { this.path = ""; this.extension = "md"; } }',
 					'export class TFolder { constructor() { this.path = ""; this.children = []; } }',
 					'export function normalizePath(p) { return String(p ?? "").replace(/\\\\/g, "/").replace(/\\/+/g, "/"); }',
@@ -60,7 +68,7 @@ await esbuild.build({
 	logLevel: 'silent',
 });
 
-const { LinkNoteEnrichWorkflow, referencedVideoJobParams, TFile, TFolder } = await import(pathToFileURL(outfile).href);
+const { LinkNoteEnrichWorkflow, referencedVideoJobParams, LinkRegistryStore, openJobsDb, TFile, TFolder } = await import(pathToFileURL(outfile).href);
 
 function normalizePath(p) {
 	return String(p ?? '').replace(/\\/g, '/').replace(/\/+/g, '/');
@@ -207,6 +215,8 @@ class FakeVault {
 }
 
 function makePlugin(settingsOverrides = {}) {
+	const registry = new LinkRegistryStore(openJobsDb(':memory:'));
+	const emitted = [];
 	const vault = new FakeVault();
 	const enqueued = [];
 	const app = {
@@ -255,13 +265,17 @@ function makePlugin(settingsOverrides = {}) {
 			...settingsOverrides,
 		},
 		orchestrator: {
+			linkRegistry: () => registry,
 			enqueue: async (type, params, options) => {
 				enqueued.push({ type, params, options });
 				return { id: `job-${enqueued.length}`, type, status: 'queued', priority: options?.priority ?? 'normal', lane: options?.lane ?? 'background' };
 			},
 		},
+		ingestionEvents: { emit: (event, payload) => emitted.push({ event, payload }) },
 		_vault: vault,
 		_enqueued: enqueued,
+		_registry: registry,
+		_emitted: emitted,
 	};
 	return plugin;
 }
@@ -270,12 +284,6 @@ function makeCtx(plugin) {
 	const signal = new AbortController().signal;
 	const progress = [];
 	return { plugin, signal, throwIfAborted: () => signal.throwIfAborted(), reportProgress: (m) => progress.push(m), _progress: progress };
-}
-
-function fmOf(plugin, p) {
-	const content = plugin._vault.bodyAt(p);
-	const m = content.match(FRONTMATTER_REGEX);
-	return parseFrontmatter(m ? m[1] ?? '' : '');
 }
 
 // ── missing/invalid targetPath ──────────────────────────────────────────────────
@@ -404,13 +412,18 @@ test('a note with mixed URLs merges every one into the registry and fans out X +
 	assert.equal(result.status, 'done');
 
 	// Registry parity: three distinct canonical URLs (YT, X, arxiv) each get a
-	// link-record note via the same applyLinkToRegistry writer LinkScanWorkflow uses.
-	assert.equal(result.outputPaths.length, 3);
-	const arxivRecord = plugin._vault.getAbstractFileByPath('_crucible/link_registry/arxiv.org_abs_2401.12345.md');
-	assert.ok(arxivRecord, 'arxiv link, which has no YT/X id, still lands a link-record note');
-	const arxivFm = fmOf(plugin, '_crucible/link_registry/arxiv.org_abs_2401.12345.md');
-	assert.equal(arxivFm['type'], 'link-record');
-	assert.deepEqual(arxivFm['source_notes'], ['[[clips/mixed]]']);
+	// link_records row via the same applyLinkToRegistry writer LinkScanWorkflow uses —
+	// and no vault note is written under the legacy registry folder.
+	assert.equal(plugin._registry.count(), 3);
+	const arxiv = plugin._registry.listAll().find(r => r.domain.includes('arxiv'));
+	assert.ok(arxiv, 'arxiv link, which has no YT/X id, still lands a registry record');
+	assert.deepEqual(arxiv.sourceNotes, ['[[clips/mixed]]']);
+	assert.equal(arxiv.xStatusId, null);
+	assert.equal(plugin._registry.listWithXStatus().length, 1);
+	assert.equal(plugin._vault.getAbstractFileByPath('_crucible/link_registry'), null, 'no registry folder created');
+	// One registry-change notification for the whole run, not one per URL.
+	const changes = plugin._emitted.filter(e => e.event === 'link-registry-changed');
+	assert.deepEqual(changes, [{ event: 'link-registry-changed', payload: { changed: 3 } }]);
 
 	// X: one x_post_discover enqueue, no second implementation of status extraction.
 	const xJobs = plugin._enqueued.filter(j => j.type === 'x_post_discover');
@@ -443,7 +456,7 @@ test('the registry write is not self-guarded: the note is still recorded even fo
 		makeCtx(plugin),
 	);
 	assert.equal(result.status, 'done');
-	assert.equal(result.outputPaths.length, 1, 'the self-referencing URL still gets a registry record');
+	assert.equal(plugin._registry.count(), 1, 'the self-referencing URL still gets a registry record');
 	const ytJobs = plugin._enqueued.filter(j => j.type === 'youtube_metadata_fetch');
 	assert.equal(ytJobs.length, 0, 'but the YouTube fan-out drops the note\'s own video');
 	assert.match(result.notes, /YouTube: 0 enqueued, 1 skipped \(note's own video\), 0 skipped \(already stamped\)/);
@@ -487,7 +500,8 @@ test('a note with no links enqueues nothing and touches no registry record', asy
 		makeCtx(plugin),
 	);
 	assert.equal(result.status, 'done');
-	assert.equal(result.outputPaths.length, 0);
+	assert.equal(plugin._registry.count(), 0);
+	assert.equal(plugin._emitted.length, 0, 'no change, no registry-change event');
 	assert.equal(plugin._enqueued.length, 0);
 	assert.match(result.notes, /0 distinct link/);
 });
