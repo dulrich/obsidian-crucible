@@ -57,7 +57,7 @@ Before signaling task completion or reporting success, you MUST execute and pass
 
 1.  **Linting:** Run `bun run lint`. This executes both ESLint (for TypeScript) and biome lint (CSS only — `styles.css` and `theme/theme.css`, per `biome.json`). All errors MUST be resolved.
 2.  **Type Checking:** Run `bunx tsc -noEmit -skipLibCheck`. The project must have zero TypeScript errors.
-3.  **Tests:** Run `bun run test`. Baseline is **2054 tests across 162 files, 0 failures** — a drop in the count is a deleted test, not a pass.
+3.  **Tests:** Run `bun run test`. Baseline is **2057 tests across 163 files, 0 failures** — a drop in the count is a deleted test, not a pass.
 4.  **Build:** Run `node esbuild.config.mjs production`. Ensure the bundling completes successfully and updates `main.js`.
 5.  **Security scan:** Run `bun run test:security` — `trivy fs --scanners vuln,misconfig --include-dev-deps
     --skip-db-update --skip-check-update --exit-code 1 --severity CRITICAL,HIGH .` (Docker/IaC
@@ -210,6 +210,16 @@ Additional tokens available in **attachment** folder/name templates (`applyAttac
 - **Safe YAML:** Always route metadata updates through `updateFrontmatter` (`src/frontmatter.ts`) — never call `fileManager.processFrontMatter` directly. The wrapper adds the stale-cache write barrier (see the quirk below) on top of `processFrontMatter`'s structural integrity.
 - **Recursive Safety:** Use the `isMaterializing` flag to wrap all plugin-driven file modifications to prevent infinite loops (especially with "Lint on Save").
 - **Path Awareness:** Always check `isPathIgnored` from the `Linter` class before running automated note body operations.
+
+## Versioning
+
+The plugin follows semver; `manifest.json`, `package.json` and `versions.json` move together via `bun run bump <level>` (never hand-edit one of them). The orchestrator bumps in each plan's implementing commit (the `plan <slug>: implemented` commit) and records the new version in the plan's Status line:
+
+- **patch** (`+0.0.1`): every implemented plan, by default.
+- **minor** (`+0.1.0`): a plan delivering a significant new user-facing feature.
+- **major** (`+1.0.0`): significant breaking changes (settings/data migrations users must act on, removed commands or features).
+
+Direct-route fixes outside a plan don't bump; the next plan's bump covers them. No git tags: the public branch is a rewritten projection, so a tag on a master SHA names nothing on GitHub.
 
 ## Write out Plans
 
