@@ -656,6 +656,7 @@ export interface CrucibleSettings {
 	orchestrationBlogsIngestCommandId: string;
 	// Workflow: link_scan
 	orchestrationLinkScanEnabled: boolean;
+	/** Legacy: folder of the old note-per-URL link registry; now only the one-time import source (records live in the link_records table). */
 	orchestrationLinkRegistryRoot: string;
 	orchestrationLinkScanExclusions: string[];
 	orchestrationTrackedSourcesNote: string;

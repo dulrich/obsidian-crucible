@@ -1,4 +1,5 @@
 import { Plugin, TFile, MarkdownView, Notice, debounce, TAbstractFile, TFolder, Editor } from 'obsidian';
+import type { LinkRegistryImportResult, LinkRegistryReconcileResult } from './orchestration/utils/linkRegistryImport';
 import { CrucibleSettingTab, CrucibleSettingsTab } from "./settings";
 import { CrucibleSettings, DEFAULT_SETTINGS, Provider } from "./types";
 import { normalizeAgentBinding } from "./providerModelContract";
@@ -120,6 +121,10 @@ export default class CruciblePlugin extends Plugin {
 	secretRegistry!: SecretRegistry;
 	agentManager!: AgentManager;
 	orchestrator!: Orchestrator;
+	/** Diagnostic (link-registry-out-of-vault WP-2): the last legacy-import / reconciliation
+	 * results, readable via `app.plugins.plugins['obsidian-crucible'].lastLinkRegistry*`. */
+	lastLinkRegistryImport: LinkRegistryImportResult | null = null;
+	lastLinkRegistryReconcile: LinkRegistryReconcileResult | null = null;
 	/**
 	 * Per-dependency circuit breaker for the queue. Deliberately in-memory and NEVER
 	 * persisted: a breaker that survives a reload can wedge a service that recovered

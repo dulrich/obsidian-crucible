@@ -116,6 +116,20 @@ export class LinkRegistryStore {
 		return Number(row?.n ?? 0);
 	}
 
+	/** Runs `fn` inside one `BEGIN`/`COMMIT` (ROLLBACK on throw) over the store's
+	 * handle — the legacy importer (WP-2) batches ~25k upserts through it. */
+	transaction<T>(fn: () => T): T {
+		this.db.exec('BEGIN');
+		try {
+			const out = fn();
+			this.db.exec('COMMIT');
+			return out;
+		} catch (err) {
+			this.db.exec('ROLLBACK');
+			throw err;
+		}
+	}
+
 	/** Create-or-merge. An upsert whose merged record equals the stored row performs
 	 * no write and reports `changed: false`. */
 	upsert(input: LinkRecordInput): LinkRecordUpsertResult {

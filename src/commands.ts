@@ -27,6 +27,9 @@ import { exportSourceEvalTrainingData } from './sourceEval/export';
 import { SURROUNDS, setSurround, nextSurround, surroundLabel } from './surround';
 import { runServiceOutageRequeueFlow } from './orchestration/failedJobRepair';
 import { ConfirmModal } from './confirmModal';
+import { logWarn } from './log';
+import { importLegacyLinkRegistry, reconcileLegacyLinkRegistry } from './orchestration/utils/linkRegistryImport';
+import { emitLinkRegistryChanged } from './orchestration/utils/linkRegistry';
 
 /**
  * Registers Crucible's static (always-present) commands. Split out of `onload`
@@ -403,6 +406,58 @@ export function registerStaticCommands(plugin: CruciblePlugin): void {
 		group: 'Orchestrations',
 		mutating: false,
 		run: () => plugin.orchestrator.enqueue('x_metadata_backfill', {}, { priority: 'high', lane: 'user' }),
+	});
+
+	// link-registry-out-of-vault WP-2: one-time import of the legacy note-per-URL
+	// registry into the link_records table, plus a per-key reconciliation check.
+	// Both are read-only against the vault (metadataCache frontmatter only), so
+	// mutating:false. Last results are kept on the plugin for `obsidian eval`.
+	plugin.registerCrucibleCommand({
+		id: 'orchestrator-import-legacy-link-registry',
+		name: 'Orchestrate: import legacy link registry notes into the store',
+		group: 'Orchestrations',
+		mutating: false,
+		run: () => {
+			try {
+				const result = importLegacyLinkRegistry(
+					plugin.app,
+					plugin.orchestrator.linkRegistry(),
+					plugin.settings.orchestrationLinkRegistryRoot,
+					changed => emitLinkRegistryChanged(plugin, changed),
+				);
+				plugin.lastLinkRegistryImport = result;
+				for (const skip of result.skipped) logWarn(`Legacy link registry import: skipped ${skip.path} (${skip.reason})`);
+				new Notice(`Link registry import: ${result.scanned} scanned, ${result.imported} imported, ${result.merged} merged, ${result.unchanged} unchanged, ${result.skipped.length} skipped.`);
+			} catch (err) {
+				const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+				new Notice(`Link registry import failed — ${msg}`);
+				logWarn('Legacy link registry import failed', err);
+			}
+		},
+	});
+
+	plugin.registerCrucibleCommand({
+		id: 'orchestrator-reconcile-legacy-link-registry',
+		name: 'Orchestrate: check legacy link registry against the store',
+		group: 'Orchestrations',
+		mutating: false,
+		run: () => {
+			try {
+				const result = reconcileLegacyLinkRegistry(
+					plugin.app,
+					plugin.orchestrator.linkRegistry(),
+					plugin.settings.orchestrationLinkRegistryRoot,
+				);
+				plugin.lastLinkRegistryReconcile = result;
+				for (const m of result.mismatched) logWarn(`Legacy link registry mismatch: ${m.path} (${m.canonicalUrl}): ${m.reasons.join('; ')}`);
+				for (const skip of result.skipped) logWarn(`Legacy link registry check: skipped ${skip.path} (${skip.reason})`);
+				new Notice(`Link registry check: ${result.matched} matched, ${result.mismatched.length} mismatched, ${result.skipped.length} skipped, ${result.postCutover} post-cut-over.`);
+			} catch (err) {
+				const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+				new Notice(`Link registry check failed — ${msg}`);
+				logWarn('Legacy link registry check failed', err);
+			}
+		},
 	});
 
 	// Also registered as a chain-internal command (internalCommands.ts) so a
