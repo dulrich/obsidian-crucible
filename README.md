@@ -1,12 +1,7 @@
----
-title: README
-created: 2026-05-05
-modified: 2026-07-19
-word-count: 294
-tags: ""
----
-
 # Crucible
+
+> [!WARNING]
+> **Superseded.** This repository was superseded by [crucible-vault](https://github.com/dulrich/crucible-vault) and will not receive further updates or maintenance.
 
 Crucible is an Obsidian plugin for turning capture, cleanup, ingestion, and AI-assisted note work into repeatable workflows.
 
