@@ -9,7 +9,7 @@ import { logWarn } from "../log";
  * This module is the FRAMEWORK only — the registry, the resolution helper, and the
  * `confirmDestructive` wrapper around the existing `ConfirmModal`. It does not touch any
  * existing delete handler; wiring each audited call site through `confirmDestructive` is
- * WP-4 (a separate work package). See `plans/confirmations-lint-steps-search-latch.md`.
+ * WP-4 (a separate work package). See the `confirmations-lint-steps-search-latch` plan (unpublished).
  *
  * New destructive control ⇒ register an action id here + route it through
  * `confirmDestructive`. Never reach for a bare `ConfirmModal` in settings code — going
@@ -28,7 +28,7 @@ export interface DestructiveAction {
 }
 
 /**
- * The registry, from the completed audit in `plans/confirmations-lint-steps-search-latch.md`.
+ * The registry, from the completed audit in the `confirmations-lint-steps-search-latch` plan (unpublished).
  * File:line references are evidence for WP-4's retrofit, not load-bearing here — they will
  * drift as call sites move; treat them as "where to look", not a contract.
  *

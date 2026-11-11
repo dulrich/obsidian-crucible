@@ -1,5 +1,5 @@
 // WP-D — probe-first provider model configuration UI
-// (plans/queue-control-model-probing-vault-isolation.md, governing rule D2: "a probe never
+// (the `queue-control-model-probing-vault-isolation` plan (unpublished), governing rule D2: "a probe never
 // auto-writes model configuration").
 //
 // Everything under test here lives in src/settings/modelCapabilities.ts and
@@ -366,7 +366,7 @@ test('catalogSuggestionHasChanges treats capability list order as irrelevant', (
 	assert.equal(catalogSuggestionHasChanges(m, { capabilities: ['chat', 'embedding'] }), false);
 });
 
-// ── WP-8 — probe-first becomes the default (D2 amendment, plans/sprint-exit-queue-health-and-scrub.md) ──
+// ── WP-8 — probe-first becomes the default (D2 amendment, the `sprint-exit-queue-health-and-scrub` plan (unpublished)) ──
 
 test('WP-8: an explicit catalog pick auto-applies through the SAME acceptCatalogSuggestion/resetCatalogField path Accept uses — badge + undo is the fallback, not a new mechanism', () => {
 	const m = model({ id: 'text-embedding-bge-m3', capabilities: undefined });

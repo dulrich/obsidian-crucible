@@ -6,7 +6,7 @@ import { json, readJson, requireString } from '../http.mjs';
 // give it: `/v1/files/state` only echoes state for paths the caller already names, so
 // nothing could enumerate "what does the index think exists" to diff against the vault's own
 // file list (orphan/missing/stale detection was structurally impossible client-side). See
-// `src/search/AGENTS.md` and `plans/search-index-audit-health.md` WP-SA1.
+// `src/search/AGENTS.md` and the `search-index-audit-health` plan (unpublished) WP-SA1.
 //
 // One aggregate GROUP BY query (`selectPathsByVault`, statements.mjs) — no per-path loop.
 // Additive: no schema change, no change to any existing route's behavior.

@@ -12,7 +12,7 @@
 // project was, until this harness, either a speed number or an agreement number.
 //
 // The ground truth here is parallel Wikipedia (built by the dataset builder into
-// runs/measurements/*/samples/S5-wikipedia.json):
+// the eval-harness archive's samples/S5-wikipedia.json):
 //
 //   ALIGNMENT  An article and its translation are semantically identical and lexically almost
 //              disjoint. A working multilingual embedder must rank the true translation FIRST

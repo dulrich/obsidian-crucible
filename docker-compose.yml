@@ -12,7 +12,7 @@ services:
         GIT_SHA: ${CRUCIBLE_GIT_SHA:-unknown}
     container_name: crucible-search
     restart: unless-stopped
-    # 4g, sized by arithmetic (plans/search-latency-durability.md): working set ~=
+    # 4g, sized by arithmetic (the `search-latency-durability` plan (unpublished)): working set ~=
     # 150MB Node/SQLite baseline + chunks x (11.8KB DB, whole file page-cached + 4.1KB
     # 1024d Float32 matrix row). 100k chunks (2026-10) ~= 1.75GB; 4g holds ~240k chunks,
     # ~6 months at the measured ~680 chunks/day and near the ~250k brute-force vector-leg
@@ -58,7 +58,7 @@ services:
   # Diagnostic note for whoever hits this next: `docker inspect` reports OOMKilled=false and
   # exit=0, because the kernel kills the infinity_emb child rather than PID 1 — Docker never
   # sets the flag. dmesg is the only honest source.
-  # See plans/semantic-vector-leg-and-reranker.md WP-4 for the full trail.
+  # See the `semantic-vector-leg-and-reranker` plan (unpublished) WP-4 for the full trail.
   #
   # cpus 16 is throughput headroom, not correctness — sized for a 24-logical-core box. The
   # full-vault backfill runs for hours and would otherwise saturate every core; measured

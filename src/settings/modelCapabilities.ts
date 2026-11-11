@@ -50,7 +50,7 @@ export function setModelCapability(model: ProviderModel, capability: ProviderMod
 }
 
 /**
- * WP-D — probe-first model configuration (plans/queue-control-model-probing-vault-isolation.md,
+ * WP-D — probe-first model configuration (the `queue-control-model-probing-vault-isolation` plan (unpublished),
  * governing rule D2: "a probe never auto-writes model configuration"). Everything below this line
  * is pure state/logic with no Obsidian import, deliberately, so it can be unit-tested the same way
  * as the capability functions above — bundled standalone with esbuild, no DOM/plugin stub needed.

@@ -1,5 +1,5 @@
 // WP-TB2: client-side tag boost, gated on WP-TB1's spike measurement (weight 0.005,
-// zero-regression across 52 graded corpus queries — plans/tag-boost-spike.md). `tagBoost.ts` is
+// zero-regression across 52 graded corpus queries — the `tag-boost-spike` plan (unpublished)). `tagBoost.ts` is
 // a pure, obsidian-free leaf module in the style of `linkGraph.ts`'s `applyLinkBoost`, so it
 // unit-tests against plain data via the same esbuild-bundle-then-import pattern as
 // tests/providerRefs.test.mjs / tests/linkGraph.test.mjs.

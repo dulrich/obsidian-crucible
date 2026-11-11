@@ -300,7 +300,7 @@ test('ProviderManager.describeImage: a caller-side race (withTimeout-style) that
 
 // ── B-1 (thq WP-4): the optional per-pass timer now lives inside the limiter ────
 //
-// Investigation ground truth (`runs/dispatch/thq-feedback-items-investigation.md` §3): the old
+// Investigation ground truth (the `thq-feedback-items-investigation` dispatch report (unpublished) §3): the old
 // `withTimeout` wrap lived at the `imageDescribe.ts` call site, around the ENTIRE
 // `providerManager.describeImage(...)` call — including the wait for a limit-1 local provider's
 // slot. These pin the fix: `describeImage`'s optional `timeoutMs` only starts its clock once the

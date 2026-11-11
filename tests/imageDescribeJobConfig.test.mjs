@@ -139,7 +139,7 @@ test('imageDescribeBackfillJobConfig: does NOT declare the image-description-pro
 
 // ── thq WP-4 (B-4): per-type timeoutMs on the image job types ───────────────────
 //
-// Investigation ground truth (`runs/dispatch/thq-feedback-items-investigation.md` §3): the
+// Investigation ground truth (the `thq-feedback-items-investigation` dispatch report (unpublished) §3): the
 // generic 600s job-level backstop (`orchestrationAutorunTimeoutSeconds`) killed a resumed
 // `image_describe_batch` that legitimately needed ~16 min of serial local model time. These pin
 // the arithmetic from `jobTypeConfig.ts`'s comment (mirroring, not importing, the constants —

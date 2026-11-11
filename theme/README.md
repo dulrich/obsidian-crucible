@@ -154,7 +154,7 @@ vendored snapshot yet.
 - A few hardcoded `rgba(0, 0, 0, …)` box-shadows remain on Obsidian's native
   `.checkbox-container` and the native range-slider thumb — both live in `app.css` itself,
   not in this file, so they aren't reachable via the `--n1-*` token layer. See WP-2's
-  execution report (`runs/dispatch/wp-n1-2-report.md`) for the full residue list.
+  execution report (unpublished) for the full residue list.
   `--shadow-edges` is deliberately left unmapped: `app.css` only defines it on
   `.theme-light`, so hoisting it for Dark/Med would add a shadow Obsidian never had there.
 - Community-Themes submission is out of scope; `manifest.json` is submission-shaped but

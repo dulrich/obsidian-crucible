@@ -351,7 +351,7 @@ export interface ProviderModel {
 export type ProviderModelCapability = 'chat' | 'embedding' | 'image-extraction' | 'rerank';
 
 // A single entry from a provider's model-list endpoint (WP-C — see
-// plans/queue-control-model-probing-vault-isolation.md). This is what a server *reports*, kept
+// the `queue-control-model-probing-vault-isolation` plan (unpublished)). This is what a server *reports*, kept
 // deliberately separate from `ProviderModel`: nothing here is ever written into
 // `ProviderModel.capabilities` / `embeddingDimensions` / `embeddingVariant` by the probing layer
 // itself — per D2, only an explicit user Accept action (WP-D, settings UI) may copy a value across.
@@ -727,7 +727,7 @@ export interface CrucibleSettings {
 	searchLinkBoostEnabled: boolean;
 	searchLinkBoostWeight: number;
 	// WP-TB2: client-side tag boost, gated on WP-TB1's spike (weight 0.005 measured
-	// zero-regression across 52 graded corpus queries — plans/tag-boost-spike.md). A flat
+	// zero-regression across 52 graded corpus queries — the `tag-boost-spike` plan (unpublished)). A flat
 	// `score += weight` on every result whose `metadata.tags` matches a configured tag
 	// (frontmatter tags only — an inline body `#gold` is invisible to this boost, since the
 	// companion's index carries frontmatter tags). Off by default until proven live.

@@ -510,7 +510,7 @@ Crucible: **one base URL for every provider entry, including chat** —
   port, just a different alias/model id and the Chat capability instead of Embedding/Rerank.
 - Vision: the `gemma-4-12b` alias also serves image content parts on `/v1/chat/completions` —
   its router entry loads `--mmproj` beside the weights (added 2026-07-27 for
-  `plans/image-descriptions-search.md`). Mark the provider `image-extraction` capable to use it
+  the `image-descriptions-search` plan (unpublished)). Mark the provider `image-extraction` capable to use it
   for Image descriptions. Requests must carry `reasoning_effort: "none"` (Crucible's
   `describeImagePass` does this for local providers automatically) or the model spends the
   completion budget on `reasoning_content` and returns empty `content`. Crucible serializes
@@ -647,7 +647,7 @@ Gotchas (kept because they still apply to raw `llama-server` use generally):
   container/model load than the steady-state measurement above — and a user-lowered
   `orchestrationAutorunTimeoutSeconds` well below that ceiling can turn a post-idle first embed
   batch into a **failed** job rather than a merely slow one. This interaction is a known, deferred
-  gap — not yet guarded in the settings UI (`plans/sprint-audit-remediation-2026-07-26.md`,
+  gap — not yet guarded in the settings UI (the `sprint-audit-remediation-2026-07-26` plan (unpublished),
   WP-R4).
 - **Unlike LM Studio, this route does real reranking.** `llama-server` started with `--reranking
   --pooling rank` serves a real rerank endpoint (§3, §4).
@@ -726,4 +726,4 @@ Building the GPU container image (routes (a) and (c) above — same Dockerfile, 
 the first time costs several minutes. Publishing a
 prebuilt image so a plugin user could skip that build is an **open option, not a decision** —
 recorded as explicitly undecided: "noted as an option in WP-10, not decided"
-(`plans/sprint-exit-queue-health-and-scrub.md`). Nothing here should be read as promising it.
+(the `sprint-exit-queue-health-and-scrub` plan (unpublished)). Nothing here should be read as promising it.

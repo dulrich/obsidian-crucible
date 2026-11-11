@@ -239,7 +239,7 @@ export function imageDescribeNoteDedupeKey(p: Record<string, unknown>): string {
 // default 600s) was killing legitimately long-running image jobs — a resumed 100-image
 // `image_describe_batch` needs ~16 min of serial local model time, well past the 600s default,
 // and died with the popup "Orchestrate: <id> -> failed (Timed out after 600s)" while it was still
-// making progress (`runs/dispatch/thq-feedback-items-investigation.md` §3). Size each image job
+// making progress (the `thq-feedback-items-investigation` dispatch report (unpublished) §3). Size each image job
 // type's own `timeoutMs` from its real worst-case budget instead of the one-size-fits-all
 // setting, so the backstop only ever fires for a genuine hang, never for slow-but-legitimate
 // serial completion.

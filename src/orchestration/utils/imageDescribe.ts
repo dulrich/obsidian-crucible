@@ -49,7 +49,7 @@ export const IMAGE_DESCRIBE_BATCH_IMAGES = 100;
 /** Enqueues between macrotask yields, so a full backfill fan-out can't freeze the UI thread. */
 export const IMAGE_DESCRIBE_ENQUEUE_YIELD_EVERY = 10;
 
-// idh-WP-1 hardening (`plans/image-describe-hardening-ux.md` WP-1): observed live, a temp-0
+// idh-WP-1 hardening (the `image-describe-hardening-ux` plan (unpublished) WP-1): observed live, a temp-0
 // repetition loop generated to the 32k context ceiling — `extraction=597888ms`, a 76k/94k-char
 // degenerate record. Every provider pass and the transcode step now get a bounded worst case.
 /** Per provider pass (narrative or extraction). `requestUrl` is not abortable — see `withTimeout`. */
@@ -63,7 +63,7 @@ export const IMAGE_DESCRIBE_DEGENERATE_MAX_EXTRACTION_CHARS = 20_000;
  * pathological error (e.g. one embedding a chunk of the runaway output itself) to bloat the store. */
 const FAILURE_MESSAGE_MAX_CHARS = 500;
 
-// idh-WP-2 hardening (`plans/queue-image-dataview-dashboard-fixes.md` WP-2): the live incident
+// idh-WP-2 hardening (the `queue-image-dataview-dashboard-fixes` plan (unpublished) WP-2): the live incident
 // this section fixes — a dead local inference router failed every remaining image in a batch
 // (dozens per second), each earning a durable `kind: 'failed'` skip-forever record, and 954 more
 // were `withTimeout` timeouts cascading from one abandoned generation that kept the server busy

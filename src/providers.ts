@@ -19,7 +19,7 @@ export const providerSecretKey = (id: string) => `crucible-provider-${id}-key`;
 // the exact detection that already gates `reasoning_effort` there, rather than a second "is
 // local" heuristic — default to 1 (measured: a single-GPU local inference-engine gains no
 // throughput from concurrency, and pile-up pushed the tail across the 120s timeout; see
-// `runs/dispatch/feedback-image-timeout-investigation.md`). Everything else (cloud HTTP kinds and
+// the `feedback-image-timeout-investigation` dispatch report (unpublished)). Everything else (cloud HTTP kinds and
 // CLI kinds, which run their own local subprocess rather than sharing a GPU-bound HTTP server)
 // defaults to unlimited (`Infinity`) — a CLI provider that does share a constrained local
 // resource can still be capped by setting the field explicitly.

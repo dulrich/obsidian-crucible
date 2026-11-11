@@ -18,12 +18,12 @@
 //
 // An arm is `label:vaultId:mode[:runtimeSpec]` where mode is fts | vector | rerank:
 //
-//   node scripts/dseries-judge.mjs prepare --queries runs/.../S2-queries.json \
+//   node scripts/dseries-judge.mjs prepare --queries <out-dir>/S2-queries.json \
 //     --a 'fts:d-bge-m3-f16:fts' \
 //     --b 'vector:d-bge-m3-f16:vector:gpu=http://127.0.0.1:4804/v1,bge-m3,openai' \
-//     --space 'BAAI/bge-m3/f16' --out runs/.../D1-fts-vs-vector.json
-//   node scripts/dseries-judge.mjs judge  --session runs/.../D1-fts-vs-vector.json
-//   node scripts/dseries-judge.mjs report --session runs/.../D1-fts-vs-vector.json
+//     --space 'BAAI/bge-m3/f16' --out <out-dir>/D1-fts-vs-vector.json
+//   node scripts/dseries-judge.mjs judge  --session <out-dir>/D1-fts-vs-vector.json
+//   node scripts/dseries-judge.mjs report --session <out-dir>/D1-fts-vs-vector.json
 
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -139,7 +139,7 @@ async function rerankResults(opts, query, results) {
 
 // Scoring a retrieval system on finding its own input is circular, and this vault makes that a
 // live hazard rather than a hypothetical: the user logs half-remembered lookups verbatim into
-// monthly Observations notes, and FEEDBACK.md carries the query text of anything discussed with an
+// monthly Observations notes, and the user's feedback scratchpad carries the query text of anything discussed with an
 // agent. Both then rank first on an exact-phrase match while containing no answer at all. Such
 // paths are dropped BEFORE the top-k cut, so an excluded hit does not consume a result slot, and
 // the drop is counted per arm so the run record can show it happened.

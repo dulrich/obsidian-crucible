@@ -1,9 +1,9 @@
 # Multimodal image → search (design record)
 
-**Status: implemented — see `plans/image-descriptions-search.md` (landed 2026-07-27).** The
+**Status: implemented — see the `image-descriptions-search` plan (unpublished) (landed 2026-07-27).** The
 description store, chunker emission, job pipeline, and router vision wiring all shipped per
 that plan; this document remains the design record behind it. WP-7 of
-`plans/model-ux-search-perf-and-inference-consolidation.md` was a bench plus this document.
+the `model-ux-search-perf-and-inference-consolidation` plan (unpublished) was a bench plus this document.
 Everything below that is presented as a measurement was
 measured on this box on 2026-07-26 and is archived at
 `../eval-harness/local-inference-bench/measurements/wp7-multimodal-2026-07-26/`

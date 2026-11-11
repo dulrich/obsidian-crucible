@@ -15,7 +15,7 @@ This record is written against a read-only survey of `docker/llamacpp-vulkan/`,
 `docs/local-inference.md`, `src/providers/AGENTS.md`, `src/search/AGENTS.md`,
 the fleet compose file + `SERVICES.md`, and
 `../news-ingestion/` (`AGENTS.md`, `enrich/`, `pipeline/`, `research_bench/`,
-`references/enrich-footprint-and-service-eval.md`).
+the `enrich-footprint-and-service-eval` reference note (unpublished)).
 
 ---
 
@@ -73,7 +73,7 @@ The models live in **`enrich/`** (tool `enrich`, RW schema `crisis24_enrich`, RO
   `exp_sidecar_predictive`, `exp_sidecar_blind`, `exp_analyst_topic_direction`, `db.py`. Nothing
   calls a model at read time; the experiments read materialized columns.
 
-Measured footprint (`references/enrich-footprint-and-service-eval.md`, 2026-07-20):
+Measured footprint (the `enrich-footprint-and-service-eval` reference note (unpublished), 2026-07-20):
 
 | Model | Cold load | Download | RSS | CPU throughput |
 |---|---|---|---|---|
@@ -162,7 +162,7 @@ Grepped for every in-repo reference to `llamacpp-vulkan` / `crucible-inference` 
   ships `providers: []` — no base URL, no model id, no port.
 - **Docs and plans only:** `AGENTS.md` (one table row), `src/providers/AGENTS.md`,
   `src/search/AGENTS.md`, `docs/local-inference.md`, `docs/search-companion.md`,
-  `docs/multimodal-image-search.md`, and six historical `plans/*.md`.
+  `docs/multimodal-image-search.md`, and six historical plan documents (unpublished).
 
 The container is already a *sibling*, not a component. That is the strongest structural argument
 that the split is cheap whenever it is wanted — and equally the argument that it is not urgent.
@@ -314,7 +314,7 @@ Honest estimate for the full move, if taken:
 
 | Step | Scope | Risk |
 |---|---|---|
-| New repo scaffold (`AGENTS.md`, `README`, `INITIATIVE.md`, git init on master) | ~0.2 kSLOC | none |
+| New repo scaffold (`AGENTS.md`, `README`, initiative tracker, git init on master) | ~0.2 kSLOC | none |
 | `git mv` the six files | 848 lines, no edits | none |
 | Repoint compose `build.context` + **both bind-mount absolute paths** | ~4 lines in the fleet compose file | **highest — see below** |
 | `SERVICES.md` rows (new base decade, `4806` alias, backfill missing rows) | ~5 lines | none |
@@ -365,7 +365,7 @@ Two factors the enrich framework does not cover, both pointing *toward* an event
 
 5. **Public-repo hygiene.** obsidian-crucible ships as an Obsidian community plugin. It currently
    carries a GPU container, a router config naming this host's GGUF paths, and VRAM math for one
-   specific desktop machine. `runs/` was scrubbed from this repo's git history on 2026-07-26 for
+   specific desktop machine. The measurement-runs directory was scrubbed from this repo's git history on 2026-07-26 for
    exactly this class of reason. This is a real argument, but it is a tidiness argument, not a
    capability one.
 6. **Where the *next* container is born.** This is the decisive one. The entity sidecar is the

@@ -71,7 +71,7 @@ function searchRefsPointingAt(tab: CrucibleSettingTab, provider: Provider, model
 	return labels;
 }
 
-// WP-8 (D2 amendment — plans/sprint-exit-queue-health-and-scrub.md, "probe-first becomes the
+// WP-8 (D2 amendment — the `sprint-exit-queue-health-and-scrub` plan (unpublished), "probe-first becomes the
 // default"): a provider's model catalog is fetched automatically the first time its Models section
 // renders, rather than requiring the user to find the Fetch models button. Session-only (a
 // WeakSet, not a counter) and fires at most once per Provider object — a failure (unsupported

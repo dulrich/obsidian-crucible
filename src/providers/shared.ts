@@ -330,7 +330,7 @@ export function looksLikeCrossEncoder(...candidates: (string | undefined)[]): bo
 // Deduplicated per (providerId, modelId) for the life of the module (i.e. the plugin session), so
 // a hot indexing loop that calls this once per embed batch logs it exactly once.
 //
-// WP-8 (plans/sprint-exit-queue-health-and-scrub.md): the warning used to be logWarn-only, which
+// WP-8 (the `sprint-exit-queue-health-and-scrub` plan (unpublished)): the warning used to be logWarn-only, which
 // is debug-gated (see src/log.ts) — invisible unless the user has already turned on Crucible debug
 // output, which someone picking a reranker as an embedder for the first time has no reason to have
 // done. `notify`, when supplied, is called with the identical message so a caller with access to

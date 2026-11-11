@@ -17,7 +17,7 @@ import {
 
 /**
  * WP-1 — inline model catalog browser panel
- * (plans/model-catalog-ux-local-inference-and-remediations.md).
+ * (the `model-catalog-ux-local-inference-and-remediations` plan (unpublished)).
  *
  * Renders at the bottom of each provider's panel in Settings → AI, replacing the bare
  * `formatProbeStatusText` status line that used to be the ONLY way to see the fetched catalog

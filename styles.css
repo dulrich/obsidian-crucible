@@ -1710,7 +1710,7 @@ If your plugin does not need CSS, delete this file.
   }
 }
 
-/* WP-D — probe-first provider model configuration (plans/queue-control-model-probing-vault-isolation.md,
+/* WP-D — probe-first provider model configuration (the `queue-control-model-probing-vault-isolation` plan (unpublished),
    D2). Appended rather than interleaved with the settings-group rules above: WP-B is editing this
    same file in parallel, and keeping additions at the end keeps that rebase mechanical. */
 
@@ -1748,7 +1748,7 @@ If your plugin does not need CSS, delete this file.
   border-left-color: var(--text-accent);
 }
 
-/* The consolidated per-model notices block (plans/model-ux-search-perf-and-inference-consolidation.md
+/* The consolidated per-model notices block (the `model-ux-search-perf-and-inference-consolidation` plan (unpublished)
    WP-1): every callout previously interleaved through the model row — the search-refs rename
    warning, the embedding-field detail, the cross-encoder warning, the probe-suggestion provenance
    — renders here instead, at the bottom of the row, below the fields. A `.crucible-inline-warning`
@@ -1769,7 +1769,7 @@ If your plugin does not need CSS, delete this file.
    bare-paragraph rule it used to style is gone along with the paragraph itself. */
 
 /* WP-1 — inline model catalog browser panel
-   (plans/model-catalog-ux-local-inference-and-remediations.md). Appended at the end for the same
+   (the `model-catalog-ux-local-inference-and-remediations` plan (unpublished)). Appended at the end for the same
    rebase-friendliness reason as the WP-D block above it — this WP and others in the same
    dispatch wave touch this file in parallel. */
 

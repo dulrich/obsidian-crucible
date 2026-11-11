@@ -267,7 +267,7 @@ export class SearchServiceClient {
 			// WP-SS1: `requestUrl` (the lint rule's suggested replacement, disabled just below)
 			// has no AbortController equivalent, and being able to cancel
 			// a superseded/timed-out interactive search is this work package's entire point (see
-			// src/search/AGENTS.md and plans/search-typeahead-supersede.md). Scoped to exactly
+			// src/search/AGENTS.md and the `search-typeahead-supersede` plan (unpublished)). Scoped to exactly
 			// this one call site — every other endpoint in this file stays on `requestUrl`
 			// unchanged, and this call permanently falls back to `requestUrl` for the rest of the
 			// session the first time it hits a CORS/network-shaped failure (see `postSearch`).
@@ -474,7 +474,7 @@ function normalizeTimings(value: unknown): SearchTimings | undefined {
 }
 
 // WP-SA2: normalizes `POST /v1/paths` (WP-SA1's response contract — `ok: true` alongside
-// `paths`/`totals`; see `runs/dispatch/sa-1-report.md`). `ok` itself is not surfaced on
+// `paths`/`totals`; see the `sa-1-report` dispatch report (unpublished)). `ok` itself is not surfaced on
 // `SearchPathsResponse` — a non-2xx status already throws via `request()`'s status branches, so by
 // the time this runs the only remaining question is "what shape is the payload", not "did it
 // succeed". An unindexed/unknown vaultId legitimately returns empty arrays/zeroed totals (per the

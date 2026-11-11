@@ -10,7 +10,7 @@ const ARCHIVE_NOTICE_MS = 15000;
  * The one-time "the old queue folder is a frozen archive" notice (thq WP-8).
  *
  * The cutover deliberately does NOT import the ~20k markdown job files
- * (`plans/trigger-hardening-and-sqlite-queue.md`, Decisions): jobs live in the plugin's
+ * (the `trigger-hardening-and-sqlite-queue` plan (unpublished), Decisions): jobs live in the plugin's
  * own database now and the plugin never reads that folder again. Which leaves a folder
  * full of notes nothing will ever touch, inflating the vault's note count exactly as
  * before — so the user has to be *told*, once, that deleting it is safe.

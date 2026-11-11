@@ -1,5 +1,5 @@
 // WP-1 — inline model catalog browser panel
-// (plans/model-catalog-ux-local-inference-and-remediations.md).
+// (the `model-catalog-ux-local-inference-and-remediations` plan (unpublished)).
 //
 // Bundles the real src/settings/modelCatalogBrowser.ts purely to reach its exported pure
 // functions (bucketing, paging, the Use-button dedupe rule) — none of them touch the DOM or

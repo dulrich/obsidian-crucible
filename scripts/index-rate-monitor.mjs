@@ -18,7 +18,7 @@
 // not constant: it stalls on large files, and a since-start average silently folds the ramp-up
 // and any idle tail into the figure.
 //
-//   node scripts/index-rate-monitor.mjs --json runs/.../E1-plugin-pass.json
+//   node scripts/index-rate-monitor.mjs --json <out-dir>/E1-plugin-pass.json
 //   (start it BEFORE the indexing pass; Ctrl-C when the pass finishes)
 
 import { writeFileSync } from 'node:fs';

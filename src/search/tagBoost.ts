@@ -2,7 +2,7 @@ import { SearchResult } from './types';
 
 // WP-TB2: client-side tag boost, gated on WP-TB1's measured result (weight 0.005 at the live
 // limit-40 fetch: RC1 5->1, RC3 3->1, RC4 33->19, zero regressions across 52 graded corpus
-// queries — see plans/tag-boost-spike.md). Mirrors the shape of `applyLinkBoost` in
+// queries — see the `tag-boost-spike` plan (unpublished)). Mirrors the shape of `applyLinkBoost` in
 // `linkGraph.ts`: a pure, obsidian-free leaf so it unit-tests without bundling the plugin, and
 // a flat additive `score += weight` rather than the RRF idiom the link boost uses — there is no
 // per-candidate "rank" to feed an RRF denominator here, just a binary tag match.

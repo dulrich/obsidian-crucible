@@ -70,7 +70,7 @@ addressed below on its own terms.
 
 All four land in `scripts/search-companion.mjs` (Crucible's zero-dependency local search
 service — see `docs/search-companion.md`) and are scoped as WP-5 of the same plan
-(`plans/file-open-palette-remediation.md`). None needs embeddings, Postgres, or an LLM call.
+(the `file-open-palette-remediation` plan (unpublished)). None needs embeddings, Postgres, or an LLM call.
 
 1. **Best-chunk-per-page pooling.** GBrain: "vector retrieval pools the best chunk per page, so a
    page surfaces on its strongest evidence instead of losing to a neighbor on one weak chunk."
@@ -146,7 +146,7 @@ This verdict is a snapshot, not a permanent ruling. Concretely, it's worth re-re
   endpoint) behind an explicit button in the search modal, never on the type-ahead path — so
   per-keystroke latency stays untouched and whether reranking actually helps this corpus is
   something to observe by clicking, not assume. See
-  `plans/semantic-vector-leg-and-reranker.md` for the full design and the AGENTS.md quirk on the
+  the `semantic-vector-leg-and-reranker` plan (unpublished) for the full design and the AGENTS.md quirk on the
   vector leg for the measured numbers behind it (scan cost, backfill throughput, the interactive
   ceiling).
 

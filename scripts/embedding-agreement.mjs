@@ -104,7 +104,7 @@ function findNewestSnapshot() {
 // texts. Hashing the chunk id gives a stable pseudo-random order derivable from the snapshot
 // alone (no seed to record, no state to carry), and stratifying by length quintile stops a draw
 // from over-weighting short chunks, which is the confound that made `enrich`'s 301 events/s
-// untransferable in the first place. See runs/dispatch/esi-field-report-protocol.md sample S1.
+// untransferable in the first place. See the `esi-field-report-protocol` dispatch report (unpublished) sample S1.
 function selectionHash(id) {
 	return createHash('sha256').update(id).digest('hex');
 }

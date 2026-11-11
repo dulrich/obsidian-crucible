@@ -3,7 +3,7 @@
  * `refused` or `server-error` is confirmed evidence the service is down or broken; `timeout`
  * is not, because a single-threaded, synchronous-SQLite companion mid-flush on our own bulk
  * write simply does not get to the event loop in time. Treating the two the same is the bug
- * this type exists to remove: see the WP-5 residue in `plans/sprint-exit-queue-health-and-scrub.md`.
+ * this type exists to remove: see the WP-5 residue in the `sprint-exit-queue-health-and-scrub` plan (unpublished).
  *
  * - `refused` — the request never reached a server (connection refused/reset, DNS failure,
  *   or any other transport-level failure below the HTTP layer).
